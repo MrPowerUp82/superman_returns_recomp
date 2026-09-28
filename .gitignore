@@ -1,0 +1,10 @@
+# Arquivos do jogo e ferramentas baixadas localmente
+*.iso
+game/
+.tools/
+
+# Saida da recompilacao e da compilacao
+port/generated/default/
+port/out/
+*.log
+.vs/
