@@ -14,6 +14,7 @@
 #include <rex/hook.h>
 
 #include "generated/default/superman_returns_init.h"
+#include "renderdoc_capture.h"
 
 namespace {
 
@@ -40,7 +41,9 @@ void MaybeLogFps(uint64_t frames) {
 }  // namespace
 
 REX_HOOK_RAW(sub_82112050) {
-  MaybeLogFps(g_frames.fetch_add(1, std::memory_order_relaxed) + 1);
+  const uint64_t frames = g_frames.fetch_add(1, std::memory_order_relaxed) + 1;
+  MaybeLogFps(frames);
+  OnGuestFrameForCapture(frames);
   __imp__sub_82112050(ctx, base);
 }
 
