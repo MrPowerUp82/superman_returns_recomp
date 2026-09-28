@@ -10,16 +10,345 @@ file_path = "../game/default.xex"
 out_directory_path = "generated/default"
 includes = []
 
+# Codegen optimizations: keep these guest registers in C++ locals so the
+# host compiler can allocate them. non_volatile_as_local needs setjmp/longjmp
+# mapped and skip_lr breaks code that reads LR, so both stay off.
+cr_as_local = true
+ctr_as_local = true
+xer_as_local = true
+reserved_as_local = true
+non_argument_as_local = true
+
+# Native replacements for the statically linked CRT (identified by code shape:
+# memcpy saves r3 and prefetches with dcbt; memset splats the byte with rlwimi).
+[entrypoint.rexcrt]
+memcpy = 0x8279EC60
+memset = 0x8279F290
+
+# Kick starved XMA contexts in the audio mixer's busy-wait (see src/xma_fixes.cpp).
+[[entrypoint.midasm_hook]]
+address = 0x826595B8
+name = "XmaKickStarvedContext"
+registers = ["r26", "r31"]
+
 # Targets found by the first validation pass but omitted from automatic
 # function discovery. Keep these in the manifest so normal codegen can run
 # without --force; their boundaries still need runtime verification.
 [entrypoint.functions]
 0x8234F650 = { name = "indirect_8234F650" }
-0x82627DE8 = { end = 0x82627E50 }
-0x82627E50 = { parent = 0x82627DE8, end = 0x82627E80 }
+0x82627DE8 = { end = 0x82627DF0 }
+0x82627DF0 = { end = 0x82627EA8 }
 0x82627EA8 = { end = 0x82627F58 }
 0x8263D240 = { name = "gap_8263D240" }
 0x8263D220 = { name = "gap_8263D220" }
 0x8266DF80 = { name = "gap_8266DF80" }
 0x8266FC80 = { name = "gap_8266FC80" }
 0x82717790 = { name = "gap_82717790" }
+
+# Entry points found by tools/find_missing_funcs.py: vtable thunks and leaf
+# functions referenced only through data pointers or lis/addi pairs.
+0x8211B718 = { name = "vt_8211B718" }
+0x82120EE8 = { name = "vt_82120EE8" }
+0x82120EF0 = { name = "vt_82120EF0" }
+0x82126098 = { name = "vt_82126098" }
+0x821260C0 = { name = "vt_821260C0" }
+0x821260F8 = { name = "vt_821260F8" }
+0x82126108 = { name = "vt_82126108" }
+0x82127410 = { name = "vt_82127410" }
+0x82127418 = { name = "vt_82127418" }
+0x82127420 = { name = "vt_82127420" }
+0x82127430 = { name = "vt_82127430" }
+0x82127468 = { name = "vt_82127468" }
+0x82127490 = { name = "vt_82127490" }
+0x821483F8 = { name = "vt_821483F8" }
+0x8215E090 = { name = "vt_8215E090" }
+0x82198AC8 = { name = "vt_82198AC8" }
+0x82198AD8 = { name = "vt_82198AD8" }
+0x821AA490 = { name = "vt_821AA490" }
+0x821AA4C0 = { name = "vt_821AA4C0" }
+0x821AE1A8 = { name = "vt_821AE1A8" }
+0x821AE758 = { name = "vt_821AE758" }
+0x821AE7B8 = { name = "vt_821AE7B8" }
+0x821AED20 = { name = "vt_821AED20" }
+0x821AED78 = { name = "vt_821AED78" }
+0x821AEDE0 = { name = "vt_821AEDE0" }
+0x821AF3B0 = { name = "vt_821AF3B0" }
+0x821B04B0 = { name = "vt_821B04B0" }
+0x821B1CB0 = { name = "vt_821B1CB0" }
+0x821B1CC8 = { name = "vt_821B1CC8" }
+0x821B1CE0 = { name = "vt_821B1CE0" }
+0x821B1CF8 = { name = "vt_821B1CF8" }
+0x821B1D10 = { name = "vt_821B1D10" }
+0x821B1D28 = { name = "vt_821B1D28" }
+0x821B1D40 = { name = "vt_821B1D40" }
+0x821B1D58 = { name = "vt_821B1D58" }
+0x82240430 = { name = "vt_82240430" }
+0x8231E030 = { name = "vt_8231E030" }
+0x8231E360 = { name = "vt_8231E360" }
+0x8231E518 = { name = "vt_8231E518" }
+0x8231E928 = { name = "vt_8231E928" }
+0x8234FA30 = { name = "vt_8234FA30" }
+0x8234FA48 = { name = "vt_8234FA48" }
+0x8237B438 = { name = "vt_8237B438" }
+0x8237BB08 = { name = "vt_8237BB08" }
+0x823DDC40 = { name = "vt_823DDC40" }
+0x823F1E38 = { name = "vt_823F1E38" }
+0x823FD438 = { name = "vt_823FD438" }
+0x823FD778 = { name = "vt_823FD778" }
+0x823FD7A0 = { name = "vt_823FD7A0" }
+0x823FD7C8 = { name = "vt_823FD7C8" }
+0x823FD7F0 = { name = "vt_823FD7F0" }
+0x823FDC18 = { name = "vt_823FDC18" }
+0x823FDC40 = { name = "vt_823FDC40" }
+0x823FDC50 = { name = "vt_823FDC50" }
+0x823FDC60 = { name = "vt_823FDC60" }
+0x823FDC70 = { name = "vt_823FDC70" }
+0x823FDC80 = { name = "vt_823FDC80" }
+0x823FDC90 = { name = "vt_823FDC90" }
+0x823FDCA0 = { name = "vt_823FDCA0" }
+0x823FDCB0 = { name = "vt_823FDCB0" }
+0x823FDCC0 = { name = "vt_823FDCC0" }
+0x823FDCD0 = { name = "vt_823FDCD0" }
+0x8246DE48 = { name = "vt_8246DE48" }
+0x82476058 = { name = "vt_82476058" }
+0x8247DE50 = { name = "vt_8247DE50" }
+0x8247DE70 = { name = "vt_8247DE70" }
+0x8247DE90 = { name = "vt_8247DE90" }
+0x8247E028 = { name = "vt_8247E028" }
+0x8247E048 = { name = "vt_8247E048" }
+0x8247E068 = { name = "vt_8247E068" }
+0x8247E088 = { name = "vt_8247E088" }
+0x8247E0A8 = { name = "vt_8247E0A8" }
+0x8247E0C8 = { name = "vt_8247E0C8" }
+0x8247E0E8 = { name = "vt_8247E0E8" }
+0x8247E108 = { name = "vt_8247E108" }
+0x8247E128 = { name = "vt_8247E128" }
+0x8247E148 = { name = "vt_8247E148" }
+0x8247F9C0 = { name = "vt_8247F9C0" }
+0x82485220 = { name = "vt_82485220" }
+0x82574948 = { name = "vt_82574948" }
+0x82595460 = { name = "vt_82595460" }
+0x82595478 = { name = "vt_82595478" }
+0x82595490 = { name = "vt_82595490" }
+0x8259D348 = { name = "vt_8259D348" }
+0x825B9978 = { name = "vt_825B9978" }
+0x826385A8 = { name = "vt_826385A8" }
+0x826385C8 = { name = "vt_826385C8" }
+0x8264CE28 = { name = "vt_8264CE28" }
+0x82689840 = { name = "vt_82689840" }
+0x82689F90 = { name = "vt_82689F90" }
+0x8268A170 = { name = "vt_8268A170" }
+0x8268A1A8 = { name = "vt_8268A1A8" }
+0x8268A1E0 = { name = "vt_8268A1E0" }
+0x8268A218 = { name = "vt_8268A218" }
+0x8268A250 = { name = "vt_8268A250" }
+0x826D0CE8 = { name = "vt_826D0CE8" }
+0x826DA530 = { name = "vt_826DA530" }
+0x82707E20 = { name = "vt_82707E20" }
+0x82785108 = { name = "vt_82785108" }
+0x8278B1B8 = { name = "vt_8278B1B8" }
+0x8278DBC0 = { name = "vt_8278DBC0" }
+0x82796738 = { name = "vt_82796738" }
+0x82796B70 = { name = "vt_82796B70" }
+0x828579B0 = { name = "vt_828579B0" }
+
+# Entry points inside uncovered code gaps (tools/find_missing_funcs.py --gaps):
+# code right after a terminator, e.g. thunk tables indexed at runtime.
+0x82116C4C = { name = "fn_82116C4C" }
+0x8213C420 = { name = "fn_8213C420" }
+0x8213D8A8 = { name = "fn_8213D8A8" }
+0x82152220 = { name = "fn_82152220" }
+0x821604AC = { name = "fn_821604AC" }
+0x8216084C = { name = "fn_8216084C" }
+0x82163638 = { name = "fn_82163638" }
+0x821998FC = { name = "fn_821998FC" }
+0x821999D0 = { name = "fn_821999D0" }
+0x821AA1E8 = { name = "fn_821AA1E8" }
+0x821AA210 = { name = "fn_821AA210" }
+0x821AA244 = { name = "fn_821AA244" }
+0x821AA274 = { name = "fn_821AA274" }
+0x821AA298 = { name = "fn_821AA298" }
+0x821AA4F4 = { name = "fn_821AA4F4" }
+0x821AA5DC = { name = "fn_821AA5DC" }
+0x821AA828 = { name = "fn_821AA828" }
+0x821AA910 = { name = "fn_821AA910" }
+0x821AA944 = { name = "fn_821AA944" }
+0x821AA974 = { name = "fn_821AA974" }
+0x821AAA00 = { name = "fn_821AAA00" }
+0x821AAA34 = { name = "fn_821AAA34" }
+0x821AAA64 = { name = "fn_821AAA64" }
+0x821AE1C4 = { name = "fn_821AE1C4" }
+0x821AE380 = { name = "fn_821AE380" }
+0x821AEE40 = { name = "fn_821AEE40" }
+0x821AFFD4 = { name = "fn_821AFFD4" }
+0x821B01E0 = { name = "fn_821B01E0" }
+0x821B0350 = { name = "fn_821B0350" }
+0x821B0384 = { name = "fn_821B0384" }
+0x821B03AC = { name = "fn_821B03AC" }
+0x821B03D4 = { name = "fn_821B03D4" }
+0x821B04D0 = { name = "fn_821B04D0" }
+0x821B04F8 = { name = "fn_821B04F8" }
+0x821B0520 = { name = "fn_821B0520" }
+0x821B0568 = { name = "fn_821B0568" }
+0x821B0820 = { name = "fn_821B0820" }
+0x821B08DC = { name = "fn_821B08DC" }
+0x821B090C = { name = "fn_821B090C" }
+0x821B250C = { name = "fn_821B250C" }
+0x821BC1FC = { name = "fn_821BC1FC" }
+0x821BC6F4 = { name = "fn_821BC6F4" }
+0x821C6348 = { name = "fn_821C6348" }
+0x821D1164 = { name = "fn_821D1164" }
+0x821E265C = { name = "fn_821E265C" }
+0x821E7760 = { name = "fn_821E7760" }
+0x821E9284 = { name = "fn_821E9284" }
+0x821E9870 = { name = "fn_821E9870" }
+0x821EA610 = { name = "fn_821EA610" }
+0x821EA690 = { name = "fn_821EA690" }
+0x821EB908 = { name = "fn_821EB908" }
+0x821EB924 = { name = "fn_821EB924" }
+0x821EBE80 = { name = "fn_821EBE80" }
+0x821EC0A0 = { name = "fn_821EC0A0" }
+0x821EE8D8 = { name = "fn_821EE8D8" }
+0x82201D24 = { name = "fn_82201D24" }
+0x8224F10C = { name = "fn_8224F10C" }
+0x822A0D30 = { name = "fn_822A0D30" }
+0x822A3C08 = { name = "fn_822A3C08" }
+0x822A4B28 = { name = "fn_822A4B28" }
+0x822A4B88 = { name = "fn_822A4B88" }
+0x822A4BC4 = { name = "fn_822A4BC4" }
+0x822A4BFC = { name = "fn_822A4BFC" }
+0x822A4C34 = { name = "fn_822A4C34" }
+0x822A4C6C = { name = "fn_822A4C6C" }
+0x822A4DC4 = { name = "fn_822A4DC4" }
+0x822A4DFC = { name = "fn_822A4DFC" }
+0x822A5564 = { name = "fn_822A5564" }
+0x822A55FC = { name = "fn_822A55FC" }
+0x822A5700 = { name = "fn_822A5700" }
+0x822A5750 = { name = "fn_822A5750" }
+0x822A57A0 = { name = "fn_822A57A0" }
+0x822A99A0 = { name = "fn_822A99A0" }
+0x822A9A00 = { name = "fn_822A9A00" }
+0x822A9D2C = { name = "fn_822A9D2C" }
+0x822A9D84 = { name = "fn_822A9D84" }
+0x822A9DD8 = { name = "fn_822A9DD8" }
+0x822A9E28 = { name = "fn_822A9E28" }
+0x822AA0D0 = { name = "fn_822AA0D0" }
+0x822AA130 = { name = "fn_822AA130" }
+0x822AA1B4 = { name = "fn_822AA1B4" }
+0x822AA20C = { name = "fn_822AA20C" }
+0x822AA260 = { name = "fn_822AA260" }
+0x822AA2B8 = { name = "fn_822AA2B8" }
+0x822AA308 = { name = "fn_822AA308" }
+0x822AA588 = { name = "fn_822AA588" }
+0x822AA83C = { name = "fn_822AA83C" }
+0x822AB7B8 = { name = "fn_822AB7B8" }
+0x822ABDF8 = { name = "fn_822ABDF8" }
+0x822B70E4 = { name = "fn_822B70E4" }
+0x822BE38C = { name = "fn_822BE38C" }
+0x822BE3BC = { name = "fn_822BE3BC" }
+0x822C47B0 = { name = "fn_822C47B0" }
+0x822E7790 = { name = "fn_822E7790" }
+0x822E97D4 = { name = "fn_822E97D4" }
+0x822E9C0C = { name = "fn_822E9C0C" }
+0x822EEA14 = { name = "fn_822EEA14" }
+0x8231DFEC = { name = "fn_8231DFEC" }
+0x8231E1F8 = { name = "fn_8231E1F8" }
+0x8231E2E8 = { name = "fn_8231E2E8" }
+0x8231E9C8 = { name = "fn_8231E9C8" }
+0x8231F13C = { name = "fn_8231F13C" }
+0x8231F61C = { name = "fn_8231F61C" }
+0x82321B88 = { name = "fn_82321B88" }
+0x82324ED8 = { name = "fn_82324ED8" }
+0x82329C70 = { name = "fn_82329C70" }
+0x82329F78 = { name = "fn_82329F78" }
+0x82355DAC = { name = "fn_82355DAC" }
+0x823EEBDC = { name = "fn_823EEBDC" }
+0x824260D4 = { name = "fn_824260D4" }
+0x8247263C = { name = "fn_8247263C" }
+0x82472EF0 = { name = "fn_82472EF0" }
+0x8247FC80 = { name = "fn_8247FC80" }
+0x8247FCB0 = { name = "fn_8247FCB0" }
+0x8256C99C = { name = "fn_8256C99C" }
+0x8256CA40 = { name = "fn_8256CA40" }
+0x82585A88 = { name = "fn_82585A88" }
+0x82585AB0 = { name = "fn_82585AB0" }
+0x82585AD8 = { name = "fn_82585AD8" }
+0x825911C8 = { name = "fn_825911C8" }
+0x825911F0 = { name = "fn_825911F0" }
+0x82591218 = { name = "fn_82591218" }
+0x82595430 = { name = "fn_82595430" }
+0x82595448 = { name = "fn_82595448" }
+0x8259B7F4 = { name = "fn_8259B7F4" }
+0x825AA394 = { name = "fn_825AA394" }
+0x825B36C4 = { name = "fn_825B36C4" }
+0x825F7DB0 = { name = "fn_825F7DB0" }
+0x825F9B7C = { name = "fn_825F9B7C" }
+0x825F9E7C = { name = "fn_825F9E7C" }
+0x82621AF0 = { name = "fn_82621AF0" }
+0x82623884 = { name = "fn_82623884" }
+0x8263D158 = { name = "fn_8263D158" }
+0x8263D238 = { name = "fn_8263D238" }
+0x8263D290 = { name = "fn_8263D290" }
+0x8263D2C0 = { name = "fn_8263D2C0" }
+0x82642BB8 = { name = "fn_82642BB8" }
+0x82650A04 = { name = "fn_82650A04" }
+0x82650A28 = { name = "fn_82650A28" }
+0x82661A08 = { name = "fn_82661A08" }
+0x8266650C = { name = "fn_8266650C" }
+0x8266DF68 = { name = "fn_8266DF68" }
+0x8266DF90 = { name = "fn_8266DF90" }
+0x82685658 = { name = "fn_82685658" }
+0x82686AE8 = { name = "fn_82686AE8" }
+0x82686B10 = { name = "fn_82686B10" }
+0x82688458 = { name = "fn_82688458" }
+0x8269FB98 = { name = "fn_8269FB98" }
+0x826C6B08 = { name = "fn_826C6B08" }
+0x826CE8D4 = { name = "fn_826CE8D4" }
+0x826CFD04 = { name = "fn_826CFD04" }
+0x826D00F4 = { name = "fn_826D00F4" }
+0x826D011C = { name = "fn_826D011C" }
+0x826D0E70 = { name = "fn_826D0E70" }
+0x826D169C = { name = "fn_826D169C" }
+0x826D17A0 = { name = "fn_826D17A0" }
+0x826D17F4 = { name = "fn_826D17F4" }
+0x826D1864 = { name = "fn_826D1864" }
+0x826D7FE8 = { name = "fn_826D7FE8" }
+0x826DC0A0 = { name = "fn_826DC0A0" }
+0x826DCBB0 = { name = "fn_826DCBB0" }
+0x826E4E80 = { name = "fn_826E4E80" }
+0x826E5B94 = { name = "fn_826E5B94" }
+0x826E6990 = { name = "fn_826E6990" }
+0x827037D4 = { name = "fn_827037D4" }
+0x8270B280 = { name = "fn_8270B280" }
+0x8271E558 = { name = "fn_8271E558" }
+0x82722588 = { name = "fn_82722588" }
+0x82722648 = { name = "fn_82722648" }
+0x82722670 = { name = "fn_82722670" }
+0x827273B0 = { name = "fn_827273B0" }
+0x82727478 = { name = "fn_82727478" }
+0x827274B0 = { name = "fn_827274B0" }
+0x82728924 = { name = "fn_82728924" }
+0x8272C410 = { name = "fn_8272C410" }
+0x8272E08C = { name = "fn_8272E08C" }
+0x8272F370 = { name = "fn_8272F370" }
+0x8272F538 = { name = "fn_8272F538" }
+0x827332F0 = { name = "fn_827332F0" }
+0x82744448 = { name = "fn_82744448" }
+0x82763708 = { name = "fn_82763708" }
+0x82782870 = { name = "fn_82782870" }
+0x827852F8 = { name = "fn_827852F8" }
+0x8278C838 = { name = "fn_8278C838" }
+0x82796664 = { name = "fn_82796664" }
+0x82796BA8 = { name = "fn_82796BA8" }
+0x827C6A08 = { name = "fn_827C6A08" }
+0x827C6A40 = { name = "fn_827C6A40" }
+0x827CD5AC = { name = "fn_827CD5AC" }
+0x827D7250 = { name = "fn_827D7250" }
+0x828A9878 = { name = "fn_828A9878" }
+0x828B5258 = { name = "fn_828B5258" }
+0x828CE928 = { name = "fn_828CE928" }
+0x828ECE08 = { name = "fn_828ECE08" }
+0x828ECE30 = { name = "fn_828ECE30" }
+0x828ECE58 = { name = "fn_828ECE58" }
+0x828ECE80 = { name = "fn_828ECE80" }
+0x828ECEA8 = { name = "fn_828ECEA8" }

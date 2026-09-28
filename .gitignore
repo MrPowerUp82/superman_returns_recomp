@@ -8,3 +8,4 @@ port/generated/default/
 port/out/
 *.log
 .vs/
+logs/

@@ -13,6 +13,8 @@ include(generated/rexglue.cmake)
 # Sources
 set(SUPERMANRETURNS_SOURCES
     src/main.cpp
+    src/frame_stats.cpp
+    src/xma_fixes.cpp
 )
 
 if(WIN32)
