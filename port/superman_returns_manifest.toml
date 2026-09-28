@@ -10,21 +10,6 @@ file_path = "../game/default.xex"
 out_directory_path = "generated/default"
 includes = []
 
-# Codegen optimizations: keep these guest registers in C++ locals so the
-# host compiler can allocate them. non_volatile_as_local needs setjmp/longjmp
-# mapped and skip_lr breaks code that reads LR, so both stay off.
-cr_as_local = true
-ctr_as_local = true
-xer_as_local = true
-reserved_as_local = true
-non_argument_as_local = true
-
-# Native replacements for the statically linked CRT (identified by code shape:
-# memcpy saves r3 and prefetches with dcbt; memset splats the byte with rlwimi).
-[entrypoint.rexcrt]
-memcpy = 0x8279EC60
-memset = 0x8279F290
-
 # Kick starved XMA contexts in the audio mixer's busy-wait (see src/xma_fixes.cpp).
 [[entrypoint.midasm_hook]]
 address = 0x826595B8

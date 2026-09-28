@@ -15,6 +15,8 @@ set(SUPERMANRETURNS_SOURCES
     src/main.cpp
     src/frame_stats.cpp
     src/xma_fixes.cpp
+    src/sr_settings.cpp
+    src/skip_intro.cpp
 )
 
 if(WIN32)
