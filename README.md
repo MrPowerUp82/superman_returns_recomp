@@ -38,7 +38,7 @@ O jogo roda a 30 FPS no Xbox 360. Aqui o gargalo é a emulação da GPU do Xbox 
 | `rov` (padrão do runtime) | 30 FPS | ~2 FPS |
 | `rtv` (padrão do `run.cmd`) | ~16 FPS | ~10 FPS |
 
-Os scripts usam `rtv` junto com `--depth_float24_convert_in_pixel_shader=true`. Sem essa opção, no modo `rtv` o céu e o fundo distante ficam pretos: o depth float24 do Xbox 360 perde precisão na conversão e o céu, desenhado na profundidade máxima, falha no teste de profundidade. Em mundo aberto o jogo roda a ~8–10 FPS com Intel UHD. Com uma GPU dedicada (NVIDIA/AMD), vale testar `run.cmd --render_target_path_d3d12=rov`, que emula a EDRAM com mais precisão.
+O jogo já aplica por padrão, em `port/src/superman_returns_app.h`, as opções de GPU medidas neste hardware: `render_target_path_d3d12=rtv`, `depth_float24_convert_in_pixel_shader=true` (sem ela o céu e o fundo ficam pretos no `rtv`) e `native_stencil_value_output_d3d12_intel=true` (dica do Xenia para GPUs Intel, [xenia-canary#542](https://github.com/xenia-canary/xenia-canary/issues/542): 7,6 → 10,2 FPS na rua). Qualquer opção passada na linha de comando prevalece.
 
 Para medir, `F3` abre um painel com o FPS do jogo, e `set SR_LOG_FPS=1` antes de rodar grava o FPS em `logs/game.log` a cada 2 s. `F4` abre as configurações do runtime.
 
