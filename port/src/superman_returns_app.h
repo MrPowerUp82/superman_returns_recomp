@@ -32,6 +32,21 @@ class SupermanReturnsApp : public rex::ReXApp {
   void OnPreSetup(rex::RuntimeConfig& config) override {
     const bool trace = rex::cvar::Query<std::string>("sr_renderer") == "trace";
 #if SR_HAS_TRACE_GPU
+    // GPU defaults measured on Intel UHD (open world, paired runs); an explicit
+    // command-line or config value always wins.
+    //   render_target_path_d3d12=rtv: ~2 FPS with ROV, ~7 with RTV.
+    //   depth_float24_convert_in_pixel_shader: without it the sky and far
+    //     scenery fail the depth test and render black under RTV (~5% cost).
+    //   native_stencil_value_output_d3d12_intel: the ROV-era Intel workaround
+    //     is not needed on current drivers; 7.6 -> 10.2 FPS in the street.
+    auto gpu_default = [](const char* name, const char* value) {
+      if (rex::cvar::GetFlagSource(name) == rex::cvar::Source::kDefault) {
+        rex::cvar::SetFlagByName(name, value);
+      }
+    };
+    gpu_default("render_target_path_d3d12", "rtv");
+    gpu_default("depth_float24_convert_in_pixel_shader", "true");
+    gpu_default("native_stencil_value_output_d3d12_intel", "true");
     if (!config.graphics) {
       config.graphics = trace ? CreateSrTraceGraphicsSystem() : CreateSrXenosGraphicsSystem();
     }
