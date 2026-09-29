@@ -7,3 +7,4 @@
 
 REXCVAR_DECLARE(bool, sr_skip_intro);
 REXCVAR_DECLARE(int32_t, sr_render_scale);
+REXCVAR_DECLARE(bool, sr_post_effects);

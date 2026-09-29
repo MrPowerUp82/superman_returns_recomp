@@ -14,6 +14,7 @@ add_executable(sr_native_tests
     test_pm4_mirror.cpp
     test_shaders.cpp
     test_game_profile.cpp
+    test_post_effects.cpp
     "${SR_NATIVE_DIR}/pm4_mirror.cpp"
 )
 target_include_directories(sr_native_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${SR_NATIVE_DIR}")

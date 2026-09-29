@@ -8,6 +8,12 @@ REXCVAR_DEFINE_INT32(sr_render_scale, 100, "Superman Returns",
     .range(25, 100)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
+REXCVAR_DEFINE_BOOL(sr_post_effects, true, "Superman Returns",
+                    "Post-processing (bloom and light rays). Off skips the small-surface "
+                    "passes of the chain found in the gameplay trace; needs the in-process "
+                    "D3D12 backend (tools/setup_gpu_source.ps1)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
 REXCVAR_DEFINE_STRING(sr_renderer, "xenos", "Superman Returns",
                       "Graphics backend: xenos, trace (project command processor) or native "
                       "(experimental XDK-hook renderer; falls back to xenos when unavailable)")

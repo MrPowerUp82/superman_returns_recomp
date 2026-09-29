@@ -23,6 +23,8 @@
 #include <rex/system/interfaces/graphics.h>
 #include <rex/ui/presenter.h>
 
+#include "post_effects.h"
+
 namespace {
 
 class SrGraphicsSystem;
@@ -44,8 +46,10 @@ std::atomic<SrCommandProcessor*> g_active_processor{nullptr};
 class SrCommandProcessor final : public rex::graphics::d3d12::D3D12CommandProcessor {
  public:
   // record = false: no CSV trace, probe or skip rules (A/B mode).
+  // skip_post_effects: sr_post_effects=false (post_effects.h).
   SrCommandProcessor(SrGraphicsSystem* graphics_system,
-                     rex::system::KernelState* kernel_state, bool record);
+                     rex::system::KernelState* kernel_state, bool record,
+                     bool skip_post_effects);
   ~SrCommandProcessor() override;
   bool GammaRamp256(uint32_t* out) const {
     const auto* table = gamma_ramp_256_entry_table();
@@ -67,8 +71,12 @@ class SrCommandProcessor final : public rex::graphics::d3d12::D3D12CommandProces
   void ProbeDraw(rex::graphics::xenos::PrimitiveType primitive_type,
                  uint32_t index_count, const IndexBufferInfo* index_buffer_info);
   void DumpAbOutput(uint64_t swap_number);
+  bool SkipPostEffectDraw(uint32_t primitive_type);
+  bool SkipPostEffectCopy();
 
   SrGraphicsSystem* sr_graphics_system_;
+  bool skip_post_effects_;
+  superman_returns::post_effects::Filter post_effects_;
 
   std::ofstream trace_;
   std::ofstream pass_probe_;
@@ -88,16 +96,19 @@ class SrCommandProcessor final : public rex::graphics::d3d12::D3D12CommandProces
 
 class SrGraphicsSystem final : public rex::graphics::d3d12::D3D12GraphicsSystem {
  public:
-  explicit SrGraphicsSystem(bool record) : record_(record) {}
+  SrGraphicsSystem(bool record, bool skip_post_effects)
+      : record_(record), skip_post_effects_(skip_post_effects) {}
   rex::ui::Presenter* sr_presenter() const { return presenter(); }
 
  protected:
   std::unique_ptr<rex::graphics::CommandProcessor> CreateCommandProcessor() override {
-    return std::make_unique<SrCommandProcessor>(this, kernel_state_, record_);
+    return std::make_unique<SrCommandProcessor>(this, kernel_state_, record_,
+                                                skip_post_effects_);
   }
 
  private:
   bool record_;
+  bool skip_post_effects_;
 };
 
 uint64_t ParseShaderHash(const std::string& value) {
@@ -156,9 +167,21 @@ SrCommandProcessor::~SrCommandProcessor() {
 }
 
 SrCommandProcessor::SrCommandProcessor(
-    SrGraphicsSystem* graphics_system, rex::system::KernelState* kernel_state, bool record)
-    : D3D12CommandProcessor(graphics_system, kernel_state), sr_graphics_system_(graphics_system) {
+    SrGraphicsSystem* graphics_system, rex::system::KernelState* kernel_state, bool record,
+    bool skip_post_effects)
+    : D3D12CommandProcessor(graphics_system, kernel_state),
+      sr_graphics_system_(graphics_system),
+      skip_post_effects_(skip_post_effects) {
   g_active_processor.store(this);
+  if (skip_post_effects_) {
+    REXLOG_INFO("sr renderer: post effects off, skipping {} bloom/light-ray passes derived "
+                "from the gameplay trace (post_effects.h)",
+                superman_returns::post_effects::kPassCount);
+    if (rex::cvar::Query<int32_t>("sr_render_scale") != 100) {
+      REXLOG_WARN("sr renderer: sr_post_effects=false only matches the 1280x720 surfaces; "
+                  "with sr_render_scale != 100 the post effects will probably stay on");
+    }
+  }
   if (!record) return;
   const std::string path = rex::cvar::Query<std::string>("sr_gpu_trace_path");
   max_frames_ = static_cast<uint32_t>(
@@ -271,9 +294,8 @@ bool SrCommandProcessor::IssueDraw(
     rex::graphics::xenos::PrimitiveType primitive_type, uint32_t index_count,
     IndexBufferInfo* index_buffer_info, bool major_mode_explicit) {
   ProbeDraw(primitive_type, index_count, index_buffer_info);
-  const auto* vs = active_vertex_shader();
-  const auto* ps = active_pixel_shader();
-  if (MatchesSkipRule(false, static_cast<uint32_t>(primitive_type))) {
+  if (SkipPostEffectDraw(static_cast<uint32_t>(primitive_type)) ||
+      MatchesSkipRule(false, static_cast<uint32_t>(primitive_type))) {
     ++skipped_draws_;
     Trace("skipped", static_cast<uint32_t>(primitive_type), index_count,
           index_buffer_info ? static_cast<uint32_t>(index_buffer_info->format) : 0,
@@ -309,8 +331,30 @@ bool SrCommandProcessor::MatchesSkipRule(bool copy, uint32_t primitive_type) con
   return false;
 }
 
+// sr_post_effects=false. Every draw must reach the filter, so this runs before
+// the diagnostic skip rules; the resolve draws (mode 6) only pass through.
+bool SrCommandProcessor::SkipPostEffectDraw(uint32_t primitive_type) {
+  if (!skip_post_effects_) return false;
+  const auto& regs = *register_file_;
+  const auto* vs = active_vertex_shader();
+  const auto* ps = active_pixel_shader();
+  return post_effects_.SkipDraw(primitive_type,
+                                regs.values[rex::graphics::XE_GPU_REG_RB_MODECONTROL] & 7,
+                                vs ? vs->ucode_data_hash() : 0,
+                                ps ? ps->ucode_data_hash() : 0,
+                                regs.values[rex::graphics::XE_GPU_REG_RB_SURFACE_INFO]);
+}
+
+bool SrCommandProcessor::SkipPostEffectCopy() {
+  if (!skip_post_effects_) return false;
+  const auto* ps = active_pixel_shader();
+  return post_effects_.SkipCopy(
+      ps ? ps->ucode_data_hash() : 0,
+      register_file_->values[rex::graphics::XE_GPU_REG_RB_SURFACE_INFO]);
+}
+
 bool SrCommandProcessor::IssueCopy() {
-  if (MatchesSkipRule(true, 0)) {
+  if (SkipPostEffectCopy() || MatchesSkipRule(true, 0)) {
     ++skipped_copies_;
     Trace("skipped_copy", 0, 0, 0, false);
     return true;
@@ -345,6 +389,10 @@ void SrCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   if (!skip_rules_.empty() && frame_ % 120 == 0) {
     REXLOG_INFO("sr renderer: skipped {} draws, {} copies through frame {}",
                 skipped_draws_, skipped_copies_, frame_);
+  }
+  if (skip_post_effects_ && frame_ % 600 == 0) {
+    REXLOG_INFO("sr renderer: post effects off: skipped {} passes, {} resolves through frame {}",
+                post_effects_.skipped_draws(), post_effects_.skipped_copies(), frame_);
   }
 }
 
@@ -386,12 +434,18 @@ void SrCommandProcessor::DumpAbOutput(uint64_t swap_number) {
 
 }  // namespace
 
+// Query<bool> would read a missing cvar as false (= off); compare the text so
+// anything but an explicit "false" keeps the stock behavior.
+static bool SrPostEffectsDisabled() {
+  return rex::cvar::GetFlagByName("sr_post_effects") == "false";
+}
+
 std::unique_ptr<rex::system::IGraphicsSystem> CreateSrTraceGraphicsSystem() {
-  return std::make_unique<SrGraphicsSystem>(true);
+  return std::make_unique<SrGraphicsSystem>(true, SrPostEffectsDisabled());
 }
 
 std::unique_ptr<rex::system::IGraphicsSystem> CreateSrAbGraphicsSystem() {
-  return std::make_unique<SrGraphicsSystem>(false);
+  return std::make_unique<SrGraphicsSystem>(false, false);
 }
 
 void SetSrXenosSwapObserver(SrXenosSwapObserver observer) { g_swap_observer.store(observer); }
@@ -402,5 +456,7 @@ bool GetSrXenosGammaRamp256(uint32_t* out_entries) {
 }
 
 std::unique_ptr<rex::system::IGraphicsSystem> CreateSrXenosGraphicsSystem() {
+  // sr_post_effects=true (default) keeps the stock backend untouched.
+  if (SrPostEffectsDisabled()) return std::make_unique<SrGraphicsSystem>(false, true);
   return std::make_unique<rex::graphics::d3d12::D3D12GraphicsSystem>();
 }

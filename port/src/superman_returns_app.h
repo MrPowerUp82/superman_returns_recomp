@@ -72,6 +72,10 @@ class SupermanReturnsApp : public rex::ReXApp {
       REXLOG_WARN("sr_renderer=native requires the ReXGlue v0.10.0 GPU sources and CMake "
                   "SR_NATIVE=RENDERER; using the xenos backend");
     }
+    if (rex::cvar::GetFlagByName("sr_post_effects") == "false") {
+      REXLOG_WARN("sr_post_effects=false requires the ReXGlue v0.10.0 GPU sources "
+                  "(tools/setup_gpu_source.ps1); post effects stay on");
+    }
 #endif
     if (!config.graphics && config.gpu_plugin.empty()) {
       config.gpu_plugin = "xenos";
