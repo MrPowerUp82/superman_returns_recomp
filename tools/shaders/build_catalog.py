@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Ported from crazyriddler/rexglue-native-kit @136bc6c4, tools/shaders/build_catalog.py.
+# Changes for Superman Returns: tool and output paths (srpaths.py: translator
+# and DXC under .tools/, the Markdown catalog under artifacts/shaders/ so no
+# generated output lands in the tracked tree).
 """
 Translate every extracted container with XenosRecompCorpus, compile the HLSL
 with DXC, parse reflection from the container, and write:
@@ -10,7 +14,7 @@ with DXC, parse reflection from the container, and write:
   artifacts/shaders/spirv/<hash>.<vs|ps>.spv          -spirv -fvk-use-dx-layout (optional, --spirv)
   artifacts/shaders/logs/<hash>.<vs|ps>.<step>.log    translator / DXC diagnostics for failures
   artifacts/shaders/catalog.json                      machine-readable catalog
-  docs/SHADER_CATALOG.md                              human summary + table
+  artifacts/shaders/SHADER_CATALOG.md                 human summary + table
 
 Status ladder per shader: extracted -> translated -> compiles
 (-> visually_validated / optimized are set manually later via
@@ -28,7 +32,8 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from srpaths import ARTIFACTS, DXC, ROOT, SHADER_COMMON, TRANSLATOR  # noqa: E402
 
 REGSET = ["bool", "int4", "float4", "sampler"]
 PCLASS = ["scalar", "vector", "matrix_rows", "matrix_columns", "object", "struct"]
@@ -212,14 +217,14 @@ def md_table_row(c):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--corpus", default=str(ROOT / "artifacts" / "shaders"))
-    ap.add_argument("--translator", default=str(ROOT / "tools" / "xenosrecomp" / "build" / "XenosRecompCorpus.exe"))
-    ap.add_argument("--include", default=str(ROOT / "tools" / "xenosrecomp" / "src" / "XenosRecomp" / "shader_common.h"))
-    ap.add_argument("--dxc", default=str(ROOT / "tools" / "dxc" / "bin" / "x64" / "dxc.exe"))
+    ap.add_argument("--corpus", default=str(ARTIFACTS))
+    ap.add_argument("--translator", default=str(TRANSLATOR))
+    ap.add_argument("--include", default=str(SHADER_COMMON))
+    ap.add_argument("--dxc", default=str(DXC))
     ap.add_argument("--spirv", action="store_true", default=True)
     ap.add_argument("--no-spirv", dest="spirv", action="store_false")
     ap.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 4) - 1))
-    ap.add_argument("--md", default=str(ROOT / "docs" / "SHADER_CATALOG.md"))
+    ap.add_argument("--md", default=str(ARTIFACTS / "SHADER_CATALOG.md"))
     a = ap.parse_args()
 
     corpus = Path(a.corpus)

@@ -1,5 +1,9 @@
-"""Pack the native renderer's DXIL shaders into one blob (embedded in conan.exe
-as an RCDATA resource, see $PORT_DIR/CMakeLists.txt).
+"""Pack the native renderer's DXIL shaders into one blob (embedded in
+superman_returns.exe as an RCDATA resource, see port/CMakeLists.txt SR_NATIVE;
+reader: port/src/native_renderer/shader_pack.h).
+
+Ported from crazyriddler/rexglue-native-kit @136bc6c4, tools/shaders/pack_shaders.py;
+unchanged apart from this docstring.
 usage: pack_shaders.py <dxil_dir> <out.pak>
 
 Format (little-endian):

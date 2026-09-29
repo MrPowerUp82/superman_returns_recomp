@@ -1,3 +1,4 @@
+// Copied unchanged from crazyriddler/rexglue-native-kit @136bc6c4, tools/xenosrecomp/corpus_main.cpp.
 // XenosRecompCorpus: per-shader driver around (patched) XenosRecomp's
 // ShaderRecompiler, used by tools/shaders/build_corpus.sh.
 //

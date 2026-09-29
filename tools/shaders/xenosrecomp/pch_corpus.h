@@ -1,3 +1,4 @@
+// Copied unchanged from crazyriddler/rexglue-native-kit @136bc6c4, tools/xenosrecomp/pch_corpus.h.
 // Replacement for XenosRecomp/pch.h without DXC/smol-v/zstd: the corpus driver
 // only needs the HLSL emitter (DXC runs out of process).
 #pragma once

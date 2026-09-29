@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
+# Ported from crazyriddler/rexglue-native-kit @136bc6c4, tools/shaders/extract_shaders.py.
+# Changes for Superman Returns: repository paths (srpaths.py) and the
+# decoded image from SR_DUMP_IMAGE; --dump-dir adds the containers the CreateShader hooks
+# dumped at run time (sr_native_dump_shader_dir), for game data that compresses them.
 """
-Extract every Xbox 360 XDK shader container from Conan's game data.
+Extract every Xbox 360 XDK shader container from the game data.
 
-Scans files byte-by-byte (via bytes.find on the container magic) because
-1659 of the 1800 containers in shaders/shaders.stx start at file offsets with
-offset % 4 == 1, which stock XenosRecomp's 4-byte-stride scan misses.
+Scans files byte-by-byte (via bytes.find on the container magic): in Conan
+1659 of the 1800 containers in shaders/shaders.stx started at file offsets
+with offset % 4 == 1, which stock XenosRecomp's 4-byte-stride scan misses.
+Superman Returns keeps its data in 12 .AST archives whose layout is unknown;
+if they are compressed this finds nothing there and the run-time dumps
+(--dump-dir) are the source.
 
 Outputs (default root: artifacts/shaders):
   raw/<container_hash>.<vs|ps>.bin   the container, exactly virtualSize+physicalSize bytes
@@ -30,7 +37,6 @@ import json
 import os
 import re
 import struct
-import subprocess
 import sys
 from pathlib import Path
 
@@ -43,9 +49,8 @@ MAGIC = b"\x10\x2a\x11"
 HDR = struct.Struct(">9I")  # flags virtualSize physicalSize fieldC ctabOff defOff shaderOff field1C field20
 SHADER_HDR = struct.Struct(">6I")  # physicalOffset size field8 fieldC field10 interpolatorInfo
 
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "tools"))
-from kitcfg import PORT, CFG  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from srpaths import ARTIFACTS, GAME, GAME_NAME, ROOT, TITLE_ID, default_image  # noqa: E402
 
 
 def h64(b: bytes) -> str:
@@ -146,10 +151,14 @@ def scan_file(path: Path, rel: str, found: dict, occurrences: list, stats: dict)
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--game", default=str(Path(PORT) / "game"))
-    ap.add_argument("--out", default=str(ROOT / "artifacts" / "shaders"))
-    ap.add_argument("--no-xex", action="store_true", help="skip decoding/scanning default.xex")
-    ap.add_argument("--skip-ext", default=".bik,.fsb,.fev,.wav,.xma",
+    ap.add_argument("--game", default=str(GAME))
+    ap.add_argument("--out", default=str(ARTIFACTS))
+    ap.add_argument("--image", default=None,
+                    help="decoded executable image (default: port/logs or logs/default_image.bin)")
+    ap.add_argument("--no-xex", action="store_true", help="skip scanning the decoded executable image")
+    ap.add_argument("--dump-dir", action="append", default=[],
+                    help="directory of containers dumped by sr_native_dump_shader_dir (repeatable)")
+    ap.add_argument("--skip-ext", default=".bik,.fsb,.fev,.wav,.xma,.xex",
                     help="comma list of extensions not scanned (media). Use '' to scan everything")
     args = ap.parse_args()
 
@@ -174,19 +183,21 @@ def main():
             scan_file(p, rel, found, occurrences, stats)
             scanned += 1
 
+    # default.xex itself is encrypted/compressed: scan the decoded image the
+    # game writes with SR_DUMP_IMAGE instead (the kit decoded the XEX itself).
     xex_note = None
     if not args.no_xex:
-        xex = game / "default.xex"
-        img = work / "default_image.bin"
-        dec = ROOT / "scripts" / "port" / "xex_decode.py"
-        if xex.exists() and dec.exists():
-            if not img.exists():
-                r = subprocess.run([sys.executable, str(dec), str(xex), str(img)], capture_output=True, text=True)
-                if r.returncode != 0:
-                    xex_note = "xex decode failed: " + (r.stderr.strip()[-300:])
-            if img.exists():
-                scan_file(img, "default.xex[decoded image]", found, occurrences, stats)
-                xex_note = xex_note or "decoded image scanned"
+        img = Path(args.image) if args.image else default_image()
+        if img and img.exists():
+            scan_file(img, "default.xex[decoded image]", found, occurrences, stats)
+            xex_note = f"decoded image scanned ({img})"
+        else:
+            xex_note = "no decoded image (run the game with SR_DUMP_IMAGE, see docs/native-port-plan.md)"
+
+    for dump_dir in args.dump_dir:
+        for p in sorted(Path(dump_dir).glob("*.bin")):
+            scan_file(p, f"runtime-dump/{p.name}", found, occurrences, stats)
+            scanned += 1
 
     for h, rec in found.items():
         blob = rec.pop("_blob")
@@ -195,7 +206,7 @@ def main():
     shaders = sorted(found.values(), key=lambda r: (r["type"], r["container_hash"]))
     manifest = {
         "schema": 1,
-        "game": f"{CFG.get('GAME_NAME', 'game')} {CFG.get('TITLE_ID', '')}",
+        "game": f"{GAME_NAME} {TITLE_ID}",
         "hash_definitions": {
             "container_hash": "XXH3_64 (seed 0) of container bytes [0, virtualSize+physicalSize); "
                               "same key as XenosRecomp/UnleashedRecomp/re:Blue g_shaderCacheEntries",

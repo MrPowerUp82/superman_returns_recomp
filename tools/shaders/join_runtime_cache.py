@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Ported from crazyriddler/rexglue-native-kit @136bc6c4, tools/shaders/join_runtime_cache.py.
+# Changes for Superman Returns: title ID and paths from srpaths.py; the
+# default .xsh search covers port/out (the Xenos backend's shader storage).
 """
 Join ReXGlue Xenos-backend shader storage (<cache>/shaders/shareable/<TITLE_ID>.xsh)
 against the extracted container corpus (artifacts/shaders/manifest.json).
@@ -31,10 +34,9 @@ from pathlib import Path
 
 import xxhash
 
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "tools"))
-from kitcfg import CFG  # noqa: E402
-TITLE = CFG.get("TITLE_ID", "") or "*"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from srpaths import ARTIFACTS, ROOT, TITLE_ID  # noqa: E402
+TITLE = TITLE_ID
 
 
 def read_xsh(path: Path):
@@ -117,8 +119,8 @@ def normalize_vfetch(ucode: bytes) -> bytes:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--corpus", default=str(ROOT / "artifacts" / "shaders"))
-    ap.add_argument("xsh", nargs="*", help=".xsh files (default: every bench/**/<TITLE_ID>.xsh)")
+    ap.add_argument("--corpus", default=str(ARTIFACTS))
+    ap.add_argument("xsh", nargs="*", help=".xsh files (default: every port/out/**/<TITLE_ID>.xsh)")
     args = ap.parse_args()
     corpus = Path(args.corpus)
     manifest = json.loads((corpus / "manifest.json").read_text())
@@ -134,7 +136,7 @@ def main():
         by_len.setdefault((s["type"], len(u)), []).append((s["container_hash"], u))
 
     files = [Path(p) for p in args.xsh] or sorted(
-        Path(p) for p in glob.glob(str(ROOT / "bench" / "**" / f"{TITLE}.xsh"), recursive=True))
+        Path(p) for p in glob.glob(str(ROOT / "port" / "out" / "**" / f"{TITLE}.xsh"), recursive=True))
     runtime = {}
     for f in files:
         for e in read_xsh(f):
