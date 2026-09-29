@@ -58,7 +58,7 @@ usa o SDK oficial v0.10.0 (`f5337cd`) e as fontes de GPU em `.tools/rexglue-sdk-
 |---|---|---|
 | `IGraphicsSystem::GetGammaRamp256`, `guest_frame_counter` | rampa DC_LUT no blit final; contador de swaps | métodos próprios de `NativeGraphicsSystem` (sem `override`); o renderer consulta o sistema nativo diretamente |
 | `rex::perf::BenchElapsedMs`, `RegisterBenchExitCallback`, `RegisterSampledThread`, `CounterId::kApp0..3` | diagnósticos de benchmark | `sdk_compat.h`: relógio local desde o primeiro swap; callbacks e perfis viram no-op |
-| `rex::perf::RegisterGpuSwapCallback` (swap do CP Xenos) | modo A/B quadro a quadro | `SrCommandProcessor::IssueSwap` (já existe no modo `trace`) chama `NotifyXenosSwap` do renderer |
+| `rex::perf::RegisterGpuSwapCallback` (swap do CP Xenos) e `bench_screenshot_swaps` | modo A/B quadro a quadro | `SrCommandProcessor::IssueSwap` (já existe no modo `trace`) chama o observador do renderer e grava a saída do Xenos (`CaptureGuestOutput`) nos mesmos swaps |
 | `graphics_flags.h` (`unlocked_vblank_rate`) | vblank destravado | cvar própria `sr_native_unlocked_vblank_hz` |
 | `gpu_null_draws` (Xenos só sincroniza) | modo intermediário "Xenos sincroniza, nativo desenha" | não existe no SDK oficial; o port só tem dois modos: nativo puro (`NativeGraphicsSystem`) e A/B (Xenos completo + nativo fora da tela) |
 | Correções de runtime do fork (timer de alta resolução, fila de áudio, occlusion query atrasada, waitable swap chain) | desempenho e estabilidade em Conan | **não portadas**; podem afetar FPS/estabilidade do modo nativo. Avaliar depois das primeiras medições |
@@ -69,7 +69,7 @@ Todos ficam em `port/src/native_renderer/game_profile.h`.
 
 | Fato | Valor em Conan | O que sabemos de SR | Situação |
 |---|---|---|---|
-| Ponteiro global do device (`kDevicePtrAddr`) | `0x82C81A64` | desconhecido | **placeholder 0**; o modo `capture` procura candidatos (seção 8, passo 4) |
+| Ponteiro global do device (`kDevicePtrAddr`) | `0x82C81A64` | desconhecido | **não é necessário**: com `0` o renderer usa o `r3` (device) das próprias chamadas D3D interceptadas. O modo `capture` ainda lista os globais que guardam o device (`device_pointer_globals`), caso se queira fixar um |
 | Offsets do `D3DDevice` (fetch 0x480, consts 0x780/0x1780, bools/loops 0x2780.., decl 0x2E24, RTs 0x3090, DS 0x30A0, texturas 0x30F8, viewport 0x3160, shaders 0x318C/0x3190, anel +0x30/+0x34) | ver coluna | 93 funções `exact` em `xdk_match.tsv`, mas o `xdk_sigs.py` **mascara** os imediatos de loads/stores, então os offsets não estão provados | valores de Conan, **não confirmados**; conferir no disassembly dos setters (3.2) |
 | Front buffer (global `0x82C81A68`) | argumento de Resolve/Swap | `r4` do candidato a Swap | lido do argumento, sem global |
 | Resolução de saída | 1280×720 | 1280×720: `render_scale.cpp` (`sub_82611A20` modo 4 e `sub_822EB148` gravam 1280/720) | conhecido pelo código existente; confirmar no Swap |
@@ -156,41 +156,58 @@ se for anterior, espere diferenças na ordem das funções e possivelmente nos o
 ## 5. Como o código portado está protegido
 
 - `port/src/native_renderer/game_profile.h` concentra os endereços e fatos. Cada endereço
-  tem `SR_CONFIRMED_<PAPEL>` (0/1) e o comentário `// UNCONFIRMED`.
+  tem `SR_CONFIRMED_<PAPEL>` (0/1), `SR_ABSENT_<PAPEL>` (papel que o jogo não usa) e o
+  comentário `// UNCONFIRMED`. O layout do device tem `kDeviceLayoutConfirmed`.
 - CMake `SR_NATIVE` = `OFF` (padrão) | `CAPTURE` | `RENDERER`:
   - `OFF`: nada do renderer nativo é compilado; o executável é o mesmo de antes.
     `--sr_renderer=native` registra no log uma vez e usa `xenos`.
   - `CAPTURE`: compila o renderer; **só os hooks com endereço confirmado** são gerados. O
     renderer não pode ser ativado (`sr_renderer=native` cai para `xenos`), mas os hooks de
-    observação funcionam: dump de containers de shader, contagem de draws, busca do ponteiro
-    global do device.
+    observação funcionam com `--sr_native_capture=true`: chamadas por papel, amostras de
+    argumentos, devices vistos, globais que apontam para o device
+    (`logs/native_capture.json`, regravado a cada 300 swaps) e, com
+    `--sr_native_dump_shader_dir`, os containers de shader criados pelo jogo.
   - `RENDERER`: `static_assert(kProfileConfirmed)` impede a compilação enquanto houver
     endereço não confirmado. Só então `--sr_renderer=native` ativa o renderer.
 - Fallback para `xenos`, com log uma vez por causa, quando: o build não tem o renderer; o
   perfil não está confirmado; não há shaders DXIL (pacote embutido ou `sr_native_shader_dir`);
-  a criação do dispositivo D3D12 falha. Durante o jogo, cada caso não suportado (formato de
+  a apresentação D3D12 ou a configuração da GPU guest do sistema nativo falha (troca
+  transparente, antes de o jogo usar a GPU). Durante o jogo, cada caso não suportado (formato de
   textura, primitiva, shader ausente no pacote, pacote PM4 desconhecido) é registrado **uma
   vez** por caso. Não é possível voltar para Xenos no meio da sessão: o contrato de GPU guest
   (anel, MMIO, interrupções) pertence a um único `IGraphicsSystem` do início ao fim. Para
-  diagnosticar com segurança use o modo A/B (`--sr_native_ab=true`): Xenos continua
-  desenhando e apresentando, o renderer nativo desenha fora da tela e grava quadros para
-  comparação.
+  diagnosticar com segurança use o modo A/B (`--sr_native_ab_mode=true`): Xenos continua
+  desenhando e apresentando, o renderer nativo desenha fora da tela e, nos swaps de
+  `--sr_native_ab_swaps`, as duas saídas do **mesmo quadro** vão para
+  `--sr_native_dump_dir` (`s<swap>_output_1280x720.raw` e `s<swap>_xenos_output.raw`).
+- Opções do kit que dependem de passes do jogo (`sr_native_fxaa`,
+  `sr_native_ambient_occlusion`, `sr_native_soft_particles`, `sr_native_shadow_quality`) são
+  desligadas com aviso enquanto os papéis de passe forem `-1`.
+- Todas as cvars do kit foram renomeadas `native_*` → `sr_native_*` (e as opções gráficas,
+  por exemplo `render_scale` → `sr_native_render_scale`), na categoria
+  "Superman Returns Native" do F4.
 
 ## 6. Pipeline de shaders
 
 `tools/shaders/` (copiado do kit, adaptado) roda **localmente contra o jogo do dono**; nenhuma
 saída é comitada (`artifacts/` e `.tools/` são ignorados):
 
-1. `tools/shaders/fetch_xenosrecomp.ps1`: clona reblue-XenosRecomp no pin `339af41` em
-   `.tools/xenosrecomp/src` e aplica `tools/shaders/patches/0001-native-recomp.patch` (o
-   patch do kit, sem mudanças).
+1. `tools/shaders/fetch_xenosrecomp.py`: clona reblue-XenosRecomp no pin `339af41` em
+   `.tools/xenosrecomp/src`, aplica `tools/shaders/xenosrecomp/patches/0001-conan-recomp.patch`
+   (o patch do kit, sem mudanças) e baixa fmt 12.1.0 e xxHash 0.8.3. Verificado aqui: o patch
+   aplica no pin e o `XenosRecompCorpus` compila com clang 18 no Linux.
 2. `extract_shaders.py`: varredura byte a byte dos arquivos em `game/` e da imagem decodificada
    (`logs/default_image.bin`) procurando containers (magia `0x102A11xx`), ou de um diretório
    de dumps em tempo de execução (`--dump-dir`).
 3. `build_catalog.py`: tradução HLSL, compilação DXIL com DXC, reflexão →
    `artifacts/shaders/catalog.json` e `artifacts/shaders/dxil/*.dxil`.
 4. `pack_shaders.py`: empacota o DXIL (formato `CNSH` do kit) para o CMake embutir no
-   executável, ou use `--sr_native_shader_dir=artifacts/shaders/dxil`.
+   executável (`SR_NATIVE=RENDERER` com `artifacts/shaders/dxil` presente), ou use
+   `--sr_native_shader_dir=<repo>\artifacts\shaders\dxil`.
+
+`tools/shaders/build_corpus.ps1` faz tudo em sequência (DXC 1.9.2607 em `.tools/dxc`,
+tradutor, extração, junção com o cache `.xsh` do Xenos, catálogo). O catálogo fica em
+`artifacts/shaders/SHADER_CATALOG.md` (no kit ia para `docs/`; aqui nada gerado entra no Git).
 
 Riscos: os containers podem estar comprimidos dentro dos `.AST`; a cobertura do XenosRecomp
 em SR é desconhecida (em Conan o patch levou de 234 para 591 de 591). Os 123 dumps de
@@ -199,60 +216,75 @@ cabeçalho do container e a tabela de constantes.
 
 ## 7. Compilação
 
-**Não foi possível compilar no ambiente da nuvem**: o SDK é Windows/clang com D3D12 e não há
-`port/generated/`. Apenas os testes unitários de `tests/native/` (código puro, sem SDK)
-foram compilados e executados aqui, com clang no Linux. Todo o resto precisa ser compilado
-pelo dono. O código foi mantido o mais próximo possível do kit (diferenças listadas na
-seção 2) para reduzir o risco.
+**Não foi possível compilar nem linkar o executável no ambiente da nuvem**: o SDK é
+Windows/clang com D3D12 e não há `port/generated/`. O que foi verificado aqui:
+
+- `clang++ -fsyntax-only --target=x86_64-w64-mingw32` de todos os `.cpp` do renderer contra os
+  headers do ReXGlue v0.10.0 (`f5337cd`), inclusive com todos os papéis forçados como
+  confirmados numa cópia temporária e com `SR_NATIVE_RENDERER_BUILD=1`. Restam apenas erros de
+  declarações que o `d3d12.h` do mingw não tem (`ID3D12InfoQueue1`, `ID3D12Device9`,
+  `D3D12_ENCODE_BASIC_FILTER`, `SetThreadDescription`), em trechos idênticos ao kit.
+- O `static_assert` do build `RENDERER` dispara com o perfil atual (não confirmado).
+- Os testes de `tests/native/` e `tests/tools/` (código puro, sem SDK nem jogo).
+- `tools/native_validate.ps1 -Step kit` executado com PowerShell 7 no Linux; os demais `.ps1`
+  só passaram pelo parser do PowerShell.
+
+Todo o resto precisa ser compilado e executado pelo dono. O código foi mantido o mais próximo
+possível do kit (diferenças listadas na seção 2) para reduzir o risco.
 
 ## 8. Checklist para rodar em casa
 
-`tools/native_validate.ps1` automatiza os passos marcados com ▶; cada passo grava em
-`logs/native_validate/`. Todo resultado deve ser anotado aqui com data, máquina e comando.
-Até lá, todo número relacionado ao renderer nativo é **não medido**.
+`tools/native_validate.ps1 -Step <passo>` automatiza os passos marcados com ▶ e grava tudo em
+`logs/native_validate/`. Anote aqui cada resultado com data, máquina e comando. Até lá, todo
+número relacionado ao renderer nativo é **não medido**. O caminho do repositório não deve ter
+espaços (o `bench.ps1` separa `-ExtraArgs` por espaço).
 
-1. ▶ **Pré-requisitos**: `build.cmd` funcionando, `tools/setup_gpu_source.ps1` já rodado,
-   Python 3 com `numpy` e `xxhash`, Git.
-2. ▶ **Kit**: `tools/native_validate.ps1 -Step kit` clona o kit no commit `136bc6c4` em
-   `.tools/rexglue-native-kit` e escreve o `kit.env` apontando `PORT_DIR` para `port/`.
-3. ▶ **Imagem e disassembly**: `-Step image` roda o jogo com `SR_DUMP_IMAGE` (já existe em
-   `superman_returns_app.h`), grava `port/logs/default_image.bin` e gera
-   `port/logs/default_full.dis` com o `objdump` PowerPC do kit.
-4. ▶ **Assinaturas**: `-Step sigs` roda `xdk_sigs.py match` e grava
-   `logs/native_validate/xdk_match.tsv`; comparar com `docs/data/xdk_match.tsv`.
-5. ▶ **Ferramentas semânticas**: `-Step re` roda `pm4scan.py` e `q.py dis/callers/callees` para
-   cada papel da tabela 3.1 e dos setters da 3.2 e grava um relatório por papel em
-   `logs/native_validate/re/`. **A decisão é manual**: para cada linha, conferir o critério
-   da coluna "Como confirmar", editar `game_profile.h` (endereço + `SR_CONFIRMED_<PAPEL> 1`,
-   trocar `// UNCONFIRMED` pela evidência).
-6. ▶ **Versão do XDK**: `-Step xex` roda `tools/xex_libraries.py`.
-7. **Build de captura**: `build.cmd` com `set SR_NATIVE=CAPTURE`. Um endereço que não é
-   início de função no codegen gera erro de link `__imp__sub_XXXXXXXX` — isso também é
+1. **Pré-requisitos**: `build.cmd` funcionando, `tools/setup_gpu_source.ps1` já rodado (o
+   renderer nativo exige as fontes de GPU em processo), Python 3 e Git.
+2. ▶ `-Step kit`: clona o kit no commit `136bc6c4` em `.tools/rexglue-native-kit` (só
+   `tools/re`, `tools/binutils`, `tools/kitcfg.py`), escreve o `kit.env` com `PORT_DIR` = `port/`
+   e instala `numpy`/`xxhash`.
+3. ▶ `-Step image`: roda o jogo com `SR_DUMP_IMAGE` (já existe em `superman_returns_app.h`),
+   grava `port/logs/default_image.bin` e o disassembly `port/logs/default_full.dis` com o
+   `objdump` PowerPC do kit.
+4. ▶ `-Step sigs`: `xdk_sigs.py match` → `logs/native_validate/xdk_match.tsv`; informa quantas
+   linhas diferem de `docs/data/xdk_match.tsv`.
+5. ▶ `-Step re`: para cada papel de `game_profile.h`, `q.py dis/callers/callees` do candidato
+   (`re/<PAPEL>.txt`), `pm4scan.py`, busca da magia `0x102A` dos containers e o disassembly dos
+   setters da tabela 3.2 (`re/setter_*.txt`). **A decisão é manual**: para cada papel, aplicar o
+   critério da tabela 3.1, corrigir o endereço se preciso, pôr `SR_CONFIRMED_<PAPEL> 1` (ou
+   `SR_ABSENT_<PAPEL> 1` se o jogo não usa a função) e trocar `// UNCONFIRMED` pela evidência.
+   Conferir os offsets da tabela 3.2 e então `kDeviceLayoutConfirmed = true`.
+6. ▶ `-Step xex`: `tools/xex_libraries.py game/default.xex` (revisão do XDK, seção 4).
+7. ▶ `-Step build -Native CAPTURE`: `build.cmd` com `SR_NATIVE=CAPTURE`. Um endereço que não é
+   início de função no codegen falha no link (`__imp__sub_XXXXXXXX` indefinido): também é
    evidência de endereço errado.
-8. ▶ **Captura**: `-Step capture` roda o jogo em `--sr_renderer=xenos` com
-   `--sr_native_capture=true`, entra no mundo aberto (mesma automação do `bench.ps1`) e grava
-   `logs/native_capture.json`: contagem de chamadas por hook, argumentos de amostra,
-   candidatos ao ponteiro global do device e `logs/native_shaders/` (containers vistos no
-   CreateShader). Critérios: draws por quadro na mesma ordem de grandeza do trace
-   (`docs/data/gpu_passes_gameplay_intel_uhd.csv`), `r3` igual em todos os hooks do device.
-9. ▶ **Shaders**: `-Step shaders` roda o pipeline da seção 6 (extração dos arquivos e dos dumps
-   do passo 8) e informa quantos containers foram traduzidos/compilados.
-10. **Build do renderer**: com todos os `SR_CONFIRMED_*` em 1, `set SR_NATIVE=RENDERER` e
-    `build.cmd`. Se o `static_assert` disparar, falta confirmar algo.
-11. ▶ **A/B de imagem**: `-Step ab` roda duas vezes o mesmo cenário (título e mundo aberto,
-    `--sr_skip_intro=true`): `--sr_renderer=xenos` e `--sr_renderer=native --sr_native_ab=true
-    --sr_native_ab_swaps=600,1200` e grava as imagens nas mesmas posições de swap; compara com
-    `tools/native_ab_compare.py` (PSNR por imagem). Critério do kit: ≥ 40 dB na tela de
-    título; abaixo disso, investigar pelo trace de quadro (`--sr_native_trace_frame_at_s`).
-12. ▶ **FPS**: `-Step bench` roda `tools/bench.ps1` em `xenos` e em `native` (mesmos cenários
-    `idle` e `forward`) e acrescenta as linhas em `logs/bench_results.csv`. Meta: média ≥ 30
-    e mínimo ≥ 27 nos dois cenários no i5-13420H + Intel UHD.
-13. **Estabilidade**: 10 minutos no mundo aberto em `native`, sem crash e sem travamento de
-    áudio (regressão do XMA).
+8. ▶ `-Step capture`: `bench.ps1` com `--sr_native_capture=true` e
+   `--sr_native_dump_shader_dir=logs/native_shaders` → `logs/native_capture.json` e os
+   containers. Critérios: cada papel confirmado com chamadas (draws por swap na ordem de
+   grandeza de `docs/data/gpu_passes_gameplay_intel_uhd.csv`), um único device em `devices`,
+   amostras de argumentos coerentes (primitiva 1–13 no `r4` dos draws, containers válidos no
+   CreateShader, sem `anomalies`).
+9. ▶ `-Step shaders`: `tools/shaders/build_corpus.ps1` sobre `game/` e `logs/native_shaders`;
+   ver quantos containers foram traduzidos/compilados em `artifacts/shaders/SHADER_CATALOG.md`.
+10. ▶ `-Step build -Native RENDERER`: exige todos os papéis e o layout confirmados
+    (`static_assert`). Com `artifacts/shaders/dxil` presente, o DXIL é embutido.
+11. ▶ `-Step ab`: uma execução com `--sr_renderer=native --sr_native_ab_mode=true` (Xenos
+    desenha e apresenta, o nativo desenha fora da tela) grava as duas saídas nos swaps de
+    `-AbSwaps` e roda `tools/native_ab_compare.py` (PSNR por swap, imagens PPM). Critério do
+    kit: ≥ 40 dB. Abaixo disso, investigar com `--sr_native_trace_frame_at_s`,
+    `--sr_native_dump_frame_at_s` e `--sr_native_dump_dir`.
+12. ▶ `-Step bench`: `bench.ps1` em `xenos` e em `--sr_renderer=native`; avisa se a execução
+    nativa caiu para `xenos` (nesse caso os números são do Xenos). Meta: média ≥ 30 e mínimo
+    ≥ 27 FPS nos dois cenários no i5-13420H + Intel UHD.
+13. **Estabilidade** (manual): 10 minutos no mundo aberto em `native`, sem crash nem
+    travamento de áudio (regressão do XMA); `--sr_native_hang_watchdog_s` registra as pilhas se
+    os swaps pararem.
 
 ## 9. O que ficou como placeholder
 
-- Todos os endereços de SR (seção 3.1) e o ponteiro global do device (0).
+- Todos os endereços de SR (seção 3.1). O ponteiro global do device fica `0` (o renderer usa
+  o `r3` dos hooks).
 - Offsets do device: valores de Conan.
 - Papéis de passe: `-1`; SSAO, FXAA antes do HUD, partículas suaves e escala de sombra
   ficam desligados.

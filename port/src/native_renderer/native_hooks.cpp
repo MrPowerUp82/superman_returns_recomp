@@ -295,9 +295,8 @@ SR_DEFINE_HOOK(SR_ADDR_SWAP) {
   const uint32_t dev = ctx.r3.u32, front_buffer = ctx.r4.u32;
   static uint64_t swap_number = 0;
   ++swap_number;
-  native::compat::MarkGuestSwap();
-  OnDeviceCall("Swap", dev, front_buffer);
   SR_ORIGINAL(SR_ADDR_SWAP)(ctx, base);
+  native::NoteGuestSwap(base, dev, front_buffer);
   if (native::Enabled()) {
     native::HangWatchdogBeat();
     native::Renderer::Get().OnSwap(base, front_buffer, swap_number);

@@ -243,14 +243,13 @@ void LogCaptureAnomalyOnce(const char* what, uint32_t value) {
   REXLOG_WARN("native hooks: {} ({:08X}); check game_profile.h", what, value);
 }
 
-void OnFrameStatsSwap(uint8_t* base, uint32_t dev, uint32_t front_buffer) {
-#if SR_HOOK_ENABLED(SWAP) && SR_HEX(SR_ADDR_SWAP) == SR_FRAME_STATS_SWAP_HOOK
-  static uint64_t swap_number = 0;
-  ++swap_number;
+void NoteGuestSwap(uint8_t* base, uint32_t dev, uint32_t front_buffer) {
   compat::MarkGuestSwap();
   NoteGuestDevice(dev);
   NoteHookCall("Swap", dev, front_buffer);
-  if (CaptureActive()) {
+  if (!CaptureActive()) return;
+  bool flush = false;
+  {
     std::lock_guard<std::mutex> lock(g_capture_mutex);
     ++g_swaps;
     if (dev) g_devices.insert(dev);
@@ -259,7 +258,18 @@ void OnFrameStatsSwap(uint8_t* base, uint32_t dev, uint32_t front_buffer) {
       g_device_scan_done = true;
       ScanDeviceGlobals(base, dev);
     }
+    // The benchmark scripts end the game with a forced kill (no atexit):
+    // rewrite the record every 300 swaps too.
+    flush = g_swaps % 300 == 0;
   }
+  if (flush) WriteCapture();
+}
+
+void OnFrameStatsSwap(uint8_t* base, uint32_t dev, uint32_t front_buffer) {
+#if SR_HOOK_ENABLED(SWAP) && SR_HEX(SR_ADDR_SWAP) == SR_FRAME_STATS_SWAP_HOOK
+  static uint64_t swap_number = 0;
+  ++swap_number;
+  NoteGuestSwap(base, dev, front_buffer);
   if (RendererActive()) {
     HangWatchdogBeat();
     Renderer::Get().OnSwap(base, front_buffer, swap_number);

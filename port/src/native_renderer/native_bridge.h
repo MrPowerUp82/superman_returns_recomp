@@ -51,6 +51,9 @@ void NoteHookCall(const char* role, uint32_t r3, uint32_t r4);
 // Something a confirmed hook saw that contradicts its role (logged once).
 void LogCaptureAnomalyOnce(const char* what, uint32_t value);
 
+// Capture bookkeeping of one guest swap (both swap hook paths call it).
+void NoteGuestSwap(uint8_t* base, uint32_t dev, uint32_t front_buffer);
+
 // Called by frame_stats.cpp's hook of sub_82112050 after the original ran,
 // with the r3/r4 it received. Forwards to the renderer while game_profile.h
 // names sub_82112050 as the (confirmed) D3DDevice_Swap.
