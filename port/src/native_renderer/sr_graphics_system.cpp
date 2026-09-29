@@ -1,7 +1,9 @@
 #include "sr_graphics_system.h"
 
 #include <algorithm>
+#include <atomic>
 #include <charconv>
+#include <cstdio>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -18,6 +20,8 @@
 #include <rex/graphics/register_file.h>
 #include <rex/graphics/registers.h>
 #include <rex/logging.h>
+#include <rex/system/interfaces/graphics.h>
+#include <rex/ui/presenter.h>
 
 namespace {
 
@@ -32,10 +36,22 @@ struct SkipRule {
   bool copy = false;         // matches resolves (IssueCopy) instead of draws
 };
 
+std::atomic<SrXenosSwapObserver> g_swap_observer{nullptr};
+
+class SrCommandProcessor;
+std::atomic<SrCommandProcessor*> g_active_processor{nullptr};
+
 class SrCommandProcessor final : public rex::graphics::d3d12::D3D12CommandProcessor {
  public:
+  // record = false: no CSV trace, probe or skip rules (A/B mode).
   SrCommandProcessor(SrGraphicsSystem* graphics_system,
-                     rex::system::KernelState* kernel_state);
+                     rex::system::KernelState* kernel_state, bool record);
+  ~SrCommandProcessor() override;
+  bool GammaRamp256(uint32_t* out) const {
+    const auto* table = gamma_ramp_256_entry_table();
+    for (uint32_t i = 0; i < 256; ++i) out[i] = table[i].value;
+    return true;
+  }
 
  protected:
   bool IssueDraw(rex::graphics::xenos::PrimitiveType primitive_type,
@@ -50,6 +66,9 @@ class SrCommandProcessor final : public rex::graphics::d3d12::D3D12CommandProces
              uint32_t index_format, bool accepted);
   void ProbeDraw(rex::graphics::xenos::PrimitiveType primitive_type,
                  uint32_t index_count, const IndexBufferInfo* index_buffer_info);
+  void DumpAbOutput(uint64_t swap_number);
+
+  SrGraphicsSystem* sr_graphics_system_;
 
   std::ofstream trace_;
   std::ofstream pass_probe_;
@@ -68,10 +87,17 @@ class SrCommandProcessor final : public rex::graphics::d3d12::D3D12CommandProces
 };
 
 class SrGraphicsSystem final : public rex::graphics::d3d12::D3D12GraphicsSystem {
+ public:
+  explicit SrGraphicsSystem(bool record) : record_(record) {}
+  rex::ui::Presenter* sr_presenter() const { return presenter(); }
+
  protected:
   std::unique_ptr<rex::graphics::CommandProcessor> CreateCommandProcessor() override {
-    return std::make_unique<SrCommandProcessor>(this, kernel_state_);
+    return std::make_unique<SrCommandProcessor>(this, kernel_state_, record_);
   }
+
+ private:
+  bool record_;
 };
 
 uint64_t ParseShaderHash(const std::string& value) {
@@ -124,9 +150,16 @@ std::vector<SkipRule> ParseSkipRules(std::string_view text) {
   return rules;
 }
 
+SrCommandProcessor::~SrCommandProcessor() {
+  SrCommandProcessor* self = this;
+  g_active_processor.compare_exchange_strong(self, nullptr);
+}
+
 SrCommandProcessor::SrCommandProcessor(
-    SrGraphicsSystem* graphics_system, rex::system::KernelState* kernel_state)
-    : D3D12CommandProcessor(graphics_system, kernel_state) {
+    SrGraphicsSystem* graphics_system, rex::system::KernelState* kernel_state, bool record)
+    : D3D12CommandProcessor(graphics_system, kernel_state), sr_graphics_system_(graphics_system) {
+  g_active_processor.store(this);
+  if (!record) return;
   const std::string path = rex::cvar::Query<std::string>("sr_gpu_trace_path");
   max_frames_ = static_cast<uint32_t>(
       std::clamp(rex::cvar::Query<int32_t>("sr_gpu_trace_frames"), 1, 10000));
@@ -292,6 +325,10 @@ void SrCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                                    uint32_t frontbuffer_height) {
   D3D12CommandProcessor::IssueSwap(frontbuffer_ptr, frontbuffer_width,
                                    frontbuffer_height);
+  if (SrXenosSwapObserver observer = g_swap_observer.load()) {
+    observer(frame_ + 1, register_file_->values, rex::graphics::RegisterFile::kRegisterCount);
+    DumpAbOutput(frame_ + 1);
+  }
   Trace("swap", 0, 0, 0, true);
   ++frame_;
   if (!trace_started_ && std::filesystem::exists(trigger_path_)) {
@@ -311,10 +348,57 @@ void SrCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
   }
 }
 
+// A/B reference image: the presented Xenos output at the swaps the native
+// renderer dumps too (sr_native_ab_swaps, comma-separated).
+void SrCommandProcessor::DumpAbOutput(uint64_t swap_number) {
+  static const std::vector<uint64_t> swaps = [] {
+    std::vector<uint64_t> v;
+    const std::string text = rex::cvar::Query<std::string>("sr_native_ab_swaps");
+    std::string_view list = text;
+    while (!list.empty()) {
+      const size_t comma = list.find(',');
+      uint64_t n = 0;
+      std::from_chars(list.data(), list.data() + std::min(comma, list.size()), n);
+      if (n) v.push_back(n);
+      list = comma == std::string_view::npos ? std::string_view{} : list.substr(comma + 1);
+    }
+    return v;
+  }();
+  if (std::find(swaps.begin(), swaps.end(), swap_number) == swaps.end()) return;
+  const std::string dir = rex::cvar::Query<std::string>("sr_native_dump_dir");
+  rex::ui::Presenter* presenter = sr_graphics_system_->sr_presenter();
+  rex::ui::RawImage image;
+  if (dir.empty() || !presenter || !presenter->CaptureGuestOutput(image)) {
+    REXLOG_WARN("sr renderer: could not capture the Xenos output at swap {}", swap_number);
+    return;
+  }
+  char name[64];
+  std::snprintf(name, sizeof(name), "/s%06llu_xenos_output.raw", (unsigned long long)swap_number);
+  if (std::FILE* f = std::fopen((dir + name).c_str(), "wb")) {
+    // DXGI_FORMAT_R8G8B8A8_UNORM (28): RawImage rows are R8 G8 B8 X8.
+    const uint32_t header[4] = {image.width, image.height, 28u, uint32_t(image.stride)};
+    std::fwrite(header, 4, 4, f);
+    std::fwrite(image.data.data(), 1, image.data.size(), f);
+    std::fclose(f);
+    REXLOG_INFO("sr renderer: A/B Xenos output of swap {} -> {}{}", swap_number, dir, name);
+  }
+}
+
 }  // namespace
 
 std::unique_ptr<rex::system::IGraphicsSystem> CreateSrTraceGraphicsSystem() {
-  return std::make_unique<SrGraphicsSystem>();
+  return std::make_unique<SrGraphicsSystem>(true);
+}
+
+std::unique_ptr<rex::system::IGraphicsSystem> CreateSrAbGraphicsSystem() {
+  return std::make_unique<SrGraphicsSystem>(false);
+}
+
+void SetSrXenosSwapObserver(SrXenosSwapObserver observer) { g_swap_observer.store(observer); }
+
+bool GetSrXenosGammaRamp256(uint32_t* out_entries) {
+  SrCommandProcessor* processor = g_active_processor.load();
+  return processor && out_entries && processor->GammaRamp256(out_entries);
 }
 
 std::unique_ptr<rex::system::IGraphicsSystem> CreateSrXenosGraphicsSystem() {

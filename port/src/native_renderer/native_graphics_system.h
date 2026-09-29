@@ -45,8 +45,9 @@ class D3D12Provider;
 
 namespace superman_returns::native {
 
-// True when the app should use NativeGraphicsSystem instead of a GPU plugin.
-bool UseNativeGraphicsSystem();
+class NativeGraphicsSystem;
+// The running native graphics system, or nullptr (Xenos / A/B mode).
+NativeGraphicsSystem* ActiveNativeGraphicsSystem();
 
 // GPU progress notification for guest threads that wait on the GPU (the XDK
 // polls fences and the read pointer in a busy loop). GpuProgressGeneration()
@@ -70,8 +71,10 @@ class NativeGraphicsSystem : public rex::system::IGraphicsSystem {
   bool has_presentation() const override { return presenter_ != nullptr; }
   rex::ui::GraphicsProvider* provider() const override;
   rex::ui::Presenter* presenter() const override { return presenter_.get(); }
-  uint32_t guest_frame_counter() const override { return counter_.load(); }
-  bool GetGammaRamp256(uint32_t* out_entries) const override;
+  // Not IGraphicsSystem overrides: the stock SDK interface has neither (they
+  // are additions of the kit's SDK fork). The renderer calls them directly.
+  uint32_t guest_frame_counter() const { return counter_.load(); }
+  bool GetGammaRamp256(uint32_t* out_entries) const;
   void SetInterruptCallback(uint32_t callback, uint32_t user_data) override;
   void InitializeRingBuffer(uint32_t ptr, uint32_t size_log2) override;
   void EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_size_log2) override;

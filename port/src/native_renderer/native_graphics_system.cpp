@@ -8,11 +8,9 @@
 //
 // The packet semantics below follow the SDK's (Xenia-derived) CommandProcessor
 // for everything the guest can observe; everything it cannot (draws, shader
-// loads, render state) is skipped. REXGLUE_ENABLE_PERF_COUNTERS is defined so
-// the frame-time CSV / overlay keep working without the GPU plugin.
-#ifndef REXGLUE_ENABLE_PERF_COUNTERS
-#define REXGLUE_ENABLE_PERF_COUNTERS
-#endif
+// loads, render state) is skipped. (The kit forced REXGLUE_ENABLE_PERF_COUNTERS
+// here; the stock SDK compiles the counters out of Release builds, so the
+// frame-time counters below are only live in non-Release builds.)
 
 #include "native_graphics_system.h"
 
@@ -32,7 +30,6 @@
 #include <rex/perf/counter.h>
 #include <rex/runtime.h>
 #include <rex/system/function_dispatcher.h>
-#include <rex/system/graphics_flags.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xmemory.h>
 #include <rex/system/xthread.h>
@@ -41,17 +38,20 @@
 #include <rex/ui/presenter.h>
 #include <rex/ui/windowed_app_context.h>
 
+#include "game_profile.h"
 #include "hang_watchdog.h"
+#include "sdk_compat.h"
 
-REXCVAR_DECLARE(bool, native_renderer);
-REXCVAR_DECLARE(bool, native_ab_mode);
-REXCVAR_DEFINE_INT32(fps_limit, 30, "Graphics",
-                     "Frame rate limit (30 = original, up to 120; 0 = unlocked_vblank_rate / 2)")
+REXCVAR_DEFINE_INT32(sr_native_fps_limit, 30, "Superman Returns Native",
+                     "Native graphics system frame rate limit (30 = original, up to 120; 0 = "
+                     "sr_native_unlocked_vblank_hz)")
     .range(0, 1000);
-REXCVAR_DEFINE_BOOL(native_gpu_trace, false, "Superman Returns Native", "Debug: log native GPU packets/registers");
-REXCVAR_DEFINE_BOOL(native_graphics_system, true, "Superman Returns Native",
-                    "With native_renderer (and not native_ab_mode): replace the Xenos GPU plugin "
-                    "with the native graphics system (sync-only PM4 consumer, no emulation)");
+REXCVAR_DEFINE_BOOL(sr_native_gpu_trace, false, "Superman Returns Native", "Debug: log native GPU packets/registers");
+// The kit's fork declares unlocked_vblank_rate in the runtime; the stock SDK
+// does not, so the unlocked rate is a project cvar.
+REXCVAR_DEFINE_INT32(sr_native_unlocked_vblank_hz, 240, "Superman Returns Native",
+                     "Guest vblank rate with sr_native_fps_limit=0 (benchmarks)")
+    .range(1, 2000);
 
 namespace superman_returns::native {
 
@@ -60,14 +60,11 @@ using rex::X_STATUS;
 namespace xenos = rex::graphics::xenos;
 namespace gpu = rex::graphics;
 
-bool UseNativeGraphicsSystem() {
-  return REXCVAR_GET(native_renderer) && !REXCVAR_GET(native_ab_mode) &&
-         REXCVAR_GET(native_graphics_system);
-}
-
 namespace {
 std::atomic<NativeGraphicsSystem*> g_active_system{nullptr};
 }  // namespace
+
+NativeGraphicsSystem* ActiveNativeGraphicsSystem() { return g_active_system.load(); }
 
 uint64_t GpuProgressGeneration() {
   NativeGraphicsSystem* system = g_active_system.load();
@@ -279,7 +276,7 @@ uint32_t NativeGraphicsSystem::ReadMmioRegister(uint32_t addr) {
 
 void NativeGraphicsSystem::WriteMmioRegister(uint32_t addr, uint32_t value) {
   uint32_t r = (addr & 0xFFFF) / 4;
-  if (REXCVAR_GET(native_gpu_trace) && r != 0x01C5) {
+  if (REXCVAR_GET(sr_native_gpu_trace) && r != 0x01C5) {
     static int logged = 0;
     if (logged++ < 40) REXLOG_INFO("native gpu trace: mmio write {:04X} = {:08X}", r, value);
   }
@@ -308,13 +305,14 @@ void NativeGraphicsSystem::DispatchInterrupt(uint32_t source, uint32_t cpu) {
 // --- Vblank -------------------------------------------------------------------
 
 void NativeGraphicsSystem::VsyncThreadMain() {
-  // The game presents every second vblank (D3DPRESENT_INTERVAL_TWO), so the
-  // guest vblank rate is twice the frame rate limit. Host present vsync is
-  // separate (`vsync`, D3D12 presenter).
+  // Conan presents every second vblank (D3DPRESENT_INTERVAL_TWO), so the
+  // guest vblank rate is twice the frame rate limit. SR's cadence is
+  // profile::kVblanksPerFrame (unconfirmed). Host present vsync is separate
+  // (`vsync`, D3D12 presenter).
   uint64_t freq = rex::chrono::Clock::guest_tick_frequency();
-  int32_t fps = REXCVAR_GET(fps_limit);
-  int32_t vblank_hz = fps > 0 ? 2 * std::clamp(fps, 10, 1000)
-                              : std::max(int32_t(1), REXCVAR_GET(unlocked_vblank_rate));
+  int32_t fps = REXCVAR_GET(sr_native_fps_limit);
+  int32_t vblank_hz = fps > 0 ? int32_t(profile::kVblanksPerFrame) * std::clamp(fps, 10, 1000)
+                              : std::max(int32_t(1), REXCVAR_GET(sr_native_unlocked_vblank_hz));
   REXLOG_INFO("native graphics: frame rate limit {} (guest vblank {} Hz)", fps, vblank_hz);
   uint64_t interval = std::max(uint64_t(1), freq / uint64_t(vblank_hz));
   uint64_t last = rex::chrono::Clock::QueryGuestTickCount();
@@ -339,7 +337,7 @@ void NativeGraphicsSystem::VsyncThreadMain() {
 // --- PM4 consumer -------------------------------------------------------------
 
 void NativeGraphicsSystem::CommandThreadMain() {
-  rex::perf::RegisterSampledThread(1, "native_gpu_commands");
+  compat::RegisterSampledThread(1, "native_gpu_commands");
   while (running_) {
     uint32_t write_index = write_index_.load();
     if (write_index == 0xBAADF00D || write_index == read_index_ || !ring_dwords_) {
@@ -473,7 +471,7 @@ void NativeGraphicsSystem::WriteRegister(uint32_t index, uint32_t value) {
     registers_[index].store(value, std::memory_order_relaxed);
     return;
   }
-  if (REXCVAR_GET(native_gpu_trace)) {
+  if (REXCVAR_GET(sr_native_gpu_trace)) {
     static int logged = 0;
     if (logged++ < 60) REXLOG_INFO("native gpu trace: reg {:04X} = {:08X}", index, value);
   }
@@ -539,7 +537,7 @@ bool NativeGraphicsSystem::ExecuteType3(Reader& reader, uint32_t packet) {
   if (reader.remaining < count) return false;
   {
     static int logged = 0;
-    if (logged < 60 && REXCVAR_GET(native_gpu_trace)) {
+    if (logged < 60 && REXCVAR_GET(sr_native_gpu_trace)) {
       ++logged;
       std::string d;
       Reader peek = reader;

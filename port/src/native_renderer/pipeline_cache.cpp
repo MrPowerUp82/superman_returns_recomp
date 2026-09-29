@@ -16,7 +16,7 @@
 #include <rex/logging.h>
 #include <rex/hash.h>
 
-REXCVAR_DEFINE_BOOL(native_debug_no_embedded_pipelines, false, "Superman Returns Native",
+REXCVAR_DEFINE_BOOL(sr_native_debug_no_embedded_pipelines, false, "Superman Returns Native",
                     "Debug: ignore the embedded pipeline base (worst case for the async path)");
 
 namespace superman_returns::native {
@@ -161,7 +161,7 @@ void PipelineCache::Start(ID3D12Device* device, ID3D12RootSignature* root_signat
   path_ = rex::filesystem::GetExecutableFolder() / "superman_returns_pipelines.bin";
 
   std::vector<PsoRecord> records;
-  if (!REXCVAR_GET(native_debug_no_embedded_pipelines)) LoadEmbedded(records);
+  if (!REXCVAR_GET(sr_native_debug_no_embedded_pipelines)) LoadEmbedded(records);
   size_t embedded = records.size();
   LoadFile(path_, records);
   size_t variants = 0;

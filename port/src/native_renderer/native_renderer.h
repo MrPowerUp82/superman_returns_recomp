@@ -9,8 +9,9 @@
 // Runs on the guest render thread, driven by hooks on the game's XDK D3D
 // entry points. Uses the SDK's D3D12 device and direct queue (owned by the
 // presenter's provider) and hands each finished frame to the presenter via
-// Presenter::RefreshGuestOutput. While active, the Xenos plugin runs with
-// --gpu_null_draws (PM4 consumed for synchronization only).
+// Presenter::RefreshGuestOutput. The guest GPU contract (fences, interrupts,
+// vblank) is served by NativeGraphicsSystem, or by the Xenos backend in
+// sr_native_ab_mode (then the native output is only dumped, not presented).
 //
 // Binding model = XenosRecomp/UnleashedRecomp convention (shader_common.h):
 //   b0/b1/b2 space4: VS float constants (256 float4), PS float constants,
@@ -28,6 +29,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <string>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -36,6 +38,7 @@
 #include <thread>
 #include <type_traits>
 
+#include "game_profile.h"
 #include "pipeline_cache.h"
 #include "pm4_mirror.h"
 
@@ -64,12 +67,28 @@ extern int g_current_pass;
 // Pass as seen by the guest threads (set by the pass hooks). With the
 // recording worker, g_current_pass is the pass of the command being executed.
 extern int g_guest_pass;
-constexpr int kPassRenderShadowMaps = 4;
-constexpr int kPassRenderOpaque = 12;
-constexpr int kPassEndTiling = 16;
-constexpr int kPassRenderSorted = 21;
-constexpr int kPassUpscale = 25;
-constexpr int kPassRenderHud = 27;
+// Pass roles from game_profile.h (Conan: 4, 12, 16, 21, 25, 27). -1 = the
+// game's pass is unknown and the features keyed on it stay off.
+constexpr int kPassRenderShadowMaps = profile::kPassShadowMaps;
+constexpr int kPassRenderOpaque = profile::kPassOpaque;
+constexpr int kPassEndTiling = profile::kPassEndTiling;
+constexpr int kPassRenderSorted = profile::kPassSorted;
+constexpr int kPassUpscale = profile::kPassUpscale;
+constexpr int kPassRenderHud = profile::kPassHud;
+
+// Last guest D3DDevice pointer seen in a hooked D3D call's r3 (used when the
+// profile has no device global).
+void NoteGuestDevice(uint32_t dev);
+
+// Records an unsupported case once per (category, key) in the log; returns
+// true the first time. The renderer keeps the kit's policy for the draw
+// itself (counted skip); see docs/native-port-plan.md section 5.
+bool LogUnsupportedOnce(const char* category, uint64_t key, const char* detail = nullptr);
+
+// Offline shader corpus present: the embedded pack (RCDATA 2) or .dxil files
+// in sr_native_shader_dir (default <repo>/artifacts/shaders/dxil). `where`
+// describes the source that was checked.
+bool ShaderCorpusAvailable(std::string* where);
 
 // Guest memory captured with a worker command: `length` bytes of guest virtual
 // address `address`, stored at `offset` in the batch's byte arena.
@@ -165,7 +184,7 @@ class Renderer {
   const Stats& stats() const { return stats_; }
 
  private:
-  // --- Recording worker (native_worker) ---------------------------------
+  // --- Recording worker (sr_native_worker) ---------------------------------
   // The guest threads only capture what a command reads from guest memory
   // (PM4 segment words, device/object state, dirty buffer ranges, inline
   // vertices) and queue it; a worker thread records the D3D12 commands.
@@ -283,7 +302,7 @@ class Renderer {
   bool ts_pending_[3] = {};
   bool ts_open_ = false;
   double ts_accum_ms_ = 0.0;
-  // Per-pass split (native_gpu_pass_timing): timestamps at pass changes.
+  // Per-pass split (sr_native_gpu_pass_timing): timestamps at pass changes.
   static constexpr uint32_t kTsPerFrame = 64;
   uint32_t ts_count_[3] = {};                  // timestamps written per frame slot
   uint8_t ts_pass_[3][kTsPerFrame] = {};       // pass of the segment starting at i
@@ -400,8 +419,8 @@ class Renderer {
   uint32_t AllocSrvIndex();
 
   static constexpr uint32_t kFramesInFlight = 3;
-  static constexpr uint32_t kOutputWidth = 1280;
-  static constexpr uint32_t kOutputHeight = 720;
+  static constexpr uint32_t kOutputWidth = profile::kOutputWidth;
+  static constexpr uint32_t kOutputHeight = profile::kOutputHeight;
   static constexpr size_t kUploadBytesPerFrame = 128u << 20;
   static constexpr uint32_t kSrvHeapSize = 32768;
   static constexpr uint32_t kSamplerHeapSize = 2048;
@@ -415,7 +434,7 @@ class Renderer {
   const rex::ui::d3d12::D3D12Provider* provider_ = nullptr;
   ID3D12Device* device_ = nullptr;
   ID3D12CommandQueue* queue_ = nullptr;
-  // Own direct queue (native_own_queue): isolated from the presenter/Xenos.
+  // Own direct queue (sr_native_own_queue): isolated from the presenter/Xenos.
   Microsoft::WRL::ComPtr<ID3D12CommandQueue> own_queue_;
 
   Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocators_[kFramesInFlight];
@@ -569,7 +588,7 @@ class Renderer {
   void DumpFrameResources(const std::string& prefix = "", bool surfaces_only = false,
                           bool output_only = false);
   bool frame_dump_done_ = false;
-  // Frame trace (native_trace_frame_at_s): 0 idle, 1 tracing this frame, 2 done.
+  // Frame trace (sr_native_trace_frame_at_s): 0 idle, 1 tracing this frame, 2 done.
   int trace_state_ = 0;
   bool dump_all_active_ = false;
   rex::system::IGraphicsSystem* graphics_ = nullptr;
@@ -613,7 +632,7 @@ class Renderer {
   void ResolveEdramAliasing(HostSurface* s);
   uint64_t alias_clear_frame_ = ~0ull;
   Pm4Mirror mirror_;
-  std::vector<uint32_t> mirror_snapshot_;  // mirror at native_dump_swap (A/B check)
+  std::vector<uint32_t> mirror_snapshot_;  // mirror at sr_native_dump_swap (A/B check)
   uint32_t ring_last_ = 0;
   uint64_t ring_resyncs_ = 0;
   // Register value as the GPU sees it (mirror), falling back to the XDK shadow

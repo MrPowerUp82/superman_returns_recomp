@@ -4,13 +4,32 @@
 // ReXGlue keep their BSD license. Changes for Superman Returns are listed in
 // docs/native-port-plan.md section 2.
 //
+// Changes: hook addresses from game_profile.h (built only once confirmed),
+// header validation (shader_container.h) and an optional dump of every
+// container the game creates (sr_native_dump_shader_dir), which feeds
+// tools/shaders/extract_shaders.py --dump-dir when the game data stores its
+// shaders compressed.
 #include "shader_registry.h"
 
+#include <cstdio>
+#include <filesystem>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 
+#include <rex/cvar.h>
 #include <rex/hash.h>
+#include <rex/logging.h>
 #include <rex/ppc.h>
+
+#include "game_profile.h"
+#include "native_bridge.h"
+#include "shader_container.h"
+
+REXCVAR_DEFINE_STRING(sr_native_dump_shader_dir, "", "Superman Returns Native",
+                      "Write every shader container seen by the XDK CreateShader hooks to "
+                      "<dir>/<hash>.<vs|ps>.bin (input for tools/shaders/extract_shaders.py)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 namespace superman_returns::native {
 
@@ -18,22 +37,58 @@ namespace {
 std::mutex g_mutex;
 std::unordered_map<uint32_t, GuestShaderInfo> g_shaders;
 
-inline uint32_t Load32(uint8_t* base, uint32_t addr) {
-  return __builtin_bswap32(*reinterpret_cast<uint32_t*>(base + addr));
+// Kit: hash [c, c + virtual + physical) exactly like the corpus. Returns
+// false (logged once) when the header is not a shader container.
+bool HashContainer(uint8_t* base, uint32_t container, GuestShaderInfo& info) {
+  ShaderContainerHeader header;
+  // Guest addresses above 0x82000000 still leave > 32 MB readable in the
+  // 4 GB guest space; the size limit is in the parser.
+  if (!container || !ParseShaderContainerHeader(base + container, 0x100000000ull - container,
+                                                header)) {
+    LogCaptureAnomalyOnce("CreateShader r3 is not a shader container", container);
+    return false;
+  }
+  info.is_vertex = header.is_vertex;
+  info.container_hash = XXH3_64bits(base + container, header.total_size());
+  return true;
 }
 
-// Container layout (XenosRecomp ShaderContainer): +0 flags (0x102A1100 PS /
-// 0x102A1101 VS), +4 virtualSize, +8 physicalSize; the microcode (physical
-// part) directly follows the virtual part, so the whole container is
-// contiguous: hash [c, c + virtual + physical) exactly like the corpus.
-GuestShaderInfo HashContainer(uint8_t* base, uint32_t container) {
+void DumpContainer(uint8_t* base, uint32_t container, const GuestShaderInfo& info) {
+  static const std::string dir = REXCVAR_GET(sr_native_dump_shader_dir);
+  if (dir.empty()) return;
+  static std::mutex mutex;
+  static std::unordered_set<uint64_t> written;
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (!written.insert(info.container_hash).second) return;
+  }
+  ShaderContainerHeader header;
+  ParseShaderContainerHeader(base + container, 0x100000000ull - container, header);
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  char name[64];
+  std::snprintf(name, sizeof(name), "%016llX.%s.bin", (unsigned long long)info.container_hash,
+                info.is_vertex ? "vs" : "ps");
+  const auto path = std::filesystem::path(dir) / name;
+  if (std::FILE* f = std::fopen(path.string().c_str(), "wb")) {
+    std::fwrite(base + container, 1, header.total_size(), f);
+    std::fclose(f);
+  }
+}
+
+// XDK shader creators (called by the game's effect/material loader): r3 =
+// shader container, returns the new D3D shader object in r3.
+void OnCreateShader(PPCContext& ctx, uint8_t* base, void (*original)(PPCContext&, uint8_t*),
+                    const char* role) {
+  const uint32_t container = ctx.r3.u32;
   GuestShaderInfo info;
-  uint32_t flags = Load32(base, container);
-  uint32_t virtual_size = Load32(base, container + 4);
-  uint32_t physical_size = Load32(base, container + 8);
-  info.is_vertex = (flags & 1) != 0;
-  info.container_hash = XXH3_64bits(base + container, size_t(virtual_size) + physical_size);
-  return info;
+  const bool valid = HashContainer(base, container, info);
+  original(ctx, base);
+  NoteHookCall(role, container, ctx.r3.u32);
+  if (!valid || !ctx.r3.u32) return;
+  DumpContainer(base, container, info);
+  std::lock_guard<std::mutex> lock(g_mutex);
+  g_shaders[ctx.r3.u32] = info;
 }
 }  // namespace
 
@@ -45,22 +100,17 @@ const GuestShaderInfo* LookupGuestShader(uint32_t guest_object) {
 
 }  // namespace superman_returns::native
 
-// XDK shader creators (called by the D3DX effect loader 825B2E68): r3 =
-// shader container, returns the new D3D shader object in r3.
-#define CONAN_SHADER_CREATE_HOOK(addr)                                          \
-  REX_EXTERN(__imp__sub_##addr);                                                \
-  extern "C" REX_FUNC(sub_##addr) {                                             \
-    superman_returns::native::GuestShaderInfo info =                                       \
-        superman_returns::native::HashContainer(base, ctx.r3.u32);                         \
-    __imp__sub_##addr(ctx, base);                                               \
-    if (ctx.r3.u32) {                                                           \
-      std::lock_guard<std::mutex> lock(superman_returns::native::g_mutex);                 \
-      superman_returns::native::g_shaders[ctx.r3.u32] = info;                              \
-    }                                                                           \
+#define SR_SHADER_CREATE_HOOK_(addr, role)                                             \
+  REX_EXTERN(__imp__sub_##addr);                                                       \
+  extern "C" REX_FUNC(sub_##addr) {                                                    \
+    superman_returns::native::OnCreateShader(                                          \
+        ctx, base, [](PPCContext& c, uint8_t* b) { __imp__sub_##addr(c, b); }, role);  \
   }
+#define SR_SHADER_CREATE_HOOK(addr, role) SR_SHADER_CREATE_HOOK_(addr, role)
 
-namespace superman_returns::native {
-// Expose internals to the hook macro.
-}
-CONAN_SHADER_CREATE_HOOK(822E84C0)
-CONAN_SHADER_CREATE_HOOK(822E85D0)
+#if SR_HOOK_ENABLED(CREATE_SHADER_A)
+SR_SHADER_CREATE_HOOK(SR_ADDR_CREATE_SHADER_A, "CreateShaderA")
+#endif
+#if SR_HOOK_ENABLED(CREATE_SHADER_B)
+SR_SHADER_CREATE_HOOK(SR_ADDR_CREATE_SHADER_B, "CreateShaderB")
+#endif

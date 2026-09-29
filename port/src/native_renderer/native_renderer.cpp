@@ -36,176 +36,179 @@
 #include <rex/ui/d3d12/d3d12_presenter.h>
 #include <rex/ui/d3d12/d3d12_provider.h>
 
+#include "game_profile.h"
+#include "native_bridge.h"
+#include "native_graphics_system.h"
+#include "sdk_compat.h"
+#include "sr_graphics_system.h"
+#include "shader_pack.h"
 #include "shader_registry.h"
 #include "texture_decode.h"
 
-REXCVAR_DEFINE_BOOL(native_renderer, true, "Superman Returns Native",
-                    "Render with the native game-specific renderer (no Xenos GPU plugin, EXP-036); "
-                    "false = legacy Xenos emulation");
-REXCVAR_DEFINE_INT32(native_debug_spin_us, 0, "Superman Returns Native",
+REXCVAR_DEFINE_INT32(sr_native_debug_spin_us, 0, "Superman Returns Native",
                      "Debug: busy-wait this many microseconds in every native draw entry (timing bisection)");
-REXCVAR_DEFINE_INT32(native_debug_resolve_mode, 0, "Superman Returns Native",
+REXCVAR_DEFINE_INT32(sr_native_debug_resolve_mode, 0, "Superman Returns Native",
                      "Debug bisection: 1 = resolves skip copies, 2 = resolves skip clears");
-REXCVAR_DEFINE_DOUBLE(native_dump_frame_at_s, 0.0, "Superman Returns Native",
+REXCVAR_DEFINE_DOUBLE(sr_native_dump_frame_at_s, 0.0, "Superman Returns Native",
                       "Debug: at this bench time, read back every native surface and resolve "
-                      "texture into native_dump_dir (.raw; tools/native_dump_to_png.py)");
-REXCVAR_DEFINE_INT32(native_dump_after_pass, -1, "Superman Returns Native",
-                     "Debug: with native_dump_frame_at_s, dump at the end of this pass instead of "
+                      "texture into sr_native_dump_dir (.raw; tools/native_dump_to_png.py)");
+REXCVAR_DEFINE_INT32(sr_native_dump_after_pass, -1, "Superman Returns Native",
+                     "Debug: with sr_native_dump_frame_at_s, dump at the end of this pass instead of "
                      "at the end of the frame");
-REXCVAR_DEFINE_STRING(native_dump_dir, "", "Superman Returns Native", "Directory for native_dump_frame_at_s");
-REXCVAR_DEFINE_DOUBLE(native_trace_frame_at_s, 0.0, "Superman Returns Native",
+REXCVAR_DEFINE_STRING(sr_native_dump_dir, "", "Superman Returns Native", "Directory for sr_native_dump_frame_at_s");
+REXCVAR_DEFINE_DOUBLE(sr_native_trace_frame_at_s, 0.0, "Superman Returns Native",
                       "Debug: log render target binds, clears and resolves of one frame after "
                       "this many seconds");
-REXCVAR_DEFINE_STRING(native_pass_mask, "", "Superman Returns Native",
+REXCVAR_DEFINE_STRING(sr_native_pass_mask, "", "Superman Returns Native",
                       "Debug: comma-separated pass indices whose draws are rendered natively "
                       "(empty = all). Pass 0 = draws outside any pass.");
-REXCVAR_DEFINE_BOOL(native_buffer_cache_per_frame, false, "Superman Returns Native",
+REXCVAR_DEFINE_BOOL(sr_native_buffer_cache_per_frame, false, "Superman Returns Native",
                     "Debug: drop cached vertex/index buffers every frame (stale data bisection)");
-REXCVAR_DEFINE_BOOL(native_ring_constants, true, "Superman Returns Native",
+REXCVAR_DEFINE_BOOL(sr_native_ring_constants, true, "Superman Returns Native",
                     "Debug: mirror GpuBeginShaderConstantF4 ring constants into the shadow");
-REXCVAR_DEFINE_STRING(native_skip_draws, "", "Superman Returns Native",
+REXCVAR_DEFINE_STRING(sr_native_skip_draws, "", "Superman Returns Native",
                       "Debug: skip draws <pass>:<first>-<last> (per-frame draw index within the pass)");
-REXCVAR_DEFINE_INT32(native_dump_swap, 0, "Superman Returns Native",
+REXCVAR_DEFINE_INT32(sr_native_dump_swap, 0, "Superman Returns Native",
                      "Debug: dump the frame presented by this guest swap number (see "
                      "bench_screenshot_swaps)");
-REXCVAR_DEFINE_BOOL(native_pm4_mirror, true, "Superman Returns Native",
+REXCVAR_DEFINE_BOOL(sr_native_pm4_mirror, true, "Superman Returns Native",
                     "Take shader/fetch constants from the parsed command stream (GPU truth) "
                     "instead of the XDK device shadow");
-REXCVAR_DEFINE_BOOL(native_fixed16_snorm, false, "Superman Returns Native",
+REXCVAR_DEFINE_BOOL(sr_native_fixed16_snorm, false, "Superman Returns Native",
                     "Experiment: store EDRAM k_16_16_16_16 render targets as SNORM (clamp to "
                     "[-1, 1]) instead of float");
-REXCVAR_DEFINE_INT32(native_exp_alias_depth_base, -1, "Superman Returns Native",
+REXCVAR_DEFINE_INT32(sr_native_exp_alias_depth_base, -1, "Superman Returns Native",
                      "Experiment: clear the depth surface at this EDRAM base at its first bind "
                      "each frame");
-REXCVAR_DEFINE_DOUBLE(native_exp_alias_depth_value, 0.0, "Superman Returns Native",
-                      "Experiment: depth value for native_exp_alias_depth_base");
-REXCVAR_DEFINE_STRING(native_debug_ps_const, "", "Superman Returns Native",
+REXCVAR_DEFINE_DOUBLE(sr_native_exp_alias_depth_value, 0.0, "Superman Returns Native",
+                      "Experiment: depth value for sr_native_exp_alias_depth_base");
+REXCVAR_DEFINE_STRING(sr_native_debug_ps_const, "", "Superman Returns Native",
                       "Debug: override a pixel shader constant, <ps hash>:<reg>:<x>,<y>,<z>,<w>");
-REXCVAR_DEFINE_BOOL(native_edram_aliasing, true, "Superman Returns Native",
+REXCVAR_DEFINE_BOOL(sr_native_edram_aliasing, true, "Superman Returns Native",
                     "Clear host surfaces whose EDRAM range was overwritten by another surface "
                     "since their last use (no cross-frame feedback through aliased EDRAM)");
-REXCVAR_DEFINE_BOOL(native_tile_resolve_in_place, true, "Superman Returns Native",
+REXCVAR_DEFINE_BOOL(sr_native_tile_resolve_in_place, true, "Superman Returns Native",
                     "Tiling resolves with a (0,0) destination into a full-screen texture keep "
                     "the tile at its screen position");
-REXCVAR_DEFINE_STRING(native_dump_texture_addr, "", "Superman Returns Native",
+REXCVAR_DEFINE_STRING(sr_native_dump_texture_addr, "", "Superman Returns Native",
                       "Debug: write the decoded texture at this physical base (hex) as DDS into "
-                      "native_dump_dir whenever it is (re)created");
-REXCVAR_DEFINE_BOOL(native_gamma_ramp, true, "Superman Returns Native",
+                      "sr_native_dump_dir whenever it is (re)created");
+REXCVAR_DEFINE_BOOL(sr_native_gamma_ramp, true, "Superman Returns Native",
                     "Apply the guest display gamma ramp when presenting the front buffer");
-REXCVAR_DEFINE_INT32(native_trace_swap, 0, "Superman Returns Native",
+REXCVAR_DEFINE_INT32(sr_native_trace_swap, 0, "Superman Returns Native",
                      "Debug: trace the frame presented by this guest swap number");
-REXCVAR_DEFINE_BOOL(native_debug_no_present, false, "Superman Returns Native",
+REXCVAR_DEFINE_BOOL(sr_native_debug_no_present, false, "Superman Returns Native",
                     "Debug: render natively but never refresh the presenter's guest output");
-REXCVAR_DEFINE_BOOL(native_own_queue, true, "Superman Returns Native",
+REXCVAR_DEFINE_BOOL(sr_native_own_queue, true, "Superman Returns Native",
                     "Native renderer submits on its own D3D12 direct queue");
-REXCVAR_DEFINE_STRING(native_skip_ps, "", "Superman Returns Native",
+REXCVAR_DEFINE_STRING(sr_native_skip_ps, "", "Superman Returns Native",
                       "Debug: skip draws using this pixel shader (hex container hash)");
-REXCVAR_DEFINE_DOUBLE(native_edram_alias_alpha, 0.0, "Superman Returns Native",
+REXCVAR_DEFINE_DOUBLE(sr_native_edram_alias_alpha, 0.0, "Superman Returns Native",
                       "Alpha written into color surfaces whose EDRAM was clobbered by aliasing");
-REXCVAR_DEFINE_BOOL(native_edram_reinterpret, true, "Superman Returns Native",
+REXCVAR_DEFINE_BOOL(sr_native_edram_reinterpret, true, "Superman Returns Native",
                     "Surfaces sharing an EDRAM base with a newer surface of another 32bpp "
                     "format take its bits (reinterpreted) instead of keeping stale contents");
-REXCVAR_DEFINE_BOOL(native_texture_watch, true, "Superman Returns Native",
+REXCVAR_DEFINE_BOOL(sr_native_texture_watch, true, "Superman Returns Native",
                     "Revalidate textures only after guest writes (page write watches) instead "
                     "of hashing them every frame");
-REXCVAR_DEFINE_INT32(native_texture_gamma, 2, "Superman Returns Native",
+REXCVAR_DEFINE_INT32(sr_native_texture_gamma, 2, "Superman Returns Native",
                      "Xenos gamma textures (fetch sign = GAMMA): 0 = raw, 1 = sRGB views, "
                      "2 = Xenos piecewise-linear curve in the shader (descriptor index bit 31)");
-REXCVAR_DEFINE_BOOL(native_worker, true, "Superman Returns Native",
+REXCVAR_DEFINE_BOOL(sr_native_worker, true, "Superman Returns Native",
                     "Record D3D12 commands on a worker thread (guest threads only capture state; "
-                    "requires native_pm4_mirror)");
-REXCVAR_DEFINE_BOOL(native_worker_lag, true, "Superman Returns Native",
+                    "requires sr_native_pm4_mirror)");
+REXCVAR_DEFINE_BOOL(sr_native_worker_lag, true, "Superman Returns Native",
                     "Let the recording worker finish a frame while the guest starts the next one");
-REXCVAR_DEFINE_BOOL(native_async_pipelines, true, "Superman Returns Native",
+REXCVAR_DEFINE_BOOL(sr_native_async_pipelines, true, "Superman Returns Native",
                     "Pipelines missing from the cache compile in the background for passes the game "
                     "redraws every frame (scene geometry, shadows, transparents): the draw is skipped "
                     "for a few frames instead of stalling. Other passes wait (EXP-053)");
-REXCVAR_DEFINE_BOOL(native_alpha_to_coverage, true, "Superman Returns Native",
+REXCVAR_DEFINE_BOOL(sr_native_alpha_to_coverage, true, "Superman Returns Native",
                     "Xenos alpha to mask (RB_COLORCONTROL) as host alpha to coverage on MSAA targets");
-REXCVAR_DEFINE_INT32(native_debug_vb_addr, 0, "Superman Returns Native",
+REXCVAR_DEFINE_INT32(sr_native_debug_vb_addr, 0, "Superman Returns Native",
                      "Debug: log plans and first vertices of draws using this vertex buffer base");
-REXCVAR_DEFINE_BOOL(native_half_pixel_offset, true, "Superman Returns Native",
+REXCVAR_DEFINE_BOOL(sr_native_half_pixel_offset, true, "Superman Returns Native",
                     "Emulate Xenos D3D pixel centers (PA_SU_VTX_CNTL) with a half-pixel viewport shift");
-REXCVAR_DEFINE_STRING(native_ab_swaps, "", "Superman Returns Native",
+REXCVAR_DEFINE_STRING(sr_native_ab_swaps, "", "Superman Returns Native",
                       "A/B: comma-separated guest swap numbers whose native output is dumped "
-                      "(s<swap>_output_1280x720.raw in native_dump_dir)");
-REXCVAR_DEFINE_BOOL(native_scissor, true, "Superman Returns Native",
+                      "(s<swap>_output_1280x720.raw in sr_native_dump_dir)");
+REXCVAR_DEFINE_BOOL(sr_native_scissor, true, "Superman Returns Native",
                     "Apply the guest window/screen scissor (outside predicated tiling)");
-REXCVAR_DEFINE_INT32(native_debug_texture_format, -1, "Superman Returns Native",
+REXCVAR_DEFINE_INT32(sr_native_debug_texture_format, -1, "Superman Returns Native",
                      "Debug: log every created texture of this Xenos format");
-REXCVAR_DEFINE_BOOL(native_debug_buffers_always_dirty, false, "Superman Returns Native",
+REXCVAR_DEFINE_BOOL(sr_native_debug_buffers_always_dirty, false, "Superman Returns Native",
                     "Debug: re-upload every draw's vertex/index range (ignores Unlock tracking)");
-REXCVAR_DEFINE_BOOL(native_debug_clears, false, "Superman Returns Native", "Debug: log resolve depth clears");
-REXCVAR_DEFINE_BOOL(native_debug_no_ztest, false, "Superman Returns Native", "Debug: disable all depth tests");
-REXCVAR_DEFINE_DOUBLE(render_scale, 1.0, "Graphics",
+REXCVAR_DEFINE_BOOL(sr_native_debug_clears, false, "Superman Returns Native", "Debug: log resolve depth clears");
+REXCVAR_DEFINE_BOOL(sr_native_debug_no_ztest, false, "Superman Returns Native", "Debug: disable all depth tests");
+REXCVAR_DEFINE_DOUBLE(sr_native_render_scale, 1.0, "Superman Returns Native",
                       "Internal render resolution multiplier of 720p, may be fractional (1 = 720p, "
                       "1.5 = 1080p, 2 = 1440p, 3 = 2160p, 4 = 2880p)")
     .range(1.0, 4.0);
-REXCVAR_DEFINE_INT32(shadow_quality, 1, "Graphics",
+REXCVAR_DEFINE_INT32(sr_native_shadow_quality, 1, "Superman Returns Native",
                      "Shadow map resolution multiplier (1 = original 1024, 2 = 2048, 4 = 4096)")
     .range(1, 4);
-REXCVAR_DEFINE_INT32(msaa_samples, 0, "Graphics",
+REXCVAR_DEFINE_INT32(sr_native_msaa_samples, 0, "Superman Returns Native",
                      "MSAA samples for the surfaces the game multisamples (0 = game's 4x, "
                      "1 = off, 2, 4, 8; launcher: Off / 4x / 8x)")
     .range(0, 8);
-REXCVAR_DEFINE_BOOL(full_scene_resolution, true, "Graphics",
-                    "Render the 3D scene at the output resolution instead of the game's 1024x576 "
-                    "(x render scale) stretched to 1280x720");
-REXCVAR_DEFINE_BOOL(foliage_antialiasing, false, "Graphics",
+REXCVAR_DEFINE_BOOL(sr_native_full_scene_resolution, true, "Superman Returns Native",
+                    "Scale scene surfaces by output width / game_profile kSceneWidth (Conan rendered "
+                    "1024x576 stretched to 1280x720; SR renders 1280x720, so no effect)");
+REXCVAR_DEFINE_BOOL(sr_native_foliage_antialiasing, false, "Superman Returns Native",
                     "Alpha-tested foliage/grilles use alpha-to-coverage with the game's MSAA "
                     "(antialiased, mip-corrected leaf edges) instead of a hard alpha test");
-REXCVAR_DEFINE_BOOL(ambient_occlusion, false, "Graphics",
+REXCVAR_DEFINE_BOOL(sr_native_ambient_occlusion, false, "Superman Returns Native",
                     "Screen-space ambient occlusion on the 3D scene");
-REXCVAR_DEFINE_BOOL(ssao_debug, false, "Superman Returns Native", "Debug: replace the scene with the SSAO term");
-REXCVAR_DEFINE_DOUBLE(ssao_radius, 0.5, "Graphics", "SSAO sampling radius in world units");
-REXCVAR_DEFINE_DOUBLE(ssao_intensity, 0.8, "Graphics", "SSAO strength (0-1)");
-REXCVAR_DEFINE_DOUBLE(ssao_fade_distance, 40.0, "Graphics",
+REXCVAR_DEFINE_BOOL(sr_native_ssao_debug, false, "Superman Returns Native", "Debug: replace the scene with the SSAO term");
+REXCVAR_DEFINE_DOUBLE(sr_native_ssao_radius, 0.5, "Superman Returns Native", "SSAO sampling radius in world units");
+REXCVAR_DEFINE_DOUBLE(sr_native_ssao_intensity, 0.8, "Superman Returns Native", "SSAO strength (0-1)");
+REXCVAR_DEFINE_DOUBLE(sr_native_ssao_fade_distance, 40.0, "Superman Returns Native",
                       "SSAO fades out towards this distance from the camera (world units)");
-REXCVAR_DEFINE_BOOL(soft_particles, false, "Graphics",
+REXCVAR_DEFINE_BOOL(sr_native_soft_particles, false, "Superman Returns Native",
                     "Soft particles: blended effects fade near the geometry behind them");
-REXCVAR_DEFINE_DOUBLE(soft_particle_distance, 0.4, "Graphics",
+REXCVAR_DEFINE_DOUBLE(sr_native_soft_particle_distance, 0.4, "Superman Returns Native",
                       "Soft particle fade distance in world units");
-REXCVAR_DEFINE_INT32(shadow_smoothing, 0, "Graphics",
+REXCVAR_DEFINE_INT32(sr_native_shadow_smoothing, 0, "Superman Returns Native",
                      "Shadow edge smoothing: 0 = off (original), 1 = on (per-pixel rotated PCF), "
                      "2 = softer (wider kernel)")
     .range(0, 2);
-REXCVAR_DEFINE_BOOL(smooth_effects, true, "Graphics",
+REXCVAR_DEFINE_BOOL(sr_native_smooth_effects, true, "Superman Returns Native",
                     "Above the original resolution, magnify small textures of blended effects "
                     "(particles, glows) with a smooth cubic filter instead of bilinear");
-REXCVAR_DEFINE_BOOL(fxaa, false, "Graphics",
+REXCVAR_DEFINE_BOOL(sr_native_fxaa, false, "Superman Returns Native",
                     "FXAA post-process antialiasing on the 3D image (the HUD stays sharp)");
-REXCVAR_DEFINE_INT32(bloom_quality, 1, "Graphics",
+REXCVAR_DEFINE_INT32(sr_native_bloom_quality, 1, "Superman Returns Native",
                      "Resolution multiplier of small post-process targets (bloom): 1 = original, 2, 4")
     .range(1, 4);
-REXCVAR_DEFINE_INT32(anisotropic_filtering, -1, "Graphics",
+REXCVAR_DEFINE_INT32(sr_native_anisotropic_filtering, -1, "Superman Returns Native",
                      "Anisotropic filtering for filtered textures (-1 = game, 1 = off, 2, 4, 8, 16)")
     .range(-1, 16);
-REXCVAR_DEFINE_INT32(native_debug_rs_salt, 0, "Superman Returns Native",
+REXCVAR_DEFINE_INT32(sr_native_debug_rs_salt, 0, "Superman Returns Native",
                      "Debug: add an unused root constant block of N dwords (1-32) so every "
                      "pipeline misses the driver's shader cache (cold-start stutter tests)");
-REXCVAR_DEFINE_BOOL(native_debug_disable_driver_shader_cache, false, "Superman Returns Native",
+REXCVAR_DEFINE_BOOL(sr_native_debug_disable_driver_shader_cache, false, "Superman Returns Native",
                     "Debug: disable the driver's shader cache (simulates a first run; needs "
                     "Windows developer mode)");
-REXCVAR_DEFINE_BOOL(native_pipeline_cache, true, "Superman Returns Native",
+REXCVAR_DEFINE_BOOL(sr_native_pipeline_cache, true, "Superman Returns Native",
                     "Precompile the known pipelines at startup and record new ones "
                     "(superman_returns_pipelines.bin) against shader-compilation stutter");
-REXCVAR_DEFINE_INT32(native_shadow_pcf_mode, 0, "Superman Returns Native",
+REXCVAR_DEFINE_INT32(sr_native_shadow_pcf_mode, 0, "Superman Returns Native",
                      "Debug: shadow atlas PCF at shadow_quality > 1 (0 = kernel on the host texel "
                      "grid, 1 = EXP-038 guest-texel kernel)");
-REXCVAR_DEFINE_BOOL(native_gpu_breadcrumbs, false, "Superman Returns Native",
+REXCVAR_DEFINE_BOOL(sr_native_gpu_breadcrumbs, false, "Superman Returns Native",
                     "Debug: GPU hang breadcrumbs (a pipeline-draining marker write after every "
                     "draw; enable only to diagnose GPU hangs)");
-REXCVAR_DEFINE_BOOL(native_gpu_pass_timing, false, "Superman Returns Native",
+REXCVAR_DEFINE_BOOL(sr_native_gpu_pass_timing, false, "Superman Returns Native",
                     "Debug: log GPU time per render pass (timestamp queries at pass changes)");
-REXCVAR_DEFINE_BOOL(native_msaa, true, "Superman Returns Native",
+REXCVAR_DEFINE_BOOL(sr_native_msaa, true, "Superman Returns Native",
                     "Create host render targets with the guest's MSAA sample count");
-REXCVAR_DEFINE_BOOL(native_ab_mode, false, "Superman Returns Native",
+REXCVAR_DEFINE_BOOL(sr_native_ab_mode, false, "Superman Returns Native",
                     "A/B validation: Xenos keeps rendering and presenting; the native renderer "
                     "renders the same frames offscreen (dumps only)");
-REXCVAR_DEFINE_BOOL(native_flip_winding, false, "Superman Returns Native", "Debug: invert front-face winding");
-REXCVAR_DEFINE_BOOL(native_draws, true, "Superman Returns Native", "Native renderer: issue draws (debug bisection)");
-REXCVAR_DEFINE_BOOL(native_resolves, true, "Superman Returns Native", "Native renderer: perform resolves (debug bisection)");
-REXCVAR_DEFINE_STRING(native_shader_dir, "", "Superman Returns Native",
+REXCVAR_DEFINE_BOOL(sr_native_flip_winding, false, "Superman Returns Native", "Debug: invert front-face winding");
+REXCVAR_DEFINE_BOOL(sr_native_draws, true, "Superman Returns Native", "Native renderer: issue draws (debug bisection)");
+REXCVAR_DEFINE_BOOL(sr_native_resolves, true, "Superman Returns Native", "Native renderer: perform resolves (debug bisection)");
+REXCVAR_DEFINE_STRING(sr_native_shader_dir, "", "Superman Returns Native",
                       "Directory with the offline shader corpus DXIL (<hash>.vs.dxil / .ps.dxil); "
                       "default: <exe>/../../../../artifacts/shaders/dxil");
 
@@ -218,24 +221,33 @@ namespace reg = rex::graphics::reg;
 int g_current_pass = 0;
 int g_guest_pass = 0;
 
+std::atomic<uint32_t> g_guest_device{0};
+void NoteGuestDevice(uint32_t dev) {
+  if (dev) g_guest_device.store(dev, std::memory_order_relaxed);
+}
+
 namespace {
 
-constexpr uint32_t kDevicePtrAddr = 0x82C81A64;
-// D3DDevice layout (docs/RENDERER_ANALYSIS.md sections 4 and 8).
-constexpr uint32_t kDevFetchConstants = 0x480;  // [32] x 24 bytes
-constexpr uint32_t kDevVsConstants = 0x780;     // 256 float4
-constexpr uint32_t kDevPsConstants = 0x1780;    // 256 float4
-constexpr uint32_t kDevVsBools = 0x2780;        // 4 dwords
-constexpr uint32_t kDevPsBools = 0x2790;        // 4 dwords
-constexpr uint32_t kDevVsLoops = 0x27A0;        // 16 dwords
-constexpr uint32_t kDevPsLoops = 0x27E0;        // 16 dwords
-constexpr uint32_t kDevShaderA = 0x318C;
-constexpr uint32_t kDevShaderB = 0x3190;
-constexpr uint32_t kDevVertexDecl = 0x2E24;
-constexpr uint32_t kDevViewport = 0x3160;  // X, Y, W, H (u32), MinZ, MaxZ (f32)
-constexpr uint32_t kDevTextures = 0x30F8;  // [26] texture objects
-constexpr uint32_t kDevRenderTargets = 0x3090;  // [4] surfaces
-constexpr uint32_t kDevDepthStencil = 0x30A0;
+// D3DDevice layout and the device pointer come from game_profile.h (Conan's
+// values there, unconfirmed for Superman Returns).
+constexpr const profile::DeviceLayout& kDev = profile::kDevice;
+constexpr uint32_t kDevFetchConstants = kDev.fetch_constants;  // [32] x 24 bytes
+constexpr uint32_t kDevVsConstants = kDev.vs_constants;        // 256 float4
+constexpr uint32_t kDevPsConstants = kDev.ps_constants;        // 256 float4
+constexpr uint32_t kDevVsBools = kDev.vs_bools;                // 4 dwords
+constexpr uint32_t kDevPsBools = kDev.ps_bools;                // 4 dwords
+constexpr uint32_t kDevVsLoops = kDev.vs_loops;                // 16 dwords
+constexpr uint32_t kDevPsLoops = kDev.ps_loops;                // 16 dwords
+constexpr uint32_t kDevShaderA = kDev.shader_a;
+constexpr uint32_t kDevShaderB = kDev.shader_b;
+constexpr uint32_t kDevVertexDecl = kDev.vertex_decl;
+constexpr uint32_t kDevViewport = kDev.viewport;  // X, Y, W, H, MinZ, MaxZ (f32)
+constexpr uint32_t kDevTextures = kDev.textures;  // [26] texture objects
+constexpr uint32_t kDevRenderTargets = kDev.render_targets;  // [4] surfaces
+constexpr uint32_t kDevDepthStencil = kDev.depth_stencil;
+// Vertex stream s uses the 8-byte vertex fetch constant at 0x778 - 8 * s
+// (the top of the fetch constant file).
+constexpr uint32_t kDevVertexFetch0 = kDev.fetch_constants + 0x2F8;
 // XDK D3DDevice_Clear flags: D3DCLEAR_TARGET0..3 = bits 0-3, ZBUFFER 0x10,
 // STENCIL 0x20 (the game passes 0xF = color only and 0x3F = everything).
 constexpr uint32_t kClearZBuffer = 0x10;
@@ -243,13 +255,7 @@ constexpr uint32_t kClearStencil = 0x20;
 
 // Register shadow -> Xenos register (section 8).
 uint32_t RegShadowOffset(uint32_t reg_index) {
-  struct Range {
-    uint32_t first, count, offset;
-  };
-  static constexpr Range kRanges[] = {{0x2000, 16, 0x2880}, {0x2100, 21, 0x28CC},
-                                      {0x2180, 5, 0x2920},  {0x2200, 12, 0x2934},
-                                      {0x2280, 21, 0x2964}, {0x2300, 38, 0x29B8}};
-  for (const Range& r : kRanges) {
+  for (const profile::RegisterShadowRange& r : profile::kRegisterShadow) {
     if (reg_index >= r.first && reg_index < r.first + r.count) {
       return r.offset + 4 * (reg_index - r.first);
     }
@@ -290,6 +296,17 @@ inline uint32_t Load16(uint8_t* base, uint32_t addr) {
   return __builtin_bswap16(v);
 }
 inline uint32_t Load8(uint8_t* base, uint32_t addr) { return *GuestPtr(base, addr, 1); }
+
+// Conan read the device from a global (0x82C81A64). SR's global is unknown:
+// with profile::kDevicePtrAddr == 0 the device is the r3 argument the D3D
+// hooks saw last (the XDK has one device per process; NoteGuestDevice).
+inline uint32_t GuestDevice(uint8_t* base) {
+  if constexpr (profile::kDevicePtrAddr != 0) {
+    return Load32(base, profile::kDevicePtrAddr);
+  } else {
+    return g_guest_device.load(std::memory_order_relaxed);
+  }
+}
 
 // Texture fetch constant with RGB sign = GAMMA (dword 0 bits 2-7).
 inline bool IsGammaFetch(const uint32_t fetch[6]) {
@@ -412,46 +429,28 @@ D3D12_TEXTURE_ADDRESS_MODE MapClamp(uint32_t clamp) {
 }  // namespace
 
 namespace {
-// Shader pack embedded in superman_returns.exe (RCDATA 2, tools/shaders/pack_shaders.py):
-// 'CNSH', version, count, then {u64 hash, u32 stage, u32 offset, u32 size}
-// sorted by (hash, stage), then the DXIL blobs.
-// Table entries are 20 bytes, unaligned: read them with memcpy.
-constexpr size_t kPackEntrySize = 20;
-struct PackEntry {
-  uint64_t hash;
-  uint32_t stage, offset, size;
-};
-struct ShaderPack {
-  const uint8_t* base = nullptr;
-  uint32_t count = 0;
-  PackEntry Entry(uint32_t i) const {
-    const uint8_t* e = base + 12 + size_t(i) * kPackEntrySize;
-    PackEntry r;
-    std::memcpy(&r.hash, e, 8);
-    std::memcpy(&r.stage, e + 8, 4);
-    std::memcpy(&r.offset, e + 12, 4);
-    std::memcpy(&r.size, e + 16, 4);
-    return r;
-  }
-};
-const ShaderPack& EmbeddedShaderPack() {
-  static const ShaderPack pack = [] {
-    ShaderPack p;
+// Shader pack embedded in superman_returns.exe (RCDATA 2, tools/shaders/pack_shaders.py);
+// format and lookup in shader_pack.h.
+const ShaderPackView& EmbeddedShaderPack() {
+  static const ShaderPackView pack = [] {
+    ShaderPackView p;
     HMODULE module = GetModuleHandleW(nullptr);
     HRSRC res = FindResourceW(module, MAKEINTRESOURCEW(2), MAKEINTRESOURCEW(10));  // RT_RCDATA
     if (!res) return p;
     HGLOBAL handle = LoadResource(module, res);
     const uint8_t* data = handle ? static_cast<const uint8_t*>(LockResource(handle)) : nullptr;
-    DWORD size = SizeofResource(module, res);
-    if (!data || size < 12 || std::memcmp(data, "CNSH", 4) != 0) return p;
-    uint32_t count;
-    std::memcpy(&count, data + 8, 4);
-    if (12 + uint64_t(count) * kPackEntrySize > size) return p;
-    p.base = data;
-    p.count = count;
+    p.Parse(data, SizeofResource(module, res));
     return p;
   }();
   return pack;
+}
+
+// Default loose-file corpus: <repo>/artifacts/shaders/dxil for an executable
+// in port/out/build/<preset>/ (same relative path as the kit).
+std::filesystem::path DefaultShaderDir() {
+  return (rex::filesystem::GetExecutableFolder() / ".." / ".." / ".." / ".." / "artifacts" /
+          "shaders" / "dxil")
+      .lexically_normal();
 }
 }  // namespace
 
@@ -498,7 +497,7 @@ DXGI_FORMAT MapColorRtFormat(uint32_t f) {
     case 4:   // 16_16
       return DXGI_FORMAT_R16G16_SNORM;
     case 5:   // 16_16_16_16 (Xenos fixed -32..32; approximated as float)
-      return REXCVAR_GET(native_fixed16_snorm) ? DXGI_FORMAT_R16G16B16A16_SNORM
+      return REXCVAR_GET(sr_native_fixed16_snorm) ? DXGI_FORMAT_R16G16B16A16_SNORM
                                                : DXGI_FORMAT_R16G16B16A16_FLOAT;
     case 6:   // 16_16_FLOAT
       return DXGI_FORMAT_R16G16_FLOAT;
@@ -548,9 +547,28 @@ inline std::vector<D3D12_RECT> ScaleRects(const std::vector<D3D12_RECT>& rs, flo
 
 }  // namespace
 
-bool Enabled() {
-  static const bool enabled = REXCVAR_GET(native_renderer);
-  return enabled;
+bool Enabled() { return RendererActive(); }
+
+// DC_LUT gamma ramp: from the native graphics system, or from the Xenos
+// command processor in sr_native_ab_mode (the kit read it through a
+// fork-only IGraphicsSystem::GetGammaRamp256).
+bool GuestGammaRamp256(uint32_t* out) {
+  if (NativeGraphicsSystem* system = ActiveNativeGraphicsSystem()) {
+    return system->GetGammaRamp256(out);
+  }
+  return GetSrXenosGammaRamp256(out);
+}
+
+bool LogUnsupportedOnce(const char* category, uint64_t key, const char* detail) {
+  static std::mutex mutex;
+  static std::set<std::pair<std::string, uint64_t>> seen;
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (!seen.emplace(category, key).second) return false;
+  }
+  REXLOG_WARN("native: unsupported {} ({:X}){}{} - logged once; see docs/native-port-plan.md", category,
+              key, detail ? ": " : "", detail ? detail : "");
+  return true;
 }
 
 Renderer& Renderer::Get() {
@@ -568,27 +586,42 @@ bool Renderer::EnsureInitialized() {
     return false;
   }
   init_failed_ = true;
-  render_scale_ = float(std::clamp(REXCVAR_GET(render_scale), 1.0, 4.0));
-  shadow_scale_ = float(std::clamp(REXCVAR_GET(shadow_quality), 1, 4));
+  render_scale_ = float(std::clamp(REXCVAR_GET(sr_native_render_scale), 1.0, 4.0));
+  shadow_scale_ = float(std::clamp(REXCVAR_GET(sr_native_shadow_quality), 1, 4));
   {
-    int32_t m = REXCVAR_GET(msaa_samples);
+    int32_t m = REXCVAR_GET(sr_native_msaa_samples);
     msaa_samples_ = m >= 8 ? 8u : m >= 4 ? 4u : m >= 2 ? 2u : m == 1 ? 1u : 0u;
   }
-  anisotropy_ = REXCVAR_GET(anisotropic_filtering);
-  full_scene_resolution_ = REXCVAR_GET(full_scene_resolution);
-  foliage_aa_ = REXCVAR_GET(foliage_antialiasing);
-  fxaa_ = REXCVAR_GET(fxaa);
-  smooth_effects_ = REXCVAR_GET(smooth_effects);
-  shadow_smoothing_ = REXCVAR_GET(shadow_smoothing);
-  soft_particles_ = REXCVAR_GET(soft_particles);
-  ssao_ = REXCVAR_GET(ambient_occlusion);
-  bloom_scale_ = float(std::clamp(REXCVAR_GET(bloom_quality), 1, 4));
+  anisotropy_ = REXCVAR_GET(sr_native_anisotropic_filtering);
+  full_scene_resolution_ = REXCVAR_GET(sr_native_full_scene_resolution);
+  foliage_aa_ = REXCVAR_GET(sr_native_foliage_antialiasing);
+  fxaa_ = REXCVAR_GET(sr_native_fxaa);
+  smooth_effects_ = REXCVAR_GET(sr_native_smooth_effects);
+  shadow_smoothing_ = REXCVAR_GET(sr_native_shadow_smoothing);
+  soft_particles_ = REXCVAR_GET(sr_native_soft_particles);
+  ssao_ = REXCVAR_GET(sr_native_ambient_occlusion);
+  bloom_scale_ = float(std::clamp(REXCVAR_GET(sr_native_bloom_quality), 1, 4));
+  // Options keyed on game passes (Conan's pass table). SR's roles are -1 in
+  // game_profile.h until its passes are known: keep them off.
+  auto require_pass = [](bool& option, int pass, const char* name) {
+    if (option && pass < 0) {
+      option = false;
+      REXLOG_WARN("native: {} needs a render pass role missing from game_profile.h; disabled", name);
+    }
+  };
+  require_pass(fxaa_, kPassRenderHud, "sr_native_fxaa");
+  require_pass(ssao_, kPassRenderOpaque, "sr_native_ambient_occlusion");
+  require_pass(soft_particles_, kPassRenderSorted, "sr_native_soft_particles");
+  if (shadow_scale_ != 1.0f && kPassRenderShadowMaps < 0) {
+    shadow_scale_ = 1.0f;
+    REXLOG_WARN("native: sr_native_shadow_quality needs the shadow pass role; disabled");
+  }
   output_width_ = HostPx(kOutputWidth, render_scale_);
   output_height_ = HostPx(kOutputHeight, render_scale_);
   REXLOG_INFO("native: render scale {} ({}x{}), shadow scale {}, msaa {}, anisotropy {}",
               render_scale_, output_width_, output_height_, shadow_scale_, msaa_samples_,
               anisotropy_);
-  if (REXCVAR_GET(native_texture_watch)) {
+  if (REXCVAR_GET(sr_native_texture_watch)) {
     page_write_seq_ = std::make_unique<std::atomic<uint32_t>[]>(0x20000);
     for (uint32_t p = 0; p < 0x20000; ++p) page_write_seq_[p].store(0);
     REX_KERNEL_MEMORY()->RegisterPhysicalMemoryInvalidationCallback(&Renderer::OnPhysicalWrite,
@@ -606,13 +639,16 @@ bool Renderer::EnsureInitialized() {
   }
   presenter_ = static_cast<rex::ui::d3d12::D3D12Presenter*>(graphics->presenter());
   graphics_ = graphics;
-  rex::perf::RegisterGpuSwapCallback([](uint64_t swap, const uint32_t* regs, uint32_t count) {
+  // The kit's SDK fork calls back from the Xenos CP after each swap (A/B
+  // dumps). The stock SDK has no such hook; the project's own command
+  // processor (sr_graphics_system.cpp, sr_native_ab_mode) does it instead.
+  SetSrXenosSwapObserver([](uint64_t swap, const uint32_t* regs, uint32_t count) {
     Renderer::Get().OnGpuSwap(swap, regs, count);
   });
   provider_ = &presenter_->provider();
   device_ = provider_->GetDevice();
   queue_ = provider_->GetDirectQueue();
-  if (REXCVAR_GET(native_own_queue)) {
+  if (REXCVAR_GET(sr_native_own_queue)) {
     D3D12_COMMAND_QUEUE_DESC queue_desc{};
     queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     if (SUCCEEDED(device_->CreateCommandQueue(&queue_desc, IID_PPV_ARGS(&own_queue_)))) {
@@ -620,17 +656,11 @@ bool Renderer::EnsureInitialized() {
     }
   }
 
-  // Xenos keeps consuming PM4 (fences, interrupts, swap timing) but must not
-  // translate or present anything.
-  // native_ab_mode keeps full Xenos rendering + presentation alongside the
-  // native renderer (same guest frame through both paths, for A/B diffs).
-  if (!REXCVAR_GET(native_ab_mode)) {
-    rex::cvar::SetFlagByName("gpu_null_draws", "true");
-    // With Xenos drawing nothing, real occlusion queries would all report zero
-    // samples and the game's visibility culling (per-batch viz queries) would
-    // drop almost every draw; report the fake "visible" count instead.
-    rex::cvar::SetFlagByName("occlusion_query_enable", "false");
-  }
+  // The kit also had a mode where the Xenos plugin only synchronized
+  // (gpu_null_draws, a fork-only cvar). Here there are two modes: the native
+  // graphics system without Xenos (it reports occlusion queries as visible),
+  // or sr_native_ab_mode with full Xenos rendering and presentation next to
+  // the native renderer (same guest frame through both paths, A/B diffs).
 
   for (auto& allocator : allocators_) {
     if (FAILED(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
@@ -685,8 +715,8 @@ bool Renderer::EnsureInitialized() {
   }).detach();
 
   REXLOG_INFO("native: renderer initialized, shaders from {}",
-              EmbeddedShaderPack().count && REXCVAR_GET(native_shader_dir).empty()
-                  ? fmt::format("embedded pack ({} shaders)", EmbeddedShaderPack().count)
+              EmbeddedShaderPack().count() && REXCVAR_GET(sr_native_shader_dir).empty()
+                  ? fmt::format("embedded pack ({} shaders)", EmbeddedShaderPack().count())
                   : shader_dir_);
   init_failed_ = false;
   initialized_ = true;
@@ -722,9 +752,9 @@ bool Renderer::CreateDrawResources() {
   params[6].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
   D3D12_ROOT_SIGNATURE_DESC rs_desc{};
   rs_desc.NumParameters = 7;
-  // Debug (native_debug_rs_salt): an unused root-constant parameter makes every
+  // Debug (sr_native_debug_rs_salt): an unused root-constant parameter makes every
   // pipeline new to the driver's shader cache - a cold first run on demand.
-  if (int32_t salt = REXCVAR_GET(native_debug_rs_salt); salt > 0) {
+  if (int32_t salt = REXCVAR_GET(sr_native_debug_rs_salt); salt > 0) {
     params[7].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     params[7].Constants.ShaderRegister = 15;
     params[7].Constants.RegisterSpace = 7;
@@ -970,14 +1000,11 @@ bool Renderer::CreateDrawResources() {
     upload_buffers_[i]->Map(0, &none, reinterpret_cast<void**>(&upload_cpu_[i]));
   }
 
-  shader_dir_ = REXCVAR_GET(native_shader_dir);
+  shader_dir_ = REXCVAR_GET(sr_native_shader_dir);
   if (shader_dir_.empty()) {
-    auto exe_dir = rex::filesystem::GetExecutableFolder();
-    shader_dir_ = (exe_dir / ".." / ".." / ".." / ".." / "artifacts" / "shaders" / "dxil")
-                      .lexically_normal()
-                      .string();
+    shader_dir_ = DefaultShaderDir().string();
   }
-  if (REXCVAR_GET(native_debug_disable_driver_shader_cache)) {
+  if (REXCVAR_GET(sr_native_debug_disable_driver_shader_cache)) {
     // Debug: simulate a first run (cold driver shader cache). Needs Windows
     // developer mode.
     ComPtr<ID3D12Device9> device9;
@@ -988,7 +1015,7 @@ bool Renderer::CreateDrawResources() {
     }
     REXLOG_INFO("native: driver shader cache disabled: {:08X}", uint32_t(hr));
   }
-  if (REXCVAR_GET(native_pipeline_cache)) {
+  if (REXCVAR_GET(sr_native_pipeline_cache)) {
     // Sample count the renderer uses on the surfaces the game multisamples
     // (msaa_samples 0 = the game's own 4x), and whether foliage antialiasing
     // (alpha to coverage) can apply: the cache converts captured pipelines to
@@ -1123,7 +1150,7 @@ void Renderer::BeginFrameTimestamp() {
   if (ts_frames_ && now - ts_last_log_ > std::chrono::seconds(5)) {
     REXLOG_INFO("native: GPU time {:.3f} ms/frame ({} frames)", ts_accum_ms_ / double(ts_frames_),
                 ts_frames_);
-    if (REXCVAR_GET(native_gpu_pass_timing)) {
+    if (REXCVAR_GET(sr_native_gpu_pass_timing)) {
       std::string split;
       for (int pass = 0; pass < 32; ++pass) {
         if (ts_pass_ms_[pass] / double(ts_frames_) >= 0.005) {
@@ -1249,7 +1276,7 @@ Renderer::HostSurface* Renderer::GetSurface(uint8_t* base, uint32_t surface_obje
   // not by the surface object (EXP-013). Depth keeps no format distinction.
   uint32_t edram_base = color_depth_info & 0xFFF;
   uint32_t guest_msaa = (surface_info >> 16) & 3;
-  uint32_t samples = REXCVAR_GET(native_msaa) ? (guest_msaa == 2 ? 4u : guest_msaa == 1 ? 2u : 1u)
+  uint32_t samples = REXCVAR_GET(sr_native_msaa) ? (guest_msaa == 2 ? 4u : guest_msaa == 1 ? 2u : 1u)
                                               : 1u;
   // msaa_samples setting: applies to the surfaces the game multisamples.
   if (samples > 1 && msaa_samples_) samples = msaa_samples_;
@@ -1296,7 +1323,9 @@ Renderer::HostSurface* Renderer::GetSurface(uint8_t* base, uint32_t surface_obje
     // the scene reaches the output 1:1. Small post-process targets (the
     // 256x144 bloom chain) get bloom_quality on top.
     bool output_sized = width == kOutputWidth && height == kOutputHeight;
-    if (!output_sized && full_scene_resolution_) s.scale *= float(kOutputWidth) / 1024.0f;
+    if (!output_sized && full_scene_resolution_) {
+      s.scale *= float(kOutputWidth) / float(profile::kSceneWidth);
+    }
     if (!output_sized && width <= 512 && height <= 512) s.scale *= bloom_scale_;
   }
   D3D12_RESOURCE_DESC desc{};
@@ -1388,6 +1417,8 @@ struct ProjectionReg {
   uint32_t reg;
 };
 constexpr ProjectionReg kProjectionRegs[] = {
+    // Sentinel so the table is never empty (register 256 is rejected below).
+    {0ull, 256},
 #include "projection_regs.inc"
 };
 
@@ -1476,7 +1507,7 @@ void Renderer::ApplySsao() {
     }
   }
   auto pipeline = [&](bool apply) -> ID3D12PipelineState* {
-    uint64_t key = (uint64_t(REXCVAR_GET(ssao_debug)) << 41) | (uint64_t(apply) << 40) |
+    uint64_t key = (uint64_t(REXCVAR_GET(sr_native_ssao_debug)) << 41) | (uint64_t(apply) << 40) |
                    (uint64_t(ms) << 39) | (uint64_t(rt.samples) << 32) |
                    uint32_t(rt.view_format);
     auto& pso = ssao_pipelines_[key];
@@ -1488,7 +1519,7 @@ void Renderer::ApplySsao() {
         desc.PS = ms ? D3D12_SHADER_BYTECODE{kSsaoApplyMsPS, sizeof(kSsaoApplyMsPS)}
                      : D3D12_SHADER_BYTECODE{kSsaoApplyPS, sizeof(kSsaoApplyPS)};
         auto& b = desc.BlendState.RenderTarget[0];
-        b.BlendEnable = !REXCVAR_GET(ssao_debug);  // debug: show the AO term itself
+        b.BlendEnable = !REXCVAR_GET(sr_native_ssao_debug);  // debug: show the AO term itself
         b.SrcBlend = D3D12_BLEND_ZERO;  // scene *= ao
         b.DestBlend = D3D12_BLEND_SRC_COLOR;
         b.BlendOp = D3D12_BLEND_OP_ADD;
@@ -1578,9 +1609,9 @@ void Renderer::ApplySsao() {
   std::memcpy(constants.view_proj, view_proj, sizeof(view_proj));
   constants.size[0] = float(w);
   constants.size[1] = float(h);
-  constants.radius = float(REXCVAR_GET(ssao_radius));
-  constants.intensity = float(std::clamp(REXCVAR_GET(ssao_intensity), 0.0, 1.0));
-  constants.fade = float(REXCVAR_GET(ssao_fade_distance));
+  constants.radius = float(REXCVAR_GET(sr_native_ssao_radius));
+  constants.intensity = float(std::clamp(REXCVAR_GET(sr_native_ssao_intensity), 0.0, 1.0));
+  constants.fade = float(REXCVAR_GET(sr_native_ssao_fade_distance));
   static_assert(sizeof(constants) == 40 * 4);
 
   auto gpu_srv = [&](uint32_t index) {
@@ -1798,7 +1829,7 @@ bool Renderer::ReinterpretSurface(HostSurface& dst, HostSurface& src) {
 }
 
 void Renderer::ResolveEdramAliasing(HostSurface* s) {
-  if (!s || !s->edram_tiles || !REXCVAR_GET(native_edram_aliasing)) return;
+  if (!s || !s->edram_tiles || !REXCVAR_GET(sr_native_edram_aliasing)) return;
   constexpr uint32_t kEdramTiles = 2048;
   auto overlaps = [](uint32_t a0, uint32_t an, uint32_t b0, uint32_t bn) {
     // Ranges on the 2048-tile ring.
@@ -1835,7 +1866,7 @@ void Renderer::ResolveEdramAliasing(HostSurface* s) {
                 newest_same ? newest_same->last_write : 0, newest, s->last_write);
   }
   if (newest_same && newest_same->last_write > newest &&
-      REXCVAR_GET(native_edram_reinterpret)) {
+      REXCVAR_GET(sr_native_edram_reinterpret)) {
     bool ok = ReinterpretSurface(*s, *newest_same);
     if (trace_state_ == 1)
       REXLOG_INFO("trace edram reinterpret {} <- {}: {} (kinds {} {} fmt {} {})", SurfaceName(s),
@@ -1856,7 +1887,7 @@ void Renderer::ResolveEdramAliasing(HostSurface* s) {
     // Undefined EDRAM contents: black. Alpha 1 by default - EDRAM left behind
     // by the previous frame's opaque images reads as alpha ~1 (e.g. the p9
     // decal buffer's alpha gates terrain specular; 0 made the beach white).
-    float a = float(REXCVAR_GET(native_edram_alias_alpha));
+    float a = float(REXCVAR_GET(sr_native_edram_alias_alpha));
     float value[4] = {0.0f, 0.0f, 0.0f, a};
     Transition(s->resource.Get(), s->state, D3D12_RESOURCE_STATE_RENDER_TARGET);
     command_list_->ClearRenderTargetView(s->view, value, 0, nullptr);
@@ -1915,13 +1946,13 @@ bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_fo
   }
   // Experiment: EDRAM-aliased depth surfaces (e.g. the 256x144 bloom depth at
   // base 448, never cleared by the game) start from depth 0 each frame.
-  if (ds && REXCVAR_GET(native_exp_alias_depth_base) >= 0 &&
-      ds->edram_base == uint32_t(REXCVAR_GET(native_exp_alias_depth_base)) &&
+  if (ds && REXCVAR_GET(sr_native_exp_alias_depth_base) >= 0 &&
+      ds->edram_base == uint32_t(REXCVAR_GET(sr_native_exp_alias_depth_base)) &&
       alias_clear_frame_ != frame_count_) {
     alias_clear_frame_ = frame_count_;
     Transition(ds->resource.Get(), ds->state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
     command_list_->ClearDepthStencilView(ds->view, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
-                                         float(REXCVAR_GET(native_exp_alias_depth_value)), 0, 0,
+                                         float(REXCVAR_GET(sr_native_exp_alias_depth_value)), 0, 0,
                                          nullptr);
   }
   // Aliasing is checked against surfaces outside this bind set; the set is
@@ -1980,25 +2011,29 @@ bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_fo
 
 // Thread-safe lookup into the embedded shader pack (pipeline precompilation).
 bool PackShaderLookup(uint64_t hash, bool vertex, const void** data, size_t* size) {
-  const ShaderPack& pack = EmbeddedShaderPack();
-  if (!pack.count || !REXCVAR_GET(native_shader_dir).empty()) return false;
-  uint32_t stage = vertex ? 0 : 1;
-  uint32_t lo = 0, hi = pack.count;
-  while (lo < hi) {
-    uint32_t mid = (lo + hi) / 2;
-    PackEntry m = pack.Entry(mid);
-    if (m.hash < hash || (m.hash == hash && m.stage < stage)) {
-      lo = mid + 1;
-    } else {
-      hi = mid;
-    }
-  }
-  if (lo >= pack.count) return false;
-  PackEntry e = pack.Entry(lo);
-  if (e.hash != hash || e.stage != stage) return false;
-  *data = pack.base + e.offset;
+  const ShaderPackView& pack = EmbeddedShaderPack();
+  if (!pack.count() || !REXCVAR_GET(sr_native_shader_dir).empty()) return false;
+  ShaderPackEntry e;
+  if (!pack.Find(hash, vertex, e)) return false;
+  *data = pack.base() + e.offset;
   *size = e.size;
   return true;
+}
+
+bool ShaderCorpusAvailable(std::string* where) {
+  const ShaderPackView& pack = EmbeddedShaderPack();
+  const std::string dir_cvar = REXCVAR_GET(sr_native_shader_dir);
+  if (pack.count() && dir_cvar.empty()) {
+    if (where) *where = fmt::format("embedded pack, {} shaders", pack.count());
+    return true;
+  }
+  const std::filesystem::path dir = dir_cvar.empty() ? DefaultShaderDir() : dir_cvar;
+  if (where) *where = "sr_native_shader_dir " + dir.string();
+  std::error_code ec;
+  for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+    if (entry.path().extension() == ".dxil") return true;
+  }
+  return false;
 }
 
 const std::vector<uint8_t>* Renderer::LoadShader(uint64_t hash, bool vertex) {
@@ -2010,28 +2045,16 @@ const std::vector<uint8_t>* Renderer::LoadShader(uint64_t hash, bool vertex) {
   std::snprintf(name, sizeof(name), "%016llX.%s.dxil", (unsigned long long)hash,
                 vertex ? "vs" : "ps");
   std::unique_ptr<std::vector<uint8_t>> data;
-  // Embedded pack unless native_shader_dir points at loose files.
-  const ShaderPack& pack = EmbeddedShaderPack();
-  if (pack.count && REXCVAR_GET(native_shader_dir).empty()) {
-    uint32_t stage = vertex ? 0 : 1;
-    // Binary search over (hash, stage).
-    uint32_t lo = 0, hi = pack.count;
-    while (lo < hi) {
-      uint32_t mid = (lo + hi) / 2;
-      PackEntry m = pack.Entry(mid);
-      if (m.hash < hash || (m.hash == hash && m.stage < stage)) {
-        lo = mid + 1;
-      } else {
-        hi = mid;
-      }
-    }
-    PackEntry e{};
-    if (lo < pack.count) e = pack.Entry(lo);
-    if (lo < pack.count && e.hash == hash && e.stage == stage) {
-      data = std::make_unique<std::vector<uint8_t>>(pack.base + e.offset,
-                                                    pack.base + e.offset + e.size);
+  // Embedded pack unless sr_native_shader_dir points at loose files.
+  const ShaderPackView& pack = EmbeddedShaderPack();
+  if (pack.count() && REXCVAR_GET(sr_native_shader_dir).empty()) {
+    ShaderPackEntry e;
+    if (pack.Find(hash, vertex, e)) {
+      data = std::make_unique<std::vector<uint8_t>>(pack.base() + e.offset,
+                                                    pack.base() + e.offset + e.size);
     } else {
       REXLOG_WARN("native: shader {} not in the embedded pack", name);
+      LogUnsupportedOnce("shader missing from the corpus", hash, name);
     }
     auto* result = data.get();
     shader_bytecode_[hash] = std::move(data);
@@ -2043,6 +2066,7 @@ const std::vector<uint8_t>* Renderer::LoadShader(uint64_t hash, bool vertex) {
                                                   std::istreambuf_iterator<char>());
   } else {
     REXLOG_WARN("native: missing shader {}", name);
+    LogUnsupportedOnce("shader missing from the corpus", hash, name);
   }
   auto* result = data.get();
   shader_bytecode_[hash] = std::move(data);
@@ -2104,7 +2128,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
 
   // Alpha to mask (RB_COLORCONTROL bit 4): MSAA coverage from alpha (foliage).
   bool alpha_to_coverage =
-      (bound_samples_ > 1 && REXCVAR_GET(native_alpha_to_coverage) &&
+      (bound_samples_ > 1 && REXCVAR_GET(sr_native_alpha_to_coverage) &&
        ((LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_COLORCONTROL) >> 4) & 1)) ||
       AlphaTestToCoverage(base, dev);
   uint64_t key_parts[] = {vs_hash ^ (uint64_t(bound_samples_) << 60) ^
@@ -2231,13 +2255,13 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
     desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
   }
   desc.RasterizerState.FrontCounterClockwise =
-      (mode.face ? FALSE : TRUE) ^ (REXCVAR_GET(native_flip_winding) ? TRUE : FALSE);
+      (mode.face ? FALSE : TRUE) ^ (REXCVAR_GET(sr_native_flip_winding) ? TRUE : FALSE);
   desc.RasterizerState.DepthClipEnable = TRUE;
   desc.RasterizerState.DepthBias = depth_bias;
   desc.RasterizerState.SlopeScaledDepthBias = slope_bias;
   if (dsv_format != DXGI_FORMAT_UNKNOWN) {
     auto& ds = desc.DepthStencilState;
-    ds.DepthEnable = depth.z_enable && !REXCVAR_GET(native_debug_no_ztest);
+    ds.DepthEnable = depth.z_enable && !REXCVAR_GET(sr_native_debug_no_ztest);
     ds.DepthWriteMask = depth.z_write_enable ? D3D12_DEPTH_WRITE_MASK_ALL
                                              : D3D12_DEPTH_WRITE_MASK_ZERO;
     ds.DepthFunc = MapCompare(depth.zfunc);
@@ -2297,11 +2321,13 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
   // pipeline is ready. Everything that may carry state across frames (post
   // process, the luminance/exposure chain, copies, HUD, menus) still waits: a
   // skipped one-time draw can break the image permanently (EXP-005).
-  if (REXCVAR_GET(native_async_pipelines) && REXCVAR_GET(native_pipeline_cache) &&
+  if (REXCVAR_GET(sr_native_async_pipelines) && REXCVAR_GET(sr_native_pipeline_cache) &&
       elements.size() <= PsoRecord::kMaxElements) {
     int p = g_current_pass;
-    bool redrawn = p == kPassRenderShadowMaps || p == 6 || p == 8 || p == 9 || p == kPassRenderOpaque ||
-                   p == 13 || p == 14 || p == 15 || p == 17 || p == kPassRenderSorted;
+    // Conan: shadow maps, reflections, depth, decals, opaque (+character),
+    // skybox, ocean, sorted. SR: from game_profile.h (none known yet).
+    bool redrawn = false;
+    for (int r : profile::kRedrawnPasses) redrawn |= r >= 0 && p == r;
     if (redrawn) {
       pipeline_cache_.Record(record);
       pipeline_cache_.CompileAsync(record);
@@ -2422,8 +2448,8 @@ uint32_t Renderer::GetTextureSrvIndex(uint8_t* base, const uint32_t fetch[6]) {
       bool check = texture_watch_
                        ? TextureWrittenSince(entry.guest_base, entry.guest_size, entry.watch_seq)
                        : entry.guest_size <= (256u << 10) || frame_count_ - entry.hashed_frame >= 30;
-      if (REXCVAR_GET(native_debug_texture_format) >= 0 &&
-          int32_t(fetch[1] & 0x3F) == REXCVAR_GET(native_debug_texture_format)) {
+      if (REXCVAR_GET(sr_native_debug_texture_format) >= 0 &&
+          int32_t(fetch[1] & 0x3F) == REXCVAR_GET(sr_native_debug_texture_format)) {
         static int logged = 0;
         uint64_t h = XXH3_64bits(
             REX_KERNEL_MEMORY()->TranslatePhysical<const uint8_t*>(entry.guest_base), entry.guest_size);
@@ -2513,19 +2539,19 @@ uint32_t Renderer::CreateTexture(const uint32_t fetch[6], TextureEntry& entry) {
   DecodedTexture decoded;
   const char* reason = nullptr;
   bool decoded_ok = DecodeTexture(fetch, decoded, &reason);
-  if (decoded_ok && REXCVAR_GET(native_debug_texture_format) >= 0 &&
-      int32_t(decoded.guest_format) == REXCVAR_GET(native_debug_texture_format)) {
+  if (decoded_ok && REXCVAR_GET(sr_native_debug_texture_format) >= 0 &&
+      int32_t(decoded.guest_format) == REXCVAR_GET(sr_native_debug_texture_format)) {
     REXLOG_INFO("native dbg texture fmt {} base {:08X} {}x{} dxgi {} mips {} fetch {:08X} {:08X} {:08X} {:08X}",
                 decoded.guest_format, decoded.base_address, decoded.width, decoded.height,
                 int(decoded.format), decoded.mip_levels, fetch[0], fetch[1], fetch[2], fetch[3]);
   }
-  bool dump_by_format = REXCVAR_GET(native_debug_texture_format) >= 0 &&
-                        int32_t(decoded.guest_format) == REXCVAR_GET(native_debug_texture_format) &&
-                        decoded.width <= 512 && !REXCVAR_GET(native_dump_dir).empty();
-  if (decoded_ok && (dump_by_format || (!REXCVAR_GET(native_dump_texture_addr).empty() &&
-      REXCVAR_GET(native_dump_texture_addr).find(fmt::format("{:08X}", decoded.base_address)) !=
+  bool dump_by_format = REXCVAR_GET(sr_native_debug_texture_format) >= 0 &&
+                        int32_t(decoded.guest_format) == REXCVAR_GET(sr_native_debug_texture_format) &&
+                        decoded.width <= 512 && !REXCVAR_GET(sr_native_dump_dir).empty();
+  if (decoded_ok && (dump_by_format || (!REXCVAR_GET(sr_native_dump_texture_addr).empty() &&
+      REXCVAR_GET(sr_native_dump_texture_addr).find(fmt::format("{:08X}", decoded.base_address)) !=
           std::string::npos))) {
-    std::string path = REXCVAR_GET(native_dump_dir) + fmt::format("/tex_{:08X}_{}.dds",
+    std::string path = REXCVAR_GET(sr_native_dump_dir) + fmt::format("/tex_{:08X}_{}.dds",
                                                                   decoded.base_address, frame_count_);
     WriteDds(decoded, path.c_str());
     REXLOG_INFO("native: dumped texture {:08X} fmt {} endian {} -> {}", decoded.base_address,
@@ -2538,6 +2564,7 @@ uint32_t Renderer::CreateTexture(const uint32_t fetch[6], TextureEntry& entry) {
     reason = "stacked 2D array";
   }
   if (!decoded_ok) {
+    LogUnsupportedOnce("texture", fetch[1] & 0x3F, reason);
     static std::set<uint64_t> logged;
     uint64_t k = (uint64_t(fetch[1]) << 32) | fetch[5];
     if (logged.size() < 200 && logged.insert(k).second) {
@@ -2559,7 +2586,7 @@ uint32_t Renderer::CreateTexture(const uint32_t fetch[6], TextureEntry& entry) {
   desc.MipLevels = uint16_t(decoded.mip_levels);
   // Xenos gamma textures (sign = GAMMA on RGB) are linearized when sampled
   // (piecewise-linear ~2.2 curve): sample them through an sRGB view.
-  bool gamma = IsGammaFetch(fetch) && REXCVAR_GET(native_texture_gamma) == 1;
+  bool gamma = IsGammaFetch(fetch) && REXCVAR_GET(sr_native_texture_gamma) == 1;
   DXGI_FORMAT srv_format = decoded.format;
   DXGI_FORMAT resource_format = decoded.format;
   if (gamma) {
@@ -2754,8 +2781,8 @@ uint32_t Renderer::GetSamplerIndex(const uint32_t fetch[6], bool force_linear, f
 }
 
 void Renderer::OnGpuSwap(uint64_t swap_number, const uint32_t* regs, uint32_t count) {
-  if (!REXCVAR_GET(native_ab_mode) || REXCVAR_GET(native_dump_swap) <= 0 ||
-      swap_number != uint64_t(REXCVAR_GET(native_dump_swap))) {
+  if (!REXCVAR_GET(sr_native_ab_mode) || REXCVAR_GET(sr_native_dump_swap) <= 0 ||
+      swap_number != uint64_t(REXCVAR_GET(sr_native_dump_swap))) {
     return;
   }
   std::vector<std::array<uint32_t, 6>> fetches;
@@ -2786,7 +2813,7 @@ void Renderer::OnGpuSwap(uint64_t swap_number, const uint32_t* regs, uint32_t co
       if (f[1]) fetches.push_back(f);
     }
   }
-  std::string dir = REXCVAR_GET(native_dump_dir);
+  std::string dir = REXCVAR_GET(sr_native_dump_dir);
   int written = 0;
   for (auto& f : fetches) {
     DecodedTexture t;
@@ -2824,7 +2851,7 @@ void Renderer::OnGpuSwap(uint64_t swap_number, const uint32_t* regs, uint32_t co
 void Renderer::Breadcrumb(const char* what) {
   // Debug only: a MARKER_OUT WriteBufferImmediate after every draw makes the GPU
   // drain its pipeline ~600 times per frame.
-  if (!REXCVAR_GET(native_gpu_breadcrumbs)) return;
+  if (!REXCVAR_GET(sr_native_gpu_breadcrumbs)) return;
   uint32_t seq = ++crumb_seq_;
   CrumbDesc& d = crumbs_[seq & 4095];
   d.what = what;
@@ -2885,12 +2912,12 @@ void Renderer::ReportHang() {
 
 uint32_t Renderer::GpuConstant(uint8_t* base, uint32_t dev, uint32_t reg,
                                uint32_t shadow_offset) const {
-  if (REXCVAR_GET(native_pm4_mirror) && mirror_.written(reg)) return mirror_.reg(reg);
+  if (REXCVAR_GET(sr_native_pm4_mirror) && mirror_.written(reg)) return mirror_.reg(reg);
   return Load32(base, dev + shadow_offset);
 }
 
 void Renderer::NoteRingConstants(bool pixel, uint32_t start, uint32_t count, uint32_t ring_ptr) {
-  if (REXCVAR_GET(native_pm4_mirror)) return;  // the mirror parses the packets itself
+  if (REXCVAR_GET(sr_native_pm4_mirror)) return;  // the mirror parses the packets itself
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (trace_state_ == 1) {
     REXLOG_INFO("trace p{} ring consts {} start {} count {} ptr {:08X}", g_current_pass,
@@ -2903,7 +2930,7 @@ void Renderer::NoteRingConstants(bool pixel, uint32_t start, uint32_t count, uin
 
 void Renderer::ApplyLoadAluConstants(uint8_t* base, uint32_t dev, uint32_t table,
                                      uint32_t data) {
-  if (REXCVAR_GET(native_pm4_mirror)) return;  // the mirror parses the packet itself
+  if (REXCVAR_GET(sr_native_pm4_mirror)) return;  // the mirror parses the packet itself
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   // Earlier ring writes precede this load on the GPU.
   FlushRingConstants(base, dev);
@@ -2929,7 +2956,7 @@ void Renderer::ApplyLoadAluConstants(uint8_t* base, uint32_t dev, uint32_t table
 }
 
 void Renderer::FlushRingConstants(uint8_t* base, uint32_t dev) {
-  if (!REXCVAR_GET(native_ring_constants) || REXCVAR_GET(native_pm4_mirror)) {
+  if (!REXCVAR_GET(sr_native_ring_constants) || REXCVAR_GET(sr_native_pm4_mirror)) {
     pending_ring_constants_.clear();
     return;
   }
@@ -2948,15 +2975,15 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
   if (!Upload(512, 256, shared)) {
     return false;
   }
-  bool use_mirror = REXCVAR_GET(native_pm4_mirror);
-  // Debug: native_debug_ps_const=<ps hash hex>:<register>:<x>,<y>,<z>,<w>
+  bool use_mirror = REXCVAR_GET(sr_native_pm4_mirror);
+  // Debug: sr_native_debug_ps_const=<ps hash hex>:<register>:<x>,<y>,<z>,<w>
   static const struct Override {
     uint64_t hash = 0;
     uint32_t reg = 0;
     float v[4] = {};
   } ps_override = [] {
     Override o;
-    std::string spec = REXCVAR_GET(native_debug_ps_const);
+    std::string spec = REXCVAR_GET(sr_native_debug_ps_const);
     unsigned long long h = 0;
     if (!spec.empty() &&
         std::sscanf(spec.c_str(), "%llx:%u:%f,%f,%f,%f", &h, &o.reg, &o.v[0], &o.v[1], &o.v[2],
@@ -3030,7 +3057,7 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
           // on the host texel grid (g_ShadowAtlasTexelScale scales the baked
           // tap offsets instead, EXP-041).
           if (rt != resolve_textures_.end() && rt->second.scale != 1.0f &&
-              (!rt->second.shadow || REXCVAR_GET(native_shadow_pcf_mode) == 1)) {
+              (!rt->second.shadow || REXCVAR_GET(sr_native_shadow_pcf_mode) == 1)) {
             // Bits 16-27: scale in 8.8 fixed point (TEX_SCALE in the
             // XenosRecomp patch); SRV indices use bits 0-14.
             uint32_t fixed = uint32_t(std::lround(double(rt->second.scale) * 256.0));
@@ -3068,7 +3095,7 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
         }
       }
       // PWL gamma in the shader (XenosRecomp CONAN_RECOMP tfetch*).
-      if (srv > 2 && REXCVAR_GET(native_texture_gamma) == 2 && IsGammaFetch(fetch)) {
+      if (srv > 2 && REXCVAR_GET(sr_native_texture_gamma) == 2 && IsGammaFetch(fetch)) {
         srv |= 0x80000000u;
       }
     }
@@ -3114,7 +3141,7 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
   // pix_center = 0) are emulated like Xenia, by moving the viewport half a
   // pixel right/down (the VS adds g_HalfPixelOffset * w to the position).
   float half_pixel[2] = {0.0f, 0.0f};
-  if (REXCVAR_GET(native_half_pixel_offset) &&
+  if (REXCVAR_GET(sr_native_half_pixel_offset) &&
       !(LoadReg(base, dev, rex::graphics::XE_GPU_REG_PA_SU_VTX_CNTL) & 1)) {
     float w = 0.0f, h = 0.0f;
     if (ScreenSpaceDraw(base, dev)) {
@@ -3177,7 +3204,7 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
       }
       if (depth.plain_srv) {
         float w_column[2] = {inv_view_proj_[11], inv_view_proj_[15]};
-        float distance = float(REXCVAR_GET(soft_particle_distance));
+        float distance = float(REXCVAR_GET(sr_native_soft_particle_distance));
         float rt_width = float(HostPx(bound_rts_[0]->width, bound_rts_[0]->scale));
         float texel_scale = float(HostPx(depth.width, depth.scale)) / std::max(rt_width, 1.0f);
         std::memcpy(&s[116], w_column, 8);
@@ -3203,7 +3230,7 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
     std::memcpy(&s[113], &inv_scale, 4);
     // g_ShadowAtlasTexelScale (c28.z): shadow atlas PCF tap offsets.
     float atlas_scale =
-        REXCVAR_GET(native_shadow_pcf_mode) == 1 ? 1.0f : 1.0f / shadow_scale_;
+        REXCVAR_GET(sr_native_shadow_pcf_mode) == 1 ? 1.0f : 1.0f / shadow_scale_;
     std::memcpy(&s[114], &atlas_scale, 4);
     // g_ShadowSoftness (c28.w): shadow smoothing option (rotated, widened PCF).
     static const float kSoftness[3] = {0.0f, 1.0f, 1.6f};
@@ -3326,7 +3353,7 @@ void Renderer::ApplyFixedFunctionState(uint8_t* base, uint32_t dev) {
   // the screen scissor. Not during predicated tiling: host surfaces are untiled
   // while the XDK sets a per-tile scissor.
   D3D12_RECT scissor{0, 0, 16384, 16384};
-  if (REXCVAR_GET(native_scissor) && !tiling_active_) {
+  if (REXCVAR_GET(sr_native_scissor) && !tiling_active_) {
     uint32_t tl = mirror_.reg(rex::graphics::XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL);
     uint32_t br = mirror_.reg(rex::graphics::XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR);
     int32_t x0 = int32_t(tl & 0x7FFF), y0 = int32_t((tl >> 16) & 0x7FFF);
@@ -3374,7 +3401,7 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
                            D3D12_PRIMITIVE_TOPOLOGY& topology, bool& quads,
                            D3D12_INDEX_BUFFER_STRIP_CUT_VALUE strip_cut) {
   static const uint64_t pass_mask = [] {
-    std::string list = REXCVAR_GET(native_pass_mask);
+    std::string list = REXCVAR_GET(sr_native_pass_mask);
     if (list.empty()) return ~0ull;
     uint64_t mask = 0;
     size_t pos = 0;
@@ -3391,7 +3418,7 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
   }
   static const std::array<int, 3> skip = [] {
     std::array<int, 3> r{-1, 0, -1};
-    std::sscanf(REXCVAR_GET(native_skip_draws).c_str(), "%d:%d-%d", &r[0], &r[1], &r[2]);
+    std::sscanf(REXCVAR_GET(sr_native_skip_draws).c_str(), "%d:%d-%d", &r[0], &r[1], &r[2]);
     return r;
   }();
   uint32_t draw_index = pass_draw_index_[g_current_pass & 31]++;
@@ -3406,7 +3433,7 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
   }
   uint32_t decl = Load32(base, dev + kDevVertexDecl);
   static const uint64_t skip_ps = [] {
-    std::string v = REXCVAR_GET(native_skip_ps);
+    std::string v = REXCVAR_GET(sr_native_skip_ps);
     return v.empty() ? 0ull : std::stoull(v, nullptr, 16);
   }();
   if (skip_ps && ps_hash == skip_ps) return false;
@@ -3432,8 +3459,8 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
     tex += fmt::format(" rt0info {:08X}", rt0 ? Load32(base, rt0 + 0x1C) : 0);
     els += tex;
     REXLOG_INFO("trace draw p{} #{} prim {} vs {:016X} ps {:016X} stride0 {} fetch0 {:08X} cc {:08X} blend {:08X} depth {:08X} mask {:X}{}",
-                g_current_pass, draw_index, prim, vs_hash, ps_hash, Load8(base, dev + 0x30E8) * 4,
-                Load32(base, dev + 0x778),
+                g_current_pass, draw_index, prim, vs_hash, ps_hash, Load8(base, dev + kDev.stream_strides) * 4,
+                Load32(base, dev + kDevVertexFetch0),
                 LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_COLORCONTROL),
                 LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_BLENDCONTROL0),
                 LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_DEPTHCONTROL),
@@ -3443,6 +3470,8 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
   if (!vs_hash || (!ps_hash && !depth_only) || !decl) {
     ++stats_.skip_shader;
     stats_.pass_last_skip[g_current_pass & 31] = "shader";
+    LogUnsupportedOnce("draw without registered shaders or declaration", vs_hash ^ (ps_hash << 1),
+                       "shader object not seen by the CreateShader hooks");
     return false;
   }
   D3D12_PRIMITIVE_TOPOLOGY_TYPE topology_type = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
@@ -3477,6 +3506,7 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
     default:
       ++stats_.skip_prim;
       stats_.pass_last_skip[g_current_pass & 31] = "prim";
+      LogUnsupportedOnce("primitive type", prim);
       return false;
   }
   DXGI_FORMAT rtv_formats[4];
@@ -3485,6 +3515,7 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
   if (!BindRenderTargets(base, dev, rtv_formats, rt_count, dsv_format)) {
     ++stats_.skip_rt;
     stats_.pass_last_skip[g_current_pass & 31] = "rt";
+    LogUnsupportedOnce("render target bind", 0);
     return false;
   }
   // After binding targets: EDRAM reinterpretation inside BindRenderTargets
@@ -3511,6 +3542,7 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
   if (!pso) {
     ++stats_.skip_pso;
     stats_.pass_last_skip[g_current_pass & 31] = "pso";
+    LogUnsupportedOnce("pipeline", vs_hash ^ (ps_hash << 1));
     return false;
   }
   // Constants may create/upload textures (copy commands): record them before
@@ -3800,7 +3832,7 @@ Renderer::BufferPlan Renderer::PlanBuffer(uint8_t* base, uint32_t address, uint3
   auto it = tracked_.find(plan.key);
   if (it != tracked_.end()) {
     TrackedBuffer& t = it->second;
-    if (REXCVAR_GET(native_debug_buffers_always_dirty)) {
+    if (REXCVAR_GET(sr_native_debug_buffers_always_dirty)) {
       t.dirty = true;
       t.clean.clear();
     }
@@ -3879,18 +3911,18 @@ bool Renderer::PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRan
   for (uint32_t s = 0; s < 16; ++s) {
     if (!(streams_used & (1u << s))) continue;
     // Vertex fetch constant for stream s (XDK: slot 95 - s).
-    uint32_t fetch0 = Load32(base, dev + 0x778 - 8 * s);
-    uint32_t fetch1 = Load32(base, dev + 0x778 - 8 * s + 4);
+    uint32_t fetch0 = Load32(base, dev + kDevVertexFetch0 - 8 * s);
+    uint32_t fetch1 = Load32(base, dev + kDevVertexFetch0 - 8 * s + 4);
     uint32_t address = fetch0 & ~3u;
     uint32_t size = ((fetch1 >> 2) & 0xFFFFFF) * 4;
-    uint32_t stride = Load8(base, dev + 0x30E8 + s) * 4;
+    uint32_t stride = Load8(base, dev + kDev.stream_strides + s) * 4;
     if (!address || !size || !stride) {
       return false;
     }
     // Cache the whole guest vertex buffer (the stream offset of SetStreamSource
     // varies per draw into large shared buffers) and bind at an offset.
     uint32_t buffer_base = address, buffer_size = size;
-    if (uint32_t vb_object = Load32(base, dev + 0x30A4 + 4 * s)) {
+    if (uint32_t vb_object = Load32(base, dev + kDev.stream_buffers + 4 * s)) {
       uint32_t v = Load32(base, vb_object + 0x18) & ~3u;
       uint32_t phys = (v & 0x1FFFFFFFu) + (v >= 0xE0000000u ? 0x1000u : 0u);
       uint32_t full = ((Load32(base, vb_object + 0x1C) >> 2) & 0xFFFFFF) * 4;
@@ -3907,7 +3939,7 @@ bool Renderer::PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRan
     sp.size = size;
     sp.stride = stride;
     FrontStreamCache& sc = front_stream_cache_[s];
-    if (!REXCVAR_GET(native_debug_buffers_always_dirty) && sc.tracked && sc.address == buffer_base && sc.size == buffer_size && sc.decl == decl &&
+    if (!REXCVAR_GET(sr_native_debug_buffers_always_dirty) && sc.tracked && sc.address == buffer_base && sc.size == buffer_size && sc.decl == decl &&
         sc.stride == stride && sc.phase == phase && !sc.tracked->dirty) {
       // Clean and cached: no lookup, no range needed.
       sp.buffer.key = sc.key;
@@ -3942,7 +3974,7 @@ bool Renderer::PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRan
       sc.key = sp.buffer.key;
       sc.tracked = it != tracked_.end() ? &it->second : nullptr;
     }
-    if (REXCVAR_GET(native_debug_vb_addr) && address == uint32_t(REXCVAR_GET(native_debug_vb_addr))) {
+    if (REXCVAR_GET(sr_native_debug_vb_addr) && address == uint32_t(REXCVAR_GET(sr_native_debug_vb_addr))) {
       static int logged = 0;
       if (logged++ < 40) {
         std::string v;
@@ -3974,7 +4006,10 @@ bool Renderer::BindVertexStreams(uint8_t* base, const WorkBatch& batch, const Wo
                                   sp.stride};
     command_list_->IASetVertexBuffers(sp.stream, 1, &view);
   }
-  if (!ok) ++stats_.skip_vb;
+  if (!ok) {
+    ++stats_.skip_vb;
+    LogUnsupportedOnce("vertex stream", 0);
+  }
   return ok;
 }
 
@@ -3984,7 +4019,7 @@ void Renderer::ExecDrawVertices(uint8_t* base, const WorkBatch& batch, const Wor
   crumb_count_ = vertex_count;
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!BeginFrame()) return;
-  uint32_t dev = Load32(base, kDevicePtrAddr);
+  uint32_t dev = GuestDevice(base);
   D3D12_PRIMITIVE_TOPOLOGY topology;
   bool quads;
   bool streams_ok = BindVertexStreams(base, batch, cmd);
@@ -4024,7 +4059,7 @@ void Renderer::ExecDrawIndexedVertices(uint8_t* base, const WorkBatch& batch,
   crumb_count_ = index_count;
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!BeginFrame()) return;
-  uint32_t dev = Load32(base, kDevicePtrAddr);
+  uint32_t dev = GuestDevice(base);
   D3D12_PRIMITIVE_TOPOLOGY topology;
   bool quads;
   // Xenos strips restart at the all-ones index (the XDK enables reset for
@@ -4126,7 +4161,7 @@ void Renderer::ExecDrawInlineVertices(uint8_t* base, uint32_t prim, uint32_t dat
   crumb_count_ = vertex_count;
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!BeginFrame()) return;
-  uint32_t dev = Load32(base, kDevicePtrAddr);
+  uint32_t dev = GuestDevice(base);
   D3D12_PRIMITIVE_TOPOLOGY topology;
   bool quads;
   if (!dev || !vertex_count || !stride || !data ||
@@ -4237,7 +4272,7 @@ void Renderer::ExecBeginTiling(uint8_t* base, uint32_t count, uint32_t rects,
   tiling_active_ = w && h;
   tiling_width_ = w;
   tiling_height_ = h;
-  uint32_t dev = Load32(base, kDevicePtrAddr);
+  uint32_t dev = GuestDevice(base);
   if (!dev) return;
   // Clear the (full-size) tiling surfaces as the XDK does per tile.
   HostSurface* rt = GetSurface(base, Load32(base, dev + kDevRenderTargets), false);
@@ -4355,7 +4390,7 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
                            float clear_z, uint32_t clear_stencil) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!BeginFrame()) return;
-  uint32_t dev = Load32(base, kDevicePtrAddr);
+  uint32_t dev = GuestDevice(base);
   if (!dev) return;
   uint32_t source = flags & 7;
   bool depth = source == 4;
@@ -4492,7 +4527,7 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
       dy = Load32(base, dest_point + 4);
       // Predicated tiling: per-tile resolves of a full-screen target that pass
       // a (0,0) destination keep the tile at its screen position.
-      if (tiling_active_ && REXCVAR_GET(native_tile_resolve_in_place) && !dx && !dy &&
+      if (tiling_active_ && REXCVAR_GET(sr_native_tile_resolve_in_place) && !dx && !dy &&
           (x1 || y1) && dest_w >= src->width && dest_h >= src->height) {
         dx = x1;
         dy = y1;
@@ -4502,7 +4537,7 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
     y2 = std::min(y2, src->height);
     if (dx + (x2 - x1) > dest_w) x2 = x1 + (dest_w - std::min(dest_w, dx));
     if (dy + (y2 - y1) > dest_h) y2 = y1 + (dest_h - std::min(dest_h, dy));
-    if (x2 > x1 && y2 > y1 && REXCVAR_GET(native_debug_resolve_mode) != 1) {
+    if (x2 > x1 && y2 > y1 && REXCVAR_GET(sr_native_debug_resolve_mode) != 1) {
       // Guest pixels -> host pixels.
       const float k = src->scale;
       x1 = HostPx(x1, k);
@@ -4546,7 +4581,7 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
   }
 
   // Clears requested with the resolve.
-  if (REXCVAR_GET(native_debug_resolve_mode) == 2) flags &= ~0x300u;
+  if (REXCVAR_GET(sr_native_debug_resolve_mode) == 2) flags &= ~0x300u;
   // Xenos clears only the resolved EDRAM rectangle: with predicated tiling
   // each tile's resolve clears that tile for the next pass, and our host
   // surfaces are untiled, so clearing everything would wipe the other tiles.
@@ -4587,7 +4622,7 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
       r = ScaleRect(r, ds->scale);
       {
         static int logged = 0;
-        if (logged < 200 && REXCVAR_GET(native_debug_clears)) {
+        if (logged < 200 && REXCVAR_GET(sr_native_debug_clears)) {
           ++logged;
           REXLOG_INFO("native dbg depth clear {} z {} stencil {} rect {},{}-{},{} pass {} swap {}",
                       SurfaceName(ds), clear_z, clear_stencil, r.left, r.top, r.right, r.bottom,
@@ -4644,9 +4679,9 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
     if (Upload(1024 + 16, 256, gamma)) {
       uint32_t* g = reinterpret_cast<uint32_t*>(gamma.cpu);
       bool any = false;
-      if (!graphics_ || !graphics_->GetGammaRamp256(g)) std::memset(g, 0, 1024);
+      if (!GuestGammaRamp256(g)) std::memset(g, 0, 1024);
       for (uint32_t i = 0; i < 256; ++i) any |= g[i] != 0;
-      g[256] = (any && REXCVAR_GET(native_gamma_ramp)) ? 1 : 0;
+      g[256] = (any && REXCVAR_GET(sr_native_gamma_ramp)) ? 1 : 0;
       command_list_->SetGraphicsRootConstantBufferView(1, gamma.gpu);
     }
     command_list_->SetPipelineState(blit_pipeline_.Get());
@@ -4665,7 +4700,7 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
 
   // native_present=false: render (and dump) natively but leave presentation to
   // Xenos, for same-run A/B comparisons against its screenshots.
-  if (!REXCVAR_GET(native_ab_mode) && !REXCVAR_GET(native_debug_no_present))
+  if (!REXCVAR_GET(sr_native_ab_mode) && !REXCVAR_GET(sr_native_debug_no_present))
   presenter_->RefreshGuestOutput(
       output_width_, output_height_, 1280, 720,
       [&](rex::ui::Presenter::GuestOutputRefreshContext& context) -> bool {
@@ -4734,20 +4769,20 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
     frame_dump_done_ = true;
     REXLOG_INFO("native: per-pass dump done");
   }
-  bool dump_by_swap = REXCVAR_GET(native_dump_swap) > 0 &&
-                      swap_number_ == uint64_t(REXCVAR_GET(native_dump_swap));
-  if (!frame_dump_done_ && REXCVAR_GET(native_dump_after_pass) < 0 &&
-      (dump_by_swap || (REXCVAR_GET(native_dump_frame_at_s) > 0 &&
-                        rex::perf::BenchElapsedMs() >=
-                            REXCVAR_GET(native_dump_frame_at_s) * 1000.0))) {
+  bool dump_by_swap = REXCVAR_GET(sr_native_dump_swap) > 0 &&
+                      swap_number_ == uint64_t(REXCVAR_GET(sr_native_dump_swap));
+  if (!frame_dump_done_ && REXCVAR_GET(sr_native_dump_after_pass) < 0 &&
+      (dump_by_swap || (REXCVAR_GET(sr_native_dump_frame_at_s) > 0 &&
+                        compat::BenchElapsedMs() >=
+                            REXCVAR_GET(sr_native_dump_frame_at_s) * 1000.0))) {
     frame_dump_done_ = true;
     DumpFrameResources();
   }
-  // Multi-swap A/B (native_ab_swaps): the output only, prefixed by the swap.
+  // Multi-swap A/B (sr_native_ab_swaps): the output only, prefixed by the swap.
   {
     static const std::vector<uint64_t> ab_swaps = [] {
       std::vector<uint64_t> v;
-      std::string list = REXCVAR_GET(native_ab_swaps);
+      std::string list = REXCVAR_GET(sr_native_ab_swaps);
       size_t pos = 0;
       while (pos < list.size()) {
         size_t comma = list.find(',', pos);
@@ -4769,10 +4804,10 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
     REXLOG_INFO("trace end of frame ({} draws since last event)", trace_draws_);
     trace_state_ = 2;
   } else if (trace_state_ == 0 &&
-             ((REXCVAR_GET(native_trace_swap) > 0 &&
-               swap_number_ + 1 == uint64_t(REXCVAR_GET(native_trace_swap))) ||
-              (REXCVAR_GET(native_trace_frame_at_s) > 0 &&
-               rex::perf::BenchElapsedMs() >= REXCVAR_GET(native_trace_frame_at_s) * 1000.0))) {
+             ((REXCVAR_GET(sr_native_trace_swap) > 0 &&
+               swap_number_ + 1 == uint64_t(REXCVAR_GET(sr_native_trace_swap))) ||
+              (REXCVAR_GET(sr_native_trace_frame_at_s) > 0 &&
+               compat::BenchElapsedMs() >= REXCVAR_GET(sr_native_trace_frame_at_s) * 1000.0))) {
     trace_state_ = 1;
     trace_draws_ = 0;
     REXLOG_INFO("trace begin frame {}", frame_count_ + 1);
@@ -4780,8 +4815,8 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
   frame_index_ = (frame_index_ + 1) % kFramesInFlight;
   ++frame_count_;
   static double last_buffer_log = 0;
-  if (rex::perf::BenchElapsedMs() - last_buffer_log > 2000) {
-    last_buffer_log = rex::perf::BenchElapsedMs();
+  if (compat::BenchElapsedMs() - last_buffer_log > 2000) {
+    last_buffer_log = compat::BenchElapsedMs();
     REXLOG_INFO("native: buffers uploads {} partial {} ({} MB) invalidations {} ({} MB) live {}",
                 stats_.buffer_uploads, stats_.buffer_partial_uploads,
                 stats_.buffer_upload_bytes >> 20, front_invalidations_.load(),
@@ -4794,7 +4829,7 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
       }
     }
     REXLOG_INFO("native: t={:.0f}s swap {} per pass drawn/skipped:{}",
-                rex::perf::BenchElapsedMs() / 1000, swap_number_, per_pass);
+                compat::BenchElapsedMs() / 1000, swap_number_, per_pass);
     {
       std::string at;
       for (int p = 0; p < 32; ++p) {
@@ -4851,11 +4886,11 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
 }
 
 void Renderer::ExecOnPassEnd(int pass) {
-  // native_dump_after_pass=99: dump the surfaces after every pass of one frame
+  // sr_native_dump_after_pass=99: dump the surfaces after every pass of one frame
   // (starting at the shadow pass), files prefixed with the pass number.
-  bool all = REXCVAR_GET(native_dump_after_pass) == 99;
-  if (all && !frame_dump_done_ && REXCVAR_GET(native_dump_frame_at_s) > 0 &&
-      rex::perf::BenchElapsedMs() >= REXCVAR_GET(native_dump_frame_at_s) * 1000.0 &&
+  bool all = REXCVAR_GET(sr_native_dump_after_pass) == 99;
+  if (all && !frame_dump_done_ && REXCVAR_GET(sr_native_dump_frame_at_s) > 0 &&
+      compat::BenchElapsedMs() >= REXCVAR_GET(sr_native_dump_frame_at_s) * 1000.0 &&
       (dump_all_active_ || pass == 4)) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!frame_open_) return;
@@ -4873,9 +4908,9 @@ void Renderer::ExecOnPassEnd(int pass) {
     return;
   }
   if (all) return;
-  if (frame_dump_done_ || pass != REXCVAR_GET(native_dump_after_pass) ||
-      REXCVAR_GET(native_dump_frame_at_s) <= 0 ||
-      rex::perf::BenchElapsedMs() < REXCVAR_GET(native_dump_frame_at_s) * 1000.0) {
+  if (frame_dump_done_ || pass != REXCVAR_GET(sr_native_dump_after_pass) ||
+      REXCVAR_GET(sr_native_dump_frame_at_s) <= 0 ||
+      compat::BenchElapsedMs() < REXCVAR_GET(sr_native_dump_frame_at_s) * 1000.0) {
     return;
   }
   std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -4897,7 +4932,7 @@ void Renderer::ExecOnPassEnd(int pass) {
 
 void Renderer::DumpFrameResources(const std::string& prefix, bool surfaces_only,
                                   bool output_only) {
-  std::string dir = REXCVAR_GET(native_dump_dir);
+  std::string dir = REXCVAR_GET(sr_native_dump_dir);
   if (dir.empty()) return;
   uint64_t last = next_fence_value_ - 1;
   if (fence_->GetCompletedValue() < last) {
@@ -4925,9 +4960,9 @@ void Renderer::DumpFrameResources(const std::string& prefix, bool surfaces_only,
   if (!surfaces_only && !output_only && ssao_ao_) {
     items.push_back({"ssao_ao", ssao_ao_.Get(), &ssao_ao_state_});
   }
-  if (REXCVAR_GET(native_debug_texture_format) >= 0 && !surfaces_only) {
+  if (REXCVAR_GET(sr_native_debug_texture_format) >= 0 && !surfaces_only) {
     for (auto& [key, te] : textures_) {
-      if (!te.resource || te.guest_format != uint32_t(REXCVAR_GET(native_debug_texture_format))) continue;
+      if (!te.resource || te.guest_format != uint32_t(REXCVAR_GET(sr_native_debug_texture_format))) continue;
       D3D12_RESOURCE_DESC rd = te.resource->GetDesc();
       if (rd.Width > 512 || rd.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) continue;
       char n[96];
@@ -5004,13 +5039,13 @@ void Renderer::DumpFrameResources(const std::string& prefix, bool surfaces_only,
 }
 
 // ---------------------------------------------------------------------------
-// Front end (guest threads): capture + queue. See native_worker.
+// Front end (guest threads): capture + queue. See sr_native_worker.
 // ---------------------------------------------------------------------------
 
 void Renderer::BeginCmd(Op op) {
   if (!worker_mode_checked_) {
     worker_mode_checked_ = true;
-    worker_mode_ = REXCVAR_GET(native_worker) && REXCVAR_GET(native_pm4_mirror);
+    worker_mode_ = REXCVAR_GET(sr_native_worker) && REXCVAR_GET(sr_native_pm4_mirror);
     if (worker_mode_) {
       std::thread(&Renderer::WorkerMain, this).detach();
       REXLOG_INFO("native: recording worker enabled");
@@ -5052,12 +5087,12 @@ void Renderer::CaptureBytes(uint8_t* base, uint32_t address, uint32_t length) {
 // pointer, surface/shader/stream/index pointers and viewport, and the objects
 // they point to.
 void Renderer::CaptureDevice(uint8_t* base, uint32_t dev) {
-  CaptureBytes(base, kDevicePtrAddr, 4);
+  if (profile::kDevicePtrAddr) CaptureBytes(base, profile::kDevicePtrAddr, 4);
   CaptureBytes(base, dev, 8);
-  CaptureBytes(base, dev + 0x700, 0x80);
-  CaptureBytes(base, dev + 0x2880, 0x1D0);
-  CaptureBytes(base, dev + 0x2E20, 8);
-  CaptureBytes(base, dev + 0x3080, 0x120);
+  CaptureBytes(base, dev + kDev.fetch_constants + 0x280, 0x80);  // vertex fetch slots
+  CaptureBytes(base, dev + kDev.register_shadow, 0x1D0);
+  CaptureBytes(base, dev + kDev.vertex_decl - 4, 8);
+  CaptureBytes(base, dev + kDev.index_buffer - 0xC, 0x120);  // pointers .. viewport
   for (uint32_t i = 0; i < 4; ++i) {
     if (uint32_t rt = Load32(base, dev + kDevRenderTargets + 4 * i)) CaptureBytes(base, rt, 0x28);
   }
@@ -5073,7 +5108,7 @@ void Renderer::CaptureDevice(uint8_t* base, uint32_t dev) {
 void Renderer::CaptureRing(uint8_t* base, uint32_t dev) {
   if (!dev) return;
   // dev+48: last dword written into the current XDK command segment.
-  uint32_t current = Load32(base, dev + 48) + 4;
+  uint32_t current = Load32(base, dev + kDev.ring_write) + 4;
   if (ring_last_ && current >= ring_last_ && current - ring_last_ <= (1u << 20)) {
     uint32_t n = current - ring_last_;
     if (!cur_.ring_bytes) cur_.ring_offset = uint32_t(batch_->bytes.size());
@@ -5111,7 +5146,7 @@ void Renderer::WaitWorkerIdle(uint64_t batches) {
 }
 
 void Renderer::WorkerMain() {
-  rex::perf::RegisterSampledThread(4, "native_worker");
+  compat::RegisterSampledThread(4, "sr_native_worker");
   for (;;) {
     std::unique_ptr<WorkBatch> batch;
     {
@@ -5139,7 +5174,7 @@ void Renderer::Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd
   t_capture_count = cmd.range_count;
   t_capture_bytes = batch.bytes.data();
   g_current_pass = cmd.pass;
-  if (frame_open_ && REXCVAR_GET(native_gpu_pass_timing)) PassTimestamp(cmd.pass);
+  if (frame_open_ && REXCVAR_GET(sr_native_gpu_pass_timing)) PassTimestamp(cmd.pass);
   if (cmd.pass != last_exec_pass_) {
     if (fxaa_ && cmd.pass == kPassRenderHud && upscale_rt_ && frame_open_) {
       std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -5195,16 +5230,16 @@ void Renderer::Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd
 
 void Renderer::DrawVertices(uint8_t* base, uint32_t prim, uint32_t start_vertex,
                             uint32_t vertex_count) {
-  if (!REXCVAR_GET(native_draws)) return;
+  if (!REXCVAR_GET(sr_native_draws)) return;
   std::lock_guard<std::mutex> lock(front_mutex_);
   guest_base_ = base;
-  uint32_t dev = Load32(base, kDevicePtrAddr);
+  uint32_t dev = GuestDevice(base);
   if (!dev) return;
   if (prim == uint32_t(xenos::PrimitiveType::kRectangleList)) {
     // Rect lists need CPU expansion: read stream 0 through the guest's
     // physical view (0xA0000000 maps physical memory 1:1) and draw inline.
-    uint32_t fetch0 = Load32(base, dev + 0x778);
-    uint32_t stride = Load8(base, dev + 0x30E8) * 4;
+    uint32_t fetch0 = Load32(base, dev + kDevVertexFetch0);
+    uint32_t stride = Load8(base, dev + kDev.stream_strides) * 4;
     uint32_t phys = fetch0 & ~3u;
     if (!phys || !stride) return;
     uint32_t data = 0xA0000000u + phys + start_vertex * stride;
@@ -5234,16 +5269,16 @@ void Renderer::DrawVertices(uint8_t* base, uint32_t prim, uint32_t start_vertex,
 
 void Renderer::DrawIndexedVertices(uint8_t* base, uint32_t prim, int32_t base_vertex,
                                    uint32_t start_index, uint32_t index_count) {
-  if (int32_t spin = REXCVAR_GET(native_debug_spin_us)) {
+  if (int32_t spin = REXCVAR_GET(sr_native_debug_spin_us)) {
     auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(spin);
     while (std::chrono::steady_clock::now() < until) {
     }
   }
-  if (!REXCVAR_GET(native_draws)) return;
-  rex::perf::RegisterSampledThread(3, "native_draw_thread");
+  if (!REXCVAR_GET(sr_native_draws)) return;
+  compat::RegisterSampledThread(3, "native_draw_thread");
   std::lock_guard<std::mutex> lock(front_mutex_);
   guest_base_ = base;
-  uint32_t dev = Load32(base, kDevicePtrAddr);
+  uint32_t dev = GuestDevice(base);
   if (!dev) return;
   BeginCmd(Op::kDrawIndexed);
   CaptureRing(base, dev);
@@ -5255,7 +5290,7 @@ void Renderer::DrawIndexedVertices(uint8_t* base, uint32_t prim, int32_t base_ve
   // Vertex range referenced by the indices, scanned only if a dynamic vertex
   // buffer of this draw is dirty.
   VertexRange draw_range;
-  if (uint32_t ib_object = Load32(base, dev + 0x308C)) {
+  if (uint32_t ib_object = Load32(base, dev + kDev.index_buffer)) {
     bool index32 = (Load32(base, ib_object) & 0x80000000u) != 0;
     // +0x18 is a guest *virtual* address: convert like the XDK draw prologue
     // (82580FF8): physical = low 29 bits, +4 KB for the 0xE0000000 view.
@@ -5283,10 +5318,10 @@ void Renderer::DrawIndexedVertices(uint8_t* base, uint32_t prim, int32_t base_ve
 
 void Renderer::DrawInlineVertices(uint8_t* base, uint32_t prim, uint32_t data,
                                   uint32_t vertex_count, uint32_t stride) {
-  if (!REXCVAR_GET(native_draws)) return;
+  if (!REXCVAR_GET(sr_native_draws)) return;
   std::lock_guard<std::mutex> lock(front_mutex_);
   guest_base_ = base;
-  uint32_t dev = Load32(base, kDevicePtrAddr);
+  uint32_t dev = GuestDevice(base);
   if (!dev) return;
   BeginCmd(Op::kDrawInline);
   CaptureRing(base, dev);
@@ -5302,10 +5337,10 @@ void Renderer::DrawInlineVertices(uint8_t* base, uint32_t prim, uint32_t data,
 void Renderer::Resolve(uint8_t* base, uint32_t flags, uint32_t src_rect, uint32_t dest_texture,
                        uint32_t dest_point, uint32_t clear_color, float clear_z,
                        uint32_t clear_stencil) {
-  if (!REXCVAR_GET(native_resolves)) return;
+  if (!REXCVAR_GET(sr_native_resolves)) return;
   std::lock_guard<std::mutex> lock(front_mutex_);
   guest_base_ = base;
-  uint32_t dev = Load32(base, kDevicePtrAddr);
+  uint32_t dev = GuestDevice(base);
   if (!dev) return;
   BeginCmd(Op::kResolve);
   CaptureRing(base, dev);
@@ -5328,7 +5363,7 @@ void Renderer::BeginTiling(uint8_t* base, uint32_t count, uint32_t rects, uint32
                            float clear_z, uint32_t clear_stencil) {
   std::lock_guard<std::mutex> lock(front_mutex_);
   guest_base_ = base;
-  uint32_t dev = Load32(base, kDevicePtrAddr);
+  uint32_t dev = GuestDevice(base);
   BeginCmd(Op::kBeginTiling);
   if (dev) {
     CaptureRing(base, dev);
@@ -5348,7 +5383,7 @@ void Renderer::Clear(uint8_t* base, uint32_t count, uint32_t rects, uint32_t fla
                      uint32_t color, float z, uint32_t stencil) {
   std::lock_guard<std::mutex> lock(front_mutex_);
   guest_base_ = base;
-  uint32_t dev = Load32(base, kDevicePtrAddr);
+  uint32_t dev = GuestDevice(base);
   if (!dev) return;
   BeginCmd(Op::kClear);
   CaptureRing(base, dev);
@@ -5369,7 +5404,7 @@ void Renderer::ExecClear(uint8_t* base, uint32_t count, uint32_t rects, uint32_t
                          uint32_t color, float z, uint32_t stencil) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!BeginFrame()) return;
-  uint32_t dev = Load32(base, kDevicePtrAddr);
+  uint32_t dev = GuestDevice(base);
   if (!dev) return;
   {
     static int logged = 0;
@@ -5431,7 +5466,7 @@ void Renderer::EndTiling() {
 }
 
 void Renderer::OnPassEnd(int pass) {
-  if (REXCVAR_GET(native_dump_after_pass) < 0) return;  // debug dumps only
+  if (REXCVAR_GET(sr_native_dump_after_pass) < 0) return;  // debug dumps only
   std::lock_guard<std::mutex> lock(front_mutex_);
   if (!guest_base_) return;
   BeginCmd(Op::kPassEnd);
@@ -5449,21 +5484,21 @@ void Renderer::SyncRing(uint8_t* base, uint32_t dev) {
 
 void Renderer::ResyncRing(uint8_t* base, uint32_t dev) {
   std::lock_guard<std::mutex> lock(front_mutex_);
-  if (dev) ring_last_ = Load32(base, dev + 48) + 4;
+  if (dev) ring_last_ = Load32(base, dev + kDev.ring_write) + 4;
 }
 
 void Renderer::OnSwap(uint8_t* base, uint32_t front_buffer_texture, uint64_t swap_number) {
   std::lock_guard<std::mutex> lock(front_mutex_);
   guest_base_ = base;
   BeginCmd(Op::kSwap);
-  CaptureRing(base, Load32(base, kDevicePtrAddr));
+  CaptureRing(base, GuestDevice(base));
   if (front_buffer_texture) CaptureBytes(base, front_buffer_texture, 0x40);
   cur_.u[0] = front_buffer_texture;
   cur_.u64 = swap_number;
   EndCmd(base);
   if (worker_mode_) {
     FlushBatch();
-    // native_worker_lag 0: the frame is recorded before the guest continues.
+    // sr_native_worker_lag 0: the frame is recorded before the guest continues.
     // 1: the worker may still record this frame while the guest builds the
     // next one (everything a command reads from guest memory is captured,
     // except texture data - watched - and shader literal tables).
@@ -5472,7 +5507,7 @@ void Renderer::OnSwap(uint8_t* base, uint32_t front_buffer_texture, uint64_t swa
       std::lock_guard<std::mutex> qlock(queue_mutex_);
       submitted = batches_submitted_;
     }
-    WaitWorkerIdle(REXCVAR_GET(native_worker_lag) ? prev_swap_batches_ : submitted);
+    WaitWorkerIdle(REXCVAR_GET(sr_native_worker_lag) ? prev_swap_batches_ : submitted);
     prev_swap_batches_ = submitted;
   }
 }
@@ -5484,7 +5519,7 @@ void Renderer::ExecOnSwap(uint8_t* base, uint32_t front_buffer_texture, uint64_t
   scene_rt_ = scene_ds_ = nullptr;
   scene_depth_key_ = 0;
   camera_valid_ = ssao_done_ = false;
-  if (REXCVAR_GET(native_dump_swap) > 0 && swap_number == uint64_t(REXCVAR_GET(native_dump_swap))) {
+  if (REXCVAR_GET(sr_native_dump_swap) > 0 && swap_number == uint64_t(REXCVAR_GET(sr_native_dump_swap))) {
     mirror_snapshot_.assign(mirror_.regs(), mirror_.regs() + Pm4Mirror::kRegisterCount);
   }
   if (!BeginFrame()) {

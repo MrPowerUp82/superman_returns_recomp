@@ -4,7 +4,7 @@
 // ReXGlue keep their BSD license. Changes for Superman Returns are listed in
 // docs/native-port-plan.md section 2.
 //
-// Hang watchdog: when guest swaps stop for native_hang_watchdog_s seconds, logs
+// Hang watchdog: when guest swaps stop for sr_native_hang_watchdog_s seconds, logs
 // the native call stacks of every process thread once (dbghelp, superman_returns.pdb).
 // Diagnoses freezes without an attached debugger.
 #include "hang_watchdog.h"
@@ -21,7 +21,7 @@
 #include <rex/cvar.h>
 #include <rex/logging.h>
 
-REXCVAR_DEFINE_INT32(native_hang_watchdog_s, 6, "Superman Returns Native",
+REXCVAR_DEFINE_INT32(sr_native_hang_watchdog_s, 6, "Superman Returns Native",
                      "Log all thread stacks when no swap happens for this many seconds (0 = off)");
 
 namespace superman_returns::native {
@@ -101,7 +101,7 @@ void WatchdogMain() {
   bool reported = false;
   for (;;) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
-    int32_t limit_s = REXCVAR_GET(native_hang_watchdog_s);
+    int32_t limit_s = REXCVAR_GET(sr_native_hang_watchdog_s);
     int64_t last = g_last_beat_ms.load();
     if (limit_s <= 0 || !last) continue;
     int64_t idle = NowMs() - last;
