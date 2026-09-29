@@ -58,6 +58,11 @@ O modo experimental `--sr_renderer=trace` já usa um processador de comandos do 
 
 Para compilar o modo de captura, execute `powershell -File tools\setup_gpu_source.ps1` antes de `build.cmd`. O script baixa somente o código gráfico do ReXGlue v0.10.0 para `.tools/`. Para capturar 120 quadros de gameplay após o início de um jogo novo, execute `powershell -File tools\capture_gpu_trace.ps1 -Name gameplay -Gameplay -Frames 120`. O script fecha o processo que iniciou e grava o CSV bruto, o resumo e uma imagem de referência em `logs/`. Veja a [análise e os critérios de migração](docs/native-renderer.md).
 
+#### Ferramentas de otimização para rodar em casa
+
+- `powershell -File tools\bisect_codegen_flags.ps1`: testa cada opção de registrador do codegen (`cr_as_local`, `ctr_as_local`, `xer_as_local`, `reserved_as_local`, `non_argument_as_local`) sozinha — codegen, `build.cmd`, boot com `--sr_skip_intro=true` e `tools\bench.ps1` se bootar — e grava `logs\codegen_bisect.csv`. Restaura o manifesto e recompila no final. Ligadas juntas, elas deixaram o jogo sem nenhum quadro.
+- `python tools\find_spin_loops.py`: lista em `port\generated\default\` laços curtos de espera ativa (com `db16cyc` ou que só releem memória e comparam) em `logs\spin_loops.csv`, candidatos a hooks de espera real. É análise estática: confirmar com um perfil antes de criar hooks.
+
 ### Teclado e mouse (padrão)
 
 Os atalhos vêm do ReXGlue SDK v0.10.0. Cada botão aceita várias teclas separadas por vírgula.
