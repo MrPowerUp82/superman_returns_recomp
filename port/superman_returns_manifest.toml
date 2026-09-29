@@ -25,6 +25,12 @@ non_argument_as_local = false
 memcpy = 0x8279EC60
 memset = 0x8279F290
 
+# Scale the engine render size after device setup stores it (see src/render_scale.cpp).
+[[entrypoint.midasm_hook]]
+address = 0x822EB1C8
+name = "SrScaleEngineRenderSize"
+registers = ["r31"]
+
 # Kick starved XMA contexts in the audio mixer's busy-wait (see src/xma_fixes.cpp).
 [[entrypoint.midasm_hook]]
 address = 0x826595B8

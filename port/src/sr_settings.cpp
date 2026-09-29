@@ -3,6 +3,11 @@
 REXCVAR_DEFINE_BOOL(sr_skip_intro, false, "Superman Returns",
                     "Skip the publisher logo and legal videos at boot");
 
+REXCVAR_DEFINE_INT32(sr_render_scale, 100, "Superman Returns",
+                     "Internal render resolution in percent of 1280x720")
+    .range(25, 100)
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
 REXCVAR_DEFINE_STRING(sr_renderer, "xenos", "Superman Returns",
                       "Graphics backend: xenos or trace (project command processor)")
     .allowed({"xenos", "trace"})

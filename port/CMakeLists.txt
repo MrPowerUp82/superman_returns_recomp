@@ -18,6 +18,7 @@ set(SUPERMANRETURNS_SOURCES
     src/sr_settings.cpp
     src/skip_intro.cpp
     src/renderdoc_capture.cpp
+    src/render_scale.cpp
 )
 
 if(WIN32)
