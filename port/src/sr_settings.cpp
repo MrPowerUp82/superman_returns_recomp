@@ -26,6 +26,18 @@ REXCVAR_DEFINE_STRING(sr_gpu_trace_trigger_path, "", "Superman Returns",
                       "Begin tracing after this file appears (overrides start frame)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
+REXCVAR_DEFINE_STRING(sr_gpu_pass_probe_path, "", "Superman Returns",
+                      "Optional CSV of vertex buffers and constants for a selected shader pair")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
+REXCVAR_DEFINE_STRING(sr_gpu_probe_vs_hash, "", "Superman Returns",
+                      "Vertex shader hash for the optional pass probe")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
+REXCVAR_DEFINE_STRING(sr_gpu_probe_ps_hash, "", "Superman Returns",
+                      "Pixel shader hash for the optional pass probe")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
 REXCVAR_DEFINE_STRING(sr_gpu_skip_vs_hash, "", "Superman Returns",
                       "Diagnostic: skip draws using this vertex shader hash and sr_gpu_skip_ps_hash")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
