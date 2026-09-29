@@ -42,6 +42,12 @@ O jogo já aplica por padrão, em `port/src/superman_returns_app.h`, as opções
 
 Para medir, `F3` abre um painel com o FPS do jogo, e `set SR_LOG_FPS=1` antes de rodar grava o FPS em `logs/game.log` a cada 2 s. `F4` abre as configurações do runtime.
 
+#### Pós-processamento (`sr_post_effects`, experimental, não validado)
+
+`--sr_post_effects=false` (padrão `true`, exige reiniciar) desliga a cadeia de bloom/raios de luz. Exige o backend D3D12 em processo (`tools/setup_gpu_source.ps1` antes do `build.cmd`); sem ele a opção é ignorada com aviso no log. Com a opção desligada, o processador de comandos do projeto pula os quads (primitiva 13 = *quad list*) das superfícies menores que a cena (640, 320, 160 e 80 pixels de largura) e o resolve que segue cada um. Os passes na superfície de 1280 (entre eles a composição final) e o HUD continuam. A lista fica em [`port/src/native_renderer/post_effects.h`](port/src/native_renderer/post_effects.h) e foi derivada do trace [`docs/data/gpu_groups_gameplay_intel_uhd.csv`](docs/data/gpu_groups_gameplay_intel_uhd.csv). **O efeito na imagem e no FPS não foi medido.** O teste anterior que pulou todos os draws de primitiva 13 (inclusive os de 1280 e o HUD) deu 8,4 FPS contra 7,1, com imagem não verificada; não é uma estimativa desta opção.
+
+Para validar em casa: `powershell -File tools\post_effects_check.ps1 -Pairs 2 -Trace`. O script roda o `tools\bench.ps1` com a opção ligada e desligada, compara os screenshots (`logs\post_effects_<nome>_*_diff.png`), confere no log quantos passes foram pulados e, com `-Trace`, lista a ordem dos passes de um quadro com `tools\post_effects_trace.py`. Se a imagem quebrar (tela preta, brilho congelado ou lixo), o relatório do trace indica quais passes mantidos leem as texturas que deixaram de ser atualizadas.
+
 ### Desenvolvimento do renderizador próprio
 
 O modo experimental `--sr_renderer=trace` já usa um processador de comandos do projeto. Ele registra draws, cópias, swaps, hashes de shaders e estados gráficos, mas **ainda delega a renderização ao backend Xenos D3D12**. É uma ferramenta de migração, sem ganho de FPS esperado. O modo padrão continua `xenos`.
