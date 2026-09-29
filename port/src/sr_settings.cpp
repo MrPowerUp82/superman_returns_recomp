@@ -39,14 +39,19 @@ REXCVAR_DEFINE_STRING(sr_gpu_probe_ps_hash, "", "Superman Returns",
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 REXCVAR_DEFINE_STRING(sr_gpu_skip_vs_hash, "", "Superman Returns",
-                      "Diagnostic: skip draws using this vertex shader hash and sr_gpu_skip_ps_hash")
+                      "Diagnostic: restrict sr_gpu_skip_ps_hash to this vertex shader hash (empty = any)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 REXCVAR_DEFINE_STRING(sr_gpu_skip_ps_hash, "", "Superman Returns",
-                      "Diagnostic: skip draws using this pixel shader hash and sr_gpu_skip_vs_hash")
+                      "Diagnostic: skip draws using this pixel shader hash")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 REXCVAR_DEFINE_INT32(sr_gpu_skip_edram_mode, -1, "Superman Returns",
                      "Diagnostic: restrict skipped draws to this EDRAM mode (-1 = any)")
     .range(-1, 6)
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
+REXCVAR_DEFINE_STRING(sr_gpu_skip_rules, "", "Superman Returns",
+                      "Diagnostic: skip draws/copies matching rules, e.g. "
+                      "\"ps=<hash>;prim=13,mode=4;copy=1,surface=<n>\"")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);

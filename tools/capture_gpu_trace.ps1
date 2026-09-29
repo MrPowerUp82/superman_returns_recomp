@@ -119,12 +119,19 @@ try {
     Press $proc 0x0D
     Start-Sleep 3
     Press $proc 0x20
+    $nextSkip = (Get-Date).AddSeconds(6)
     while ((Get-Date) -lt $deadline) {
       Start-Sleep 2
       $proc.Refresh()
       if ($proc.HasExited) { throw "Game exited before gameplay: $($proc.ExitCode)" }
       [SrTraceInput]::SetForegroundWindow($proc.MainWindowHandle) | Out-Null
       if (Capture-Gameplay-Frame) { break }
+      # Start skips the new-game opening cinematic; the HUD check runs first so
+      # this never opens the pause menu once gameplay is visible.
+      if ((Get-Date) -ge $nextSkip) {
+        Press $proc 0x0D
+        $nextSkip = (Get-Date).AddSeconds(8)
+      }
     }
     if (-not (Test-Path -LiteralPath $scene)) { throw 'Gameplay HUD did not appear before timeout' }
     Start-Sleep 5

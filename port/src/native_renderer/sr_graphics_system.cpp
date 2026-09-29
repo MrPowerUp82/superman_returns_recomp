@@ -8,6 +8,8 @@
 #include <iomanip>
 #include <memory>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include <rex/cvar.h>
 #include <rex/graphics/d3d12/command_processor.h>
@@ -20,6 +22,15 @@
 namespace {
 
 class SrGraphicsSystem;
+
+struct SkipRule {
+  uint64_t vs = 0;           // 0 = any
+  uint64_t ps = 0;           // 0 = any
+  int32_t mode = -1;         // RB_MODECONTROL edram mode, -1 = any
+  int32_t prim = -1;         // xenos primitive type, -1 = any
+  int64_t surface = -1;      // RB_SURFACE_INFO value, -1 = any
+  bool copy = false;         // matches resolves (IssueCopy) instead of draws
+};
 
 class SrCommandProcessor final : public rex::graphics::d3d12::D3D12CommandProcessor {
  public:
@@ -46,11 +57,11 @@ class SrCommandProcessor final : public rex::graphics::d3d12::D3D12CommandProces
   uint32_t max_frames_ = 0;
   std::filesystem::path trigger_path_;
   bool trace_started_ = true;
-  uint64_t skip_vs_hash_ = 0;
-  uint64_t skip_ps_hash_ = 0;
+  bool MatchesSkipRule(bool copy, uint32_t primitive_type) const;
+  std::vector<SkipRule> skip_rules_;
+  uint64_t skipped_copies_ = 0;
   uint64_t probe_vs_hash_ = 0;
   uint64_t probe_ps_hash_ = 0;
-  int32_t skip_edram_mode_ = -1;
   uint64_t skipped_draws_ = 0;
   uint64_t frame_ = 0;
   uint64_t event_ = 0;
@@ -80,6 +91,39 @@ uint64_t HashRegisterWords(const uint32_t* words, size_t count) {
   return hash;
 }
 
+// One diagnostic skip rule: every field that is set must match. Parsed from
+// sr_gpu_skip_rules, e.g. "ps=BE398F0A17FF758A;prim=13,mode=4;copy=1".
+SkipRule ParseSkipRule(std::string_view text) {
+  SkipRule rule;
+  while (!text.empty()) {
+    const size_t comma = text.find(',');
+    const std::string_view term = text.substr(0, comma);
+    text = comma == std::string_view::npos ? std::string_view{} : text.substr(comma + 1);
+    const size_t eq = term.find('=');
+    if (eq == std::string_view::npos) continue;
+    const std::string_view key = term.substr(0, eq);
+    const std::string value(term.substr(eq + 1));
+    if (key == "vs") rule.vs = ParseShaderHash(value);
+    else if (key == "ps") rule.ps = ParseShaderHash(value);
+    else if (key == "mode") rule.mode = std::stoi(value);
+    else if (key == "prim") rule.prim = std::stoi(value);
+    else if (key == "surface") rule.surface = std::stoll(value);
+    else if (key == "copy") rule.copy = value == "1";
+  }
+  return rule;
+}
+
+std::vector<SkipRule> ParseSkipRules(std::string_view text) {
+  std::vector<SkipRule> rules;
+  while (!text.empty()) {
+    const size_t semi = text.find(';');
+    const std::string_view part = text.substr(0, semi);
+    text = semi == std::string_view::npos ? std::string_view{} : text.substr(semi + 1);
+    if (!part.empty()) rules.push_back(ParseSkipRule(part));
+  }
+  return rules;
+}
+
 SrCommandProcessor::SrCommandProcessor(
     SrGraphicsSystem* graphics_system, rex::system::KernelState* kernel_state)
     : D3D12CommandProcessor(graphics_system, kernel_state) {
@@ -90,21 +134,21 @@ SrCommandProcessor::SrCommandProcessor(
       std::clamp(rex::cvar::Query<int32_t>("sr_gpu_trace_start_frame"), 0, 1000000));
   trigger_path_ = rex::cvar::Query<std::string>("sr_gpu_trace_trigger_path");
   trace_started_ = trigger_path_.empty();
-  skip_vs_hash_ = ParseShaderHash(
-      rex::cvar::Query<std::string>("sr_gpu_skip_vs_hash"));
-  skip_ps_hash_ = ParseShaderHash(
-      rex::cvar::Query<std::string>("sr_gpu_skip_ps_hash"));
+  skip_rules_ = ParseSkipRules(rex::cvar::Query<std::string>("sr_gpu_skip_rules"));
+  // Legacy single-pair options map onto one rule.
+  const uint64_t legacy_vs = ParseShaderHash(rex::cvar::Query<std::string>("sr_gpu_skip_vs_hash"));
+  const uint64_t legacy_ps = ParseShaderHash(rex::cvar::Query<std::string>("sr_gpu_skip_ps_hash"));
+  if (legacy_ps) {
+    skip_rules_.push_back({legacy_vs, legacy_ps,
+                           rex::cvar::Query<int32_t>("sr_gpu_skip_edram_mode")});
+  }
   probe_vs_hash_ = ParseShaderHash(
       rex::cvar::Query<std::string>("sr_gpu_probe_vs_hash"));
   probe_ps_hash_ = ParseShaderHash(
       rex::cvar::Query<std::string>("sr_gpu_probe_ps_hash"));
-  skip_edram_mode_ = rex::cvar::Query<int32_t>("sr_gpu_skip_edram_mode");
-  if (skip_vs_hash_ && skip_ps_hash_) {
-    REXLOG_WARN("sr renderer: diagnostic draw skip enabled for VS {:016X}, PS {:016X}, mode {}",
-                skip_vs_hash_, skip_ps_hash_, skip_edram_mode_);
-  } else if (skip_vs_hash_ || skip_ps_hash_) {
-    REXLOG_ERROR("sr renderer: both skip shader hashes are required; skipping disabled");
-    skip_vs_hash_ = skip_ps_hash_ = 0;
+  for (const SkipRule& r : skip_rules_) {
+    REXLOG_WARN("sr renderer: diagnostic skip rule vs={:016X} ps={:016X} mode={} prim={} "
+                "surface={} copy={}", r.vs, r.ps, r.mode, r.prim, r.surface, r.copy);
   }
   trace_.open(path, std::ios::out | std::ios::trunc);
   if (!trace_) {
@@ -196,10 +240,7 @@ bool SrCommandProcessor::IssueDraw(
   ProbeDraw(primitive_type, index_count, index_buffer_info);
   const auto* vs = active_vertex_shader();
   const auto* ps = active_pixel_shader();
-  const uint32_t mode = register_file_->values[rex::graphics::XE_GPU_REG_RB_MODECONTROL] & 7;
-  if (skip_vs_hash_ && vs && ps && vs->ucode_data_hash() == skip_vs_hash_ &&
-      ps->ucode_data_hash() == skip_ps_hash_ &&
-      (skip_edram_mode_ < 0 || mode == static_cast<uint32_t>(skip_edram_mode_))) {
+  if (MatchesSkipRule(false, static_cast<uint32_t>(primitive_type))) {
     ++skipped_draws_;
     Trace("skipped", static_cast<uint32_t>(primitive_type), index_count,
           index_buffer_info ? static_cast<uint32_t>(index_buffer_info->format) : 0,
@@ -214,7 +255,33 @@ bool SrCommandProcessor::IssueDraw(
   return accepted;
 }
 
+bool SrCommandProcessor::MatchesSkipRule(bool copy, uint32_t primitive_type) const {
+  if (skip_rules_.empty()) return false;
+  const auto& regs = *register_file_;
+  const uint32_t mode = regs.values[rex::graphics::XE_GPU_REG_RB_MODECONTROL] & 7;
+  const uint32_t surface = regs.values[rex::graphics::XE_GPU_REG_RB_SURFACE_INFO];
+  const auto* vs = active_vertex_shader();
+  const auto* ps = active_pixel_shader();
+  for (const SkipRule& r : skip_rules_) {
+    if (r.copy != copy) continue;
+    if (r.mode >= 0 && static_cast<uint32_t>(r.mode) != mode) continue;
+    if (r.surface >= 0 && static_cast<uint32_t>(r.surface) != surface) continue;
+    if (!copy) {
+      if (r.prim >= 0 && static_cast<uint32_t>(r.prim) != primitive_type) continue;
+      if (r.vs && (!vs || vs->ucode_data_hash() != r.vs)) continue;
+      if (r.ps && (!ps || ps->ucode_data_hash() != r.ps)) continue;
+    }
+    return true;
+  }
+  return false;
+}
+
 bool SrCommandProcessor::IssueCopy() {
+  if (MatchesSkipRule(true, 0)) {
+    ++skipped_copies_;
+    Trace("skipped_copy", 0, 0, 0, false);
+    return true;
+  }
   const bool accepted = D3D12CommandProcessor::IssueCopy();
   Trace("copy", 0, 0, 0, accepted);
   return accepted;
@@ -238,9 +305,9 @@ void SrCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
     REXLOG_INFO("sr renderer: finished tracing {} frames ({} events, {} draws skipped)",
                 max_frames_, event_, skipped_draws_);
   }
-  if (skip_vs_hash_ && frame_ % 120 == 0) {
-    REXLOG_INFO("sr renderer: skipped {} draws through frame {}",
-                skipped_draws_, frame_);
+  if (!skip_rules_.empty() && frame_ % 120 == 0) {
+    REXLOG_INFO("sr renderer: skipped {} draws, {} copies through frame {}",
+                skipped_draws_, skipped_copies_, frame_);
   }
 }
 
