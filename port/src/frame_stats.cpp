@@ -14,6 +14,7 @@
 #include <rex/hook.h>
 
 #include "generated/default/superman_returns_init.h"
+#include "native_renderer/native_bridge.h"
 #include "renderdoc_capture.h"
 
 namespace {
@@ -44,7 +45,12 @@ REX_HOOK_RAW(sub_82112050) {
   const uint64_t frames = g_frames.fetch_add(1, std::memory_order_relaxed) + 1;
   MaybeLogFps(frames);
   OnGuestFrameForCapture(frames);
+  // sub_82112050 is also the candidate D3DDevice_Swap(dev, front_buffer, ...)
+  // of the native renderer (game_profile.h); a no-op unless that is built,
+  // confirmed and active.
+  const uint32_t device = ctx.r3.u32, front_buffer = ctx.r4.u32;
   __imp__sub_82112050(ctx, base);
+  superman_returns::native::OnFrameStatsSwap(base, device, front_buffer);
 }
 
 rex::ui::FrameStats SampleGuestFrameStats() {

@@ -29,6 +29,21 @@ endif()
 
 rexglue_setup_target(superman_returns GPU_PLUGINS xenos)
 
+# Native renderer ported from rexglue-native-kit (docs/native-port-plan.md):
+#   OFF      (default) nothing native is built; the executable is unchanged.
+#   CAPTURE  hooks whose address is confirmed in game_profile.h observe only.
+#   RENDERER --sr_renderer=native works; needs every address confirmed
+#            (static_assert) and the in-process GPU sources below.
+set(SR_NATIVE "OFF" CACHE STRING "Native renderer build level: OFF, CAPTURE or RENDERER")
+set_property(CACHE SR_NATIVE PROPERTY STRINGS OFF CAPTURE RENDERER)
+if(NOT SR_NATIVE MATCHES "^(OFF|CAPTURE|RENDERER)$")
+    message(FATAL_ERROR "SR_NATIVE must be OFF, CAPTURE or RENDERER (got '${SR_NATIVE}')")
+endif()
+# Loose DXIL corpus packed into the executable in RENDERER builds
+# (tools/shaders/build_corpus.ps1); without it use --sr_native_shader_dir.
+set(SR_NATIVE_SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../artifacts/shaders/dxil"
+    CACHE PATH "DXIL shader corpus embedded by SR_NATIVE=RENDERER builds")
+
 # Compile the SDK's D3D12 GPU source in-process so a project-owned command
 # processor can observe each draw. The normal executable remains available
 # without the optional source checkout and keeps using the Xenos plugin.
@@ -94,6 +109,67 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
     target_link_libraries(sr_gpu PRIVATE rex::runtime rex::xxhash d3d12 dxgi dxguid)
     target_link_libraries(superman_returns PRIVATE sr_gpu)
     target_compile_definitions(superman_returns PRIVATE SR_HAS_TRACE_GPU=1)
+
+    if(NOT SR_NATIVE STREQUAL "OFF")
+        # An OBJECT library, not a static one: the hook objects only override
+        # weak recompiled functions, so nothing would pull them from an archive.
+        set(SR_NATIVE_ROOT src/native_renderer)
+        add_library(sr_native OBJECT
+            ${SR_NATIVE_ROOT}/native_bridge.cpp
+            ${SR_NATIVE_ROOT}/native_hooks.cpp
+            ${SR_NATIVE_ROOT}/native_graphics_system.cpp
+            ${SR_NATIVE_ROOT}/native_renderer.cpp
+            ${SR_NATIVE_ROOT}/pm4_mirror.cpp
+            ${SR_NATIVE_ROOT}/texture_decode.cpp
+            ${SR_NATIVE_ROOT}/shader_registry.cpp
+            ${SR_NATIVE_ROOT}/pipeline_cache.cpp
+            ${SR_NATIVE_ROOT}/hang_watchdog.cpp
+        )
+        set(SR_NATIVE_DEFINITIONS SR_HAS_NATIVE=1)
+        if(SR_NATIVE STREQUAL "RENDERER")
+            list(APPEND SR_NATIVE_DEFINITIONS SR_NATIVE_RENDERER_BUILD=1)
+        endif()
+        target_compile_definitions(sr_native PUBLIC ${SR_NATIVE_DEFINITIONS})
+        target_include_directories(sr_native PRIVATE
+            ${SR_NATIVE_ROOT}
+            ${SR_REXGPU_SOURCE_DIR}
+            ${SR_REXGPU_SOURCE_DIR}/thirdparty/renderdoc
+        )
+        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+            target_compile_options(sr_native PRIVATE -Wno-unused-variable -mssse3 -msse4.1)
+        endif()
+        target_link_libraries(sr_native PRIVATE rex::runtime rex::xxhash)
+        target_link_libraries(superman_returns PRIVATE sr_native d3d12 dxgi dbghelp)
+        target_compile_definitions(superman_returns PRIVATE ${SR_NATIVE_DEFINITIONS})
+
+        # Offline shaders packed into one blob (RCDATA 2), as in the kit.
+        file(GLOB SR_NATIVE_SHADER_FILES "${SR_NATIVE_SHADER_DIR}/*.dxil")
+        if(SR_NATIVE STREQUAL "RENDERER" AND SR_NATIVE_SHADER_FILES)
+            enable_language(RC)
+            find_package(Python3 REQUIRED COMPONENTS Interpreter)
+            set(SR_NATIVE_SHADER_PAK "${CMAKE_CURRENT_BINARY_DIR}/superman_returns_shaders.pak")
+            add_custom_command(
+                OUTPUT "${SR_NATIVE_SHADER_PAK}"
+                COMMAND Python3::Interpreter
+                        "${CMAKE_CURRENT_SOURCE_DIR}/../tools/shaders/pack_shaders.py"
+                        "${SR_NATIVE_SHADER_DIR}" "${SR_NATIVE_SHADER_PAK}"
+                DEPENDS ${SR_NATIVE_SHADER_FILES}
+                        "${CMAKE_CURRENT_SOURCE_DIR}/../tools/shaders/pack_shaders.py"
+                COMMENT "Packing native renderer shaders")
+            set(SR_NATIVE_SHADERS_RC "${CMAKE_CURRENT_BINARY_DIR}/superman_returns_shaders.rc")
+            file(WRITE "${SR_NATIVE_SHADERS_RC}" "2 RCDATA \"${SR_NATIVE_SHADER_PAK}\"\n")
+            set_source_files_properties("${SR_NATIVE_SHADERS_RC}" PROPERTIES
+                OBJECT_DEPENDS "${SR_NATIVE_SHADER_PAK}")
+            target_sources(superman_returns PRIVATE "${SR_NATIVE_SHADERS_RC}")
+        elseif(SR_NATIVE STREQUAL "RENDERER")
+            message(STATUS "No DXIL in ${SR_NATIVE_SHADER_DIR}: the native renderer will "
+                           "need --sr_native_shader_dir")
+        endif()
+    endif()
 else()
+    if(NOT SR_NATIVE STREQUAL "OFF")
+        message(FATAL_ERROR "SR_NATIVE=${SR_NATIVE} needs the ReXGlue GPU sources: run "
+                            "tools/setup_gpu_source.ps1")
+    endif()
     target_compile_definitions(superman_returns PRIVATE SR_HAS_TRACE_GPU=0)
 endif()

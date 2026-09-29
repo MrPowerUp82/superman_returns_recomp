@@ -9,8 +9,9 @@ REXCVAR_DEFINE_INT32(sr_render_scale, 100, "Superman Returns",
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 REXCVAR_DEFINE_STRING(sr_renderer, "xenos", "Superman Returns",
-                      "Graphics backend: xenos or trace (project command processor)")
-    .allowed({"xenos", "trace"})
+                      "Graphics backend: xenos, trace (project command processor) or native "
+                      "(experimental XDK-hook renderer; falls back to xenos when unavailable)")
+    .allowed({"xenos", "trace", "native"})
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 REXCVAR_DEFINE_STRING(sr_gpu_trace_path, "gpu_trace.csv", "Superman Returns",

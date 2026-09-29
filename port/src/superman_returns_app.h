@@ -12,6 +12,7 @@
 #include <rex/cvar.h>
 
 #include "frame_stats.h"
+#include "native_renderer/native_bridge.h"
 #if SR_HAS_TRACE_GPU
 #include "native_renderer/sr_graphics_system.h"
 #endif
@@ -26,11 +27,15 @@ class SupermanReturnsApp : public rex::ReXApp {
         PPCImageConfig));
   }
 
-  // Pick the graphics backend. With the in-process GPU sources linked, both
-  // modes use them (see CreateSrXenosGraphicsSystem); otherwise fall back to
-  // the Xenos plugin DLL staged next to the executable.
+  // Pick the graphics backend. With the in-process GPU sources linked, the
+  // xenos and trace modes use them (see CreateSrXenosGraphicsSystem);
+  // otherwise fall back to the Xenos plugin DLL staged next to the executable.
+  // sr_renderer=native (docs/native-port-plan.md) uses the native renderer
+  // when the build and the game profile allow it, else xenos.
   void OnPreSetup(rex::RuntimeConfig& config) override {
-    const bool trace = rex::cvar::Query<std::string>("sr_renderer") == "trace";
+    const std::string renderer = rex::cvar::Query<std::string>("sr_renderer");
+    const bool trace = renderer == "trace";
+    const bool native = renderer == "native";
 #if SR_HAS_TRACE_GPU
     // GPU defaults measured on Intel UHD (open world, paired runs); an explicit
     // command-line or config value always wins.
@@ -47,12 +52,25 @@ class SupermanReturnsApp : public rex::ReXApp {
     gpu_default("render_target_path_d3d12", "rtv");
     gpu_default("depth_float24_convert_in_pixel_shader", "true");
     gpu_default("native_stencil_value_output_d3d12_intel", "true");
+    if (!config.graphics && native) {
+#if SR_HAS_NATIVE
+      config.graphics = superman_returns::native::CreateNativeGraphicsSystem(
+          &CreateSrXenosGraphicsSystem, &CreateSrAbGraphicsSystem);
+#else
+      REXLOG_WARN("sr_renderer=native: this build has no native renderer (CMake "
+                  "SR_NATIVE=RENDERER); using the xenos backend");
+#endif
+    }
     if (!config.graphics) {
       config.graphics = trace ? CreateSrTraceGraphicsSystem() : CreateSrXenosGraphicsSystem();
     }
 #else
     if (trace) {
       REXLOG_ERROR("sr_renderer=trace requires the ReXGlue v0.10.0 GPU sources");
+    }
+    if (native) {
+      REXLOG_WARN("sr_renderer=native requires the ReXGlue v0.10.0 GPU sources and CMake "
+                  "SR_NATIVE=RENDERER; using the xenos backend");
     }
 #endif
     if (!config.graphics && config.gpu_plugin.empty()) {
