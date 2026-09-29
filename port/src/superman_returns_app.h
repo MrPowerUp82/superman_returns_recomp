@@ -12,6 +12,7 @@
 #include <rex/cvar.h>
 
 #include "frame_stats.h"
+#include "sr_settings.h"
 #include "native_renderer/native_bridge.h"
 #if SR_HAS_TRACE_GPU
 #include "native_renderer/sr_graphics_system.h"
@@ -33,6 +34,9 @@ class SupermanReturnsApp : public rex::ReXApp {
   // sr_renderer=native (docs/native-port-plan.md) uses the native renderer
   // when the build and the game profile allow it, else xenos.
   void OnPreSetup(rex::RuntimeConfig& config) override {
+    // Before anything reads the options a preset manages (sr_post_effects
+    // below, sr_render_scale in render_scale.cpp).
+    ApplySrPreset();
     const std::string renderer = rex::cvar::Query<std::string>("sr_renderer");
     const bool trace = renderer == "trace";
     const bool native = renderer == "native";

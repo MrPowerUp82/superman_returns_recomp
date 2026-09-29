@@ -2,6 +2,21 @@
 
 Status: substituído pela nova prioridade do usuário em 2026-09-28: desenvolver um renderizador próprio. Ver [native-renderer.md](native-renderer.md). Este documento permanece como registro do plano anterior; sua ordem de etapas não governa a implementação atual.
 
+## Estado da implementação (2026-09-29, nada medido)
+
+Implementado às cegas, sem compilar nem rodar o jogo; nenhum número abaixo foi medido.
+
+| Opção | Estado |
+| --- | --- |
+| `sr_preset` | `port/src/sr_preset.cpp`. `quality` (padrão) mantém tudo como está; `performance` liga `sr_post_effects=false`; `custom` não mexe em nada. Aplicado no `OnPreSetup`, só em opções com `GetFlagSource == kDefault`. |
+| `sr_post_effects` | `port/src/native_renderer/post_effects.h` (lista derivada do trace) e o filtro no processador de comandos do projeto. Validação: `tools/post_effects_check.ps1`. |
+| `sr_render_scale` | Experimental (`port/src/render_scale.cpp`). Os dois presets mantêm `100`; o gancho está comentado na tabela de `sr_preset.cpp`. |
+| `sr_shadows`, `sr_draw_distance` | Não implementados. |
+| Opções de registrador do codegen | Desligadas: ligadas juntas, o jogo não gera nenhum quadro. `tools/bisect_codegen_flags.ps1` testa uma de cada vez. |
+| Espera ativa | `tools/find_spin_loops.py` lista candidatos no código gerado para virarem hooks. |
+
+Limitação do preset: o "Save to config" do F4 grava no `.toml` toda opção diferente do padrão, inclusive as que o preset preencheu. Esse valor salvo passa a prevalecer sobre o preset; depois de trocar de preset, apague `sr_post_effects` e `sr_render_scale` do `.toml` (ou defina-os explicitamente).
+
 ## Resumo do entendimento
 
 - Otimizar o recomp com dois presets: **Qualidade** (visual atual, padrão) e **Desempenho** (hardware fraco).

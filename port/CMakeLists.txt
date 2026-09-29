@@ -16,6 +16,7 @@ set(SUPERMANRETURNS_SOURCES
     src/frame_stats.cpp
     src/xma_fixes.cpp
     src/sr_settings.cpp
+    src/sr_preset.cpp
     src/skip_intro.cpp
     src/renderdoc_capture.cpp
     src/render_scale.cpp
