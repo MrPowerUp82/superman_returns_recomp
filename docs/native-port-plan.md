@@ -229,6 +229,25 @@ Windows/clang com D3D12 e não há `port/generated/`. O que foi verificado aqui:
 - `tools/native_validate.ps1 -Step kit` executado com PowerShell 7 no Linux; os demais `.ps1`
   só passaram pelo parser do PowerShell.
 
+Testes sem o jogo (rodam em qualquer máquina, também no Windows):
+
+```bat
+cmake -S tests/native -B build/tests-native && cmake --build build/tests-native
+ctest --test-dir build/tests-native --output-on-failure
+python -m pytest tests/tools
+```
+
+`tests/native` (30 casos, C++ puro): endereçamento tiled 2D comparado com a fórmula
+independente do SDK (`GetTiledOffset2D`, copiada no teste) para 5 tamanhos de bloco e 10
+pitches, bijeção do tiling 2D/3D, swizzle → mapeamento D3D12, espelho PM4 (type-0/1,
+`SET_CONSTANT`, `LOAD_ALU_CONSTANT`, `INDIRECT_BUFFER`, resolve, pacote truncado), cabeçalho
+de container de shader, leitor do pacote de shaders e invariantes de `game_profile.h`.
+`tests/tools` (16 casos, pytest): `xex_libraries.py`, `native_ab_compare.py`,
+`extract_shaders.py` (containers desalinhados e dumps), formato do `pack_shaders.py` e a
+consistência de cada candidato não confirmado de `game_profile.h` com
+`docs/data/xdk_match.tsv`. Aqui passaram com clang 18 e g++ 13 (este também com
+ASan/UBSan) e Python 3.11.
+
 Todo o resto precisa ser compilado e executado pelo dono. O código foi mantido o mais próximo
 possível do kit (diferenças listadas na seção 2) para reduzir o risco.
 

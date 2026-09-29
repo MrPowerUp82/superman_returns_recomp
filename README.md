@@ -97,6 +97,10 @@ Opções disponíveis: `--keybind_a`, `_b`, `_x`, `_y`, `_left_trigger`, `_right
 
 O `build.cmd` usa o manifesto para regenerar o C++ automaticamente. O diretório `port/generated/default/` é descartável e não deve ser editado diretamente. Ajustes para o jogo devem ficar no manifesto, em `port/src/` ou em uma etapa de patch reproduzível.
 
+### Renderizador nativo (experimental, não validado)
+
+`port/src/native_renderer/` traz o renderizador D3D12 do [rexglue-native-kit](https://github.com/crazyriddler/rexglue-native-kit), que intercepta as funções Direct3D do XDK e desenha sem emular a GPU Xenos. **Ele ainda não foi compilado nem executado com este jogo**: os endereços das funções em `port/src/native_renderer/game_profile.h` são candidatos não confirmados, e o build padrão (`SR_NATIVE=OFF`) não inclui nada dele. `--sr_renderer=native` volta para `xenos`, com aviso no log, enquanto o renderer não estiver compilado e confirmado. O plano, a lista de endereços e a checklist para validar em casa (`tools/native_validate.ps1`) estão em [`docs/native-port-plan.md`](docs/native-port-plan.md). Os testes que não precisam do jogo ficam em `tests/`.
+
 ## Próximos marcos técnicos
 
 1. Capturar e classificar os comandos, shaders e passes gráficos do título e do mundo aberto.

@@ -13,3 +13,4 @@ logs/
 # Native renderer shader corpus and local tool checkouts (tools/shaders)
 artifacts/
 __pycache__/
+build/
