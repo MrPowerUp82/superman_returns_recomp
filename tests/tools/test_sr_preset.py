@@ -39,4 +39,6 @@ def test_quality_is_the_default():
 def test_render_scale_not_enabled_by_any_preset_yet():
     values = {name: (q, p) for name, q, p in preset_values()}
     assert values["sr_render_scale"] == ("100", "100")
-    assert values["sr_post_effects"] == ("true", "false")
+    # sr_post_effects=false corrupted the image without an FPS gain; see
+    # sr_preset.cpp. No preset turns it off until it is fixed.
+    assert values["sr_post_effects"] == ("true", "true")

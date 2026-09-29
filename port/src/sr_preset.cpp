@@ -18,7 +18,7 @@
 #include "sr_settings.h"
 
 REXCVAR_DEFINE_STRING(sr_preset, "quality", "Superman Returns",
-                      "Preset: quality (current look), performance (post effects off) or "
+                      "Preset: quality (current look), performance (lower cost options) or "
                       "custom (no change). Only fills options still at their default")
     .allowed({"quality", "performance", "custom"})
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
@@ -34,7 +34,12 @@ struct PresetValue {
 // quality must stay the compiled-in default of every option: the Quality
 // preset is the current look (docs/performance-design.md, decision 7).
 constexpr PresetValue kPresetValues[] = {
-    {"sr_post_effects", "true", "false"},
+    // Kept on in both presets: validated 2026-09-29 on i5-13420H + Intel UHD
+    // (tools/post_effects_check.ps1, 2 pairs), sr_post_effects=false gave no
+    // FPS gain (-1% idle, -6% forward, within noise) and corrupted the image
+    // (skipped resolves leave the textures the final composite reads with
+    // stale data). Re-enable here once the option works.
+    {"sr_post_effects", "true", "true"},
     // Hook for the internal resolution, not enabled yet: sr_render_scale is
     // experimental (render_scale.cpp; HUD and resolves at lower sizes are
     // unverified, and post_effects.h only matches the 1280x720 surfaces).
