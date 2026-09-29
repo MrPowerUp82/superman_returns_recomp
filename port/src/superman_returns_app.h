@@ -26,15 +26,20 @@ class SupermanReturnsApp : public rex::ReXApp {
         PPCImageConfig));
   }
 
-  // Load the Xenos GPU emulation plugin staged next to the executable.
+  // Pick the graphics backend. With the in-process GPU sources linked, both
+  // modes use them (see CreateSrXenosGraphicsSystem); otherwise fall back to
+  // the Xenos plugin DLL staged next to the executable.
   void OnPreSetup(rex::RuntimeConfig& config) override {
-    if (rex::cvar::Query<std::string>("sr_renderer") == "trace") {
+    const bool trace = rex::cvar::Query<std::string>("sr_renderer") == "trace";
 #if SR_HAS_TRACE_GPU
-      config.graphics = CreateSrTraceGraphicsSystem();
-#else
-      REXLOG_ERROR("sr_renderer=trace requires the ReXGlue v0.10.0 GPU sources");
-#endif
+    if (!config.graphics) {
+      config.graphics = trace ? CreateSrTraceGraphicsSystem() : CreateSrXenosGraphicsSystem();
     }
+#else
+    if (trace) {
+      REXLOG_ERROR("sr_renderer=trace requires the ReXGlue v0.10.0 GPU sources");
+    }
+#endif
     if (!config.graphics && config.gpu_plugin.empty()) {
       config.gpu_plugin = "xenos";
     }

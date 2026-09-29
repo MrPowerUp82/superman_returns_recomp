@@ -249,3 +249,7 @@ void SrCommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
 std::unique_ptr<rex::system::IGraphicsSystem> CreateSrTraceGraphicsSystem() {
   return std::make_unique<SrGraphicsSystem>();
 }
+
+std::unique_ptr<rex::system::IGraphicsSystem> CreateSrXenosGraphicsSystem() {
+  return std::make_unique<rex::graphics::d3d12::D3D12GraphicsSystem>();
+}

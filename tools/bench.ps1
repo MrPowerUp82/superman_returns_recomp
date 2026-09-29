@@ -148,6 +148,7 @@ try {
   Start-Sleep $Settle
   if ($proc.HasExited) { throw "game exited while loading the save" }
   $worldDeadline = (Get-Date).AddSeconds($WorldTimeout)
+  $nextSkip = Get-Date
   while ($true) {
     Focus $proc
     if (Has-Gameplay-Frame) { break }
@@ -155,6 +156,12 @@ try {
     if ((Get-Date) -gt $worldDeadline) {
       Screenshot "$root\logs\bench_${Name}_not_gameplay.png"
       throw "no gameplay frame after $WorldTimeout seconds"
+    }
+    # The new-game opening cinematic runs for minutes; Start skips it. The HUD
+    # check above runs first so this never opens the pause menu in gameplay.
+    if ((Get-Date) -ge $nextSkip) {
+      Key 0x0D
+      $nextSkip = (Get-Date).AddSeconds(8)
     }
     Start-Sleep 2
   }
