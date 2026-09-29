@@ -1,8 +1,8 @@
 <#
 Open-world benchmark for the Superman Returns recomp.
 
-Boots the game with the intro skipped, presses Start at the title screen
-(loads the most recent save), lets it settle, then measures two scenarios:
+Boots the game with the intro skipped, starts a new game at the title screen,
+lets it settle, then measures two scenarios:
   idle     - standing still for 20 s
   forward  - holding W (move forward) for 20 s
 and appends one CSV row per scenario to logs/bench_results.csv
@@ -18,7 +18,8 @@ param(
   [string]$ExtraArgs = "",
   [int]$TitleTimeout = 60,
   [int]$Settle = 25,
-  [int]$Window = 20
+  [int]$Window = 20,
+  [int]$WorldTimeout = 90
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
@@ -56,9 +57,45 @@ function Key($vk, [switch]$Down, [switch]$Up) {
 function Screenshot($path) {
   $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
   $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
-  [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
-  $bmp.Save($path)
-  $bmp.Dispose()
+  try {
+    $gfx = [System.Drawing.Graphics]::FromImage($bmp)
+    try { $gfx.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size) }
+    finally { $gfx.Dispose() }
+    $bmp.Save($path)
+  } finally { $bmp.Dispose() }
+}
+
+function Has-Gameplay-Frame() {
+  $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+  $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+  try {
+    $gfx = [System.Drawing.Graphics]::FromImage($bmp)
+    try { $gfx.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size) }
+    finally { $gfx.Dispose() }
+    $bright = 0
+    for ($y = 1; $y -le 9; $y++) {
+      for ($x = 1; $x -le 16; $x++) {
+        $pixel = $bmp.GetPixel([int]($x * $b.Width / 17), [int]($y * $b.Height / 10))
+        if (($pixel.R + $pixel.G + $pixel.B) -gt 75) { $bright++ }
+      }
+    }
+    # Require the blue and red Superman HUD bars. The title, load prompt and
+    # opening cinematic can all contain a bright rendered scene without gameplay.
+    $blueHud = 0
+    $redHud = 0
+    for ($i = 0; $i -lt 30; $i++) {
+      $px = [int]($b.Width * (.12 + $i * .012))
+      $blue = $bmp.GetPixel($px, [int]($b.Height * .18))
+      if ($blue.B - $blue.R -gt 12 -and $blue.B - $blue.G -gt 5 -and
+          $blue.R -gt 80) { $blueHud++ }
+      $red = $bmp.GetPixel($px, [int]($b.Height * .21))
+      if ($red.R - $red.B -gt 20 -and $red.R - $red.G -gt 15 -and
+          $red.R -gt 80) { $redHud++ }
+    }
+    return $bright -ge 12 -and $blueHud -ge 20 -and $redHud -ge 8
+  } finally {
+    $bmp.Dispose()
+  }
 }
 
 function Measure-Window($proc, $scenario) {
@@ -105,8 +142,24 @@ try {
   Start-Sleep 5
   Focus $proc; Key 0x0D
   Step "pressed Start"
+  Start-Sleep 3
+  Focus $proc; Key 0x20
+  Step "selected Start New Game"
   Start-Sleep $Settle
   if ($proc.HasExited) { throw "game exited while loading the save" }
+  $worldDeadline = (Get-Date).AddSeconds($WorldTimeout)
+  while ($true) {
+    Focus $proc
+    if (Has-Gameplay-Frame) { break }
+    if ($proc.HasExited) { throw "game exited before rendering the save" }
+    if ((Get-Date) -gt $worldDeadline) {
+      Screenshot "$root\logs\bench_${Name}_not_gameplay.png"
+      throw "no gameplay frame after $WorldTimeout seconds"
+    }
+    Start-Sleep 2
+  }
+  Step "visible frame detected"
+  Start-Sleep 5
 
   Measure-Window $proc 'idle'
   Focus $proc; Key 0x57 -Down

@@ -1,6 +1,6 @@
 # Otimização de desempenho — design
 
-Status: aprovado em 2026-09-28. Implementação ainda não iniciada.
+Status: substituído pela nova prioridade do usuário em 2026-09-28: desenvolver um renderizador próprio. Ver [native-renderer.md](native-renderer.md). Este documento permanece como registro do plano anterior; sua ordem de etapas não governa a implementação atual.
 
 ## Resumo do entendimento
 
@@ -49,7 +49,7 @@ A lista final só inclui opções com patch confirmado. O preset preenche apenas
 
 ### Etapa 0 — medição
 
-- `tools/bench.ps1`: fecha o jogo aberto, abre com a configuração testada, aperta Start na tela de título (carrega o save), espera 25 s e mede 20 s parado e 20 s voando. Grava em `logs/bench_results.csv` (configuração, cenário, FPS médio e mínimo, núcleos, % de GPU) e salva screenshots. Roda num processo só, com timeout em cada passo e log de progresso.
+- `tools/bench.ps1`: fecha o jogo aberto, abre com a configuração testada, aperta Start e depois A (inicia jogo novo), aguarda o HUD e mede 20 s parado e 20 s andando para a frente. Grava em `logs/bench_results.csv` (configuração, cenário, FPS médio e mínimo, núcleos, % de GPU) e salva screenshots. O teste de voo ainda precisa de um cenário reproduzível.
 - Pular os vídeos de abertura, se houver patch simples.
 - RenderDoc (integração já existe no runtime) para ver o custo de cada passagem de GPU; se a captura falhar, medir desligando passagens uma a uma.
 - `wpr` com build com símbolos (`-gcodeview`) para ver quais threads estão em espera ativa.

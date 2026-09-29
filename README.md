@@ -42,6 +42,12 @@ Os scripts usam `rtv` junto com `--depth_float24_convert_in_pixel_shader=true`. 
 
 Para medir, `F3` abre um painel com o FPS do jogo, e `set SR_LOG_FPS=1` antes de rodar grava o FPS em `logs/game.log` a cada 2 s. `F4` abre as configurações do runtime.
 
+### Desenvolvimento do renderizador próprio
+
+O modo experimental `--sr_renderer=trace` já usa um processador de comandos do projeto. Ele registra draws, cópias, swaps, hashes de shaders e estados gráficos, mas **ainda delega a renderização ao backend Xenos D3D12**. É uma ferramenta de migração, sem ganho de FPS esperado. O modo padrão continua `xenos`.
+
+Para compilar o modo de captura, execute `powershell -File tools\setup_gpu_source.ps1` antes de `build.cmd`. O script baixa somente o código gráfico do ReXGlue v0.10.0 para `.tools/`. Para capturar 120 quadros de gameplay após o início de um jogo novo, execute `powershell -File tools\capture_gpu_trace.ps1 -Name gameplay -Gameplay -Frames 120`. O script fecha o processo que iniciou e grava o CSV bruto, o resumo e uma imagem de referência em `logs/`. Veja a [análise e os critérios de migração](docs/native-renderer.md).
+
 ### Teclado e mouse (padrão)
 
 Os atalhos vêm do ReXGlue SDK v0.10.0. Cada botão aceita várias teclas separadas por vírgula.
@@ -93,8 +99,8 @@ O `build.cmd` usa o manifesto para regenerar o C++ automaticamente. O diretório
 
 ## Próximos marcos técnicos
 
-1. Testar menus, entrada (controle e teclado) e o início do gameplay.
-2. Melhorar o desempenho de GPU em hardware integrado.
-3. Só considerar o jogo jogável após passar por menus e gameplay real.
+1. Capturar e classificar os comandos, shaders e passes gráficos do título e do mundo aberto.
+2. Desenvolver um renderizador específico para o jogo e comparar imagem e FPS com o backend Xenos. A arquitetura e os critérios de aceite estão em [`docs/native-renderer.md`](docs/native-renderer.md).
+3. Testar menus, entrada e gameplay real; só considerar o jogo jogável após essa validação.
 
 Os arquivos originais do jogo não são incluídos no projeto.

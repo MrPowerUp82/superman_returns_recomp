@@ -9,8 +9,12 @@
 
 #include <rex/rex_app.h>
 #include <rex/runtime.h>
+#include <rex/cvar.h>
 
 #include "frame_stats.h"
+#if SR_HAS_TRACE_GPU
+#include "native_renderer/sr_graphics_system.h"
+#endif
 
 class SupermanReturnsApp : public rex::ReXApp {
  public:
@@ -24,6 +28,13 @@ class SupermanReturnsApp : public rex::ReXApp {
 
   // Load the Xenos GPU emulation plugin staged next to the executable.
   void OnPreSetup(rex::RuntimeConfig& config) override {
+    if (rex::cvar::Query<std::string>("sr_renderer") == "trace") {
+#if SR_HAS_TRACE_GPU
+      config.graphics = CreateSrTraceGraphicsSystem();
+#else
+      REXLOG_ERROR("sr_renderer=trace requires the ReXGlue v0.10.0 GPU sources");
+#endif
+    }
     if (!config.graphics && config.gpu_plugin.empty()) {
       config.gpu_plugin = "xenos";
     }
