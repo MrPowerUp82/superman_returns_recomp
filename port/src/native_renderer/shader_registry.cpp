@@ -80,15 +80,22 @@ void DumpContainer(uint8_t* base, uint32_t container, const GuestShaderInfo& inf
 // shader container, returns the new D3D shader object in r3.
 void OnCreateShader(PPCContext& ctx, uint8_t* base, void (*original)(PPCContext&, uint8_t*),
                     const char* role) {
-  const uint32_t container = ctx.r3.u32;
+  uint32_t container = ctx.r3.u32;
   GuestShaderInfo info;
-  const bool valid = HashContainer(base, container, info);
+  bool valid = HashContainer(base, container, info);
+  uint32_t shader_obj = 0;
+  if (!valid && HashContainer(base, ctx.r4.u32, info)) {
+    container = ctx.r4.u32;
+    shader_obj = ctx.r3.u32;
+    valid = true;
+  }
   original(ctx, base);
-  NoteHookCall(role, container, ctx.r3.u32);
-  if (!valid || !ctx.r3.u32) return;
+  if (!shader_obj) shader_obj = ctx.r3.u32;
+  NoteHookCall(role, container, shader_obj);
+  if (!valid || !shader_obj) return;
   DumpContainer(base, container, info);
   std::lock_guard<std::mutex> lock(g_mutex);
-  g_shaders[ctx.r3.u32] = info;
+  g_shaders[shader_obj] = info;
 }
 }  // namespace
 
