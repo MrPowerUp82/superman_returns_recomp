@@ -25,7 +25,9 @@ if not exist "%ROOT%game\default.xex" (
 )
 rem Native renderer build level (docs/native-port-plan.md): set SR_NATIVE=CAPTURE or RENDERER.
 if not defined SR_NATIVE set "SR_NATIVE=OFF"
-cmake -S "%ROOT%port" -B "%ROOT%port\out\build\win-amd64-release" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_PREFIX_PATH="%SDK%" -DSR_NATIVE=%SR_NATIVE%
+if not defined SR_LSFG set "SR_LSFG=OFF"
+rem Optional separate executable folder; an empty value restores normal output.
+cmake -S "%ROOT%port" -B "%ROOT%port\out\build\win-amd64-release" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_PREFIX_PATH="%SDK%" -DSR_NATIVE=%SR_NATIVE% -DSR_LSFG=%SR_LSFG% -DCMAKE_RUNTIME_OUTPUT_DIRECTORY="%SR_RUNTIME_OUTPUT_DIR%"
 if errorlevel 1 exit /b 1
 cmake --build "%ROOT%port\out\build\win-amd64-release" --parallel 4
 exit /b %errorlevel%

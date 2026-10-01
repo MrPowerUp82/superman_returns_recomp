@@ -37,6 +37,14 @@ class SupermanReturnsApp : public rex::ReXApp {
     // Before anything reads the options a preset manages (sr_post_effects
     // below, sr_render_scale in render_scale.cpp).
     ApplySrPreset();
+#if SR_HAS_LSFG
+    REXLOG_INFO("LSFG build enabled; requested={}, flag={}",
+        rex::cvar::Query<bool>("sr_lsfg"), rex::cvar::GetFlagByName("sr_lsfg"));
+#endif
+#if !SR_HAS_LSFG
+    if (rex::cvar::Query<bool>("sr_lsfg"))
+      REXLOG_WARN("sr_lsfg requires a build with SR_LSFG=ON; using normal presentation");
+#endif
     const std::string renderer = rex::cvar::Query<std::string>("sr_renderer");
     const bool trace = renderer == "trace";
     const bool native = renderer == "native";

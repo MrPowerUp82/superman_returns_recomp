@@ -41,6 +41,9 @@
 #include "game_profile.h"
 #include "hang_watchdog.h"
 #include "sdk_compat.h"
+#if SR_HAS_LSFG
+#include "presenter_factory.h"
+#endif
 
 REXCVAR_DEFINE_INT32(sr_native_fps_limit, 30, "Superman Returns Native",
                      "Native graphics system frame rate limit (30 = original, up to 120; 0 = "
@@ -145,10 +148,17 @@ rex::X_STATUS NativeGraphicsSystem::SetupPresentation(rex::ui::WindowedAppContex
   auto loss = [](bool, bool) {
     rex::FatalError("Graphics device lost (probably due to an internal error)");
   };
-  if (app_context_) {
-    app_context_->CallInUIThreadSynchronous([this, loss]() { presenter_ = provider_->CreatePresenter(loss); });
-  } else {
+  auto create_presenter = [this, loss]() {
+#if SR_HAS_LSFG
+    presenter_ = sr::lsfg::CreateProjectPresenter(*provider_, loss);
+#else
     presenter_ = provider_->CreatePresenter(loss);
+#endif
+  };
+  if (app_context_) {
+    app_context_->CallInUIThreadSynchronous(create_presenter);
+  } else {
+    create_presenter();
   }
   if (!presenter_) {
     REXLOG_ERROR("native graphics: unable to create the presenter");

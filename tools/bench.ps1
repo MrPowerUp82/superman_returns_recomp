@@ -101,12 +101,18 @@ function Has-Gameplay-Frame() {
 function Measure-Window($proc, $scenario) {
   $lines0 = @(Get-Content $log).Count
   $proc.Refresh(); $cpu0 = $proc.TotalProcessorTime.TotalSeconds
+  $timer = [System.Diagnostics.Stopwatch]::StartNew()
   $gpu = Get-Counter "\GPU Engine(pid_$($proc.Id)*engtype_3D)\Utilization Percentage" `
     -SampleInterval $Window -MaxSamples 1 -ErrorAction SilentlyContinue
-  $proc.Refresh(); $cores = ($proc.TotalProcessorTime.TotalSeconds - $cpu0) / $Window
+  # Counter availability or an early first sample must not shorten the window.
+  $remaining = $Window - $timer.Elapsed.TotalSeconds
+  if ($remaining -gt 0) { Start-Sleep -Milliseconds ([int][math]::Ceiling($remaining * 1000)) }
+  $timer.Stop()
+  $proc.Refresh(); $cores = ($proc.TotalProcessorTime.TotalSeconds - $cpu0) / $timer.Elapsed.TotalSeconds
   $gpuPct = ($gpu.CounterSamples | Measure-Object CookedValue -Sum).Sum
   $fps = @(Get-Content $log | Select-Object -Skip $lines0 | Select-String 'guest fps: ([\d.]+)' |
-    ForEach-Object { [double]$_.Matches[0].Groups[1].Value })
+    ForEach-Object { [double]::Parse($_.Matches[0].Groups[1].Value, [System.Globalization.CultureInfo]::InvariantCulture) })
+  if (-not $fps.Count) { throw "No guest FPS samples during $scenario; benchmark is invalid" }
   Screenshot "$root\logs\bench_${Name}_$scenario.png"
   $row = [pscustomobject]@{
     time = Get-Date -Format s; name = $Name; scenario = $scenario

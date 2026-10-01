@@ -10,6 +10,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(generated/rexglue.cmake)
 
+option(SR_LSFG "Build experimental direct-DLL LSFG presentation and GPU smoke test" OFF)
+if(SR_LSFG)
+    add_subdirectory(src/lsfg)
+endif()
+
 # Sources
 set(SUPERMANRETURNS_SOURCES
     src/main.cpp
@@ -20,6 +25,7 @@ set(SUPERMANRETURNS_SOURCES
     src/skip_intro.cpp
     src/renderdoc_capture.cpp
     src/render_scale.cpp
+    src/lsfg_settings.cpp
 )
 
 if(WIN32)
@@ -29,6 +35,18 @@ else()
 endif()
 
 rexglue_setup_target(superman_returns GPU_PLUGINS xenos)
+
+if(SR_LSFG)
+    # Instantiate the project presenter explicitly: rexruntime is a DLL and
+    # its internal provider factory would otherwise create the SDK presenter.
+    target_sources(superman_returns PRIVATE src/lsfg/presentation.cpp
+        third_party/rexui-lsfg/d3d12_presenter.cpp)
+    target_include_directories(superman_returns PRIVATE src/lsfg third_party/rexui-lsfg)
+    target_link_libraries(superman_returns PRIVATE sr_lsfg_interop d3dcompiler)
+    target_compile_definitions(superman_returns PRIVATE SR_HAS_LSFG=1)
+else()
+    target_compile_definitions(superman_returns PRIVATE SR_HAS_LSFG=0)
+endif()
 
 # Native renderer ported from rexglue-native-kit (docs/native-port-plan.md):
 #   OFF      (default) nothing native is built; the executable is unchanged.
@@ -62,6 +80,10 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
         message(FATAL_ERROR "Trace GPU sources must be ReXGlue v0.10.0 (f5337cd). Run tools/setup_gpu_source.ps1")
     endif()
     set(SR_GPU_ROOT "${SR_REXGPU_SOURCE_DIR}/src/graphics")
+    set(SR_GRAPHICS_SYSTEM_SOURCE "${SR_GPU_ROOT}/graphics_system.cpp")
+    if(SR_LSFG)
+        set(SR_GRAPHICS_SYSTEM_SOURCE third_party/rexui-lsfg/graphics_system.cpp)
+    endif()
     set(SR_GPU_SOURCES
         ${SR_GPU_ROOT}/flags.cpp
         ${SR_GPU_ROOT}/register_file.cpp
@@ -69,7 +91,7 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
         ${SR_GPU_ROOT}/pipeline/shader/shader.cpp
         ${SR_GPU_ROOT}/format/ucode.cpp
         ${SR_GPU_ROOT}/sampler_info.cpp
-        ${SR_GPU_ROOT}/graphics_system.cpp
+        ${SR_GRAPHICS_SYSTEM_SOURCE}
         ${SR_GPU_ROOT}/command_processor.cpp
         ${SR_GPU_ROOT}/util/draw_extent_estimator.cpp
         ${SR_GPU_ROOT}/util/draw.cpp
@@ -101,6 +123,7 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
     )
     add_library(sr_gpu STATIC ${SR_GPU_SOURCES})
     target_include_directories(sr_gpu PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/lsfg
         ${SR_REXGPU_SOURCE_DIR}
         ${SR_REXGPU_SOURCE_DIR}/thirdparty/renderdoc
     )
@@ -131,7 +154,9 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
             list(APPEND SR_NATIVE_DEFINITIONS SR_NATIVE_RENDERER_BUILD=1)
         endif()
         target_compile_definitions(sr_native PUBLIC ${SR_NATIVE_DEFINITIONS})
+        target_compile_definitions(sr_native PRIVATE SR_HAS_LSFG=$<BOOL:${SR_LSFG}>)
         target_include_directories(sr_native PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src/lsfg
             ${SR_NATIVE_ROOT}
             ${SR_REXGPU_SOURCE_DIR}
             ${SR_REXGPU_SOURCE_DIR}/thirdparty/renderdoc
@@ -168,6 +193,9 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
         endif()
     endif()
 else()
+    if(SR_LSFG)
+        message(FATAL_ERROR "SR_LSFG needs the ReXGlue GPU sources: run tools/setup_gpu_source.ps1")
+    endif()
     if(NOT SR_NATIVE STREQUAL "OFF")
         message(FATAL_ERROR "SR_NATIVE=${SR_NATIVE} needs the ReXGlue GPU sources: run "
                             "tools/setup_gpu_source.ps1")
