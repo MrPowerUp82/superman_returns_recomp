@@ -44,6 +44,7 @@
 #include "sr_graphics_system.h"
 #include "shader_pack.h"
 #include "shader_registry.h"
+#include "vertex_signature.h"
 #include "texture_decode.h"
 
 REXCVAR_DEFINE_INT32(sr_native_debug_spin_us, 0, "Superman Returns Native",
@@ -388,33 +389,6 @@ const char* UsageSemantic(uint32_t usage) {
 // of its DXBC container (u32 count, u32 offset, then 32-byte elements whose
 // first fields are stream, name offset, index; the names follow). Empty when
 // the blob has no such chunk, which turns the filtering off.
-std::vector<std::pair<std::string, uint32_t>> VertexShaderInputs(const std::vector<uint8_t>& dxbc) {
-  std::vector<std::pair<std::string, uint32_t>> out;
-  auto rd = [&](size_t at) -> uint32_t {
-    uint32_t v = 0;
-    if (at + 4 <= dxbc.size()) std::memcpy(&v, dxbc.data() + at, 4);
-    return v;
-  };
-  if (dxbc.size() < 32 || std::memcmp(dxbc.data(), "DXBC", 4) != 0) return out;
-  const uint32_t chunks = rd(28);
-  for (uint32_t c = 0; c < chunks && c < 64; ++c) {
-    const size_t at = rd(32 + 4 * c);
-    if (at + 8 > dxbc.size() || std::memcmp(dxbc.data() + at, "ISG1", 4) != 0) continue;
-    const size_t base = at + 8;
-    const size_t end = std::min(dxbc.size(), base + rd(at + 4));
-    const uint32_t count = rd(base);
-    for (uint32_t i = 0; i < count && i < 64; ++i) {
-      const size_t e = base + rd(base + 4) + 32 * i;
-      if (e + 12 > end) break;
-      const size_t name_at = base + rd(e + 4);
-      if (name_at >= end) continue;
-      const char* name = reinterpret_cast<const char*>(dxbc.data() + name_at);
-      out.emplace_back(std::string(name, strnlen(name, end - name_at)), rd(e + 8));
-    }
-    break;
-  }
-  return out;
-}
 
 D3D12_BLEND MapBlend(xenos::BlendFactor f) {
   using BF = xenos::BlendFactor;
@@ -768,7 +742,7 @@ bool Renderer::EnsureInitialized() {
 
 bool Renderer::CreateDrawResources() {
   // --- Main root signature: 3 root CBVs + bindless SRV/sampler tables. ---
-  D3D12_DESCRIPTOR_RANGE srv_ranges[3] = {};
+  D3D12_DESCRIPTOR_RANGE srv_ranges[4] = {};
   for (uint32_t i = 0; i < 3; ++i) {
     srv_ranges[i].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     srv_ranges[i].NumDescriptors = kSrvHeapSize;
@@ -778,7 +752,7 @@ bool Renderer::CreateDrawResources() {
   sampler_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
   sampler_range.NumDescriptors = kSamplerHeapSize;
   sampler_range.RegisterSpace = 3;
-  D3D12_ROOT_PARAMETER params[8] = {};
+  D3D12_ROOT_PARAMETER params[9] = {};
   for (uint32_t i = 0; i < 3; ++i) {
     params[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     params[i].Descriptor.ShaderRegister = i;
@@ -794,16 +768,23 @@ bool Renderer::CreateDrawResources() {
   params[6].DescriptorTable.pDescriptorRanges = &sampler_range;
   params[6].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
   D3D12_ROOT_SIGNATURE_DESC rs_desc{};
-  rs_desc.NumParameters = 7;
+  srv_ranges[3].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+  srv_ranges[3].NumDescriptors = kSrvHeapSize;
+  srv_ranges[3].RegisterSpace = 5;
+  params[7].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+  params[7].DescriptorTable.NumDescriptorRanges = 1;
+  params[7].DescriptorTable.pDescriptorRanges = &srv_ranges[3];
+  params[7].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+  rs_desc.NumParameters = 8;
   // Debug (sr_native_debug_rs_salt): an unused root-constant parameter makes every
   // pipeline new to the driver's shader cache - a cold first run on demand.
   if (int32_t salt = REXCVAR_GET(sr_native_debug_rs_salt); salt > 0) {
-    params[7].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    params[7].Constants.ShaderRegister = 15;
-    params[7].Constants.RegisterSpace = 7;
-    params[7].Constants.Num32BitValues = uint32_t(std::min(salt, 32));
-    params[7].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    rs_desc.NumParameters = 8;
+    params[8].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[8].Constants.ShaderRegister = 15;
+    params[8].Constants.RegisterSpace = 7;
+    params[8].Constants.Num32BitValues = uint32_t(std::min(salt, 32));
+    params[8].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    rs_desc.NumParameters = 9;
   }
   rs_desc.pParameters = params;
   rs_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
@@ -985,6 +966,29 @@ bool Renderer::CreateDrawResources() {
       nullptr, &null_srv,
       provider_->OffsetViewDescriptor(srv_heap_->GetCPUDescriptorHandleForHeapStart(), 2));
 
+  // XDK sub_82107A30, missing-element branch 82107B00: swizzle 0x9250
+  // supplies (0, 0, 0, 1). Host slot 16 is outside the 16 guest streams.
+  {
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC buffer{};
+    buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer.Width = 16;
+    buffer.Height = 1;
+    buffer.DepthOrArraySize = 1;
+    buffer.MipLevels = 1;
+    buffer.SampleDesc.Count = 1;
+    buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if (FAILED(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&default_vertex_buffer_))))
+      return false;
+    void* mapped = nullptr;
+    D3D12_RANGE no_read{0, 0};
+    if (FAILED(default_vertex_buffer_->Map(0, &no_read, &mapped))) return false;
+    const float value[4] = {0, 0, 0, 1};
+    std::memcpy(mapped, value, sizeof(value));
+    default_vertex_buffer_->Unmap(0, nullptr);
+  }
   // --- Output render target (presenter guest output format). ---
   D3D12_HEAP_PROPERTIES heap{};
   heap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -2302,6 +2306,31 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
     }
   }
 
+  // The XDK patches absent attributes to constants. A zero-stride host
+  // buffer supplies the same value regardless of the draw's vertex index.
+  const auto float_inputs = VertexShaderInputs(*vs, true);
+  for (const auto& input : float_inputs) {
+    if (std::any_of(elements.begin(), elements.end(), [&](const auto& e) {
+          return input.first == e.SemanticName && input.second == e.SemanticIndex;
+        })) continue;
+    uint32_t usage = 0;
+    while (usage < 14 && input.first != UsageSemantic(usage)) ++usage;
+    if (usage == 14) continue;
+    D3D12_INPUT_ELEMENT_DESC e{};
+    e.SemanticName = UsageSemantic(usage);
+    e.SemanticIndex = input.second;
+    e.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    e.InputSlot = 16;
+    e.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+    elements.push_back(e);
+    if (record.element_count < PsoRecord::kMaxElements) {
+      auto& re = record.elements[record.element_count++];
+      re.usage = uint8_t(usage);
+      re.usage_index = uint8_t(input.second);
+      re.slot = 16;
+      re.format = uint32_t(e.Format);
+    }
+  }
   D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
   desc.pRootSignature = root_signature_.Get();
   desc.VS = {vs->data(), vs->size()};
@@ -3066,7 +3095,7 @@ void Renderer::FlushRingConstants(uint8_t* base, uint32_t dev) {
 bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
   FlushRingConstants(base, dev);
   UploadAlloc shared;
-  if (!Upload(512, 256, shared)) {
+  if (!Upload(4096, 256, shared)) {
     return false;
   }
   bool use_mirror = REXCVAR_GET(sr_native_pm4_mirror);
@@ -3125,6 +3154,7 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
   }
   uint32_t* s = reinterpret_cast<uint32_t*>(shared.cpu);
   std::memset(s, 0, 512);
+  std::memcpy(s + 128, vertex_fetch_, sizeof(vertex_fetch_));
   for (uint32_t slot = 0; slot < 16; ++slot) {
     uint32_t fetch[6];
     for (uint32_t d = 0; d < 6; ++d) {
@@ -3513,12 +3543,32 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
     if (want >= 0 && index == want && !frame_dump_done_ && frame_open_ &&
         REXCVAR_GET(sr_native_dump_frame_at_s) > 0 &&
         compat::BenchElapsedMs() >= REXCVAR_GET(sr_native_dump_frame_at_s) * 1000.0) {
+      // Streams were bound before PrepareDraw. Keep their SRV leases pinned
+      // across the debug submission and readback fences: the draw itself will
+      // only be recorded after the dump.
+      for (auto& retired : retired_srvs_) {
+        for (const auto& meta : vertex_fetch_) {
+          if (meta[2] && meta[0] == retired.second) {
+            retired.first = UINT64_MAX;
+            break;
+          }
+        }
+      }
+      auto order_srv_leases = [&] {
+        std::stable_sort(retired_srvs_.begin(), retired_srvs_.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+      };
+      order_srv_leases();
       command_list_->Close();
       ID3D12CommandList* lists[] = {command_list_.Get()};
       queue_->ExecuteCommandLists(1, lists);
       queue_->Signal(fence_.Get(), next_fence_value_++);
       DumpFrameResources(fmt::format("d{}_", index), true);
+      for (auto& retired : retired_srvs_)
+        if (retired.first == UINT64_MAX) retired.first = next_fence_value_;
+      order_srv_leases();
       command_list_->Reset(allocators_[frame_index_].Get(), nullptr);
+      command_list_->IASetVertexBuffers(0, 16, guest_vertex_views_);
       frame_state_bound_ = false;
       bound_rt_count_ = 0;
       bound_ds_ = nullptr;
@@ -3663,6 +3713,8 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
     }
     command_list_->SetGraphicsRootDescriptorTable(
         6, sampler_heap_->GetGPUDescriptorHandleForHeapStart());
+    command_list_->SetGraphicsRootDescriptorTable(
+        7, srv_heap_->GetGPUDescriptorHandleForHeapStart());
     frame_state_bound_ = true;
   }
   // Primitive restart only matters for strips.
@@ -3727,6 +3779,9 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
   }
   ApplyFixedFunctionState(base, dev);
   command_list_->SetPipelineState(pso);
+  const D3D12_VERTEX_BUFFER_VIEW default_view{
+      default_vertex_buffer_->GetGPUVirtualAddress(), 16, 0};
+  command_list_->IASetVertexBuffers(16, 1, &default_view);
   command_list_->IASetPrimitiveTopology(topology);
   return true;
 }
@@ -3850,7 +3905,8 @@ const Renderer::BufferEntry* Renderer::ApplyBuffer(uint8_t* base, const BufferPl
                                       e - b);
       Transition(entry.resource.Get(), entry.state,
                  D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER |
-                     D3D12_RESOURCE_STATE_INDEX_BUFFER);
+                     D3D12_RESOURCE_STATE_INDEX_BUFFER |
+                     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
       ++stats_.buffer_partial_uploads;
       stats_.buffer_upload_bytes += e - b;
     }
@@ -3907,12 +3963,15 @@ const Renderer::BufferEntry* Renderer::ApplyBuffer(uint8_t* base, const BufferPl
       buffers_.erase(plan.key);
       return nullptr;
     }
+    entry.raw_srv = 0;
+    entry.raw_srv_fence = 0;
   } else {
     Transition(entry.resource.Get(), entry.state, D3D12_RESOURCE_STATE_COPY_DEST);
   }
   command_list_->CopyBufferRegion(entry.resource.Get(), 0, upload.resource, upload.offset, size);
   Transition(entry.resource.Get(), entry.state,
-             D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_INDEX_BUFFER);
+             D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_INDEX_BUFFER |
+             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
   return &entry;
 }
 
@@ -4016,10 +4075,19 @@ void Renderer::InvalidateGuestRange(uint32_t address, uint32_t size) {
   }
 }
 
+bool Renderer::DynamicVertexFetch(uint8_t* base, uint32_t dev) {
+  for (uint32_t off : {kDevShaderA, kDevShaderB}) {
+    const GuestShaderInfo* info = LookupGuestShader(Load32(base, dev + off));
+    if (info && info->is_vertex && info->dynamic_vertex_fetch) return true;
+  }
+  return false;
+}
+
 // Guest side: the vertex streams of the current draw (guest state at draw time)
 // and their buffer plans.
 bool Renderer::PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRange* range) {
   if (!decl) return false;
+  if (DynamicVertexFetch(base, dev)) range = nullptr;
   uint32_t decl_count = std::min(Load32(base, decl + 0x18), 64u);
   uint32_t streams_used = 0;
   for (uint32_t i = 0; i < decl_count; ++i) {
@@ -4115,6 +4183,9 @@ bool Renderer::PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRan
 // with the guest-side tracking.
 bool Renderer::BindVertexStreams(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd) {
   bool ok = cmd.streams_ok;
+  std::memset(vertex_fetch_, 0, sizeof(vertex_fetch_));
+  const uint32_t dev = GuestDevice(base);
+  const bool dynamic_fetch = dev && DynamicVertexFetch(base, dev);
   for (uint32_t i = 0; i < cmd.stream_count; ++i) {
     const StreamPlan& sp = batch.streams[cmd.stream_first + i];
     const BufferEntry* vb = ApplyBuffer(base, sp.buffer);
@@ -4125,6 +4196,41 @@ bool Renderer::BindVertexStreams(uint8_t* base, const WorkBatch& batch, const Wo
     D3D12_VERTEX_BUFFER_VIEW view{vb->resource->GetGPUVirtualAddress() + sp.offset, sp.size,
                                   sp.stride};
     command_list_->IASetVertexBuffers(sp.stream, 1, &view);
+    if (sp.stream < 16) guest_vertex_views_[sp.stream] = view;
+    if (!dynamic_fetch) continue;
+    // Static IA draws need no descriptor: allocate only for shader-driven
+    // instancing, otherwise transient vertex buffers would fill the SRV heap.
+    BufferEntry& entry = buffers_.at(sp.buffer.key);
+    if (!entry.raw_srv || entry.raw_srv_fence != next_fence_value_) {
+      entry.raw_srv = AllocSrvIndex();
+      if (!entry.raw_srv) { ok = false; continue; }
+      D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+      srv.Format = DXGI_FORMAT_R32_TYPELESS;
+      srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+      srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+      srv.Buffer.NumElements = UINT(entry.resource->GetDesc().Width / 4);
+      srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+      device_->CreateShaderResourceView(entry.resource.Get(), &srv,
+          provider_->OffsetViewDescriptor(srv_heap_->GetCPUDescriptorHandleForHeapStart(), entry.raw_srv));
+      // The descriptor is only cached for this submission. Transient game
+      // buffers accumulate across frames; retaining one SRV for each would
+      // exhaust the heap within minutes. Recycle after the GPU fence.
+      entry.raw_srv_fence = next_fence_value_;
+      retired_srvs_.emplace_back(next_fence_value_, entry.raw_srv);
+    }
+    const uint32_t decl = sp.buffer.decl;
+    const uint32_t count = decl ? std::min(Load32(base, decl + 0x18), 64u) : 0;
+    for (uint32_t e = 0; e < count; ++e) {
+      const uint32_t at = decl + 0x34 + 12 * e;
+      if (Load16(base, at) != sp.stream) continue;
+      const uint32_t usage = Load8(base, at + 9), index = Load8(base, at + 10);
+      if (usage >= 14 || index >= 16) continue;
+      auto& meta = vertex_fetch_[usage * 16 + index];
+      meta[0] = vb->raw_srv;
+      meta[1] = sp.offset + Load16(base, at + 2);
+      meta[2] = vb->raw_srv ? sp.stride : 0;
+      meta[3] = Load32(base, at + 4);
+    }
   }
   if (!ok) {
     ++stats_.skip_vb;
@@ -4912,6 +5018,8 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
   bool dump_by_swap = REXCVAR_GET(sr_native_dump_swap) > 0 &&
                       swap_number_ == uint64_t(REXCVAR_GET(sr_native_dump_swap));
   if (!frame_dump_done_ && REXCVAR_GET(sr_native_dump_after_pass) < 0 &&
+      (dump_by_swap || (REXCVAR_GET(sr_native_dump_before_draw) < 0 &&
+                        REXCVAR_GET(sr_native_dump_before_resolve) < 0)) &&
       (dump_by_swap || (REXCVAR_GET(sr_native_dump_frame_at_s) > 0 &&
                         compat::BenchElapsedMs() >=
                             REXCVAR_GET(sr_native_dump_frame_at_s) * 1000.0))) {
@@ -5075,6 +5183,12 @@ void Renderer::DumpFrameResources(const std::string& prefix, bool surfaces_only,
                                   bool output_only) {
   std::string dir = REXCVAR_GET(sr_native_dump_dir);
   if (dir.empty()) return;
+  std::error_code directory_error;
+  std::filesystem::create_directories(dir, directory_error);
+  if (directory_error) {
+    REXLOG_ERROR("native: cannot create dump directory {}: {}", dir, directory_error.message());
+    return;
+  }
   uint64_t last = next_fence_value_ - 1;
   if (fence_->GetCompletedValue() < last) {
     fence_->SetEventOnCompletion(last, fence_event_);
@@ -5121,6 +5235,7 @@ void Renderer::DumpFrameResources(const std::string& prefix, bool surfaces_only,
                   rt.width, rt.height);
     items.push_back({n, rt.resource.Get(), &rt.state});
   }
+  uint32_t written = 0;
   for (Item& item : items) {
     D3D12_RESOURCE_DESC desc = item.resource->GetDesc();
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp;
@@ -5172,11 +5287,14 @@ void Renderer::DumpFrameResources(const std::string& prefix, bool surfaces_only,
         std::fwrite(static_cast<uint8_t*>(data) + fp.Offset, 1,
                     size_t(fp.Footprint.RowPitch) * rows, f);
         std::fclose(f);
+        ++written;
+      } else {
+        REXLOG_ERROR("native: cannot write dump {}/{}{}.raw", dir, prefix, item.name);
       }
       readback->Unmap(0, nullptr);
     }
   }
-  REXLOG_INFO("native: dumped {} frame resources to {}", items.size(), dir);
+  REXLOG_INFO("native: dumped {}/{} frame resources to {}", written, items.size(), dir);
 }
 
 // ---------------------------------------------------------------------------

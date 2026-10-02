@@ -46,5 +46,37 @@ int main() {
     ShaderRecompiler predicated;
     predicated.recompile(instruction);
     ok &= contains(predicated.out, "if (!p0)") && predicated.indentation == 0;
+
+    // An instanced VS computes the buffer index in r0.x, then overwrites
+    // r0.x with its first fetch. Mini-fetches must retain the original index.
+    ShaderRecompiler fetching;
+    fetching.out = "";
+    const char names[] = "instance_data";
+    ConstantInfo instance{};
+    fetching.constantTableData = reinterpret_cast<const uint8_t*>(names);
+    fetching.float4Constants[4] = &instance;
+    fetching.vertexElements[7] = VertexElement{7, DeclUsage::Position, 0};
+    VertexFetchInstruction fetch{};
+    fetch.srcRegister = 0;
+    fetch.srcSwizzle = 0;
+    fetch.dstRegister = 0;
+    fetch.dstSwizzle = 0xFF8; // x/y written, z/w kept
+    fetching.recompile(fetch, 7);
+    ok &= contains(fetching.out, "srVertexIndex = floor(r0.x);") &&
+          contains(fetching.out, "srVertexFetch(0, srVertexIndex, false)");
+    fetching.out.clear();
+    fetch.isMiniFetch = 1;
+    fetch.srcRegister = 9; // ignored: mini-fetch reuses the full-fetch index
+    fetching.vertexElements[8] = VertexElement{8, DeclUsage::Normal, 0};
+    fetching.recompile(fetch, 8);
+    ok &= contains(fetching.out, "asuint(srVertexFetch(48, srVertexIndex, true))") &&
+          fetching.out.find("r9.") == std::string::npos;
+    fetching.out.clear();
+    fetch.isMiniFetch = 0;
+    fetch.isIndexRounded = 1;
+    fetch.srcRegister = 2;
+    fetch.srcSwizzle = 2;
+    fetching.recompile(fetch, 8);
+    ok &= contains(fetching.out, "srVertexIndex = floor(r2.z + 0.5f);");
     return ok ? 0 : 1;
 }

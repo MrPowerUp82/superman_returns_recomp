@@ -18,6 +18,7 @@ namespace superman_returns::native {
 struct GuestShaderInfo {
   uint64_t container_hash = 0;
   bool is_vertex = false;
+  bool dynamic_vertex_fetch = false;
   // How the container was recognised; kNone = legacy hash without a library.
   PreShaderMatch match = PreShaderMatch::kNone;
 };

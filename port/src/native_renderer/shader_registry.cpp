@@ -143,6 +143,8 @@ bool TryHashContainer(uint8_t* base, uint32_t container, GuestShaderInfo& info) 
     return false;
   }
   info.is_vertex = header.is_vertex;
+  info.dynamic_vertex_fetch = header.is_vertex &&
+      ShaderHasInstanceData(base + container, header.virtual_size);
   info.container_hash = XXH3_64bits(base + container, header.total_size());
   info.match = PreShaderMatch::kNone;
   return true;
@@ -162,6 +164,7 @@ bool IdentifyAt(uint8_t* base, uint32_t container, GuestShaderInfo& info) {
   if (!s) return false;
   info.container_hash = s->container_hash;
   info.is_vertex = s->vertex;
+  info.dynamic_vertex_fetch = s->dynamic_vertex_fetch;
   info.match = how;
   return true;
 }
@@ -182,6 +185,7 @@ uint32_t ResolveInline(uint8_t* base, uint32_t obj, bool vertex, GuestShaderInfo
                                                              &how)) {
         candidate.container_hash = s->container_hash;
         candidate.is_vertex = s->vertex;
+        candidate.dynamic_vertex_fetch = s->dynamic_vertex_fetch;
         candidate.match = how;
         found = true;
       }

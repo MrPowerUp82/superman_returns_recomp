@@ -415,6 +415,7 @@ class Renderer {
     void Resolve();
     uint32_t index_endian = 0;
   };
+  bool DynamicVertexFetch(uint8_t* base, uint32_t dev);
   bool BindVertexStreams(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd);
 
   uint32_t AllocSrvIndex();
@@ -523,6 +524,8 @@ class Renderer {
   uint32_t rtv_heap_next_ = 0;
   uint32_t dsv_heap_next_ = 0;
   Microsoft::WRL::ComPtr<ID3D12Resource> upload_buffers_[kFramesInFlight];
+  Microsoft::WRL::ComPtr<ID3D12Resource> default_vertex_buffer_;
+  D3D12_VERTEX_BUFFER_VIEW guest_vertex_views_[16] = {};
   uint8_t* upload_cpu_[kFramesInFlight] = {};
   size_t upload_offset_ = 0;
   bool frame_state_bound_ = false;
@@ -649,12 +652,15 @@ class Renderer {
   // Byte-swapped host copies of guest vertex/index buffers.
   struct BufferEntry {
     Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+    uint32_t raw_srv = 0;
+    uint64_t raw_srv_fence = 0;
     uint32_t address = 0, size = 0;
     uint32_t decl = 0, stride = 0, index_format = 0, phase = 0;
     // Dirty tracking lives on the guest side (TrackedBuffer / BufferPlan).
     D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
   };
   std::unordered_map<uint64_t, BufferEntry> buffers_;
+  uint32_t vertex_fetch_[224][4] = {}; // semantic -> SRV, offset, stride, XDK type
   // 64 KB guest page -> tracked buffer keys overlapping it (fast Unlock
   // invalidation, guest side).
   std::unordered_map<uint32_t, std::vector<TrackedBuffer*>> buffer_pages_;

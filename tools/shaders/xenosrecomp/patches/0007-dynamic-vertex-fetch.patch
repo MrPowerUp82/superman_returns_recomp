@@ -1,0 +1,152 @@
+--- a/XenosRecomp/shader_common.h
++++ b/XenosRecomp/shader_common.h
+@@ -71,6 +71,7 @@
+ #define g_SwappedTexcoords         vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 288)
+ #define g_HalfPixelOffset          vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 292)
+ #define g_AlphaThreshold           vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 300)
++#define g_VertexFetch(i)           vk::RawBufferLoad<uint4>(g_PushConstants.SharedConstants + 512 + (i)*16)
+ #define g_LoopConstant(i)          vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 304 + (i)*4)
+ #define g_ScreenXform              vk::RawBufferLoad<float4>(g_PushConstants.SharedConstants + 432)
+ #define g_SpecConstantsRuntime     vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 448)
+@@ -108,10 +109,12 @@
+     uint g_SwappedTexcoords : packoffset(c18.x); \
+     float2 g_HalfPixelOffset : packoffset(c18.y); \
+     float g_AlphaThreshold : packoffset(c18.w); \
++    uint4 g_VertexFetchArr[224] : packoffset(c32); \
+     uint4 g_LoopConstantsArr[8] : packoffset(c19); \
+     float4 g_ScreenXform : packoffset(c27);     uint g_SpecConstantsRuntime : packoffset(c28.x); float g_PixelPosScale : packoffset(c28.y); float g_ShadowAtlasTexelScale : packoffset(c28.z); float g_ShadowSoftness : packoffset(c28.w); float2 g_SoftParticleW : packoffset(c29.x); float g_SoftParticleDistance : packoffset(c29.z); float g_SoftParticleTexelScale : packoffset(c29.w); uint g_SoftParticleDepth : packoffset(c30.x);
+ 
+ #define g_Booleans(i) (g_BooleansArr[(i) / 4][(i) % 4])
++#define g_VertexFetch(i) (g_VertexFetchArr[i])
+ #define g_LoopConstant(i) (g_LoopConstantsArr[(i) / 4][(i) % 4])
+ #else
+ #define DEFINE_SHARED_CONSTANTS() \
+@@ -327,8 +330,60 @@
+     return conanGamma(resourceDescriptorIndex, g_TextureCubeDescriptorHeap[TEX_INDEX(resourceDescriptorIndex)].Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], cubeMapData.cubeMapDirections[texCoord.z]));
+ }
+ 
++#ifdef CONAN_RECOMP
++// Dynamically indexed Xenos fetches (instancing): host-order, interleaved
++// vertex streams. Descriptor metadata comes from the actual D3D declaration.
++ByteAddressBuffer g_VertexBufferHeap[] : register(t0, space5);
++#define srVertexFetch(semantic, index, packed) srVertexFetchImpl(g_VertexFetch(semantic), index, packed)
++float4 srVertexFetchImpl(uint4 meta, float index, bool packed)
++{
++    // meta: SRV, byte offset, stride, XDK type
++    if (meta.z == 0 || index < 0.0f) return 0.0f;
++    uint address = meta.y + uint(index) * meta.z;
++    uint bytes;
++    g_VertexBufferHeap[meta.x].GetDimensions(bytes);
++    uint type = meta.w;
++    uint count = (type == 0x1A23A6 || type == 0x1A235A || type == 0x1A215A ||
++                  type == 0x1A205A || type == 0x1A2360) ? 4u :
++                 (type == 0x2A23B9 ? 3u :
++                 (type == 0x2C23A5 || type == 0x2C2359 || type == 0x2C2159 ||
++                  type == 0x2C2059 || type == 0x2C235F) ? 2u : 1u);
++    bool half = type == 0x1A235A || type == 0x1A215A || type == 0x1A205A ||
++                type == 0x1A2360 || type == 0x2C2359 || type == 0x2C2159 ||
++                type == 0x2C2059 || type == 0x2C235F;
++    uint required = count * (half ? 2u : 4u);
++    if (address > bytes || required > bytes - address) return 0.0f;
++    float4 value = float4(0.0f, 0.0f, 0.0f, 1.0f);
++    for (uint c = 0; c < count; ++c)
++    {
++        uint at = address + c * (half ? 2u : 4u);
++        uint word = g_VertexBufferHeap[meta.x].Load(at & ~3u);
++        if (half)
++        {
++            uint h = (word >> ((at & 2u) * 8u)) & 65535u;
++            int signedH = int(h << 16u) >> 16;
++            if (type == 0x2C235F || type == 0x1A2360) value[c] = f16tof32(h);
++            else if (type == 0x2C2059 || type == 0x1A205A) value[c] = float(h) / 65535.0f;
++            else if (type == 0x2C2359) value[c] = float(signedH);
++            else value[c] = max(float(signedH) / 32767.0f, -1.0f);
++        }
++        else if (type == 0x2C82A1 || type == 0x2A2187 || type == 0x2A2190 || type == 0x2A2390)
++            value[c] = packed ? asfloat(word) : float(word);
++        else if (type == 0x182886 || type == 0x1A2286 || type == 0x1A2386 || type == 0x1A2086 || type == 0x1A2186)
++        {
++            value = float4(word & 255u, (word >> 8u) & 255u, (word >> 16u) & 255u, word >> 24u);
++            if (type == 0x182886) value = value.zyxw;
++            if (type != 0x1A2286 && type != 0x1A2386) value /= 255.0f;
++        }
++        else value[c] = asfloat(word);
++    }
++    return value;
++}
++#endif
++
+ #ifdef REBLUE_RECOMP
+ // DEC3N normal decode; IA binds as R32_UINT so lane .x carries the raw bits (asuint recovers them).
++
+ float4 tfetchR11G11B10(float4 value)
+ {
+ #ifdef CONAN_RECOMP
+--- a/XenosRecomp/shader_recompiler.cpp
++++ b/XenosRecomp/shader_recompiler.cpp
+@@ -201,6 +201,18 @@
+         ++indentation;
+     }
+ 
++#ifdef CONAN_RECOMP
++    bool dynamicFetch = false;
++    for (const auto& [reg, constant] : float4Constants)
++        if (constantTableData && std::strcmp(reinterpret_cast<const char*>(constantTableData + constant->name), "instance_data") == 0)
++            dynamicFetch = true;
++    if (dynamicFetch && !instr.isMiniFetch)
++    {
++        indent();
++        println("srVertexIndex = floor(r{}.{}{});", instr.srcRegister,
++                "xyzw"[instr.srcSwizzle], instr.isIndexRounded ? " + 0.5f" : "");
++    }
++#endif
+     indent();
+     print("r{}.", instr.dstRegister);
+     printDstSwizzle(instr.dstSwizzle, false);
+@@ -252,6 +264,18 @@
+     }
+ #endif
+ 
++#ifdef CONAN_RECOMP
++    if (dynamicFetch)
++    {
++        const auto usage = findResult->second.usage;
++        const bool packed = usage == DeclUsage::Normal || usage == DeclUsage::Tangent || usage == DeclUsage::Binormal;
++        if (packed) out += "asuint(";
++        print("srVertexFetch({}, srVertexIndex, {})", uint32_t(usage) * 16 + findResult->second.usageIndex,
++              packed ? "true" : "false");
++        if (packed) out += ')';
++    }
++    else
++#endif
+     print("i{}{}", USAGE_VARIABLES[uint32_t(findResult->second.usage)], uint32_t(findResult->second.usageIndex));
+ 
+ #ifdef REBLUE_RECOMP
+@@ -1663,6 +1687,19 @@
+ 
+             value = vertexShader->vertexElementsAndInterpolators[vertexShader->field18 + i];
+ 
++#ifdef CONAN_RECOMP
++            bool dynamicFetch = false;
++            for (const auto& [reg, constant] : float4Constants)
++                if (constantTableData && std::strcmp(reinterpret_cast<const char*>(constantTableData + constant->name), "instance_data") == 0)
++                    dynamicFetch = true;
++            if (dynamicFetch)
++            {
++                // These semantics come from raw SRVs. Leaving unused IA
++                // parameters in ISG1 still makes D3D12 validate their types.
++                vertexElements.emplace(uint32_t(vertexElement.address), vertexElement);
++                continue;
++            }
++#endif
+             const char* usageType = USAGE_TYPES[uint32_t(vertexElement.usage)];
+ 
+         #ifdef UNLEASHED_RECOMP
+@@ -1941,6 +1978,7 @@
+         }
+     }
+ 
++    out += "\tfloat srVertexIndex = 0.0f;\n";
+     out += "\tint a0 = 0;\n";
+     out += "\tint aL = 0;\n";
+     out += "\tbool p0 = false;\n";

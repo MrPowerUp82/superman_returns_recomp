@@ -43,6 +43,7 @@ inline uint64_t Fnv1a64(const uint8_t* data, size_t size, uint64_t h = 0xCBF29CE
 struct PreShader {
   uint64_t container_hash = 0;
   bool vertex = false;
+  bool dynamic_vertex_fetch = false;
   std::vector<uint8_t> container;  // original big-endian container bytes
   std::vector<uint8_t> dxil;
   uint32_t virtual_size = 0;
@@ -260,6 +261,8 @@ class ShaderLibrary {
       s.vertex = stage == 0;
       s.virtual_size = h.virtual_size;
       s.container.assign(data + pos, data + pos + csize);
+      s.dynamic_vertex_fetch = s.vertex &&
+          ShaderHasInstanceData(s.container.data(), s.virtual_size);
       pos += csize;
       s.dxil.assign(data + pos, data + pos + dsize);
       pos += dsize;

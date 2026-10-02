@@ -75,6 +75,22 @@ SR_TEST(shader_library_round_trip_and_find) {
   SR_CHECK(lib.Find(0x30, false) == nullptr);
 }
 
+SR_TEST(shader_library_marks_instancing_only_in_vertex_metadata) {
+  auto vs = Container(true, 1);
+  auto ps = Container(false, 2);
+  auto ordinary = Container(true, 3);
+  const char marker[] = "instance_data";
+  std::memcpy(vs.data() + 0x40, marker, sizeof(marker));
+  std::memcpy(ps.data() + 0x40, marker, sizeof(marker));
+  // A byte sequence in microcode is not a named shader parameter.
+  std::memcpy(ordinary.data() + 0x80, marker, sizeof(marker));
+  ShaderLibrary lib = Load(ShaderLibrary::Serialize({Entry(1, vs, 1),
+      Entry(2, ps, 2), Entry(3, ordinary, 3)}));
+  SR_CHECK(lib.Find(1, true)->dynamic_vertex_fetch);
+  SR_CHECK(!lib.Find(2, false)->dynamic_vertex_fetch);
+  SR_CHECK(!lib.Find(3, true)->dynamic_vertex_fetch);
+}
+
 SR_TEST(shader_library_rejects_bad_files) {
   auto good = ShaderLibrary::Serialize({Entry(1, Container(false, 1), 1)});
   ShaderLibrary lib;

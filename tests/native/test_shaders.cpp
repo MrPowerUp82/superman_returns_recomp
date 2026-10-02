@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "shader_container.h"
+#include "vertex_signature.h"
 #include "shader_pack.h"
 #include "test_main.h"
 
@@ -140,4 +141,34 @@ SR_TEST(empty_shader_pack) {
   SR_CHECK(view.Parse(pack.data(), pack.size()));
   ShaderPackEntry e;
   SR_CHECK(!view.Find(0, true, e));
+}
+
+SR_TEST(vertex_signature_defaultable_inputs) {
+  // COLOR0 / TEXCOORD1 are absent in two real SR mesh declarations. The
+  // signature also includes packed NORMAL0 and the generated vertex ID.
+  std::vector<uint8_t> blob(256);
+  std::memcpy(blob.data(), "DXBC", 4);
+  auto put = [&](size_t at, uint32_t v) { std::memcpy(blob.data() + at, &v, 4); };
+  put(28, 1); put(32, 36);
+  std::memcpy(blob.data() + 36, "ISG1", 4);
+  put(40, 212); put(44, 4); put(48, 8);
+  const char* names[] = {"COLOR", "TEXCOORD", "NORMAL", "SV_VertexID"};
+  size_t name = 180;
+  for (uint32_t i = 0; i < 4; ++i) {
+    const size_t e = 52 + 32 * i;
+    put(e + 4, uint32_t(name - 44)); put(e + 8, i == 1 ? 1 : 0);
+    put(e + 12, i == 3 ? 6 : 0);  // system value
+    put(e + 16, i < 2 ? 3 : 1);   // float32 / uint32
+    std::memcpy(blob.data() + name, names[i], std::strlen(names[i]) + 1);
+    name += std::strlen(names[i]) + 1;
+  }
+  auto all = superman_returns::native::VertexShaderInputs(blob);
+  SR_CHECK_EQ(all.size(), size_t(3));
+  auto defaults = superman_returns::native::VertexShaderInputs(blob, true);
+  SR_CHECK_EQ(defaults.size(), size_t(2));
+  SR_CHECK(defaults[0].first == "COLOR");
+  SR_CHECK(defaults[1].first == "TEXCOORD");
+  SR_CHECK_EQ(defaults[1].second, 1u);
+  blob.resize(75);  // truncated signature must not create phantom inputs
+  SR_CHECK(superman_returns::native::VertexShaderInputs(blob, true).empty());
 }

@@ -12,6 +12,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 namespace superman_returns::native {
 
@@ -29,6 +30,16 @@ inline constexpr size_t kMaxShaderContainerBytes = 1u << 20;
 
 inline uint32_t LoadBigEndian32(const uint8_t* p) {
   return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3];
+}
+
+// The game's shader-driven instancing is identified by this named parameter
+// in the virtual metadata, independently of the host DXIL source.
+inline bool ShaderHasInstanceData(const uint8_t* data, size_t virtual_size) {
+  static constexpr char marker[] = "instance_data";
+  if (!data || virtual_size < sizeof(marker)) return false;
+  for (size_t i = 0; i <= virtual_size - sizeof(marker); ++i)
+    if (!std::memcmp(data + i, marker, sizeof(marker))) return true;
+  return false;
 }
 
 // Parses the header at `data`; `available` bounds the readable bytes
