@@ -597,6 +597,13 @@ class Renderer {
                           bool output_only = false);
   bool frame_dump_done_ = false;
   bool dump_vs_after_pending_ = false;  // sr_native_dump_vs: dump again at the next draw
+  // sr_native_watch_blue
+  void WatchHdr(uint32_t index);
+  Microsoft::WRL::ComPtr<ID3D12Resource> watch_readback_;
+  uint64_t watch_total_ = 0;
+  int64_t watch_frame_ = -1;
+  bool watch_done_ = false;
+  int watch_prev_count_ = -1;
   // Frame trace (sr_native_trace_frame_at_s): 0 idle, 1 tracing this frame, 2 done.
   int trace_state_ = 0;
   bool dump_all_active_ = false;

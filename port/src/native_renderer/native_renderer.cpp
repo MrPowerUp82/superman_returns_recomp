@@ -66,6 +66,13 @@ REXCVAR_DEFINE_STRING(sr_native_dump_vs, "", "Superman Returns Native",
                       "Debug: with sr_native_dump_frame_at_s, dump every native surface right before the "
                       "first draw using this vertex shader (hex container hash, files before_*) and "
                       "right after it (after_*)");
+REXCVAR_DEFINE_BOOL(sr_native_watch_blue, false, "Superman Returns Native",
+                    "Debug: with sr_native_dump_frame_at_s, read the HDR target back after every draw "
+                    "of one frame and log the draws that change the number of blue-dash pixels in "
+                    "its lower part (slow)");
+REXCVAR_DEFINE_STRING(sr_native_debug_ps, "", "Superman Returns Native",
+                      "Debug: log the first float constants c0..c40 of draws using this pixel shader "
+                      "(hex container hash)");
 REXCVAR_DEFINE_INT32(sr_native_dump_before_resolve, -1, "Superman Returns Native",
                      "Debug: with sr_native_dump_frame_at_s, dump every native surface into "
                      "sr_native_dump_dir right before the Nth resolve (0-based) of that frame, "
@@ -3184,6 +3191,19 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
       REXLOG_INFO("native dbg vs consts v{}:{} | shadow:{}", mirror_.vs_version, m, sh);
     }
   }
+  if (!REXCVAR_GET(sr_native_debug_ps).empty() && use_mirror &&
+      current_ps_hash_ == std::strtoull(REXCVAR_GET(sr_native_debug_ps).c_str(), nullptr, 16)) {
+    static int logged = 0;
+    if (logged < 6) {
+      ++logged;
+      const float* c = reinterpret_cast<const float*>(mirror_.regs() + Pm4Mirror::kAluConstantBase + 1024);
+      std::string m;
+      for (uint32_t r = 0; r < 41; ++r) {
+        m += fmt::format(" c{}=({:.3g} {:.3g} {:.3g} {:.3g})", r, c[r * 4], c[r * 4 + 1], c[r * 4 + 2], c[r * 4 + 3]);
+      }
+      REXLOG_INFO("native dbg ps consts (vs {:016X}):{}", current_vs_hash_, m);
+    }
+  }
   if (!use_mirror || override_ps || cb_ps_version_ != mirror_.ps_version || !cb_ps_gpu_) {
     UploadAlloc ps;
     if (!Upload(4096, 256, ps)) return false;
@@ -3583,10 +3603,26 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
     const int index = draw_calls_in_frame_++;
     // sr_native_dump_vs: dump before the first draw of that vertex shader and
     // at the next draw (= right after it).
+    if (REXCVAR_GET(sr_native_watch_blue) && !watch_done_ && frame_open_ &&
+        REXCVAR_GET(sr_native_dump_frame_at_s) > 0 &&
+        compat::BenchElapsedMs() >= REXCVAR_GET(sr_native_dump_frame_at_s) * 1000.0) {
+      if (watch_frame_ < 0 && index == 0) watch_frame_ = int64_t(frame_count_);
+      if (watch_frame_ >= 0) {
+        if (int64_t(frame_count_) == watch_frame_) {
+          WatchHdr(uint32_t(index));
+        } else {
+          watch_done_ = true;
+          REXLOG_INFO("native watch: frame done");
+        }
+      }
+    }
     const bool dump_after = dump_vs_after_pending_;
     bool dump_vs = false;
     if (!dump_after && !REXCVAR_GET(sr_native_dump_vs).empty()) {
       const uint64_t vs_want = std::strtoull(REXCVAR_GET(sr_native_dump_vs).c_str(), nullptr, 16);
+      // Shader objects are reused: refresh their registration like the draw
+      // setup below does before trusting the object -> hash mapping.
+      TryRegisterInlineShaders(base, Load32(base, dev + kDevShaderA), Load32(base, dev + kDevShaderB));
       for (uint32_t off : {kDevShaderA, kDevShaderB}) {
         const GuestShaderInfo* info = LookupGuestShader(Load32(base, dev + off));
         if (info && info->is_vertex && info->container_hash == vs_want) dump_vs = true;
@@ -4641,6 +4677,13 @@ void Renderer::ExecBeginTiling(uint8_t* base, uint32_t count, uint32_t rects,
   if (rt && clear_color) {
     float color[4];
     for (uint32_t i = 0; i < 4; ++i) color[i] = LoadF32(base, clear_color + 4 * i);
+    if (REXCVAR_GET(sr_native_debug_clears)) {
+      static int logged = 0;
+      if (logged++ < 40) {
+        REXLOG_INFO("native: BeginTiling clear {} {}x{} color ({}, {}, {}, {}) edram {}", SurfaceName(rt),
+                    rt->width, rt->height, color[0], color[1], color[2], color[3], rt->edram_base);
+      }
+    }
     if (trace_state_ == 1)
       REXLOG_INFO("trace BeginTiling clear {} color ({}, {}, {}, {})", SurfaceName(rt), color[0],
                   color[1], color[2], color[3]);
@@ -4978,6 +5021,14 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
       if (clear_color) {
         for (uint32_t i = 0; i < 4; ++i) color[i] = LoadF32(base, clear_color + 4 * i);
       }
+      if (REXCVAR_GET(sr_native_debug_clears)) {
+        static int logged = 0;
+        if (rt->width >= 1000 && swap_number_ > 400 && logged++ < 60) {
+          REXLOG_INFO("native: resolve clear {} {}x{} color ({}, {}, {}, {}) edram {} swap {}", SurfaceName(rt),
+                      rt->width, rt->height, color[0], color[1], color[2], color[3], rt->edram_base,
+                      swap_number_);
+        }
+      }
       D3D12_RECT r = clear_rect;
       r.right = std::min<LONG>(r.right, LONG(rt->width));
       r.bottom = std::min<LONG>(r.bottom, LONG(rt->height));
@@ -5154,7 +5205,9 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
                       swap_number_ == uint64_t(REXCVAR_GET(sr_native_dump_swap));
   if (!frame_dump_done_ && REXCVAR_GET(sr_native_dump_after_pass) < 0 &&
       (dump_by_swap || (REXCVAR_GET(sr_native_dump_before_draw) < 0 &&
-                        REXCVAR_GET(sr_native_dump_before_resolve) < 0)) &&
+                        REXCVAR_GET(sr_native_dump_before_resolve) < 0 &&
+                        REXCVAR_GET(sr_native_dump_vs).empty() &&
+                        !REXCVAR_GET(sr_native_watch_blue))) &&
       (dump_by_swap || (REXCVAR_GET(sr_native_dump_frame_at_s) > 0 &&
                         compat::BenchElapsedMs() >=
                             REXCVAR_GET(sr_native_dump_frame_at_s) * 1000.0))) {
@@ -5300,6 +5353,11 @@ void Renderer::ExecOnPassEnd(int pass) {
     return;
   }
   if (all) return;
+  // The draw/VS/resolve/watch triggers own the dump of their frame.
+  if (REXCVAR_GET(sr_native_dump_before_draw) >= 0 || !REXCVAR_GET(sr_native_dump_vs).empty() ||
+      REXCVAR_GET(sr_native_dump_before_resolve) >= 0 || REXCVAR_GET(sr_native_watch_blue)) {
+    return;
+  }
   if (frame_dump_done_ || pass != REXCVAR_GET(sr_native_dump_after_pass) ||
       REXCVAR_GET(sr_native_dump_frame_at_s) <= 0 ||
       compat::BenchElapsedMs() < REXCVAR_GET(sr_native_dump_frame_at_s) * 1000.0) {
@@ -5320,6 +5378,130 @@ void Renderer::ExecOnPassEnd(int pass) {
   bound_ds_ = nullptr;
   std::memset(bound_rts_, 0, sizeof(bound_rts_));
   REXLOG_INFO("native: dumped after pass {}", pass);
+}
+
+static float HalfToFloat(uint16_t v) {
+  uint32_t sign = v >> 15, e = (v >> 10) & 31, m = v & 1023;
+  float f = e == 31 ? 65504.0f : e ? std::ldexp(float(m | 1024), int(e) - 25) : std::ldexp(float(m), -24);
+  return sign ? -f : f;
+}
+
+// Debug (sr_native_watch_blue): submits the frame so far, reads the HDR target
+// back and counts the "blue dash" pixels of its lower part; the draw recorded
+// just before this call (current_vs_hash_/current_ps_hash_) is blamed when the
+// count changed.
+void Renderer::WatchHdr(uint32_t index) {
+  ID3D12Resource* res = nullptr;
+  D3D12_RESOURCE_STATES* state = nullptr;
+  for (auto& [key, surf] : surfaces_) {
+    if (surf.depth || surf.samples > 1 || surf.width != 1280 || surf.height != 720) continue;
+    if (surf.resource->GetDesc().Format != DXGI_FORMAT_R16G16B16A16_FLOAT) continue;
+    res = surf.resource.Get();
+    state = &surf.state;
+    break;
+  }
+  if (!res) return;
+  for (auto& retired : retired_srvs_) {
+    for (const auto& meta : vertex_fetch_) {
+      if (meta[2] && meta[0] == retired.second) {
+        retired.first = UINT64_MAX;
+        break;
+      }
+    }
+  }
+  auto order_srv_leases = [&] {
+    std::stable_sort(retired_srvs_.begin(), retired_srvs_.end(),
+                     [](const auto& a, const auto& b) { return a.first < b.first; });
+  };
+  order_srv_leases();
+  command_list_->Close();
+  ID3D12CommandList* lists[] = {command_list_.Get()};
+  queue_->ExecuteCommandLists(1, lists);
+  queue_->Signal(fence_.Get(), next_fence_value_);
+  fence_->SetEventOnCompletion(next_fence_value_, fence_event_);
+  ++next_fence_value_;
+  WaitForSingleObject(fence_event_, 5000);
+  D3D12_RESOURCE_DESC desc = res->GetDesc();
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp;
+  UINT rows;
+  UINT64 row_size, total;
+  device_->GetCopyableFootprints(&desc, 0, 1, 0, &fp, &rows, &row_size, &total);
+  if (!watch_readback_ || watch_total_ < total) {
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_READBACK;
+    D3D12_RESOURCE_DESC buf{};
+    buf.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buf.Width = total;
+    buf.Height = 1;
+    buf.DepthOrArraySize = 1;
+    buf.MipLevels = 1;
+    buf.SampleDesc.Count = 1;
+    buf.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    watch_readback_.Reset();
+    if (FAILED(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buf,
+                                                D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                IID_PPV_ARGS(&watch_readback_)))) {
+      watch_done_ = true;
+      return;
+    }
+    watch_total_ = total;
+  }
+  allocators_[frame_index_]->Reset();
+  command_list_->Reset(allocators_[frame_index_].Get(), nullptr);
+  D3D12_RESOURCE_STATES old_state = *state;
+  Transition(res, *state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+  D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+  src.pResource = res;
+  src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  dst.pResource = watch_readback_.Get();
+  dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  dst.PlacedFootprint = fp;
+  command_list_->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+  Transition(res, *state, old_state);
+  command_list_->Close();
+  ID3D12CommandList* copy_lists[] = {command_list_.Get()};
+  queue_->ExecuteCommandLists(1, copy_lists);
+  queue_->Signal(fence_.Get(), next_fence_value_);
+  fence_->SetEventOnCompletion(next_fence_value_, fence_event_);
+  ++next_fence_value_;
+  WaitForSingleObject(fence_event_, 5000);
+  int count = 0;
+  int first_x = -1, first_y = -1;
+  void* data = nullptr;
+  D3D12_RANGE range{0, size_t(total)};
+  if (SUCCEEDED(watch_readback_->Map(0, &range, &data))) {
+    for (uint32_t y = 400; y < desc.Height; ++y) {
+      const uint16_t* row = reinterpret_cast<const uint16_t*>(
+          static_cast<uint8_t*>(data) + fp.Offset + size_t(y) * fp.Footprint.RowPitch);
+      for (uint32_t x = 0; x < desc.Width; ++x) {
+        float b = HalfToFloat(row[4 * x + 2]);
+        if (b < 2.0f || b > 29.5f) continue;
+        float r = HalfToFloat(row[4 * x]), g = HalfToFloat(row[4 * x + 1]);
+        if (b > 8.0f * std::max(r, g)) {
+          if (!count++) {
+            first_x = int(x);
+            first_y = int(y);
+          }
+        }
+      }
+    }
+    watch_readback_->Unmap(0, nullptr);
+  }
+  if (count != watch_prev_count_) {
+    REXLOG_INFO("native watch: before draw {} blue-dash pixels {} -> {} (first {},{}) | previous draw vs {:016X} "
+                "ps {:016X}", index, watch_prev_count_, count, first_x, first_y, current_vs_hash_,
+                current_ps_hash_);
+    watch_prev_count_ = count;
+  }
+  for (auto& retired : retired_srvs_)
+    if (retired.first == UINT64_MAX) retired.first = next_fence_value_;
+  order_srv_leases();
+  command_list_->Reset(allocators_[frame_index_].Get(), nullptr);
+  command_list_->IASetVertexBuffers(0, 16, guest_vertex_views_);
+  frame_state_bound_ = false;
+  bound_rt_count_ = 0;
+  bound_ds_ = nullptr;
+  std::memset(bound_rts_, 0, sizeof(bound_rts_));
 }
 
 void Renderer::DumpFrameResources(const std::string& prefix, bool surfaces_only,
