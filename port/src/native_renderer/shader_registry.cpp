@@ -12,23 +12,29 @@
 // (sr_native_preshaders, shader_library.h) that recognises shaders by their
 // original containers as StevensND/nfsmw-nx does.
 //
-// Why the library: in XDK 2.0.3529 the creators receive a MemStream
-// descriptor whose container has its size words zeroed while the outer
-// loader (sub_820F9C78) runs, and the copies inside the shader objects are
-// patched by Direct3D afterwards. Hashing guest memory therefore never
-// reproduced the corpus hash (checkpoint1.md: 0 of 120 draw-time hashes in
-// the catalog). Comparing against the original bytes, tolerating the size
-// words, does not depend on when or where the hash is taken.
+// Identification: the XDK creators (game_profile.h CREATE_SHADER_A / _B) get the
+// finished container in r3 and return the new shader object, so the container
+// is hashed there (XXH3 of virtual + physical bytes, the corpus key) and the
+// object registered under it. Direct3D patches the object's copy at bind time,
+// which is why hashing the object's bytes at draw time is not stable across
+// runs; TryRegisterInlineShaders remains only as a fallback for objects made
+// before the hooks ran. The pre-shader library (sr_native_preshaders) holds the
+// DXIL for those hashes and the original containers.
 #include "shader_registry.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
+#include <fmt/format.h>
 #include <rex/cvar.h>
 #include <rex/filesystem.h>
 #include <rex/hash.h>
@@ -64,6 +70,7 @@ std::unordered_map<uint32_t, GuestShaderInfo> g_shaders;
 // creator hook reuses the address.
 std::unordered_set<uint32_t> g_unknown;
 uint32_t g_match_counts[4] = {};
+
 
 constexpr char kLibraryName[] = "superman_returns_shaders.srsl";
 
@@ -159,23 +166,6 @@ bool IdentifyAt(uint8_t* base, uint32_t container, GuestShaderInfo& info) {
   return true;
 }
 
-// The pointers the XDK creators may carry: the container itself (Conan's
-// XDK) or, in XDK 2.0.3529 LTCG, a descriptor of MemStream structs whose
-// stream 1 (+20: +0 buffer, +4 size) holds the compiled container.
-uint32_t ResolveContainer(uint8_t* base, uint32_t arg, GuestShaderInfo& info) {
-  if (!GuestRange(arg, 24)) return 0;
-  if (IdentifyAt(base, arg, info)) return arg;
-  for (uint32_t ptr : {LoadBigEndian32(base + arg + 20), LoadBigEndian32(base + arg)}) {
-    if (IdentifyAt(base, ptr, info)) return ptr;
-  }
-  return 0;
-}
-
-uint32_t ResolveCreatorArgs(uint8_t* base, uint32_t r3, uint32_t r4, GuestShaderInfo& info) {
-  if (uint32_t c = ResolveContainer(base, r4, info)) return c;
-  return ResolveContainer(base, r3, info);
-}
-
 // Containers embedded in the shader objects (draw-time fallback). The VS/PS
 // object layouts are not confirmed per slot, so both offsets are tried and
 // the stage of the match must agree with the slot.
@@ -200,6 +190,18 @@ uint32_t ResolveInline(uint8_t* base, uint32_t obj, bool vertex, GuestShaderInfo
       info = candidate;
       return c;
     }
+  }
+  return 0;
+}
+
+// Shader objects without a creation record (their container reached Direct3D
+// by another route): the object's copy as it is at first draw, hashed like the
+// corpus. Less stable than the creator hooks (bind-time patches), so the
+// corpus is built from the union of several runs' dumps.
+uint32_t ResolveRuntimeCopy(uint8_t* base, uint32_t obj, GuestShaderInfo& info) {
+  for (uint32_t off : {kVSContainerOffset, kPSContainerOffset}) {
+    const uint32_t c = obj + off;
+    if (HasContainerMagic(base, c) && TryHashContainer(base, c, info)) return c;
   }
   return 0;
 }
@@ -236,8 +238,8 @@ void DumpContainer(uint8_t* base, uint32_t container, const GuestShaderInfo& inf
   if (lib.ok) {
     if (const PreShader* s = lib.library.Find(info.container_hash, info.is_vertex)) {
       WriteContainer(DumpDir(), name, s->container.data(), s->container.size());
+      return;
     }
-    return;
   }
   ShaderContainerHeader header;
   if (!ParseShaderContainerHeader(base + container, GuestAvailable(container), header)) return;
@@ -270,43 +272,38 @@ void DumpUnmatched(uint8_t* base, uint32_t container, const char* tag) {
 void RegisterLocked(uint32_t obj, const GuestShaderInfo& info, const char* source) {
   g_shaders[obj] = info;
   g_unknown.erase(obj);
+  static std::unordered_map<std::string, uint32_t> by_source;
   const uint32_t total = ++g_match_counts[int(info.match) & 3];
+  const uint32_t from_source = ++by_source[source];
   if (total <= 4 || (total & 63) == 0) {
-    REXLOG_INFO("shader {:08X} = {:016X}.{} ({}, {} match; exact {} body {} microcode {} legacy {})",
+    REXLOG_INFO("shader {:08X} = {:016X}.{} ({}, {} match; exact {} body {} microcode {} legacy {}; "
+                "{} registered via this source)",
                 obj, info.container_hash, info.is_vertex ? "vs" : "ps", source,
                 PreShaderMatchName(info.match), g_match_counts[int(PreShaderMatch::kExact)],
                 g_match_counts[int(PreShaderMatch::kBody)],
                 g_match_counts[int(PreShaderMatch::kMicrocode)],
-                g_match_counts[int(PreShaderMatch::kNone)]);
+                g_match_counts[int(PreShaderMatch::kNone)], from_source);
   }
 }
 
-// XDK shader creators: called by the game's effect/material loader; the new
-// D3D shader object is returned in r3. Like nfsmw-nx, the container is
-// identified BEFORE the original runs (Direct3D has not touched it yet);
-// after it, the call is retried for loaders that fill the header late, and
-// the object's own copy is the last resort.
+// XDK shader object creators (CREATE_SHADER_A = vertex, _B = pixel): r3 is the
+// finished container (header with the virtual / physical sizes, then both
+// parts), the new shader object comes back in r3 (null on failure). Direct3D
+// copies the container into the object and later patches the copy at bind
+// time (vertex-fetch variants, PS/VS linking), so this is the only place where
+// the bytes are the same on every run: the hash taken here is the corpus key.
 void OnCreateShader(PPCContext& ctx, uint8_t* base, void (*original)(PPCContext&, uint8_t*),
-                    const char* role, bool vertex_hint) {
-  const uint32_t r3_in = ctx.r3.u32;
-  const uint32_t r4_in = ctx.r4.u32;
-
+                    const char* role, bool /*vertex_hint*/) {
+  const uint32_t container = ctx.r3.u32;
   GuestShaderInfo info;
-  uint32_t container = ResolveCreatorArgs(base, r3_in, r4_in, info);
-
+  const bool known = HasContainerMagic(base, container) && TryHashContainer(base, container, info);
   original(ctx, base);
   const uint32_t shader_obj = ctx.r3.u32;
-
-  if (!container) container = ResolveCreatorArgs(base, r3_in, r4_in, info);
-  if (!container && GuestRange(shader_obj, kPSContainerOffset + 16)) {
-    container = ResolveInline(base, shader_obj, vertex_hint, info);
-  }
-
   NoteHookCall(role, container, shader_obj);
   if (!shader_obj) return;
-  if (!container) {
-    LogCaptureAnomalyOnce("CreateShader container not recognised", r4_in ? r4_in : r3_in);
-    if (GuestRange(r4_in, 24)) DumpUnmatched(base, LoadBigEndian32(base + r4_in + 20), "create");
+  if (!known) {
+    LogCaptureAnomalyOnce("CreateShader container not recognised", container);
+    DumpUnmatched(base, container, "create");
     std::lock_guard<std::mutex> lock(g_mutex);
     // The address may be a reused one: drop any stale association.
     g_shaders.erase(shader_obj);
@@ -339,6 +336,11 @@ void TryRegisterInlineShaders(uint8_t* base, uint32_t vs_obj, uint32_t ps_obj) {
     GuestShaderInfo info;
     if (ResolveInline(base, obj, vertex, info)) {
       RegisterLocked(obj, info, "draw-time");
+      continue;
+    }
+    if (uint32_t c = ResolveRuntimeCopy(base, obj, info)) {
+      DumpContainer(base, c, info);
+      RegisterLocked(obj, info, "runtime copy");
       continue;
     }
     g_unknown.insert(obj);

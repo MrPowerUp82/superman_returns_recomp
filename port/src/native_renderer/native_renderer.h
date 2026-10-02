@@ -594,6 +594,8 @@ class Renderer {
   rex::system::IGraphicsSystem* graphics_ = nullptr;
   uint64_t current_ps_hash_ = 0;
   uint64_t current_vs_hash_ = 0;
+  int draw_calls_in_frame_ = 0;  // draw calls seen this frame (sr_native_dump_before_draw)
+  int resolve_in_frame_ = 0;  // resolves seen this frame (sr_native_dump_before_resolve)
   // GPU hang diagnostics: WriteBufferImmediate breadcrumbs after each draw
   // into CPU-visible memory + a ring of draw descriptions.
   Microsoft::WRL::ComPtr<ID3D12Resource> crumb_buffer_;

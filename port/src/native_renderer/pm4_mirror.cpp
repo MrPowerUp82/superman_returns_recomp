@@ -6,6 +6,12 @@
 //
 #include "pm4_mirror.h"
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 namespace superman_returns::native {
 
 namespace {
@@ -18,6 +24,24 @@ inline uint32_t LoadBE(const uint8_t* base, uint32_t address) {
 
 // 0xA0000000 is the 1:1 cached view of guest physical memory.
 constexpr uint32_t kPhysicalView = 0xA0000000u;
+
+// True when [p, p + bytes) is committed, readable host memory. The packets are
+// scanned from guest command buffers that can already be recycled or hold a
+// stale address; a read there must not take the process down.
+bool HostReadable(const uint8_t* p, size_t bytes) {
+#ifdef _WIN32
+  const uint8_t* end = p + bytes;
+  while (p < end) {
+    MEMORY_BASIC_INFORMATION mbi;
+    if (!VirtualQuery(p, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT ||
+        (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) || !mbi.Protect) {
+      return false;
+    }
+    p = static_cast<const uint8_t*>(mbi.BaseAddress) + mbi.RegionSize;
+  }
+#endif
+  return true;
+}
 
 }  // namespace
 
@@ -92,6 +116,10 @@ void Pm4Mirror::ScanFrom(const uint8_t* base, const uint8_t* stream, uint32_t be
               default: first = kRegisterCount; break;
             }
             uint32_t src = kPhysicalView + (address & 0x1FFFFFFF);
+            if (!HostReadable(base + src, size * 4)) {
+              ++unreadable_alu_loads;
+              break;
+            }
             for (uint32_t i = 0; i < size; ++i) Write(first + i, LoadBE(base, src + 4 * i));
             break;
           }

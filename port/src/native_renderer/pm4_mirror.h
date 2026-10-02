@@ -7,7 +7,7 @@
 // Mirror of the Xenos register state as the GPU will see it, rebuilt from the
 // PM4 packets the XDK writes into its command segments.
 //
-// The XDK device shadow (dev+0x780 constants, dev+0x480 fetch constants) does
+// The XDK device shadow (dev+0x700 constants, dev+0x400 fetch constants) does
 // not see every write: shader literal constants (LOAD_ALU_CONSTANT at shader
 // bind), GpuBeginShaderConstantF4 / inline SET_CONSTANT packets and inline
 // type-0 constant blocks (SpeedTree tables, per-object lights) go straight to
@@ -50,6 +50,8 @@ class Pm4Mirror {
   uint64_t dwords = 0;
   uint64_t unknown_packets = 0;
   uint64_t indirect_buffers = 0;
+  // LOAD_ALU_CONSTANT sources that were not readable host memory (skipped).
+  uint64_t unreadable_alu_loads = 0;
   bool follow_indirect = true;
   // RB_COPY_* state captured at the last resolve (copy-mode draw); the XDK
   // resets these registers right after the copy.

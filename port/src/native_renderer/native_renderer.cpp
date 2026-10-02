@@ -56,6 +56,14 @@ REXCVAR_DEFINE_INT32(sr_native_dump_after_pass, -1, "Superman Returns Native",
                      "Debug: with sr_native_dump_frame_at_s, dump at the end of this pass instead of "
                      "at the end of the frame");
 REXCVAR_DEFINE_STRING(sr_native_dump_dir, "", "Superman Returns Native", "Directory for sr_native_dump_frame_at_s");
+REXCVAR_DEFINE_INT32(sr_native_dump_before_draw, -1, "Superman Returns Native",
+                     "Debug: with sr_native_dump_frame_at_s, dump every native surface into "
+                     "sr_native_dump_dir right before the Nth draw call (0-based, drawn or "
+                     "skipped) of that frame, prefixed d<N>_");
+REXCVAR_DEFINE_INT32(sr_native_dump_before_resolve, -1, "Superman Returns Native",
+                     "Debug: with sr_native_dump_frame_at_s, dump every native surface into "
+                     "sr_native_dump_dir right before the Nth resolve (0-based) of that frame, "
+                     "prefixed r<N>_ (for passes the game does not name)");
 REXCVAR_DEFINE_DOUBLE(sr_native_trace_frame_at_s, 0.0, "Superman Returns Native",
                       "Debug: log render target binds, clears and resolves of one frame after "
                       "this many seconds");
@@ -347,6 +355,7 @@ DeclFormat MapDeclType(uint32_t type) {
     case 0x2C2059: return {DXGI_FORMAT_R16G16_UNORM, 4, 2};
     case 0x1A205A: return {DXGI_FORMAT_R16G16B16A16_UNORM, 8, 2};
     case 0x2C82A1: return {DXGI_FORMAT_R32_UINT, 4, 4};
+    case 0x2A2187:  // DEC3N (2_10_10_10 signed normalized): unpacked by the VS, see tfetchDEC3N
     case 0x2A2190:
     case 0x2A2390: return {DXGI_FORMAT_R32_UINT, 4, 4};
     case 0x2C235F: return {DXGI_FORMAT_R16G16_FLOAT, 4, 2};
@@ -372,6 +381,38 @@ const char* UsageSemantic(uint32_t usage) {
     case 13: return "SAMPLE";
     default: return "TEXCOORD";
   }
+}
+
+// Semantic inputs (name + index) declared by a vertex shader: the ISG1 chunk
+// of its DXBC container (u32 count, u32 offset, then 32-byte elements whose
+// first fields are stream, name offset, index; the names follow). Empty when
+// the blob has no such chunk, which turns the filtering off.
+std::vector<std::pair<std::string, uint32_t>> VertexShaderInputs(const std::vector<uint8_t>& dxbc) {
+  std::vector<std::pair<std::string, uint32_t>> out;
+  auto rd = [&](size_t at) -> uint32_t {
+    uint32_t v = 0;
+    if (at + 4 <= dxbc.size()) std::memcpy(&v, dxbc.data() + at, 4);
+    return v;
+  };
+  if (dxbc.size() < 32 || std::memcmp(dxbc.data(), "DXBC", 4) != 0) return out;
+  const uint32_t chunks = rd(28);
+  for (uint32_t c = 0; c < chunks && c < 64; ++c) {
+    const size_t at = rd(32 + 4 * c);
+    if (at + 8 > dxbc.size() || std::memcmp(dxbc.data() + at, "ISG1", 4) != 0) continue;
+    const size_t base = at + 8;
+    const size_t end = std::min(dxbc.size(), base + rd(at + 4));
+    const uint32_t count = rd(base);
+    for (uint32_t i = 0; i < count && i < 64; ++i) {
+      const size_t e = base + rd(base + 4) + 32 * i;
+      if (e + 12 > end) break;
+      const size_t name_at = base + rd(e + 4);
+      if (name_at >= end) continue;
+      const char* name = reinterpret_cast<const char*>(dxbc.data() + name_at);
+      out.emplace_back(std::string(name, strnlen(name, end - name_at)), rd(e + 8));
+    }
+    break;
+  }
+  return out;
 }
 
 D3D12_BLEND MapBlend(xenos::BlendFactor f) {
@@ -2220,6 +2261,10 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
 
   std::vector<D3D12_INPUT_ELEMENT_DESC> elements;
   PsoRecord record;
+  // The game's declarations describe every attribute of the mesh; a vertex
+  // shader that reads fewer must not be given the rest (D3D12 rejects the
+  // pipeline otherwise).
+  const std::vector<std::pair<std::string, uint32_t>> vs_inputs = VertexShaderInputs(*vs);
   for (uint32_t i = 0; i < decl_count; ++i) {
     uint32_t e = decl + 0x34 + 12 * i;
     uint32_t stream = Load16(base, e);
@@ -2229,7 +2274,15 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
     uint32_t usage_index = Load8(base, e + 10);
     if (stream == 0xFF) break;
     DeclFormat fmt = MapDeclType(type);
-    if (fmt.format == DXGI_FORMAT_UNKNOWN) continue;
+    if (fmt.format == DXGI_FORMAT_UNKNOWN) {
+      LogUnsupportedOnce("vertex element type", type, "not in MapDeclType (the element is dropped)");
+      continue;
+    }
+    if (!vs_inputs.empty() &&
+        std::find(vs_inputs.begin(), vs_inputs.end(),
+                  std::make_pair(std::string(UsageSemantic(usage)), usage_index)) == vs_inputs.end()) {
+      continue;
+    }
     D3D12_INPUT_ELEMENT_DESC d{};
     d.SemanticName = UsageSemantic(usage);
     d.SemanticIndex = usage_index;
@@ -2376,16 +2429,23 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
   auto create_start = std::chrono::steady_clock::now();
   HRESULT hr = device_->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pso));
   if (FAILED(hr)) {
-    REXLOG_ERROR("native: PSO creation failed ({:08X}) vs={:016X} ps={:016X} elements={} rts={}",
-                 uint32_t(hr), vs_hash, ps_hash, elements.size(), rt_count);
-    return nullptr;
-  }
-  {
-    double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
-                                                          create_start).count();
-    stats_.pso_create_ms += ms;
-    REXLOG_INFO("native: PSO #{} created in {:.2f} ms (pass {} vs {:016X} ps {:016X})",
-                stats_.pso_created + 1, ms, g_current_pass, vs_hash, ps_hash);
+    std::string layout;
+    for (const auto& e : elements) {
+      layout += fmt::format(" {}{}:s{}+{}:f{}", e.SemanticName, e.SemanticIndex, e.InputSlot,
+                            e.AlignedByteOffset, uint32_t(e.Format));
+    }
+    std::string targets;
+    for (uint32_t i = 0; i < rt_count; ++i) targets += fmt::format(" {}", uint32_t(rtv_formats[i]));
+    std::string layout;
+    for (const auto& e : elements) {
+      layout += fmt::format(" {}{}:s{}+{}:f{}", e.SemanticName, e.SemanticIndex, e.InputSlot,
+                            e.AlignedByteOffset, uint32_t(e.Format));
+    }
+    std::string targets;
+    for (uint32_t i = 0; i < rt_count; ++i) targets += fmt::format(" {}", uint32_t(rtv_formats[i]));
+    REXLOG_INFO("native: PSO #{} created in {:.2f} ms (pass {} vs {:016X} ps {:016X}) layout:{} rtv:{} dsv {} "
+                "samples {}", stats_.pso_created + 1, ms, g_current_pass, vs_hash, ps_hash, layout, targets,
+                uint32_t(dsv_format), desc.SampleDesc.Count);
   }
   // Remember it for the next start's precompilation.
   if (elements.size() <= PsoRecord::kMaxElements) {
@@ -3432,6 +3492,26 @@ void Renderer::ApplyFixedFunctionState(uint8_t* base, uint32_t dev) {
 bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
                            D3D12_PRIMITIVE_TOPOLOGY& topology, bool& quads,
                            D3D12_INDEX_BUFFER_STRIP_CUT_VALUE strip_cut) {
+  {
+    const int want = REXCVAR_GET(sr_native_dump_before_draw);
+    const int index = draw_calls_in_frame_++;
+    if (want >= 0 && index == want && !frame_dump_done_ && frame_open_ &&
+        REXCVAR_GET(sr_native_dump_frame_at_s) > 0 &&
+        compat::BenchElapsedMs() >= REXCVAR_GET(sr_native_dump_frame_at_s) * 1000.0) {
+      command_list_->Close();
+      ID3D12CommandList* lists[] = {command_list_.Get()};
+      queue_->ExecuteCommandLists(1, lists);
+      queue_->Signal(fence_.Get(), next_fence_value_++);
+      DumpFrameResources(fmt::format("d{}_", index), true);
+      command_list_->Reset(allocators_[frame_index_].Get(), nullptr);
+      frame_state_bound_ = false;
+      bound_rt_count_ = 0;
+      bound_ds_ = nullptr;
+      std::memset(bound_rts_, 0, sizeof(bound_rts_));
+      frame_dump_done_ = true;
+      REXLOG_INFO("native: dumped before draw {}", index);
+    }
+  }
   static const uint64_t pass_mask = [] {
     std::string list = REXCVAR_GET(sr_native_pass_mask);
     if (list.empty()) return ~0ull;
@@ -4436,6 +4516,26 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
       base, Load32(base, dev + (depth ? kDevDepthStencil : kDevRenderTargets + 4 * source)), depth);
   if (!src) return;
   ++stats_.resolves;
+  {
+    const int want = REXCVAR_GET(sr_native_dump_before_resolve);
+    const int index = resolve_in_frame_++;
+    if (want >= 0 && index == want && !frame_dump_done_ &&
+        REXCVAR_GET(sr_native_dump_frame_at_s) > 0 &&
+        compat::BenchElapsedMs() >= REXCVAR_GET(sr_native_dump_frame_at_s) * 1000.0 && frame_open_) {
+      command_list_->Close();
+      ID3D12CommandList* lists[] = {command_list_.Get()};
+      queue_->ExecuteCommandLists(1, lists);
+      queue_->Signal(fence_.Get(), next_fence_value_++);
+      DumpFrameResources(fmt::format("r{}_", index), true);
+      command_list_->Reset(allocators_[frame_index_].Get(), nullptr);
+      frame_state_bound_ = false;
+      bound_rt_count_ = 0;
+      bound_ds_ = nullptr;
+      std::memset(bound_rts_, 0, sizeof(bound_rts_));
+      frame_dump_done_ = true;
+      REXLOG_INFO("native: dumped before resolve {}", index);
+    }
+  }
   for (SlotCache& sc : slot_cache_) sc.frame = ~0ull;
   // The command's PM4 words were scanned by Execute (copy draw included).
   uint32_t ring_before = ring_last_;
@@ -4900,9 +5000,10 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
     }
     REXLOG_INFO("native: gpu fence wait {} ms total, frames {}", stats_.gpu_wait_us / 1000,
                 frame_count_);
-    REXLOG_INFO("native: pm4 mirror packets {} dwords {} indirect {} ({} dwords) resyncs {}",
+    REXLOG_INFO("native: pm4 mirror packets {} dwords {} indirect {} ({} dwords) resyncs {} "
+                "unreadable ALU loads {}",
                 mirror_.packets, mirror_.dwords, mirror_.indirect_buffers,
-                mirror_.indirect_dwords, ring_resyncs_);
+                mirror_.indirect_dwords, ring_resyncs_, mirror_.unreadable_alu_loads);
   }
   if ((frame_count_ % 600) == 0) {
     REXLOG_INFO(
@@ -5553,6 +5654,8 @@ void Renderer::OnSwap(uint8_t* base, uint32_t front_buffer_texture, uint64_t swa
 void Renderer::ExecOnSwap(uint8_t* base, uint32_t front_buffer_texture, uint64_t swap_number) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   swap_number_ = swap_number;
+  resolve_in_frame_ = 0;
+  draw_calls_in_frame_ = 0;
   // Per-frame SSAO / soft particle state.
   scene_rt_ = scene_ds_ = nullptr;
   scene_depth_key_ = 0;

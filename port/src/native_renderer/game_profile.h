@@ -109,24 +109,20 @@
 #define SR_CONFIRMED_INDEX_BUFFER_UNLOCK 1
 #define SR_ABSENT_INDEX_BUFFER_UNLOCK 0
 
-// XDK shader creators: sub_820F5840 (VertexShader) and sub_820F6690 (PixelShader).
-// shader_registry.cpp identifies each new shader here, from the container
-// in the MemStream descriptor (r4 + 20), before Direct3D patches its copies;
-// these fire BEFORE the outer assembler (sub_820F9C78) finalises the
-// container header, so virtual_size / physical_size read zero at hook time.
-#define SR_ADDR_CREATE_SHADER_A 820F5840  // CONFIRMED: sub_820F5840, CreateVertexShader
+// XDK shader object creators: sub_820F5148 (vertex) and sub_820F4D90 (pixel).
+// r3 = the finished container (virtualSize / physicalSize set, both parts
+// contiguous), the new shader object comes back in r3 with the container
+// copied inside (VS: object + 872, PS: object + 40). shader_registry.cpp hashes
+// the container here, before Direct3D patches the object's copy at bind time.
+// (sub_820F5840 / sub_820F6690, the earlier candidates, are steps of the
+// effect assembler sub_820F9C78: they get a MemStream descriptor, not the
+// container, and never return the object.)
+#define SR_ADDR_CREATE_SHADER_A 820F5148  // CONFIRMED: sub_820F5148, creates a vertex shader object from a container
 #define SR_CONFIRMED_CREATE_SHADER_A 1
 #define SR_ABSENT_CREATE_SHADER_A 0
-#define SR_ADDR_CREATE_SHADER_B 820F6690  // CONFIRMED: sub_820F6690, CreatePixelShader
+#define SR_ADDR_CREATE_SHADER_B 820F4D90  // CONFIRMED: sub_820F4D90, creates a pixel shader object from a container
 #define SR_CONFIRMED_CREATE_SHADER_B 1
 #define SR_ABSENT_CREATE_SHADER_B 0
-
-// sub_820F9C78, the outer effect/material shader assembler, calls both
-// creators and restores the container's physicalSize in the MemStream
-// afterwards (stw r25,4(r31) at 0x820F9E20): inside the creators the size
-// words read zero. shader_registry.cpp therefore matches the container
-// against the pre-shader library ignoring those words (shader_library.h)
-// instead of hooking this function.
 
 // D3DDevice_Swap(dev, front_buffer, params). Conan 822E8EB8. sub_82112050 is
 // the only VdSwap caller and already hooked by frame_stats.cpp.
@@ -195,15 +191,20 @@ inline constexpr bool kDevicePtrConfirmed = false;
 // xdk_sigs.py masks load/store immediates, so its exact matches do not prove
 // these. Confirm with the setters in docs/native-port-plan.md table 3.2.
 struct DeviceLayout {
-  uint32_t fetch_constants = 0x400;  // [32] x 24 bytes (setter_SetTexture 1024 + 24*i)
-  uint32_t vs_constants = 0x780;     // 256 float4
-  uint32_t ps_constants = 0x1780;    // 256 float4
-  uint32_t vs_bools = 0x2780;        // 4 dwords
-  uint32_t ps_bools = 0x2790;        // 4 dwords
-  uint32_t vs_loops = 0x27A0;        // 16 dwords
-  uint32_t ps_loops = 0x27E0;        // 16 dwords
-  uint32_t register_shadow = 0x2880;  // first Xenos register group (0x2000)
-  uint32_t vertex_decl = 0x2E24;
+  // Confirmed in XDK 2.0.3529 from the draw-time dirty-state flush
+  // (sub_820FBBF8 -> sub_821078C0 / sub_82107760 / sub_82107520): each call
+  // passes (device, dirty mask, first Xenos register, shadow address), so the
+  // shadow of register R lives at <shadow> + 4 * (R - <first register>).
+  // Conan's revision has everything after the fetch constants 0x80 higher.
+  uint32_t fetch_constants = 0x400;  // [32] x 24 bytes, regs 0x4800 (sub_82107760: dev+1024)
+  uint32_t vs_constants = 0x700;     // 256 float4, regs 0x4000 (dev+1792)
+  uint32_t ps_constants = 0x1700;    // 256 float4, regs 0x4400 (dev+5888)
+  uint32_t vs_bools = 0x2700;        // 4 dwords, regs 0x4900 (dev+9984)
+  uint32_t ps_bools = 0x2710;        // 4 dwords, regs 0x4904
+  uint32_t vs_loops = 0x2720;        // 16 dwords, regs 0x4908
+  uint32_t ps_loops = 0x2760;        // 16 dwords, regs 0x4918
+  uint32_t register_shadow = 0x2800;  // first Xenos register group (0x2000, dev+10240)
+  uint32_t vertex_decl = 0x2D10;     // SetVertexDeclaration sub_820F5438: stw r4,11536(r3)
   uint32_t index_buffer = 0x2F84;    // SetIndices: 12164
   uint32_t render_targets = 0x2F88;  // [4] SetRenderTarget: 12168
   uint32_t depth_stencil = 0x2F98;   // SetDepthStencilSurface: 12184
@@ -223,13 +224,15 @@ inline constexpr DeviceLayout kDevice{};
 inline constexpr bool kDeviceLayoutConfirmed = true;
 
 // Register shadow -> Xenos register groups flushed by the XDK's generic
-// writer ({first register, count, device offset}); same XDK revision caveat.
+// writer ({first register, count, device offset}); confirmed for XDK 2.0.3529
+// from the sub_82107520 calls in sub_820FBBF8 (offsets are Conan's - 0x80).
 struct RegisterShadowRange {
   uint32_t first, count, offset;
 };
 inline constexpr RegisterShadowRange kRegisterShadow[] = {
-    {0x2000, 16, 0x2880}, {0x2100, 21, 0x28CC}, {0x2180, 5, 0x2920},
-    {0x2200, 12, 0x2934}, {0x2280, 21, 0x2964}, {0x2300, 38, 0x29B8}};
+    {0x2000, 16, 0x2800}, {0x2100, 21, 0x284C}, {0x2180, 5, 0x28A0},
+    {0x2200, 12, 0x28B4}, {0x2280, 21, 0x28E4}, {0x2300, 38, 0x2938},
+    {0x2380, 8, 0x29D0}};
 
 // ---- Frame shape -----------------------------------------------------------
 
