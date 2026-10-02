@@ -1,6 +1,6 @@
 # Continuação do renderer nativo — 02/10/2026 (parte 2)
 
-Retomada de `checkpoint2.md`. Tudo abaixo está commitado em `main` (de `e4e8e2e` a `334c874`). Medições feitas no laptop de trabalho (Intel UHD), com a sequência do `tools/bench_defaults_tmp.ps1`; não são benchmarks controlados.
+Retomada de `checkpoint2.md`. Tudo abaixo está commitado e publicado em `main` (de `e4e8e2e` a `af45215`, sem alterações pendentes). Medições feitas no laptop de trabalho (Intel UHD), com a sequência do `tools/bench_defaults_tmp.ps1`; não são benchmarks controlados.
 
 ## Estado atual
 
@@ -17,6 +17,20 @@ Retomada de `checkpoint2.md`. Tudo abaixo está commitado em `main` (de `e4e8e2e
 4. **Capa com movimento errado** (`9d9d603`). Os vértices da capa ficam em três conjuntos de streams de 2.576 bytes que rodam a cada frame e que o jogo reescreve **sem `Unlock`**; o rastreio de sujeira só vinha dos hooks de `Unlock`, então o host usava a pose de 3 frames antes. `RefreshTrackedBuffer`: vigilância física de escrita (não pegou essas escritas) e hash por frame do guest para buffers de até 32 KB (contador `front_frame_` incrementado em `OnSwap`).
 5. **Ping-pong `f3`/`f12`** (`6c4541b`, ganho de FPS). Os formatos guest 3 (`2_10_10_10_FLOAT`) e 12 (`..._AS_16_16_16_16`) são o mesmo 7e3 e ambos viram RGBA16F, mas eram duas superfícies host, e a troca entre draws opacos (`f3`) e com blend (`f12`) custava uma cópia de tela cheia, ~35 por frame. `sr_native_merge_7e3_surfaces` (padrão ligado) mapeia o formato 3 para o 12: 2 reinterpretações por frame, idle 23,3 → 28,5 FPS, andando 21,2 → 28,2. O round-trip antigo também quantizava (precisão 7e3, limite 31,875, alfa de 2 bits); a superfície fundida mantém fp16.
 6. **Shadow map** (`334c874`). O perfil do frame mostrou o shadow map (`f4@640x640`, ~800 draws, VS `C7C0E381…` / PS `DD925AEB…`) com ~30% da GPU, a ~8 µs por draw; é a única superfície multisample do jogo (4×). `sr_native_msaa_samples` agora vale 1 (desligado) por padrão: ~2,4 µs por draw e o jogo chega a 30/30. Com 2 amostras deu 29,8 com a GPU em 96–98%.
+
+## Distribuição: tradução de shaders em runtime, pacote e instalador
+
+Pedido do usuário: distribuir o port como o [`nfsmw-nx`](https://github.com/StevensND/nfsmw-nx), com uma página de instalação que roda no navegador (modelo: https://stevensnd.github.io/nfsmw-nx-installer/). Decisões tomadas com o usuário: os shaders são traduzidos **na máquina dele, na primeira execução**; a página fica em `docs/` e o build vai para o branch `builds` mais uma Release. Detalhes e limites em [`docs/installer.md`](docs/installer.md).
+
+Por que não gerar a biblioteca de shaders a partir do disco como o `nfsmw-nx`: o D3D12 exige DXIL **assinado** (não existe em WebAssembly) e os shaders que o jogo cria em runtime não casam com os containers do disco (por isso o corpus veio de dumps de runtime).
+
+1. **Tradução em runtime** (`b64780e`, `port/src/native_renderer/shader_translator.{h,cpp}`). Os hooks de criação oferecem cada container ao tradutor (só quando não há biblioteca de pré-shaders); ele roda `sr_xenosrecomp.exe` (o `XenosRecompCorpus`) e o `dxc.exe` como **processos filhos** (o emissor dá `assert` em shaders que não suporta e isso não pode derrubar o jogo), em 2 threads de fundo, e guarda o DXIL em `shader_cache/<impressão>/<hash>.<vs|ps>.dxil` (a impressão resume as ferramentas). `LoadShader` espera até `sr_native_runtime_shader_wait_ms` (4000) por uma tradução em andamento e nunca guarda um "ausente" enquanto ela roda. Teste numa build de desenvolvimento: `--sr_native_preshaders=false --sr_native_ignore_pack=true`. Resultado: 188 shaders a ~190–270 ms cada, 1 falha (o VS `978B0FF62C3693C2`, o mesmo com `iPosition0` duplicado), 30 FPS; com o cache quente nada é traduzido.
+2. **Build sem shaders embutidos**. `build.cmd` aceita `SR_BUILD_DIR` e `SR_EMBED_SHADERS=OFF` (opção CMake `SR_NATIVE_EMBED_SHADERS`): a build de distribuição (`port/out/build/win-amd64-dist`, ~3 min, 52 MB) não tem `.pak` nem `.srsl`.
+3. **Pacote** (`tools/package_release.ps1 [-NoBuild]`, arquivos em `tools/release/`). `artifacts/release/superman_returns_win64.zip` (~32 MB): executável, `rexruntime.dll`, `rexgpu-xenos.dll`, os 4 DLLs do runtime do Visual C++ (implantação local permitida), `shader_tools/` (tradutor, `dxc.exe`, `dxcompiler.dll`, `dxil.dll`, `shader_common.h`), `run.cmd`, `run_keyboard.cmd`, `LEIAME.txt` (CRLF), licenças e `version.json`. Sem dados do jogo e sem shaders traduzidos. Verificado: um pacote montado só com o zip mais os arquivos do ISO, rodado de dentro da própria pasta (nada do repositório), traduziu os 188 shaders com as ferramentas do pacote e chegou ao gameplay.
+4. **Página do instalador** (`1a43389`, `docs/index.html`, `docs/js/*`, pt/en). Lê o ISO (XDVDFS, offsets de partição 0, XGD1/2/3) ou a pasta no navegador, confere o SHA-256 do `default.xex` (`c8f243ac…06db2b`) e as 12 entradas de `DATA`, baixa o build e grava numa pasta (File System Access API) ou num `.zip` em fluxo (sem ZIP64: o pacote precisa ter menos de 4 GB, hoje ~2,3 GB). Há também "só atualizar o build" e "já tenho o zip do build". Testes: `node --test tests/web/installer.test.mjs` (6 passam, incluindo o disco real). No Chrome embutido: renderiza sem erros de console e `writePackage` + gravador de ZIP + `DecompressionStream` funcionam.
+5. **Publicação** (`tools/publish_release.ps1 -Confirm`, exige o repositório sem alterações pendentes). O download direto de um asset de Release a partir do navegador **não funciona**: o último salto (`release-assets.githubusercontent.com`) não envia CORS (conferido com `curl`), enquanto `api.github.com` e `raw.githubusercontent.com` enviam `Access-Control-Allow-Origin: *`. Por isso o build vai para o branch órfão `builds` (um commit, force-push a cada versão) e a Release espelha o mesmo zip.
+
+Publicado em 2026-10-02: página https://mrpowerup82.github.io/superman_returns_recomp/ (Pages: `main` / `docs`), Release https://github.com/MrPowerUp82/superman_returns_recomp/releases/tag/v2026.10.02-af45215 e branch `builds` (aviso "Compare & pull request" do GitHub deve ser ignorado: o branch é órfão e não deve ser mesclado). Na página publicada, o navegador baixou `version.json` e o zip de 33,5 MB e leu as 23 entradas.
 
 ## Ferramentas de diagnóstico novas (todas cvars `sr_native_*`)
 
@@ -36,6 +50,10 @@ Retomada de `checkpoint2.md`. Tudo abaixo está commitado em `main` (de `e4e8e2e
 5. A suposição de que o hardware real também começa o HDR em preto é por resultado visual, não comprovada.
 6. `sr_native_preshaders=false` foi validado (usa o pack embutido, 0 skips por shader).
 7. O `.tools/xenosrecomp/src` é regerado por `fetch_xenosrecomp.py`; não rode o `build_corpus.ps1` com um shell dentro desse diretório (o re-clone falha por arquivo em uso).
+8. **O instalador não foi exercitado com arquivos reais pelo navegador**: os seletores de ISO/pasta e a gravação em pasta dependem de gestos do usuário. O núcleo foi testado em Node com o disco real e no Chrome com um jogo falso em memória. Falta o usuário testar a página com o ISO ou a pasta dele.
+9. `version.json` publicado tem um BOM UTF-8 (PowerShell `Set-Content -Encoding utf8`); o navegador o ignora, mas convém gravar sem BOM na próxima publicação.
+10. Os quadros verdes no início do jogo são o vídeo de abertura (já existiam); não foram investigados.
+11. O build publicado é derivado do código do jogo (recompilação estática): a decisão de publicá-lo foi do usuário, como no `nfsmw-nx`.
 
 ## Como reproduzir as medições
 
