@@ -14,9 +14,9 @@ REXCVAR_DEFINE_BOOL(sr_post_effects, true, "Superman Returns",
                     "D3D12 backend (tools/setup_gpu_source.ps1)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
-REXCVAR_DEFINE_STRING(sr_renderer, "xenos", "Superman Returns",
-                      "Graphics backend: xenos, trace (project command processor) or native "
-                      "(experimental XDK-hook renderer; falls back to xenos when unavailable)")
+REXCVAR_DEFINE_STRING(sr_renderer, "native", "Superman Returns",
+                      "Graphics backend: native (default; XDK-hook renderer, falls back to "
+                      "xenos when unavailable), xenos or trace (project command processor)")
     .allowed({"xenos", "trace", "native"})
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 

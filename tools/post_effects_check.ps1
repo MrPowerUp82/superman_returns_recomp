@@ -160,7 +160,8 @@ for ($i = 1; $i -le $Pairs; $i++) {
   foreach ($state in $order) {
     $runName = "${Name}_${state}_$i"
     $value = if ($state -eq 'on') { 'true' } else { 'false' }
-    $bench = "--sr_post_effects=$value $ExtraArgs".Trim()
+    # sr_post_effects lives in the Xenos command processor; the native renderer ignores it.
+    $bench = "--sr_renderer=xenos --sr_post_effects=$value $ExtraArgs".Trim()
     $failed = ''
     try {
       & (Join-Path $PSScriptRoot 'bench.ps1') -Name $runName -ExtraArgs $bench | Out-Null

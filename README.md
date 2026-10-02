@@ -55,7 +55,7 @@ Para validar em casa: `powershell -File tools\post_effects_check.ps1 -Pairs 2 -T
 
 ### Desenvolvimento do renderizador próprio
 
-O modo experimental `--sr_renderer=trace` já usa um processador de comandos do projeto. Ele registra draws, cópias, swaps, hashes de shaders e estados gráficos, mas **ainda delega a renderização ao backend Xenos D3D12**. É uma ferramenta de migração, sem ganho de FPS esperado. O modo padrão continua `xenos`.
+O modo experimental `--sr_renderer=trace` já usa um processador de comandos do projeto. Ele registra draws, cópias, swaps, hashes de shaders e estados gráficos, mas **ainda delega a renderização ao backend Xenos D3D12**. É uma ferramenta de migração, sem ganho de FPS esperado. O modo padrão é `native` (veja abaixo).
 
 Para compilar o modo de captura, execute `powershell -File tools\setup_gpu_source.ps1` antes de `build.cmd`. O script baixa somente o código gráfico do ReXGlue v0.10.0 para `.tools/`. Para capturar 120 quadros de gameplay após o início de um jogo novo, execute `powershell -File tools\capture_gpu_trace.ps1 -Name gameplay -Gameplay -Frames 120`. O script fecha o processo que iniciou e grava o CSV bruto, o resumo e uma imagem de referência em `logs/`. Veja a [análise e os critérios de migração](docs/native-renderer.md).
 
@@ -113,9 +113,9 @@ Opções disponíveis: `--keybind_a`, `_b`, `_x`, `_y`, `_left_trigger`, `_right
 
 O `build.cmd` usa o manifesto para regenerar o C++ automaticamente. O diretório `port/generated/default/` é descartável e não deve ser editado diretamente. Ajustes para o jogo devem ficar no manifesto, em `port/src/` ou em uma etapa de patch reproduzível.
 
-### Renderizador nativo (experimental, não validado)
+### Renderizador nativo (padrão, experimental)
 
-`port/src/native_renderer/` traz o renderizador D3D12 do [rexglue-native-kit](https://github.com/crazyriddler/rexglue-native-kit), que intercepta as funções Direct3D do XDK e desenha sem emular a GPU Xenos. **Ele ainda não foi compilado nem executado com este jogo**: os endereços das funções em `port/src/native_renderer/game_profile.h` são candidatos não confirmados, e o build padrão (`SR_NATIVE=OFF`) não inclui nada dele. `--sr_renderer=native` volta para `xenos`, com aviso no log, enquanto o renderer não estiver compilado e confirmado. O plano, a lista de endereços e a checklist para validar em casa (`tools/native_validate.ps1`) estão em [`docs/native-port-plan.md`](docs/native-port-plan.md). Os testes que não precisam do jogo ficam em `tests/`.
+`port/src/native_renderer/` traz o renderizador D3D12 do [rexglue-native-kit](https://github.com/crazyriddler/rexglue-native-kit), que intercepta as funções Direct3D do XDK e desenha sem emular a GPU Xenos. **Ele é o padrão do projeto**: o `build.cmd` compila com `SR_NATIVE=RENDERER` (e baixa o código de GPU com `tools/setup_gpu_source.ps1` na primeira vez) e `sr_renderer` vale `native`. Se o renderer não puder ser usado (build sem o código de GPU, sem a biblioteca de shaders, ou falha ao iniciar), o jogo volta sozinho para `xenos` com um aviso `sr_renderer=native: ...; using the xenos backend` no log. Para usar o backend antigo: `run.cmd --sr_renderer=xenos`; para compilar sem o renderer: `set SR_NATIVE=OFF` antes do `build.cmd`. O renderer precisa da biblioteca de pré-shaders (abaixo). O plano, a lista de endereços e a checklist para validar em casa (`tools/native_validate.ps1`) estão em [`docs/native-port-plan.md`](docs/native-port-plan.md). Os testes que não precisam do jogo ficam em `tests/`.
 
 #### Pré-shaders (`sr_native_preshaders`)
 
