@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Superman Returns — instalador para PC</title>
+<meta name="description" content="Instalador no navegador do port nativo para PC do Superman Returns (Xbox 360). Seus arquivos nunca saem do seu computador.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <div class="topbar">
+    <span class="badge">superman-returns-recomp</span>
+    <div class="lang" role="group" aria-label="Language">
+      <button type="button" data-lang="pt">PT</button><button type="button" data-lang="en">EN</button>
+    </div>
+  </div>
+
+  <h1 id="title"></h1>
+  <p id="subtitle" class="lead"></p>
+  <p id="privacy" class="note privacy"></p>
+  <p id="browserWarning" class="note warn" hidden></p>
+
+  <section class="card" id="step1">
+    <h2 data-i18n="step1"></h2>
+    <p data-i18n-html="step1Text"></p>
+    <p class="expected">default.xex SHA-256<br><code id="expectedHash"></code></p>
+    <div class="actions">
+      <button type="button" id="chooseIso" class="primary"></button>
+      <button type="button" id="chooseFolder"></button>
+      <input type="file" id="isoInput" accept=".iso,.xiso" hidden>
+      <input type="file" id="folderInput" webkitdirectory multiple hidden>
+    </div>
+    <div id="gameStatus" class="status" aria-live="polite"></div>
+  </section>
+
+  <section class="card" id="step2">
+    <h2 data-i18n="step2"></h2>
+    <p data-i18n-html="step2Text"></p>
+    <fieldset class="choices">
+      <label><input type="radio" name="buildSource" value="auto" checked> <span data-i18n="buildAuto"></span></label>
+      <label><input type="radio" name="buildSource" value="local"> <span data-i18n="buildLocal"></span></label>
+    </fieldset>
+    <div class="actions" id="localBuildRow" hidden>
+      <button type="button" id="chooseBuildZip"></button>
+      <input type="file" id="buildZipInput" accept=".zip" hidden>
+      <span id="buildZipName" class="muted"></span>
+    </div>
+    <div id="buildStatus" class="status" aria-live="polite"></div>
+    <label class="check"><input type="checkbox" id="updateOnly"> <span data-i18n="updateOnly"></span></label>
+    <div class="actions">
+      <button type="button" id="saveFolder" class="primary"></button>
+      <button type="button" id="saveZip"></button>
+    </div>
+    <progress id="progress" max="1" value="0" hidden></progress>
+    <div id="writeStatus" class="status" aria-live="polite"></div>
+  </section>
+
+  <section class="card" id="step3">
+    <h2 data-i18n="step3"></h2>
+    <ol id="step3List"></ol>
+    <h3 data-i18n="problemsTitle"></h3>
+    <p data-i18n-html="problemsText"></p>
+  </section>
+
+  <footer>
+    <p id="disclaimer" class="note"></p>
+    <p class="links"><a id="repoLink" href="#" rel="noopener">GitHub</a> · <a id="releasesLink" href="#" rel="noopener"></a></p>
+  </footer>
+</main>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

@@ -62,6 +62,10 @@ endif()
 # (tools/shaders/build_corpus.ps1); without it use --sr_native_shader_dir.
 set(SR_NATIVE_SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../artifacts/shaders/dxil"
     CACHE PATH "DXIL shader corpus embedded by SR_NATIVE=RENDERER builds")
+# OFF for release builds: nothing translated from the game is embedded or built
+# next to the executable; the shaders are translated on the user's machine
+# (shader_translator.h).
+option(SR_NATIVE_EMBED_SHADERS "Embed the DXIL corpus and build the pre-shader library" ON)
 
 # Compile the SDK's D3D12 GPU source in-process so a project-owned command
 # processor can observe each draw. The normal executable remains available
@@ -171,6 +175,9 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
 
         # Offline shaders packed into one blob (RCDATA 2), as in the kit.
         file(GLOB SR_NATIVE_SHADER_FILES "${SR_NATIVE_SHADER_DIR}/*.dxil")
+        if(NOT SR_NATIVE_EMBED_SHADERS)
+            set(SR_NATIVE_SHADER_FILES "")
+        endif()
         if(SR_NATIVE STREQUAL "RENDERER" AND SR_NATIVE_SHADER_FILES)
             enable_language(RC)
             find_package(Python3 REQUIRED COMPONENTS Interpreter)
@@ -197,6 +204,9 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
         # original containers + their DXIL, how the renderer recognises shaders.
         get_filename_component(SR_NATIVE_CORPUS_DIR "${SR_NATIVE_SHADER_DIR}" DIRECTORY)
         file(GLOB SR_NATIVE_RAW_FILES "${SR_NATIVE_CORPUS_DIR}/raw/*.bin")
+        if(NOT SR_NATIVE_EMBED_SHADERS)
+            set(SR_NATIVE_RAW_FILES "")
+        endif()
         if(SR_NATIVE STREQUAL "RENDERER" AND SR_NATIVE_SHADER_FILES AND SR_NATIVE_RAW_FILES)
             find_package(Python3 REQUIRED COMPONENTS Interpreter)
             set(SR_NATIVE_PRESHADERS "${CMAKE_CURRENT_BINARY_DIR}/superman_returns_shaders.srsl")

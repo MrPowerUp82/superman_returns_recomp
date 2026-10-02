@@ -1,0 +1,21 @@
+Third-party software shipped in this package
+============================================
+
+ReXGlue SDK (rexruntime.dll, rexgpu-xenos.dll and the runtime linked into
+superman_returns.exe) - https://github.com/rexglue/rexglue-sdk - see licenses\ReXGlue-*.
+It bundles SDL3 (zlib license), fmt (MIT), xxHash (BSD 2-clause) and other libraries;
+their licenses are in licenses\.
+
+XenosRecomp (shader_tools\sr_xenosrecomp.exe, shader_tools\shader_common.h; derived from
+hedge-dev/XenosRecomp and zolaware/reblue-XenosRecomp) - MIT license, licenses\LICENSE-XenosRecomp.md.
+
+DirectX Shader Compiler (shader_tools\dxc.exe, dxcompiler.dll, dxil.dll) -
+https://github.com/microsoft/DirectXShaderCompiler - University of Illinois/NCSA, LLVM and
+MIT licenses, licenses\LICENSE-DXC-*.txt.
+
+Microsoft Visual C++ runtime (msvcp140.dll, msvcp140_atomic_wait.dll, vcruntime140.dll,
+vcruntime140_1.dll) - redistributed as permitted by the Visual Studio distributable code
+terms (app-local deployment).
+
+Game shaders are translated on the user's machine from the user's own copy of the game;
+no translated shader and no game data is part of this package.

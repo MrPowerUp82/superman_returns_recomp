@@ -21,6 +21,10 @@ Em 2026-10-02, o renderer `native` também chegou ao início da gameplay: Superm
 
 As dicas de limites de função estão em [`port/superman_returns_manifest.toml`](port/superman_returns_manifest.toml). A maior parte foi encontrada por [`tools/find_missing_funcs.py`](tools/find_missing_funcs.py), que procura thunks de vtable e funções pequenas que a análise estática do ReXGlue não descobre. O código gerado não tem nenhum `REX_FATAL`.
 
+## Instalar sem compilar
+
+Quem não quer compilar pode usar a página do instalador (GitHub Pages deste repositório): ela lê o seu ISO ou a sua pasta do jogo **no navegador**, confere o `default.xex`, baixa o build pré-compilado e grava tudo em uma pasta ou em um `.zip`. O pacote não contém dados do jogo nem shaders traduzidos: os shaders são traduzidos no seu PC na primeira execução e ficam em cache. Detalhes, limites e como gerar e publicar um build em [`docs/installer.md`](docs/installer.md).
+
 ## Como jogar
 
 Depois de compilar com `build.cmd`:

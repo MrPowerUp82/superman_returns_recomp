@@ -1,0 +1,35 @@
+Superman Returns - port nativo para PC (nao oficial)
+====================================================
+Native PC port of Superman Returns (Xbox 360). English notes follow the Portuguese ones.
+
+COMO JOGAR
+  1. Os arquivos do seu jogo precisam estar em game\ (default.xex e a pasta DATA).
+     O instalador (pagina do projeto) copia isso para voce a partir do seu ISO ou da
+     sua pasta extraida; ele roda no navegador e nao envia nada para a internet.
+  2. Execute run_keyboard.cmd (teclado e mouse) ou run.cmd (controle de Xbox/XInput).
+     Opcoes extras vao depois do nome, por exemplo: run.cmd --fullscreen
+  3. Na primeira execucao o jogo traduz os shaders no seu PC, em segundo plano e uma so
+     vez (pasta shader_cache\). Leva alguns minutos e as primeiras cenas podem engasgar.
+  4. O log fica em logs\game.log. Anexe-o se abrir uma issue.
+
+REQUISITOS
+  Windows 10/11 64 bits, GPU com Direct3D 12. O jogo roda a 30 FPS (limite do original).
+  Os runtimes do Visual C++ vem junto (msvcp140.dll e outros). Se faltar alguma DLL,
+  instale o "Microsoft Visual C++ Redistributable" x64.
+
+CONTROLES (teclado e mouse)
+  Analogico esquerdo: W A S D        Camera: mouse ou setas
+  A: Espaco   B: Backspace   X: L   Y: P
+  LT: Q   RT: E   LB: 1   RB: 3      Start: Enter   Back: Tab
+  Mais opcoes: https://github.com/MrPowerUp82/superman_returns_recomp
+
+ENGLISH
+  Put your own game files in game\ (default.xex and the DATA folder; the installer page
+  does it in your browser, nothing is uploaded). Run run_keyboard.cmd or run.cmd.
+  The first run translates the shaders on your PC in the background (shader_cache\).
+  Windows 10/11 64-bit with Direct3D 12. The log is logs\game.log.
+
+Projeto de fas, sem relacao com a Warner Bros., a EA ou a Microsoft. E preciso ter uma
+copia legitima do jogo. Este pacote nao contem arquivos do jogo.
+Unofficial fan project. A legitimate copy of the game is required; this package contains
+no game files.
