@@ -4116,6 +4116,40 @@ const Renderer::BufferEntry* Renderer::ApplyBuffer(uint8_t* base, const BufferPl
 
 // Guest side: decides what a draw must upload of a guest buffer (tracking the
 // XDK Unlock invalidations) and captures those bytes with the command.
+// Guest buffers are normally invalidated by the Unlock hooks, but the game also
+// rewrites buffers (the cape's cloth vertices) without any Unlock. The physical
+// write watch catches those: a write to a watched page since the last check
+// makes the buffer dirty again (and re-arms the watch).
+bool Renderer::RefreshTrackedBuffer(TrackedBuffer& t) {
+  // Small buffers (the cloth vertices live in ~2.5 KB streams) are also hashed
+  // once per guest frame: their rewrites are not always visible to the write
+  // watch. The check runs at the first use of the frame; later rewrites inside
+  // the same frame still need an Unlock.
+  if (t.size <= kHashedBufferMax && t.hashed_frame != front_frame_) {
+    t.hashed_frame = front_frame_;
+    const uint64_t hash = XXH3_64bits(
+        REX_KERNEL_MEMORY()->TranslatePhysical<const uint8_t*>(t.address & 0x1FFFFFFF), t.size);
+    if (t.hash_valid && hash != t.content_hash) {
+      t.dirty = true;
+      t.clean.clear();
+      ++stats_.buffer_hash_dirty;
+    }
+    t.content_hash = hash;
+    t.hash_valid = true;
+  }
+  if (!texture_watch_ || !t.watched) return t.dirty;
+  const uint32_t global = write_seq_.load(std::memory_order_acquire);
+  if (global == t.checked_seq) return t.dirty;
+  t.checked_seq = global;
+  if (TextureWrittenSince(t.address, t.size, t.watch_seq)) {
+    t.dirty = true;
+    t.clean.clear();
+    t.watch_seq = ArmTextureWatch(t.address, t.size);
+    ++stats_.buffer_watch_dirty;
+  }
+  return t.dirty;
+}
+
 Renderer::BufferPlan Renderer::PlanBuffer(uint8_t* base, uint32_t address, uint32_t size,
                                           uint32_t decl, uint32_t stride, uint32_t index_format,
                                           uint32_t phase, uint32_t need_begin, uint32_t need_end,
@@ -4154,6 +4188,7 @@ Renderer::BufferPlan Renderer::PlanBuffer(uint8_t* base, uint32_t address, uint3
       t.dirty = true;
       t.clean.clear();
     }
+    RefreshTrackedBuffer(t);
     if (!t.dirty) return plan;
     uint32_t b = need_begin, e = need_end;
     align_range(b, e);
@@ -4176,6 +4211,17 @@ Renderer::BufferPlan Renderer::PlanBuffer(uint8_t* base, uint32_t address, uint3
   TrackedBuffer& t = tracked_[plan.key];
   t.address = address;
   t.size = size;
+  if (texture_watch_) {
+    t.watch_seq = ArmTextureWatch(address, size);
+    t.checked_seq = write_seq_.load(std::memory_order_acquire);
+    t.watched = true;
+  }
+  if (size <= kHashedBufferMax) {
+    t.content_hash = XXH3_64bits(
+        REX_KERNEL_MEMORY()->TranslatePhysical<const uint8_t*>(address & 0x1FFFFFFF), size);
+    t.hash_valid = true;
+    t.hashed_frame = front_frame_;
+  }
   for (uint32_t page = (address & 0x1FFFFFFF) >> 16;
        page <= ((address & 0x1FFFFFFF) + size - 1) >> 16; ++page) {
     buffer_pages_[page].push_back(&t);
@@ -4267,7 +4313,7 @@ bool Renderer::PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRan
     sp.stride = stride;
     FrontStreamCache& sc = front_stream_cache_[s];
     if (!REXCVAR_GET(sr_native_debug_buffers_always_dirty) && sc.tracked && sc.address == buffer_base && sc.size == buffer_size && sc.decl == decl &&
-        sc.stride == stride && sc.phase == phase && !sc.tracked->dirty) {
+        sc.stride == stride && sc.phase == phase && !RefreshTrackedBuffer(*sc.tracked)) {
       // Clean and cached: no lookup, no range needed.
       sp.buffer.key = sc.key;
       sp.buffer.address = buffer_base;
@@ -5340,6 +5386,8 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
                   retired_.size(), srv_heap_next_, retired_srvs_.size(), rtv_heap_next_,
                   upload_peak_ >> 10, overflow_pages_created_);
     }
+    REXLOG_INFO("native: buffers made dirty by the write watch {} / by the per-frame hash {}",
+                stats_.buffer_watch_dirty, stats_.buffer_hash_dirty);
     REXLOG_INFO("native: gpu fence wait {} ms total, frames {}", stats_.gpu_wait_us / 1000,
                 frame_count_);
     REXLOG_INFO("native: pm4 mirror packets {} dwords {} indirect {} ({} dwords) resyncs {} "
@@ -6178,6 +6226,7 @@ void Renderer::ResyncRing(uint8_t* base, uint32_t dev) {
 }
 
 void Renderer::OnSwap(uint8_t* base, uint32_t front_buffer_texture, uint64_t swap_number) {
+  ++front_frame_;
   std::lock_guard<std::mutex> lock(front_mutex_);
   guest_base_ = base;
   BeginCmd(Op::kSwap);

@@ -167,6 +167,8 @@ class Renderer {
     uint64_t skip_shader = 0, skip_pso = 0, skip_prim = 0, skip_rt = 0, skip_vb = 0;
     // Draws skipped for want of a pipeline, per (vs, ps) pair and render pass.
     std::map<std::tuple<uint64_t, uint64_t, int>, uint64_t> skip_pso_pairs;
+    uint64_t buffer_watch_dirty = 0;
+    uint64_t buffer_hash_dirty = 0;
     uint64_t resolves = 0;
     uint64_t resolve_textures_created = 0;
     uint64_t pso_created = 0;
@@ -260,7 +262,13 @@ class Renderer {
     bool dirty = false;
     std::vector<std::pair<uint32_t, uint32_t>> clean;  // [begin, end) while dirty
     uint64_t invalidation_stamp = 0;
+    uint32_t watch_seq = 0, checked_seq = 0;  // physical write watch
+    bool watched = false;
+    uint64_t content_hash = 0, hashed_frame = ~0ull;  // once per guest frame, small buffers
+    bool hash_valid = false;
   };
+  static constexpr uint32_t kHashedBufferMax = 32 * 1024;
+  uint64_t front_frame_ = 0;  // guest swaps seen by the front end
   // Node-based: TrackedBuffer pointers stay valid (page index below).
   std::unordered_map<uint64_t, TrackedBuffer> tracked_;
   uint64_t invalidation_stamp_ = 0;
@@ -420,6 +428,7 @@ class Renderer {
     uint32_t index_endian = 0;
   };
   bool DynamicVertexFetch(uint8_t* base, uint32_t dev);
+  bool RefreshTrackedBuffer(TrackedBuffer& t);
   bool BindVertexStreams(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd);
 
   uint32_t AllocSrvIndex();
