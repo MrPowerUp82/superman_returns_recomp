@@ -10,7 +10,9 @@ repository fetches it. Re-running replaces src/ after a pin or patch change.
 usage: python tools/shaders/fetch_xenosrecomp.py [--force]
 """
 import argparse
+import os
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -41,7 +43,10 @@ def fetch_source(force):
         print(f"[xenosrecomp] source up to date at {src}")
         return
     if src.exists():
-        shutil.rmtree(src)
+        def _on_exc(fn, p, exc):
+            os.chmod(p, stat.S_IWRITE)
+            fn(p)
+        shutil.rmtree(src, onexc=_on_exc)
     src.parent.mkdir(parents=True, exist_ok=True)
     git("clone", "-q", "--no-checkout", XENOSRECOMP_URL, str(src))
     git("-c", "advice.detachedHead=false", "checkout", "-q", XENOSRECOMP_PIN, cwd=src)

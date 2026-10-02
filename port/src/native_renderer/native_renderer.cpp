@@ -3426,6 +3426,12 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
     return false;
   }
   uint64_t vs_hash = 0, ps_hash = 0;
+  uint32_t vs_obj = Load32(base, dev + kDevShaderA);
+  uint32_t ps_obj = Load32(base, dev + kDevShaderB);
+  // Lazily register any shader objects whose inline containers were not yet
+  // hashed by OnCreateShader (the hook fires before the XDK finalizes the
+  // container header; see shader_registry.cpp TryRegisterInlineShaders).
+  TryRegisterInlineShaders(base, vs_obj, ps_obj);
   for (uint32_t off : {kDevShaderA, kDevShaderB}) {
     if (const GuestShaderInfo* info = LookupGuestShader(Load32(base, dev + off))) {
       (info->is_vertex ? vs_hash : ps_hash) = info->container_hash;

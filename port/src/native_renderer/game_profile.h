@@ -110,12 +110,26 @@
 #define SR_ABSENT_INDEX_BUFFER_UNLOCK 0
 
 // XDK shader creators: sub_820F5840 (VertexShader) and sub_820F6690 (PixelShader).
+// These are hooked for legacy capture; they fire BEFORE the outer assembler
+// (sub_820F9C78) finalises the container header, so their containers have
+// zero virtual_size / physical_size at hook time.
 #define SR_ADDR_CREATE_SHADER_A 820F5840  // CONFIRMED: sub_820F5840, CreateVertexShader
 #define SR_CONFIRMED_CREATE_SHADER_A 1
 #define SR_ABSENT_CREATE_SHADER_A 0
 #define SR_ADDR_CREATE_SHADER_B 820F6690  // CONFIRMED: sub_820F6690, CreatePixelShader
 #define SR_CONFIRMED_CREATE_SHADER_B 1
 #define SR_ABSENT_CREATE_SHADER_B 0
+
+// sub_820F9C78 — outer effect/material shader assembler that calls both
+// CreateVertexShader and CreatePixelShader then restores physicalSize in the
+// MemStream (stw r25,4(r31) at 0x820F9E20).  Hooking this as an EXIT hook
+// gives us the container with a complete header.
+// r3_in  = device/effect object (r29 inside the func)
+// r4_in  = MemStream descriptor; stream1 = Load32(r4+20) → the container
+// r3_out = error code (0 on success)
+#define SR_ADDR_CREATE_SHADER_OUTER 820F9C78  // CONFIRMED: sub_820F9C78, effect shader assembler
+#define SR_CONFIRMED_CREATE_SHADER_OUTER 1
+#define SR_ABSENT_CREATE_SHADER_OUTER 0
 
 // D3DDevice_Swap(dev, front_buffer, params). Conan 822E8EB8. sub_82112050 is
 // the only VdSwap caller and already hooked by frame_stats.cpp.
@@ -163,6 +177,7 @@ inline constexpr HookRole kHookRoles[] = {
     SR_ROLE("IndexBufferUnlock", INDEX_BUFFER_UNLOCK),
     SR_ROLE("CreateShaderA", CREATE_SHADER_A),
     SR_ROLE("CreateShaderB", CREATE_SHADER_B),
+    SR_ROLE("CreateShaderOuter", CREATE_SHADER_OUTER),
     SR_ROLE("Swap", SWAP),
     SR_ROLE("BlockOnFence", BLOCK_ON_FENCE),
     SR_ROLE("PollGpuProgress", POLL_GPU_PROGRESS),

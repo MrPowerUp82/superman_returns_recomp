@@ -215,6 +215,7 @@ bool CaptureActive() {
     if (!REXCVAR_GET(sr_native_capture)) return false;
     g_capture_path = REXCVAR_GET(sr_native_capture_out);
     compat::RegisterBenchExitCallback(WriteCapture);
+    std::atexit(WriteCapture);
     REXLOG_INFO("sr_native_capture: recording hook calls to '{}'", g_capture_path);
     return true;
   }();
@@ -254,13 +255,13 @@ void NoteGuestSwap(uint8_t* base, uint32_t dev, uint32_t front_buffer) {
     ++g_swaps;
     if (dev) g_devices.insert(dev);
     // A few seconds in: the device and its globals exist by then.
-    if (!g_device_scan_done && dev && g_swaps == 120) {
+    if (!g_device_scan_done && dev && g_swaps >= 30) {
       g_device_scan_done = true;
       ScanDeviceGlobals(base, dev);
     }
-    // The benchmark scripts end the game with a forced kill (no atexit):
-    // rewrite the record every 300 swaps too.
-    flush = g_swaps % 300 == 0;
+    // Benchmark or test runs may end with a kill or timeout:
+    // rewrite the record at swap 30 and every 150 swaps.
+    flush = (g_swaps == 30) || (g_swaps % 150 == 0);
   }
   if (flush) WriteCapture();
 }

@@ -1,0 +1,46 @@
+﻿diff --git a/XenosRecomp/shader_common.h b/XenosRecomp/shader_common.h
+index 2963437..f0a386c 100644
+--- a/XenosRecomp/shader_common.h
++++ b/XenosRecomp/shader_common.h
+@@ -317,7 +317,7 @@ struct CubeMapData
+     // every tfetchCube reads OOB -> point-light shadows vanish.
+     float3 cubeMapDirections[9];
+     #else
+-    float3 cubeMapDirections[2];
++    float3 cubeMapDirections[16];
+     #endif
+     uint cubeMapIndex;
+ };
+diff --git a/XenosRecomp/shader_recompiler.cpp b/XenosRecomp/shader_recompiler.cpp
+index 52a3314..ef3a18b 100644
+--- a/XenosRecomp/shader_recompiler.cpp
++++ b/XenosRecomp/shader_recompiler.cpp
+@@ -144,7 +144,9 @@ static constexpr std::pair<DeclUsage, size_t> INTERPOLATORS[] =
+     { DeclUsage::TexCoord, 14 },
+     { DeclUsage::TexCoord, 15 },
+     { DeclUsage::Color, 0 },
+-    { DeclUsage::Color, 1 }
++    { DeclUsage::Color, 1 },
++    { DeclUsage::Normal, 0 },
++    { DeclUsage::Normal, 1 }
+ };
+ 
+ static constexpr std::string_view TEXTURE_DIMENSIONS[] = 
+@@ -1838,7 +1840,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+     }
+ #endif
+ 
+-    bool printedRegisters[32]{};
++    bool printedRegisters[128]{};
+ 
+     uint32_t interpolatorCount = (shader->interpolatorInfo >> 5) & 0x1F;
+ 
+@@ -1880,7 +1882,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+         out += "\n";
+     }
+ 
+-    for (size_t i = 0; i < 32; i++)
++    for (size_t i = 0; i < 128; i++)
+     {
+         if (!printedRegisters[i])
+         {

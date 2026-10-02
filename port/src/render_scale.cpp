@@ -75,6 +75,7 @@ REX_HOOK_RAW(sub_82611A20) {
 // rectangle; r4's low three bits select the source render target (4 = depth).
 // These arguments are read by sub_8210C5F8 before it emits the copy commands.
 // Recording the caller and extent exposes remaining unscaled engine passes.
+#if !defined(SR_HAS_NATIVE) || !SR_HAS_NATIVE
 REX_HOOK_RAW(sub_8210C5F8) {
   // RequiresRestart: read once, so normal runs don't query a cvar per copy.
   static const bool diagnose = REXCVAR_GET(sr_render_scale) != 100;
@@ -101,3 +102,4 @@ REX_HOOK_RAW(sub_8210C5F8) {
   }
   __imp__sub_8210C5F8(ctx, base);
 }
+#endif
