@@ -44,6 +44,7 @@
 #include "sr_graphics_system.h"
 #include "shader_pack.h"
 #include "shader_registry.h"
+#include "shader_translator.h"
 #include "vertex_signature.h"
 #include "texture_decode.h"
 
@@ -97,6 +98,9 @@ REXCVAR_DEFINE_DOUBLE(sr_native_shadow_scale_mul, 1.0, "Superman Returns Native"
 REXCVAR_DEFINE_INT32(sr_native_debug_nodraw_format, -1, "Superman Returns Native",
                      "Debug (wrong pixels): record every state of the draws that target this guest color "
                      "format but skip the draw call itself, to split state cost from draw cost");
+REXCVAR_DEFINE_BOOL(sr_native_ignore_pack, false, "Superman Returns Native",
+                    "Ignore the embedded shader pack (testing the runtime shader translator on a "
+                    "development build)");
 REXCVAR_DEFINE_INT32(sr_native_dump_before_resolve, -1, "Superman Returns Native",
                      "Debug: with sr_native_dump_frame_at_s, dump every native surface into "
                      "sr_native_dump_dir right before the Nth resolve (0-based) of that frame, "
@@ -2273,11 +2277,20 @@ bool PackShaderLookup(uint64_t hash, bool vertex, const void** data, size_t* siz
     return true;
   }
   const ShaderPackView& pack = EmbeddedShaderPack();
-  if (!pack.count()) return false;
   ShaderPackEntry e;
-  if (!pack.Find(hash, vertex, e)) return false;
-  *data = pack.base() + e.offset;
-  *size = e.size;
+  if (pack.count() && !REXCVAR_GET(sr_native_ignore_pack) && pack.Find(hash, vertex, e)) {
+    *data = pack.base() + e.offset;
+    *size = e.size;
+    return true;
+  }
+  // Shaders translated on this machine in an earlier run.
+  static std::mutex cached_mutex;
+  static std::unordered_map<uint64_t, std::vector<uint8_t>> cached;
+  std::lock_guard<std::mutex> lock(cached_mutex);
+  auto& bytes = cached[hash ^ (vertex ? 0x9E3779B97F4A7C15ull : 0)];
+  if (bytes.empty() && !ShaderTranslator::Get().LoadCached(hash, vertex, bytes)) return false;
+  *data = bytes.data();
+  *size = bytes.size();
   return true;
 }
 
@@ -2291,8 +2304,12 @@ bool ShaderCorpusAvailable(std::string* where) {
       return true;
     }
   }
-  if (pack.count() && dir_cvar.empty()) {
+  if (pack.count() && dir_cvar.empty() && !REXCVAR_GET(sr_native_ignore_pack)) {
     if (where) *where = fmt::format("embedded pack, {} shaders", pack.count());
+    return true;
+  }
+  if (dir_cvar.empty() && ShaderTranslator::Get().Enabled()) {
+    if (where) *where = "runtime shader translation (shader_tools/, cache in shader_cache/)";
     return true;
   }
   const std::filesystem::path dir = dir_cvar.empty() ? DefaultShaderDir() : dir_cvar;
@@ -2305,6 +2322,7 @@ bool ShaderCorpusAvailable(std::string* where) {
 }
 
 const std::vector<uint8_t>* Renderer::LoadShader(uint64_t hash, bool vertex) {
+  shader_pending_ = false;
   auto it = shader_bytecode_.find(hash);
   if (it != shader_bytecode_.end()) {
     return it->second.get();
@@ -2328,24 +2346,38 @@ const std::vector<uint8_t>* Renderer::LoadShader(uint64_t hash, bool vertex) {
   }
   // Embedded pack unless sr_native_shader_dir points at loose files.
   const ShaderPackView& pack = EmbeddedShaderPack();
-  if (pack.count() && REXCVAR_GET(sr_native_shader_dir).empty()) {
+  if (pack.count() && REXCVAR_GET(sr_native_shader_dir).empty() &&
+      !REXCVAR_GET(sr_native_ignore_pack)) {
     ShaderPackEntry e;
     if (pack.Find(hash, vertex, e)) {
       data = std::make_unique<std::vector<uint8_t>>(pack.base() + e.offset,
                                                     pack.base() + e.offset + e.size);
-    } else {
-      REXLOG_WARN("native: shader {} not in the embedded pack", name);
-      LogUnsupportedOnce("shader missing from the corpus", hash, name);
     }
-    auto* result = data.get();
-    shader_bytecode_[hash] = std::move(data);
-    return result;
-  }
-  std::ifstream f(std::filesystem::path(shader_dir_) / name, std::ios::binary);
-  if (f) {
-    data = std::make_unique<std::vector<uint8_t>>((std::istreambuf_iterator<char>(f)),
-                                                  std::istreambuf_iterator<char>());
   } else {
+    std::ifstream f(std::filesystem::path(shader_dir_) / name, std::ios::binary);
+    if (f) {
+      data = std::make_unique<std::vector<uint8_t>>((std::istreambuf_iterator<char>(f)),
+                                                    std::istreambuf_iterator<char>());
+    }
+  }
+  if (!data && REXCVAR_GET(sr_native_shader_dir).empty()) {
+    // Not shipped with the build: translate it on this machine (or take it from
+    // the cache of an earlier run). A translation still running leaves the
+    // answer open: nothing is cached, the draw is skipped and asked again.
+    std::vector<uint8_t> dxil;
+    switch (ShaderTranslator::Get().Fetch(hash, vertex, dxil)) {
+      case TranslateState::kReady:
+        data = std::make_unique<std::vector<uint8_t>>(std::move(dxil));
+        break;
+      case TranslateState::kPending:
+        shader_pending_ = true;
+        ++stats_.shader_pending_draws;
+        return nullptr;
+      default:
+        break;
+    }
+  }
+  if (!data) {
     REXLOG_WARN("native: missing shader {}", name);
     LogUnsupportedOnce("shader missing from the corpus", hash, name);
   }
@@ -2461,9 +2493,12 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
   }
 
   const auto* vs = LoadShader(vs_hash, true);
+  bool pending = shader_pending_;
   // ps_hash == 0: depth-only draw (the game binds no pixel shader).
   const auto* ps = ps_hash ? LoadShader(ps_hash, false) : nullptr;
+  pending = pending || shader_pending_;
   if (!vs || (ps_hash && !ps)) {
+    if (pending) pipelines_.erase(key);  // ask again once the translation finished
     return nullptr;
   }
 

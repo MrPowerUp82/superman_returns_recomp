@@ -146,6 +146,7 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
             ${SR_NATIVE_ROOT}/pm4_mirror.cpp
             ${SR_NATIVE_ROOT}/texture_decode.cpp
             ${SR_NATIVE_ROOT}/shader_registry.cpp
+            ${SR_NATIVE_ROOT}/shader_translator.cpp
             ${SR_NATIVE_ROOT}/pipeline_cache.cpp
             ${SR_NATIVE_ROOT}/hang_watchdog.cpp
         )

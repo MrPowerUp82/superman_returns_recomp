@@ -170,6 +170,7 @@ class Renderer {
     uint64_t buffer_watch_dirty = 0;
     uint64_t buffer_hash_dirty = 0;
     uint64_t edram_reinterprets = 0;
+    uint64_t shader_pending_draws = 0;
     uint64_t resolves = 0;
     uint64_t resolve_textures_created = 0;
     uint64_t pso_created = 0;
@@ -331,6 +332,7 @@ class Renderer {
     std::string rt;
   };
   bool SkipGpuDraw() const;
+  bool shader_pending_ = false;  // LoadShader: translation still running
   void ProfileBegin();
   void ProfileMark(Op op, bool drew);
   void ProfileEnd();

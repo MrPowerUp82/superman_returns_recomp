@@ -45,6 +45,7 @@
 #include "native_bridge.h"
 #include "shader_container.h"
 #include "shader_library.h"
+#include "shader_translator.h"
 
 REXCVAR_DEFINE_STRING(sr_native_dump_shader_dir, "", "Superman Returns Native",
                       "Write every shader container seen by the XDK CreateShader hooks to "
@@ -250,6 +251,24 @@ void DumpContainer(uint8_t* base, uint32_t container, const GuestShaderInfo& inf
   WriteContainer(DumpDir(), name, base + container, header.total_size());
 }
 
+// Hands the container to the runtime translator (shader_translator.h) when no
+// library supplies the shader: the hash is then the creation hash of these
+// very bytes, which is what LoadShader will ask for.
+void OfferTranslation(uint8_t* base, uint32_t container, const GuestShaderInfo& info) {
+  if (Library().ok) return;
+  ShaderTranslator& translator = ShaderTranslator::Get();
+  if (!translator.Enabled()) return;
+  static std::mutex mutex;
+  static std::unordered_set<uint64_t> offered;
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (!offered.insert(info.container_hash ^ (info.is_vertex ? 1ull : 0ull)).second) return;
+  }
+  ShaderContainerHeader header;
+  if (!ParseShaderContainerHeader(base + container, GuestAvailable(container), header)) return;
+  translator.Offer(info.container_hash, info.is_vertex, base + container, header.total_size());
+}
+
 // Unrecognised containers, for comparing against artifacts/shaders/raw
 // (tools/shaders/make_preshaders.py --diagnose). Size words may be zero:
 // write a bounded window instead.
@@ -315,6 +334,7 @@ void OnCreateShader(PPCContext& ctx, uint8_t* base, void (*original)(PPCContext&
     return;
   }
   DumpContainer(base, container, info);
+  OfferTranslation(base, container, info);
   std::lock_guard<std::mutex> lock(g_mutex);
   RegisterLocked(shader_obj, info, role);
 }
@@ -344,6 +364,7 @@ void TryRegisterInlineShaders(uint8_t* base, uint32_t vs_obj, uint32_t ps_obj) {
     }
     if (uint32_t c = ResolveRuntimeCopy(base, obj, info)) {
       DumpContainer(base, c, info);
+      OfferTranslation(base, c, info);
       RegisterLocked(obj, info, "runtime copy");
       continue;
     }
