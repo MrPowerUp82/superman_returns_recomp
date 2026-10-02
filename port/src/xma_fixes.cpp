@@ -10,15 +10,26 @@
 //  * The stream's sound has finished and its context was already released
 //    (the whole context block is zeroed), but the stream is still in the mix
 //    list. A released context can never produce output. -> stop waiting.
-//  * The output buffer gets flagged invalid ("full") while the game's read
-//    offset update races the decoder, and the state never recovers.
-//    -> stop waiting after a short timeout; the next mix pass retries.
+//  * The context has run out of input (a streamed sound, such as Jor-El's
+//    voice in the intro, waiting for its next disc read) or its output buffer
+//    is full or flagged invalid ("full") while the game's read offset update
+//    races the decoder. -> stop waiting as soon as a kick makes no progress.
 //
 // Stopping the wait (r26 = 0) makes the mixer move on to the next stream, so
 // at worst one sound skips part of a mix pass. Before this fix the audio
 // thread spun forever, stopped flushing its 1 MB command queue
 // (sub_8264C540), and the queue overflowed into the heap, crashing a minute
 // or more into 3D scenes (calls to 0xC003000C, writes to 0x8264CE28).
+//
+// The runtime's XMAEnableContext decodes inline (XmaDecoder::WriteRegister
+// runs XmaContext::Work on the calling thread), so when the kick returns the
+// context already holds everything it can decode. If the context did not
+// change, nothing will arrive while the mixer keeps spinning: the data it
+// needs comes from guest threads that run after the mix pass. An earlier
+// version waited up to 4 ms per starved stream on every mix pass; with a
+// streamed voice split over several contexts that added up to more than one
+// audio frame per pass, the mixer fell behind real time and only the sound
+// stuttered while the game kept running normally.
 //
 // Mid-asm hook at 0x826595B8 (`cmplwi cr6,r26,0` before the retry branch);
 // r31 points at the stream, whose first word points at {xma_context*, ...}.
@@ -36,20 +47,36 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-// About one audio frame; real XMA hardware delivers well within this.
-constexpr auto kMaxStarvedWait = std::chrono::milliseconds(4);
+// Safety net for a context that keeps making progress without ever giving
+// the mixer enough samples. Well under one 256-sample audio frame (5.3 ms).
+constexpr auto kMaxStarvedWait = std::chrono::milliseconds(1);
 
 uint32_t Load32(const uint8_t* base, uint32_t addr) {
   return __builtin_bswap32(*reinterpret_cast<const uint32_t*>(base + addr));
 }
 
+// The context words the decoder updates: input buffer valid bits and output
+// write offset (dword 0), output buffer valid (dword 1), input read offset
+// (dword 2) and output read offset (dword 9).
+struct ContextState {
+  uint32_t dword0;
+  uint32_t dword1;
+  uint32_t dword2;
+  uint32_t dword9;
+
+  bool operator==(const ContextState&) const = default;
+};
+
+ContextState ReadState(const uint8_t* base, uint32_t xma_context) {
+  return {Load32(base, xma_context), Load32(base, xma_context + 4),
+          Load32(base, xma_context + 8), Load32(base, xma_context + 36)};
+}
+
 // Nothing to decode and nothing to read: input buffers 0/1 and the output
 // buffer are all invalid (a released context is fully zeroed).
-bool IsDeadContext(const uint8_t* base, uint32_t xma_context) {
-  const uint32_t dword0 = Load32(base, xma_context);
-  const uint32_t dword1 = Load32(base, xma_context + 4);
-  const bool input_valid = (dword0 >> 20) & 3;
-  const bool output_valid = dword1 >> 31;
+bool IsDeadContext(const ContextState& state) {
+  const bool input_valid = (state.dword0 >> 20) & 3;
+  const bool output_valid = state.dword1 >> 31;
   return !input_valid && !output_valid;
 }
 
@@ -77,10 +104,19 @@ void XmaKickStarvedContext(PPCRegister& r26, PPCRegister& r31) {
   const uint32_t stream = r31.u32;
   const uint32_t xma_context = Load32(base, Load32(base, stream));
 
-  if (!xma_context || IsDeadContext(base, xma_context)) {
-    LogGiveUp("released", xma_context, stream);
+  auto give_up = [&](const char* reason) {
+    LogGiveUp(reason, xma_context, stream);
     waiting_stream = 0;
     r26.u64 = 0;
+  };
+
+  if (!xma_context) {
+    give_up("released");
+    return;
+  }
+  const ContextState before = ReadState(base, xma_context);
+  if (IsDeadContext(before)) {
+    give_up("released");
     return;
   }
 
@@ -89,14 +125,17 @@ void XmaKickStarvedContext(PPCRegister& r26, PPCRegister& r31) {
     waiting_stream = stream;
     waiting_since = now;
   } else if (now - waiting_since > kMaxStarvedWait) {
-    LogGiveUp("timed out", xma_context, stream);
-    waiting_stream = 0;
-    r26.u64 = 0;
+    give_up("timed out");
     return;
   }
 
   PPCContext call_ctx{};
   call_ctx.r3.u64 = xma_context;
   __imp__XMAEnableContext(call_ctx, base);
-  std::this_thread::yield();
+
+  // The kick decoded synchronously. No change means no input left or no room
+  // in the output buffer; spinning cannot fix either.
+  if (ReadState(base, xma_context) == before) {
+    give_up("no progress");
+  }
 }
