@@ -81,6 +81,12 @@ foreach ($candidate in '.tools\rexglue-sdk-source\LICENSE', '.tools\rexglue-sdk\
 foreach ($f in 'run.cmd', 'run_keyboard.cmd', 'LEIAME.txt', 'THIRD_PARTY_NOTICES.txt') {
   Copy-Item (Join-Path $root "tools\release\$f") $stage
 }
+# Batch files and notes ship with Windows line endings whatever the checkout used.
+foreach ($f in 'run.cmd', 'run_keyboard.cmd', 'LEIAME.txt', 'THIRD_PARTY_NOTICES.txt') {
+  $path = Join-Path $stage $f
+  $text = [IO.File]::ReadAllText($path) -replace "`r?`n", "`r`n"
+  [IO.File]::WriteAllText($path, $text, (New-Object Text.UTF8Encoding($false)))
+}
 
 $commit = (git -C $root rev-parse --short HEAD).Trim()
 $dirty = if ((git -C $root status --porcelain -- port tools build.cmd) ) { '-dirty' } else { '' }
