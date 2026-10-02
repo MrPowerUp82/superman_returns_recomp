@@ -14,7 +14,8 @@ O jogo compila, carrega os arquivos `.AST`, renderiza via D3D12 (plugin `xenos`)
 
 ### Correções específicas do jogo
 
-- **Travamento do áudio / crash após 1–2 min em cenas 3D** ([`port/src/xma_fixes.cpp`](port/src/xma_fixes.cpp)): o mixer de áudio fica em espera ativa pelo decodificador XMA sem timeout. Sob a emulação de XMA do runtime alguns contextos nunca entregam amostras (contexto já liberado, ou buffer de saída marcado cheio), a thread de áudio travava, a fila de comandos de 1 MB (`sub_8264C540`) parava de ser esvaziada e transbordava sobre o heap. Um hook midasm em `0x826595B8` reativa o contexto e, se ele estiver liberado ou não entregar em 4 ms, faz o mixer seguir para o próximo stream.
+- **Travamento do áudio / crash após 1–2 min em cenas 3D** ([`port/src/xma_fixes.cpp`](port/src/xma_fixes.cpp)): o mixer de áudio fica em espera ativa pelo decodificador XMA sem timeout. Sob a emulação de XMA do runtime alguns contextos nunca entregam amostras (contexto já liberado, ou buffer de saída marcado cheio), a thread de áudio travava, a fila de comandos de 1 MB (`sub_8264C540`) parava de ser esvaziada e transbordava sobre o heap. Um hook midasm em `0x826595B8` reativa o contexto e, se ele estiver liberado, se o kick não mudar nada (sem entrada ou buffer de saída cheio) ou se não entregar em 1 ms, faz o mixer seguir para o próximo stream.
+- **Som engasgando quando o Jor-El começa a falar** (mesmo hook): o `XMAEnableContext` do runtime decodifica na hora, então um contexto sem dados de entrada (a voz do Jor-El vem em stream do disco) não vai entregar nada enquanto o mixer espera. A versão anterior do hook esperava até 4 ms por stream em todo passe do mixer; com a voz dividida em vários contextos isso passava de um quadro de áudio (5,3 ms), o mixer ficava atrás do tempo real e só o som engasgava. Agora o hook desiste assim que um kick não faz progresso.
 
 As dicas de limites de função estão em [`port/superman_returns_manifest.toml`](port/superman_returns_manifest.toml). A maior parte foi encontrada por [`tools/find_missing_funcs.py`](tools/find_missing_funcs.py), que procura thunks de vtable e funções pequenas que a análise estática do ReXGlue não descobre. O código gerado não tem nenhum `REX_FATAL`.
 
@@ -54,7 +55,7 @@ Para validar em casa: `powershell -File tools\post_effects_check.ps1 -Pairs 2 -T
 
 ### Desenvolvimento do renderizador próprio
 
-O modo experimental `--sr_renderer=trace` já usa um processador de comandos do projeto. Ele registra draws, cópias, swaps, hashes de shaders e estados gráficos, mas **ainda delega a renderização ao backend Xenos D3D12**. É uma ferramenta de migração, sem ganho de FPS esperado. O modo padrão continua `xenos`.
+O modo experimental `--sr_renderer=trace` já usa um processador de comandos do projeto. Ele registra draws, cópias, swaps, hashes de shaders e estados gráficos, mas **ainda delega a renderização ao backend Xenos D3D12**. É uma ferramenta de migração, sem ganho de FPS esperado. O modo padrão é `native` (veja abaixo).
 
 Para compilar o modo de captura, execute `powershell -File tools\setup_gpu_source.ps1` antes de `build.cmd`. O script baixa somente o código gráfico do ReXGlue v0.10.0 para `.tools/`. Para capturar 120 quadros de gameplay após o início de um jogo novo, execute `powershell -File tools\capture_gpu_trace.ps1 -Name gameplay -Gameplay -Frames 120`. O script fecha o processo que iniciou e grava o CSV bruto, o resumo e uma imagem de referência em `logs/`. Veja a [análise e os critérios de migração](docs/native-renderer.md).
 
@@ -112,9 +113,9 @@ Opções disponíveis: `--keybind_a`, `_b`, `_x`, `_y`, `_left_trigger`, `_right
 
 O `build.cmd` usa o manifesto para regenerar o C++ automaticamente. O diretório `port/generated/default/` é descartável e não deve ser editado diretamente. Ajustes para o jogo devem ficar no manifesto, em `port/src/` ou em uma etapa de patch reproduzível.
 
-### Renderizador nativo (experimental, não validado)
+### Renderizador nativo (padrão, experimental)
 
-`port/src/native_renderer/` traz o renderizador D3D12 do [rexglue-native-kit](https://github.com/crazyriddler/rexglue-native-kit), que intercepta as funções Direct3D do XDK e desenha sem emular a GPU Xenos. **Ele ainda não foi compilado nem executado com este jogo**: os endereços das funções em `port/src/native_renderer/game_profile.h` são candidatos não confirmados, e o build padrão (`SR_NATIVE=OFF`) não inclui nada dele. `--sr_renderer=native` volta para `xenos`, com aviso no log, enquanto o renderer não estiver compilado e confirmado. O plano, a lista de endereços e a checklist para validar em casa (`tools/native_validate.ps1`) estão em [`docs/native-port-plan.md`](docs/native-port-plan.md). Os testes que não precisam do jogo ficam em `tests/`.
+`port/src/native_renderer/` traz o renderizador D3D12 do [rexglue-native-kit](https://github.com/crazyriddler/rexglue-native-kit), que intercepta as funções Direct3D do XDK e desenha sem emular a GPU Xenos. **Ele é o padrão do projeto**: o `build.cmd` compila com `SR_NATIVE=RENDERER` (e baixa o código de GPU com `tools/setup_gpu_source.ps1` na primeira vez) e `sr_renderer` vale `native`. Se o renderer não puder ser usado (build sem o código de GPU, sem a biblioteca de shaders, ou falha ao iniciar), o jogo volta sozinho para `xenos` com um aviso `sr_renderer=native: ...; using the xenos backend` no log. Para usar o backend antigo: `run.cmd --sr_renderer=xenos`; para compilar sem o renderer: `set SR_NATIVE=OFF` antes do `build.cmd`. O renderer precisa da biblioteca de pré-shaders (abaixo). O plano, a lista de endereços e a checklist para validar em casa (`tools/native_validate.ps1`) estão em [`docs/native-port-plan.md`](docs/native-port-plan.md). Os testes que não precisam do jogo ficam em `tests/`.
 
 #### Pré-shaders (`sr_native_preshaders`)
 

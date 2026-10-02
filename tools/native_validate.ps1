@@ -247,7 +247,7 @@ function Step-Ab() {
 }
 
 function Step-Bench() {
-  Bench 'xenos_ref' ''
+  Bench 'xenos_ref' '--sr_renderer=xenos'
   Bench 'native' '--sr_renderer=native'
   $rows = Import-Csv (Join-Path $root 'logs\bench_results.csv') | Select-Object -Last 4
   $rows | Format-Table | Out-String | Tee-Object -FilePath (Join-Path $out 'bench.txt')
