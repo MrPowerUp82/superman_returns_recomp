@@ -191,6 +191,25 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
             message(STATUS "No DXIL in ${SR_NATIVE_SHADER_DIR}: the native renderer will "
                            "need --sr_native_shader_dir")
         endif()
+
+        # Pre-shader library next to the executable (sr_native_preshaders): the
+        # original containers + their DXIL, how the renderer recognises shaders.
+        get_filename_component(SR_NATIVE_CORPUS_DIR "${SR_NATIVE_SHADER_DIR}" DIRECTORY)
+        file(GLOB SR_NATIVE_RAW_FILES "${SR_NATIVE_CORPUS_DIR}/raw/*.bin")
+        if(SR_NATIVE STREQUAL "RENDERER" AND SR_NATIVE_SHADER_FILES AND SR_NATIVE_RAW_FILES)
+            find_package(Python3 REQUIRED COMPONENTS Interpreter)
+            set(SR_NATIVE_PRESHADERS "${CMAKE_CURRENT_BINARY_DIR}/superman_returns_shaders.srsl")
+            add_custom_command(
+                OUTPUT "${SR_NATIVE_PRESHADERS}"
+                COMMAND Python3::Interpreter
+                        "${CMAKE_CURRENT_SOURCE_DIR}/../tools/shaders/make_preshaders.py"
+                        --corpus "${SR_NATIVE_CORPUS_DIR}" --out "${SR_NATIVE_PRESHADERS}"
+                DEPENDS ${SR_NATIVE_SHADER_FILES} ${SR_NATIVE_RAW_FILES}
+                        "${CMAKE_CURRENT_SOURCE_DIR}/../tools/shaders/make_preshaders.py"
+                COMMENT "Building the pre-shader library")
+            add_custom_target(sr_preshaders ALL DEPENDS "${SR_NATIVE_PRESHADERS}")
+            add_dependencies(superman_returns sr_preshaders)
+        endif()
     else()
         target_compile_definitions(superman_returns PRIVATE SR_HAS_NATIVE=0)
     endif()

@@ -116,6 +116,18 @@ O `build.cmd` usa o manifesto para regenerar o C++ automaticamente. O diretório
 
 `port/src/native_renderer/` traz o renderizador D3D12 do [rexglue-native-kit](https://github.com/crazyriddler/rexglue-native-kit), que intercepta as funções Direct3D do XDK e desenha sem emular a GPU Xenos. **Ele ainda não foi compilado nem executado com este jogo**: os endereços das funções em `port/src/native_renderer/game_profile.h` são candidatos não confirmados, e o build padrão (`SR_NATIVE=OFF`) não inclui nada dele. `--sr_renderer=native` volta para `xenos`, com aviso no log, enquanto o renderer não estiver compilado e confirmado. O plano, a lista de endereços e a checklist para validar em casa (`tools/native_validate.ps1`) estão em [`docs/native-port-plan.md`](docs/native-port-plan.md). Os testes que não precisam do jogo ficam em `tests/`.
 
+#### Pré-shaders (`sr_native_preshaders`)
+
+Como no [nfsmw-nx](https://github.com/StevensND/nfsmw-nx), os shaders do jogo são traduzidos **antes** de jogar e ficam em um arquivo local, `superman_returns_shaders.srsl`, ao lado do `superman_returns.exe`. Ele guarda cada container original (do seu jogo) junto com o DXIL já compilado. Durante o jogo, o renderer reconhece cada shader comparando o container que o Direct3D do XDK recebe com esses originais, em vez de calcular um hash da memória do jogo na hora do desenho (o Direct3D altera essas cópias, e por isso os hashes nunca batiam).
+
+- Gerar: `powershell -File tools\shaders\build_corpus.ps1` (passo 6 roda `tools/shaders/make_preshaders.py` e copia a biblioteca para cada `superman_returns.exe` em `port/out/build`). Um build `SR_NATIVE=RENDERER` também a gera ao lado do executável.
+- `--sr_native_preshaders=true` (padrão): usa a biblioteca se ela existir; sem ela, volta ao pack embutido e aos hashes antigos.
+- `--sr_native_preshaders_path=<arquivo>`: outro caminho para a biblioteca.
+- `--sr_native_pipeline_cache=true` (padrão): pré-compila no início os pipelines já vistos (`superman_returns_pipelines.bin`), para evitar travadas na primeira vez.
+- Diagnóstico: com `--sr_native_dump_shader_dir=logs\native_shaders`, os containers não reconhecidos vão para `logs\native_shaders\unmatched\`; `python tools\shaders\make_preshaders.py --diagnose logs\native_shaders\unmatched` mostra o original mais próximo e as palavras que diferem.
+
+A biblioteca contém dados derivados do jogo: não a envie para o Git.
+
 ## Próximos marcos técnicos
 
 1. Capturar e classificar os comandos, shaders e passes gráficos do título e do mundo aberto.

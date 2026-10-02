@@ -1,5 +1,44 @@
 # Checkpoint: Superman Returns Recomp — Renderizador Nativo Direct3D 12
 
+## Atualização 02/10/2026 — pré-shaders e identificação de shaders
+
+**Onde a sessão anterior parou** (`checkpoint1.md`): o build `RENDERER` já rodava, mas todos os draws eram pulados (`p0:0/Nshader`). Os 120 hashes calculados na hora do desenho, a partir das cópias dos containers dentro dos objetos de shader (+40/+872), não batiam com nenhum dos 167 do catálogo. Motivo: o Direct3D do XDK altera essas cópias, e dentro dos criadores `sub_820F5840`/`sub_820F6690` os campos de tamanho do container no MemStream (`r4+20`) estão zerados (o `sub_820F9C78` só os restaura depois).
+
+**O que mudou** (como no [nfsmw-nx](https://github.com/StevensND/nfsmw-nx)):
+
+1. **Biblioteca de pré-shaders** `superman_returns_shaders.srsl` (`port/src/native_renderer/shader_library.h`, gerada por `tools/shaders/make_preshaders.py`). Ela guarda cada container original + o DXIL e fica ao lado do exe.
+2. **Identificação na criação**, antes de o Direct3D mexer no container: os hooks dos criadores comparam o container do MemStream com os originais. Funciona com os campos de tamanho zerados (match `body`), com o header completo (match `exact`) e, no fallback da hora do desenho, pelo microcódigo (match `microcode`, só quando há um único candidato). Toda comparação é confirmada byte a byte.
+3. **Fallback na hora do desenho** sem recalcular a cada draw: um objeto não reconhecido é examinado só uma vez e registrado no log (`shader object XXXXXXXX (vs|ps) not recognised`).
+4. **Opções**: `sr_native_preshaders` (padrão `true`) e `sr_native_preshaders_path`. Os DXIL são procurados nesta ordem: `sr_native_shader_dir` → pré-shaders → pack embutido → `artifacts/shaders/dxil`.
+5. Removidos o papel `CreateShaderOuter`, que nunca teve hook (quebrava `tests/native`), e o dump temporário `logs\inline_*.bin`.
+
+**Próximos passos no Windows:**
+
+```powershell
+# 1. Corpus + biblioteca (passo 6 novo; instala ao lado dos exes em port/out/build)
+powershell -File tools\shaders\build_corpus.ps1
+python tools\shaders\make_preshaders.py --verify artifacts\shaders\superman_returns_shaders.srsl
+
+# 2. Build RENDERER (também gera a biblioteca ao lado do exe)
+powershell -File tools\native_validate.ps1 -Step build -Native RENDERER
+
+# 3. Smoke test com dump dos não reconhecidos
+.\port\out\build\win-amd64-release\superman_returns.exe --game_data_root=game --sr_renderer=native --sr_skip_intro=true --sr_native_dump_shader_dir=logs\native_shaders --log_file=logs\game.log
+Select-String logs\game.log -Pattern "pre-shaders|exact|body match|microcode|not recognised"
+```
+
+**O que verificar no log:**
+- `pre-shaders: N shaders from ...`: a biblioteca carregou.
+- `shader XXXXXXXX = HASH.vs (CreateShaderA, body match; ...)`: os contadores `exact`/`body` devem subir na criação.
+- Se aparecer `not recognised`: rode `python tools\shaders\make_preshaders.py --diagnose logs\native_shaders\unmatched`. O resultado mostra o original mais próximo e as palavras que diferem; se o microcódigo for encontrado num deslocamento diferente, ajuste a leitura em `ResolveContainer`/`ResolveInline` (`shader_registry.cpp`).
+- Os draws devem passar de `p0:0/Nshader` para valores diferentes de zero.
+
+Testes sem o jogo: `cmake -S tests/native -B build/tests-native && cmake --build build/tests-native && build\tests-native\sr_native_tests` (44 OK) e `python -m pytest tests/tools` (38 OK).
+
+---
+
+## Histórico (01/10/2026)
+
 **Data:** 01/10/2026  
 **Status Atual:** Fases 1 e 2 **100% Concluídas**. Pronto para iniciar a **Fase 3 (Build CAPTURE & Coleta de Shaders)** no novo computador.
 

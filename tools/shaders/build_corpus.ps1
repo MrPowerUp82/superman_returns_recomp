@@ -13,6 +13,9 @@ output goes to .tools/ or artifacts/ (both ignored by Git). Never commit them.
      when one exists under port/out
   5. build_catalog.py: HLSL, DXIL (+ SPIR-V), reflection ->
      artifacts/shaders/{catalog.json,dxil/,SHADER_CATALOG.md}
+  6. make_preshaders.py: the pre-shader library (original containers + DXIL,
+     as in nfsmw-nx) -> artifacts/shaders/superman_returns_shaders.srsl, also
+     copied next to every superman_returns.exe under port/out/build
 
 A SR_NATIVE=RENDERER build then embeds artifacts/shaders/dxil (port/CMakeLists.txt),
 or run the game with --sr_native_shader_dir=<repo>\artifacts\shaders\dxil.
@@ -87,4 +90,9 @@ if ($xsh) {
 $catalog = @((Join-Path $PSScriptRoot 'build_catalog.py'))
 if ($NoSpirv) { $catalog += '--no-spirv' }
 Run $python $catalog
+
+$pre = @((Join-Path $PSScriptRoot 'make_preshaders.py'))
+Get-ChildItem (Join-Path $root 'port\out\build') -Recurse -Filter 'superman_returns.exe' -ErrorAction SilentlyContinue |
+  ForEach-Object { $pre += @('--install', $_.DirectoryName) }
+Run $python $pre
 Write-Output "[corpus] done: $root\artifacts\shaders\catalog.json, $root\artifacts\shaders\SHADER_CATALOG.md"
