@@ -73,6 +73,13 @@ REXCVAR_DEFINE_BOOL(sr_native_watch_blue, false, "Superman Returns Native",
 REXCVAR_DEFINE_STRING(sr_native_debug_ps, "", "Superman Returns Native",
                       "Debug: log the first float constants c0..c40 of draws using this pixel shader "
                       "(hex container hash)");
+REXCVAR_DEFINE_STRING(sr_native_watch_xy, "640,50", "Superman Returns Native",
+                      "Debug: pixel x,y of the HDR target whose changes sr_native_watch_blue logs");
+REXCVAR_DEFINE_BOOL(sr_native_hdr_from_ldr_black, true, "Superman Returns Native",
+                    "When the HDR target takes over EDRAM last written as an 8888 surface, start it "
+                    "from black (0,0,0,1) instead of reinterpreting the bits: the cleared 8888 value "
+                    "0xFF000000 reads as 7e3 (0,0,30,1), which distance-faded terrain blended into "
+                    "blue dashes along curbs");
 REXCVAR_DEFINE_INT32(sr_native_dump_before_resolve, -1, "Superman Returns Native",
                      "Debug: with sr_native_dump_frame_at_s, dump every native surface into "
                      "sr_native_dump_dir right before the Nth resolve (0-based) of that frame, "
@@ -1928,7 +1935,20 @@ void Renderer::ResolveEdramAliasing(HostSurface* s) {
   }
   if (newest_same && newest_same->last_write > newest &&
       REXCVAR_GET(sr_native_edram_reinterpret)) {
+    if (REXCVAR_GET(sr_native_hdr_from_ldr_black) && newest_same->guest_format == 0 &&
+        s->guest_format == 12 && !s->depth) {
+      float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+      Transition(s->resource.Get(), s->state, D3D12_RESOURCE_STATE_RENDER_TARGET);
+      command_list_->ClearRenderTargetView(s->view, black, 0, nullptr);
+      s->last_write = ++edram_write_seq_;
+      return;
+    }
     bool ok = ReinterpretSurface(*s, *newest_same);
+    if (watch_frame_ >= 0 && !watch_done_) {
+      REXLOG_INFO("native watch: edram reinterpret {} <- {} ok {} (guest fmt {} <- {}) at draw {}",
+                  SurfaceName(s), SurfaceName(newest_same), ok, s->guest_format,
+                  newest_same->guest_format, draw_calls_in_frame_);
+    }
     if (trace_state_ == 1)
       REXLOG_INFO("trace edram reinterpret {} <- {}: {} (kinds {} {} fmt {} {})", SurfaceName(s),
                   SurfaceName(newest_same), ok, newest_same->guest_format, s->guest_format,
@@ -1940,6 +1960,9 @@ void Renderer::ResolveEdramAliasing(HostSurface* s) {
     }
   }
   if (!newest) return;
+  if (watch_frame_ >= 0 && !watch_done_) {
+    REXLOG_INFO("native watch: edram alias clear {} at draw {}", SurfaceName(s), draw_calls_in_frame_);
+  }
   if (s->depth) {
     Transition(s->resource.Get(), s->state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
     command_list_->ClearDepthStencilView(s->view, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
@@ -2503,6 +2526,16 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
                          Load16(base, e), Load16(base, e + 2), Load32(base, e + 4));
     }
     REXLOG_INFO("native: PSO layout vs {:016X} host:{} | guest decl:{}", vs_hash, layout, raw);
+    {
+      const auto& b0 = desc.BlendState.RenderTarget[0];
+      REXLOG_INFO("native: PSO state vs {:016X} ps {:016X}: blend {} src {} dst {} op {} alpha-src {} alpha-dst {} "
+                  "mask {:X} a2c {} depth {} write {} func {} cull {} rtv0 {} samples {}", vs_hash, ps_hash,
+                  b0.BlendEnable ? 1 : 0, int(b0.SrcBlend), int(b0.DestBlend), int(b0.BlendOp),
+                  int(b0.SrcBlendAlpha), int(b0.DestBlendAlpha), unsigned(b0.RenderTargetWriteMask),
+                  desc.BlendState.AlphaToCoverageEnable ? 1 : 0, desc.DepthStencilState.DepthEnable ? 1 : 0,
+                  int(desc.DepthStencilState.DepthWriteMask), int(desc.DepthStencilState.DepthFunc),
+                  int(desc.RasterizerState.CullMode), int(desc.RTVFormats[0]), desc.SampleDesc.Count);
+    }
   }
   // Remember it for the next start's precompilation.
   if (elements.size() <= PsoRecord::kMaxElements) {
@@ -3606,13 +3639,24 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
     if (REXCVAR_GET(sr_native_watch_blue) && !watch_done_ && frame_open_ &&
         REXCVAR_GET(sr_native_dump_frame_at_s) > 0 &&
         compat::BenchElapsedMs() >= REXCVAR_GET(sr_native_dump_frame_at_s) * 1000.0) {
-      if (watch_frame_ < 0 && index == 0) watch_frame_ = int64_t(frame_count_);
-      if (watch_frame_ >= 0) {
-        if (int64_t(frame_count_) == watch_frame_) {
-          WatchHdr(uint32_t(index));
-        } else {
+      if (watch_frame_ >= 0 && int64_t(frame_count_) != watch_frame_) {
+        if (watch_last_index_ >= 800) {
           watch_done_ = true;
-          REXLOG_INFO("native watch: frame done");
+          REXLOG_INFO("native watch: frame done ({} draws)", watch_last_index_ + 1);
+        } else {
+          // Not a scene frame (menu, HUD-only, loading): try the next one.
+          watch_frame_ = -1;
+          watch_prev_count_ = -1;
+          watch_prev_sentinel_ = -1;
+          for (float& v : watch_prev_probe_) v = -1.0f;
+          watch_ops_.clear();
+        }
+      }
+      if (!watch_done_) {
+        if (watch_frame_ < 0 && index == 0) watch_frame_ = int64_t(frame_count_);
+        if (watch_frame_ >= 0 && int64_t(frame_count_) == watch_frame_) {
+          watch_last_index_ = uint32_t(index);
+          WatchHdr(uint32_t(index));
         }
       }
     }
@@ -5467,6 +5511,8 @@ void Renderer::WatchHdr(uint32_t index) {
   WaitForSingleObject(fence_event_, 5000);
   int count = 0;
   int first_x = -1, first_y = -1;
+  float probe[4] = {};
+  int sentinel = 0;
   void* data = nullptr;
   D3D12_RANGE range{0, size_t(total)};
   if (SUCCEEDED(watch_readback_->Map(0, &range, &data))) {
@@ -5485,14 +5531,35 @@ void Renderer::WatchHdr(uint32_t index) {
         }
       }
     }
+    for (uint32_t y = 0; y < desc.Height; ++y) {
+      const uint16_t* row = reinterpret_cast<const uint16_t*>(
+          static_cast<uint8_t*>(data) + fp.Offset + size_t(y) * fp.Footprint.RowPitch);
+      for (uint32_t x = 0; x < desc.Width; ++x) {
+        if (row[4 * x + 2] == 0x4F80 && row[4 * x] == 0 && row[4 * x + 1] == 0) ++sentinel;
+      }
+    }
+    int px = 640, py = 50;
+    std::sscanf(REXCVAR_GET(sr_native_watch_xy).c_str(), "%d,%d", &px, &py);
+    if (px >= 0 && py >= 0 && uint32_t(px) < desc.Width && uint32_t(py) < desc.Height) {
+      const uint16_t* row = reinterpret_cast<const uint16_t*>(
+          static_cast<uint8_t*>(data) + fp.Offset + size_t(py) * fp.Footprint.RowPitch);
+      for (int k = 0; k < 4; ++k) probe[k] = HalfToFloat(row[4 * px + k]);
+    }
     watch_readback_->Unmap(0, nullptr);
   }
-  if (count != watch_prev_count_) {
-    REXLOG_INFO("native watch: before draw {} blue-dash pixels {} -> {} (first {},{}) | previous draw vs {:016X} "
-                "ps {:016X}", index, watch_prev_count_, count, first_x, first_y, current_vs_hash_,
-                current_ps_hash_);
+  const bool probe_changed = std::memcmp(probe, watch_prev_probe_, sizeof(probe)) != 0;
+  if (count != watch_prev_count_ || probe_changed || sentinel != watch_prev_sentinel_) {
+    REXLOG_INFO("native watch: before draw {} sentinel px {} -> {} dashes {} -> {} (first {},{}) probe "
+                "({:.3g} {:.3g} {:.3g} {:.3g}) -> ({:.3g} {:.3g} {:.3g} {:.3g}) ops since last read:{} | "
+                "previous draw vs {:016X} ps {:016X}", index, watch_prev_sentinel_, sentinel,
+                watch_prev_count_, count, first_x, first_y, watch_prev_probe_[0], watch_prev_probe_[1],
+                watch_prev_probe_[2], watch_prev_probe_[3], probe[0], probe[1], probe[2], probe[3],
+                watch_ops_, current_vs_hash_, current_ps_hash_);
     watch_prev_count_ = count;
+    watch_prev_sentinel_ = sentinel;
+    std::memcpy(watch_prev_probe_, probe, sizeof(probe));
   }
+  watch_ops_.clear();
   for (auto& retired : retired_srvs_)
     if (retired.first == UINT64_MAX) retired.first = next_fence_value_;
   order_srv_leases();
@@ -5772,6 +5839,12 @@ void Renderer::Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd
       ssao_done_ = true;
     }
     last_exec_pass_ = cmd.pass;
+  }
+  if (watch_frame_ >= 0 && !watch_done_ && cmd.op != Op::kDraw && cmd.op != Op::kDrawIndexed &&
+      cmd.op != Op::kDrawInline && cmd.op != Op::kRing) {
+    static const char* names[] = {"draw", "drawidx", "drawinline", "resolve", "begintiling",
+                                  "endtiling", "swap", "passend", "ring", "clear"};
+    watch_ops_ += fmt::format(" {}({:X})", names[int(cmd.op) % 10], cmd.u[0]);
   }
   exec_copies_before_ = mirror_.copy_draws;
   if (cmd.ring_bytes) {
