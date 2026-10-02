@@ -37,6 +37,7 @@
 #include <rex/ui/d3d12/d3d12_provider.h>
 
 #include "game_profile.h"
+#include "index_endian.h"
 #include "native_bridge.h"
 #include "native_graphics_system.h"
 #include "sdk_compat.h"
@@ -355,7 +356,7 @@ DeclFormat MapDeclType(uint32_t type) {
     case 0x2C2059: return {DXGI_FORMAT_R16G16_UNORM, 4, 2};
     case 0x1A205A: return {DXGI_FORMAT_R16G16B16A16_UNORM, 8, 2};
     case 0x2C82A1: return {DXGI_FORMAT_R32_UINT, 4, 4};
-    case 0x2A2187:  // DEC3N (2_10_10_10 signed normalized): unpacked by the VS, see tfetchDEC3N
+    case 0x2A2187:  // DEC3N: signed normalized 10/10/10, decoded by the VS.
     case 0x2A2190:
     case 0x2A2390: return {DXGI_FORMAT_R32_UINT, 4, 4};
     case 0x2C235F: return {DXGI_FORMAT_R16G16_FLOAT, 4, 2};
@@ -2436,16 +2437,17 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
     }
     std::string targets;
     for (uint32_t i = 0; i < rt_count; ++i) targets += fmt::format(" {}", uint32_t(rtv_formats[i]));
-    std::string layout;
-    for (const auto& e : elements) {
-      layout += fmt::format(" {}{}:s{}+{}:f{}", e.SemanticName, e.SemanticIndex, e.InputSlot,
-                            e.AlignedByteOffset, uint32_t(e.Format));
-    }
-    std::string targets;
-    for (uint32_t i = 0; i < rt_count; ++i) targets += fmt::format(" {}", uint32_t(rtv_formats[i]));
-    REXLOG_INFO("native: PSO #{} created in {:.2f} ms (pass {} vs {:016X} ps {:016X}) layout:{} rtv:{} dsv {} "
-                "samples {}", stats_.pso_created + 1, ms, g_current_pass, vs_hash, ps_hash, layout, targets,
-                uint32_t(dsv_format), desc.SampleDesc.Count);
+    REXLOG_ERROR("native: PSO creation failed ({:08X}) vs={:016X} ps={:016X} layout:{} rtv:{} dsv {} "
+                 "samples {}", uint32_t(hr), vs_hash, ps_hash, layout, targets,
+                 uint32_t(dsv_format), desc.SampleDesc.Count);
+    return nullptr;
+  }
+  {
+    double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                          create_start).count();
+    stats_.pso_create_ms += ms;
+    REXLOG_INFO("native: PSO #{} created in {:.2f} ms (pass {} vs {:016X} ps {:016X})",
+                stats_.pso_created + 1, ms, g_current_pass, vs_hash, ps_hash);
   }
   // Remember it for the next start's precompilation.
   if (elements.size() <= PsoRecord::kMaxElements) {
@@ -3239,8 +3241,8 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
     if (ScreenSpaceDraw(base, dev)) {
       ScreenSpaceTargetSize(w, h);
     } else {
-      w = LoadF32(base, dev + kDevViewport + 8);
-      h = LoadF32(base, dev + kDevViewport + 12);
+      w = float(Load32(base, dev + kDevViewport + 8));
+      h = float(Load32(base, dev + kDevViewport + 12));
       if (w <= 0 || h <= 0 || w > 8192 || h > 8192) {
         w = float(kOutputWidth);
         h = float(kOutputHeight);
@@ -3257,6 +3259,20 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
   uint32_t color_control = LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_COLORCONTROL);
   uint32_t alpha_func = color_control & 7;
   uint32_t spec = 0;
+  // Packed normal inputs are bound as raw R32_UINT, not IA-decoded floats.
+  uint32_t decl = Load32(base, dev + kDev.vertex_decl);
+  if (decl) {
+    uint32_t count = Load32(base, decl + 0x18);
+    for (uint32_t i = 0; i < count; ++i) {
+      uint32_t e = decl + 0x34 + 12 * i;
+      if (Load16(base, e) == 0xFF) break;
+      uint32_t usage = Load8(base, e + 9);
+      if (usage != 3 && usage != 6 && usage != 7) continue;
+      uint32_t type = Load32(base, e + 4);
+      if (type == 0x2A2187) spec |= 1u << 6;
+      if (type == 0x2A2190 || type == 0x2A2390) spec |= 1u;
+    }
+  }
   float alpha_ref = 0.0f;
   if ((color_control & 0x8) && alpha_func != 7) {
     spec |= 1u << 1;
@@ -3390,13 +3406,12 @@ void Renderer::ScreenSpaceTargetSize(float& w, float& h) {
 }
 
 void Renderer::ApplyFixedFunctionState(uint8_t* base, uint32_t dev) {
-  // The device viewport (SetViewportF) stores X, Y, Width, Height, MinZ, MaxZ
-  // as floats.
+  // sub_820F2810 caches D3DVIEWPORT9: four uint32 coordinates, then two floats.
   D3D12_VIEWPORT vp{};
-  vp.TopLeftX = LoadF32(base, dev + kDevViewport + 0);
-  vp.TopLeftY = LoadF32(base, dev + kDevViewport + 4);
-  vp.Width = LoadF32(base, dev + kDevViewport + 8);
-  vp.Height = LoadF32(base, dev + kDevViewport + 12);
+  vp.TopLeftX = float(Load32(base, dev + kDevViewport + 0));
+  vp.TopLeftY = float(Load32(base, dev + kDevViewport + 4));
+  vp.Width = float(Load32(base, dev + kDevViewport + 8));
+  vp.Height = float(Load32(base, dev + kDevViewport + 12));
   vp.MinDepth = LoadF32(base, dev + kDevViewport + 16);
   vp.MaxDepth = LoadF32(base, dev + kDevViewport + 20);
   if (vp.Width <= 0 || vp.Height <= 0 || vp.Width > 8192 || vp.Height > 8192) {
@@ -3721,14 +3736,9 @@ void Renderer::SwapBufferRange(uint8_t* base, const BufferEntry& entry, uint32_t
   uint32_t size = end - begin;
   const uint8_t* src = GuestPtr(base, 0xA0000000u + entry.address + begin, size);
   std::memcpy(data, src, size);
-  if (entry.index_format == 1) {
-    auto* p = reinterpret_cast<uint16_t*>(data);
-    for (uint32_t i = 0; i < size / 2; ++i) p[i] = __builtin_bswap16(p[i]);
-    return;
-  }
-  if (entry.index_format == 2) {
-    auto* p = reinterpret_cast<uint32_t*>(data);
-    for (uint32_t i = 0; i < size / 4; ++i) p[i] = __builtin_bswap32(p[i]);
+  if (entry.index_format & 3) {
+    uint32_t mask = IndexByteXor(entry.index_format >> 2);
+    for (uint32_t i = 0; i < size; ++i) data[i] = src[i ^ mask];
     return;
   }
   // Vertex data: swap each element of the declaration for this stream. `begin`
@@ -3779,7 +3789,7 @@ void Renderer::VertexRange::Resolve() {
   uint32_t i = start_index;
   const uint32_t end_index = start_index + index_count;
   const __m128i ones = _mm_set1_epi32(-1);
-  if (!index32) {
+  if (!index32 && index_endian == 1) {
     const __m128i swap = _mm_setr_epi8(1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14);
     __m128i vmin = ones, vmax = _mm_setzero_si128();
     for (; i + 8 <= end_index; i += 8) {
@@ -3791,7 +3801,7 @@ void Renderer::VertexRange::Resolve() {
     lo = uint32_t(_mm_cvtsi128_si32(_mm_minpos_epu16(vmin))) & 0xFFFF;
     hi = ~uint32_t(_mm_cvtsi128_si32(_mm_minpos_epu16(_mm_xor_si128(vmax, ones)))) & 0xFFFF;
     if (lo == 0xFFFF) lo = ~0u;
-  } else {
+  } else if (index32 && index_endian == 2) {
     const __m128i swap = _mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12);
     __m128i vmin = ones, vmax = _mm_setzero_si128();
     for (; i + 4 <= end_index; i += 4) {
@@ -3808,15 +3818,7 @@ void Renderer::VertexRange::Resolve() {
     hi = uint32_t(_mm_cvtsi128_si32(vmax));
   }
   for (; i < end_index; ++i) {
-    uint32_t x;
-    if (index32) {
-      std::memcpy(&x, idx + 4 * size_t(i), 4);
-      x = __builtin_bswap32(x);
-    } else {
-      uint16_t h;
-      std::memcpy(&h, idx + 2 * size_t(i), 2);
-      x = __builtin_bswap16(h);
-    }
+    uint32_t x = LoadIndex(idx, i, index32, index_endian);
     if (x == reset) continue;
     lo = std::min(lo, x);
     hi = std::max(hi, x);
@@ -3877,7 +3879,7 @@ const Renderer::BufferEntry* Renderer::ApplyBuffer(uint8_t* base, const BufferPl
   // Byte-swap in cached CPU memory: the upload heap is write-combined, and
   // reading it back (as an in-place swap does) is extremely slow.
   scratch.resize(size);
-  if (index_format == 1 || index_format == 2) {
+  if (index_format & 3) {
     SwapBufferRange(base, entry, 0, size, scratch.data());
   } else {
     // Bytes outside whole vertices (before `phase`, trailing partial vertex)
@@ -3934,10 +3936,10 @@ Renderer::BufferPlan Renderer::PlanBuffer(uint8_t* base, uint32_t address, uint3
   // Vertex data is swapped per vertex: the swap range must start on a vertex.
   auto align_range = [&](uint32_t& b, uint32_t& e) {
     e = std::min(e, size);
-    if (index_format == 1) {
+    if ((index_format & 3) == 1 && (index_format >> 2) < 2) {
       b &= ~1u;
       e = (e + 1) & ~1u;
-    } else if (index_format == 2) {
+    } else if (index_format & 3) {
       b &= ~3u;
       e = (e + 3) & ~3u;
     } else if (stride) {
@@ -5358,7 +5360,11 @@ void Renderer::Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd
       ExecOnPassEnd(int(cmd.u[0]));
       break;
     case Op::kClear:
-      ExecClear(base, cmd.u[0], cmd.u[1], cmd.u[2], cmd.u[3], cmd.f, cmd.u[4]);
+      {
+        float color[4];
+        std::memcpy(color, &cmd.u[3], sizeof(color));
+        ExecClear(base, cmd.u[0], cmd.u[1], cmd.u[2], color, cmd.f, cmd.u[7]);
+      }
       break;
     case Op::kRing:
       break;
@@ -5430,12 +5436,21 @@ void Renderer::DrawIndexedVertices(uint8_t* base, uint32_t prim, int32_t base_ve
   // buffer of this draw is dirty.
   VertexRange draw_range;
   if (uint32_t ib_object = Load32(base, dev + kDev.index_buffer)) {
-    bool index32 = (Load32(base, ib_object) & 0x80000000u) != 0;
+    uint32_t header = Load32(base, ib_object);
+    bool index32 = (header & 0x80000000u) != 0;
+    uint32_t endian = (header >> 29) & 3;
+    static bool logged_endian[2][4] = {};
+    if (!logged_endian[index32][endian]) {
+      logged_endian[index32][endian] = true;
+      REXLOG_INFO("native: index DMA {}-bit endian {} (header {:08X})",
+                  index32 ? 32 : 16, endian, header);
+    }
     // +0x18 is a guest *virtual* address: convert like the XDK draw prologue
     // (82580FF8): physical = low 29 bits, +4 KB for the 0xE0000000 view.
     uint32_t v = Load32(base, ib_object + 0x18);
     uint32_t address = (v & 0x1FFFFFFFu) + (v >= 0xE0000000u ? 0x1000u : 0u);
     uint32_t size = Load32(base, ib_object + 0x1C) & 0x00FFFFFFu;
+    if (endian >= 2) size = (size + 3) & ~3u;
     draw_range.resolved = false;
     draw_range.ib_phys = address;
     draw_range.ib_size = size;
@@ -5443,9 +5458,10 @@ void Renderer::DrawIndexedVertices(uint8_t* base, uint32_t prim, int32_t base_ve
     draw_range.index_count = index_count;
     draw_range.base_vertex = base_vertex;
     draw_range.index32 = index32;
+    draw_range.index_endian = endian;
     uint32_t isize = index32 ? 4 : 2;
     bool ok = false;
-    cur_.index = PlanBuffer(base, address, size, 0, 0, index32 ? 2 : 1, 0, start_index * isize,
+    cur_.index = PlanBuffer(base, address, size, 0, 0, (index32 ? 2u : 1u) | (endian << 2), 0, start_index * isize,
                             (start_index + index_count) * isize, ok);
     cur_.has_index = ok;
     cur_.index32 = index32;
@@ -5519,7 +5535,7 @@ void Renderer::BeginTiling(uint8_t* base, uint32_t count, uint32_t rects, uint32
 }
 
 void Renderer::Clear(uint8_t* base, uint32_t count, uint32_t rects, uint32_t flags,
-                     uint32_t color, float z, uint32_t stencil) {
+                     const float color[4], float z, uint32_t stencil) {
   std::lock_guard<std::mutex> lock(front_mutex_);
   guest_base_ = base;
   uint32_t dev = GuestDevice(base);
@@ -5531,16 +5547,15 @@ void Renderer::Clear(uint8_t* base, uint32_t count, uint32_t rects, uint32_t fla
   cur_.u[0] = rects ? std::min(count, 64u) : 0;
   cur_.u[1] = rects;
   cur_.u[2] = flags;
-  cur_.u[3] = color;
-  cur_.u[4] = stencil;
+  std::memcpy(&cur_.u[3], color, 4 * sizeof(float));
+  cur_.u[7] = stencil;
   cur_.f = z;
   EndCmd(base);
 }
 
-// XDK clears draw internally (sub_822F9DB8): clear the bound render target 0
-// (and its same-EDRAM-base aliases) and the depth-stencil surface directly.
+// Clear the bound render targets and their same-EDRAM-base aliases directly.
 void Renderer::ExecClear(uint8_t* base, uint32_t count, uint32_t rects, uint32_t flags,
-                         uint32_t color, float z, uint32_t stencil) {
+                         const float color[4], float z, uint32_t stencil) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!BeginFrame()) return;
   uint32_t dev = GuestDevice(base);
@@ -5549,8 +5564,8 @@ void Renderer::ExecClear(uint8_t* base, uint32_t count, uint32_t rects, uint32_t
     static int logged = 0;
     if (logged < 16) {
       ++logged;
-      REXLOG_INFO("native: D3DDevice_Clear flags {:X} color {:08X} z {} stencil {} rects {} pass {}",
-                  flags, color, z, stencil, count, g_current_pass);
+      REXLOG_INFO("native: D3DDevice_Clear flags {:X} color ({}, {}, {}, {}) z {} stencil {} rects {} pass {}",
+                  flags, color[0], color[1], color[2], color[3], z, stencil, count, g_current_pass);
     }
   }
   std::vector<D3D12_RECT> rs;
@@ -5564,8 +5579,6 @@ void Renderer::ExecClear(uint8_t* base, uint32_t count, uint32_t rects, uint32_t
     if (!(flags & (1u << i))) continue;
     uint32_t object = Load32(base, dev + kDevRenderTargets + 4 * i);
     if (HostSurface* rt = object ? GetSurface(base, object, false) : nullptr) {
-      float c[4] = {float((color >> 16) & 0xFF) / 255.0f, float((color >> 8) & 0xFF) / 255.0f,
-                    float(color & 0xFF) / 255.0f, float(color >> 24) / 255.0f};
       for (auto& [key, other] : surfaces_) {
         if (other.depth || other.edram_base != rt->edram_base || other.width != rt->width ||
             other.height != rt->height || other.scale != rt->scale) {
@@ -5573,7 +5586,7 @@ void Renderer::ExecClear(uint8_t* base, uint32_t count, uint32_t rects, uint32_t
         }
         Transition(other.resource.Get(), other.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
         std::vector<D3D12_RECT> scaled = ScaleRects(rs, other.scale);
-        command_list_->ClearRenderTargetView(other.view, c, nrs, nrs ? scaled.data() : nullptr);
+        command_list_->ClearRenderTargetView(other.view, color, nrs, nrs ? scaled.data() : nullptr);
         MarkWritten(&other);
       }
     }

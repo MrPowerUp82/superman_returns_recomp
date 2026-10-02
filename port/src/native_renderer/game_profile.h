@@ -71,8 +71,9 @@
 #define SR_CONFIRMED_END_TILING 1
 #define SR_ABSENT_END_TILING 0
 
-// D3DDevice_Clear(dev, count, rects, flags, color, z(f1), stencil). Conan 822F9EE0.
-#define SR_ADDR_CLEAR 82101998  // CONFIRMED: sub_82101998, color unpack and clear draw
+// XDK float-color clear(dev, flags, rect, float4 color, z(f1), stencil in r8).
+// Both Clear's D3DCOLOR wrapper (82101998) and the engine call this routine.
+#define SR_ADDR_CLEAR 82101A58  // CONFIRMED: sub_82101A58, shared float4 clear entry
 #define SR_CONFIRMED_CLEAR 1
 #define SR_ABSENT_CLEAR 0
 
@@ -211,7 +212,7 @@ struct DeviceLayout {
   uint32_t stream_buffers = 0x2F9C;  // [16] SetStreamSource: (stream+3047)*4
   uint32_t stream_strides = 0x2FE0;  // [16] SetStreamSource: 12256
   uint32_t textures = 0x2FF0;        // [26] SetTexture: (stage+3068)*4
-  uint32_t viewport = 0x3090;        // SetViewport: 12432
+  uint32_t viewport = 0x3058;        // sub_820F2810: 12376, uint32 x/y/width/height + float min/max depth
   uint32_t shader_a = 0x3080;        // SetVertexShader: 12416
   uint32_t shader_b = 0x3084;        // SetPixelShader: 12420
   uint32_t ring_write = 0x28;        // command segment write pointer (setter_RingAlloc +40)

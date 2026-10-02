@@ -69,6 +69,7 @@ SR_TEST(device_layout_is_ordered_like_the_xdk_struct) {
   SR_CHECK(d.render_targets + 16 == d.depth_stencil);
   SR_CHECK(d.index_buffer < d.render_targets);
   SR_CHECK(d.textures + 26 * 4 <= d.viewport);
+  SR_CHECK(d.viewport + 24 <= d.shader_a);
   SR_CHECK(d.shader_b == d.shader_a + 4);
   SR_CHECK(d.fence_current < d.size && d.fence_completed_ptr < d.size);
   for (const auto& r : profile::kRegisterShadow) {

@@ -175,16 +175,23 @@ SR_DEFINE_HOOK(SR_ADDR_END_TILING) {
 #endif
 
 #if SR_HOOK_ENABLED(CLEAR)
-// D3DDevice_Clear(dev, Count, pRects, Flags, Color, Z, Stencil) - the XDK
-// clears through an internal draw, never through the hooked draw entry points.
+// The shared float4 clear entry also catches direct engine calls that bypass
+// the public D3DCOLOR wrapper. A null rectangle clears the whole surface.
 SR_DEFINE_HOOK(SR_ADDR_CLEAR) {
-  const uint32_t dev = ctx.r3.u32, count = ctx.r4.u32, rects = ctx.r5.u32, flags = ctx.r6.u32,
-                 color = ctx.r7.u32, stencil = ctx.r9.u32;
+  const uint32_t dev = ctx.r3.u32, flags = ctx.r4.u32, rect = ctx.r5.u32,
+                 color_ptr = ctx.r6.u32, stencil = ctx.r8.u32;
+  float color[4] = {};
+  if (color_ptr && (flags & 0xF)) {
+    for (uint32_t i = 0; i < 4; ++i) {
+      uint32_t bits = GuestLoad32(base, color_ptr + 4 * i);
+      std::memcpy(&color[i], &bits, 4);
+    }
+  }
   const float z = float(ctx.f1.f64);
   OnDeviceCall("Clear", dev, flags);
   SR_ORIGINAL(SR_ADDR_CLEAR)(ctx, base);
   if (native::Enabled()) {
-    native::Renderer::Get().Clear(base, count, rects, flags, color, z, stencil);
+    native::Renderer::Get().Clear(base, rect ? 1u : 0u, rect, flags, color, z, stencil);
   }
 }
 #endif

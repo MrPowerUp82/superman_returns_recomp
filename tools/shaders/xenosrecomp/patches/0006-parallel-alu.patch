@@ -1,0 +1,47 @@
+--- a/XenosRecomp/shader_recompiler.cpp
++++ b/XenosRecomp/shader_recompiler.cpp
+@@ -502,3 +502,18 @@
+     }
+ 
++#ifdef CONAN_RECOMP
++    // Xenos vector and scalar lanes read the same pre-instruction registers.
++    indent();
++    out += "{\n";
++    ++indentation;
++    const bool saveAluSource = !instr.exportData && instr.vectorWriteMask != 0;
++    if (saveAluSource)
++    {
++        indent();
++        println("float4 aluVectorSource = r{};", instr.vectorDest);
++    }
++    indent();
++    out += "int aluAddress = a0;\n";
++#endif
++
+     enum
+@@ -588,5 +603,6 @@
+             if (constRelative)
+             {
+-                regFormatted = fmt::format("CONST_REL({} + {})", reg, instr.constAddressRegisterRelative ? "a0" : "aL");
++                regFormatted = fmt::format("CONST_REL({} + {})", reg,
++                    instr.constAddressRegisterRelative ? (operand >= SCALAR_0 ? "aluAddress" : "a0") : "aL");
+             }
+             else
+@@ -599,3 +615,7 @@
+             {
+                 regFormatted = fmt::format("r{}", reg);
++#ifdef CONAN_RECOMP
++                if (saveAluSource && operand >= SCALAR_0 && reg == instr.vectorDest)
++                    regFormatted = "aluVectorSource";
++#endif
+             }
+@@ -1313,4 +1333,9 @@
+     }
+ 
++#ifdef CONAN_RECOMP
++    --indentation;
++    indent();
++    out += "}\n";
++#endif
+     if (instr.isPredicated)
+     {

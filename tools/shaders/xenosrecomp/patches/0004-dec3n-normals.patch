@@ -1,0 +1,35 @@
+--- a/XenosRecomp/shader_common.h
++++ b/XenosRecomp/shader_common.h
+@@ -329,6 +329,16 @@
+ 
+ #ifdef REBLUE_RECOMP
+ // DEC3N normal decode; IA binds as R32_UINT so lane .x carries the raw bits (asuint recovers them).
+ float4 tfetchR11G11B10(float4 value)
+ {
++#ifdef CONAN_RECOMP
++    if (g_SpecConstants() & (1u << 6))
++    {
++        uint v = asuint(value.x);
++        int3 n = int3(int(v << 22) >> 22,
++                      int(v << 12) >> 22,
++                      int(v << 2) >> 22);
++        return float4(max(float3(n) / 511.0f, -1.0f), 1.0f);
++    }
++#endif
+     if (g_SpecConstants() & SPEC_CONSTANT_R11G11B10_NORMAL)
+@@ -363,5 +373,15 @@
+ float4 tfetchR11G11B10(uint4 value)
+ {
++#ifdef CONAN_RECOMP
++    if (g_SpecConstants() & (1u << 6))
++    {
++        uint v = value.x;
++        int3 n = int3(int(v << 22) >> 22,
++                      int(v << 12) >> 22,
++                      int(v << 2) >> 22);
++        return float4(max(float3(n) / 511.0f, -1.0f), 1.0f);
++    }
++#endif
+     if (g_SpecConstants() & SPEC_CONSTANT_R11G11B10_NORMAL)
+     {
+         return float4(

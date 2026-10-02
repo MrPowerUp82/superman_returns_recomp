@@ -38,3 +38,19 @@ endif()
 target_compile_options(XenosRecompCorpus PRIVATE -UNDEBUG -Wno-switch -Wno-unused-variable
     -Wno-null-arithmetic -fms-extensions -Wno-deprecated-declarations)
 target_precompile_headers(XenosRecompCorpus PRIVATE pch_corpus.h)
+
+include(CTest)
+if(BUILD_TESTING AND CONAN_RECOMP)
+    add_executable(XenosRecompTests
+        test_recompiler.cpp
+        "${XR_SRC}/shader_recompiler.cpp")
+    target_include_directories(XenosRecompTests PRIVATE
+        "${XR_SRC}" "${XR_DEPS}/fmt/include" "${XR_DEPS}/xxHash")
+    target_compile_definitions(XenosRecompTests PRIVATE
+        CONAN_RECOMP FMT_HEADER_ONLY _CRT_SECURE_NO_WARNINGS)
+    target_compile_options(XenosRecompTests PRIVATE -UNDEBUG -Wno-switch
+        -Wno-unused-variable -Wno-null-arithmetic -fms-extensions
+        -Wno-deprecated-declarations)
+    target_precompile_headers(XenosRecompTests REUSE_FROM XenosRecompCorpus)
+    add_test(NAME xenos_recompiler_alu COMMAND XenosRecompTests)
+endif()

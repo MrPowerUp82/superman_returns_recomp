@@ -14,6 +14,7 @@ add_executable(sr_native_tests
     test_pm4_mirror.cpp
     test_shaders.cpp
     test_game_profile.cpp
+    test_index_endian.cpp
     test_post_effects.cpp
     test_shader_library.cpp
     "${SR_NATIVE_DIR}/pm4_mirror.cpp"

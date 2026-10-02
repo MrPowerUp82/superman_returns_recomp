@@ -1,1847 +1,659 @@
-[CHECKPOINT_NATIVE_RENDERER.md](file;file:///c:/Users/Gusta/Documents/outros-projetos/superman_returns_recomp/CHECKPOINT_NATIVE_RENDERER.md) continue
-Viewed CHECKPOINT_NATIVE_RENDERER.md:1-196
-Ran command: `git status`
-
-I have launched the `git status` check to inspect the repository's current state and am waiting for it to complete.
-
-Ran command: `powershell -NoProfile -Command "Test-Path game; Test-Path .tools; Test-Path tools; Get-ChildItem -Directory"`
-
-I have launched a check to verify directory existence (`game`, `.tools`, etc.) and am waiting for the result.
-
-Ran command: `python -m pytest tests/tools/test_game_profile.py`
-
-I have launched the pytest test suite to verify the game profile consistency and am waiting for the results.
-
-Viewed native_validate.ps1:1-272
-Viewed build.cmd:1-34
-Ran command: `powershell -NoProfile -Command "Test-Path '.tools\clang+llvm-23.1.2-x86_64-pc-windows-msvc\bin\clang.exe'; Test-Path '.tools\rexglue-sdk\win-amd64\bin\rexglue.exe'; Test-Path 'game\default.xex'"`
-Ran command: `powershell -NoProfile -Command "Test-Path '.tools\rexglue-native-kit'; Test-Path '.tools\rexglue-sdk-source'"`
-Viewed build_corpus.ps1:1-91
-Ran command: `powershell -NoProfile -ExecutionPolicy Bypass -File tools\native_validate.ps1 -Step build -Native CAPTURE`
-
-I have started compiling the **CAPTURE** build (`tools\native_validate.ps1 -Step build -Native CAPTURE`) to intercept Direct3D calls and collect shader containers. Waiting for the build to finish.
-
-Viewed render_scale.cpp:1-104
-Viewed native_hooks.cpp:1-350
-Ran command: `git grep -n "8210C5F8"`
-Viewed game_profile.h:50-110
-Viewed CMakeLists.txt:1-100
-Viewed CMakeLists.txt:101-205
-Ran command: `git log -p -n 1 port/src/render_scale.cpp`
-Ran command: `git grep -n "REX_HOOK" port/src`
-Ran command: `git ls-files port/src/*scale*`
-Ran command: `git grep -n "SrScaleEngineRenderSize"`
-Viewed CMakeLists.txt:185-205
-Edited CMakeLists.txt
-Viewed render_scale.cpp:70-104
-Edited render_scale.cpp
-Ran command: `powershell -NoProfile -ExecutionPolicy Bypass -File tools\native_validate.ps1 -Step build -Native CAPTURE`
-
-I have launched the rebuild with `SR_NATIVE=CAPTURE` after guarding the duplicate hook in `render_scale.cpp` and am waiting for the build to finish.
-
-Viewed bench.ps1:1-186
-Ran command: `powershell -NoProfile -Command "Test-Path logs\native_capture.json; Test-Path logs\native_shaders"`
-Ran command: `powershell -NoProfile -Command "Test-Path 'port\logs\default_image.bin'; Test-Path 'port\logs\default_full.dis'"`
-Viewed superman_returns_app.h:95-122
-Viewed extract_shaders.py:1-60
-Viewed extract_shaders.py:150-220
-Ran command: `powershell -NoProfile -Command "$env:SR_DUMP_IMAGE = (Resolve-Path 'port\logs\..').Path + '\logs\default_image.bin'; $p = Start-Process -FilePath 'port\out\build\win-amd64-release\superman_returns.exe' -ArgumentList @('--game_data_root=game', '--sr_skip_intro=true') -PassThru; Start-Sleep 5; Stop-Process -Id $p.Id -Force; Test-Path 'port\logs\default_image.bin'; if (Test-Path 'port\logs\default_image.bin') { (Get-Item 'port\logs\default_image.bin').Length }"`
-Ran command: `powershell -NoProfile -Command "& { New-Item -ItemType Directory -Force 'port\logs' | Out-Null; $env:SR_DUMP_IMAGE = (Resolve-Path 'port\logs').Path + '\default_image.bin'; $p = Start-Process -FilePath 'port\out\build\win-amd64-release\superman_returns.exe' -ArgumentList @('--game_data_root=game', '--sr_skip_intro=true') -PassThru; Start-Sleep 5; Stop-Process -Id $p.Id -Force; Get-Item 'port\logs\default_image.bin' }"`
-Ran command: `$env:SR_DUMP_IMAGE = "$pwd\port\logs\default_image.bin"
-$proc = Start-Process -FilePath "port\out\build\win-amd64-release\superman_returns.exe" -ArgumentList @('--game_data_root=game', '--sr_skip_intro=true') -PassThru
-Start-Sleep 6
-Stop-Process -Id $proc.Id -Force
-Remove-Item Env:\SR_DUMP_IMAGE
-Get-Item 'port\logs\default_image.bin'
-`
-Viewed game.log:1-100
-Ran command: `New-Item -ItemType Directory -Force 'logs\native_shaders' | Out-Null
-$proc = Start-Process -FilePath "port\out\build\win-amd64-release\superman_returns.exe" -ArgumentList @(
-  "--game_data_root=$pwd\game",
-  "--log_file=$pwd\logs\game.log",
-  "--sr_skip_intro=true",
-  "--sr_native_capture=true",
-  "--sr_native_capture_out=$pwd\logs\native_capture.json",
-  "--sr_native_dump_shader_dir=$pwd\logs\native_shaders"
-) -PassThru
-Start-Sleep 12
-Stop-Process -Id $proc.Id -Force
-Test-Path 'logs\native_capture.json'
-Get-ChildItem 'logs\native_shaders'
-`
-
-I have launched a test run with `--sr_native_capture=true` and shader dumping to verify that `native_capture.json` and shader containers are produced. Waiting for the process to conclude.
-
-Viewed game.log:1-527
-Viewed native_bridge.cpp:1-100
-Viewed native_bridge.cpp:170-250
-Viewed shader_registry.cpp:1-100
-Viewed shader_container.h:1-53
-Ran command: `powershell -NoProfile -ExecutionPolicy Bypass -File tools\native_validate.ps1 -Step kit`
-
-I have started setting up `rexglue-native-kit` via `tools\native_validate.ps1 -Step kit` and am waiting for the checkout to finish.
-
-Ran command: `& ".tools\rexglue-native-kit\tools\binutils\powerpc-none-elf-objdump.exe" -D -b binary -m powerpc -EB --adjust-vma=0x82000000 "port\logs\default_image.bin" | Out-File -Encoding ascii "port\logs\default_full.dis"
-Get-Item "port\logs\default_full.dis"
-`
-
-I have launched the disassembly of `port\logs\default_image.bin` into `port\logs\default_full.dis` via PowerPC objdump and am waiting for it to complete.
-
-Ran command: `python -c "
-with open('port/logs/default_full.dis', 'r', encoding='ascii', errors='ignore') as f:
-    recording = False
-    count = 0
-    for line in f:
-        if '820f5840:' in line or '820F5840:' in line:
-            recording = True
-        if recording:
-            print(line, end='')
-            count += 1
-            if count > 45:
-                break
-"`
-Ran command: `python -c "
-with open('port/logs/default_full.dis', 'r', encoding='ascii', errors='ignore') as f:
-    for line in f:
-        if '820f5840' in line and 'bl' in line:
-            print(line.strip())
-"`
-Ran command: `python -c "
-with open('port/logs/default_full.dis', 'r', encoding='ascii', errors='ignore') as f:
-    lines = []
-    record = False
-    for line in f:
-        if '820f9d60:' in line: record = True
-        if record:
-            lines.append(line)
-            if '820f9dc0:' in line: break
-    print(''.join(lines))
-"`
-Ran command: `python -c "
-with open('port/logs/default_full.dis', 'r', encoding='ascii', errors='ignore') as f:
-    last_fn = ''
-    for line in f:
-        if ' <' in line and '>:' in line:
-            last_fn = line.strip()
-        if '820f9d9c:' in line:
-            print('Inside:', last_fn)
-            break
-"`
-Ran command: `python -c "
-with open('port/logs/default_full.dis', 'r', encoding='ascii', errors='ignore') as f:
-    buf = []
-    for line in f:
-        if '820f9' in line:
-            buf.append(line)
-        if '820f9d9c:' in line:
-            break
-    # look backwards for stwu r1
-    for l in reversed(buf):
-        if 'stwu' in l:
-            print('Prologue:', l.strip())
-            break
-"`
-Ran command: `python -c "
-with open('port/logs/default_full.dis', 'r', encoding='ascii', errors='ignore') as f:
-    for line in f:
-        if '820f9c80' in line and 'bl' in line:
-            print(line.strip())
-"`
-Ran command: `python -c "
-with open('docs/data/xdk_match.tsv', 'r') as f:
-    for line in f:
-        if 'Create' in line or 'Shader' in line:
-            print(line.strip())
-"`
-Ran command: `python -c "
-with open('port/logs/default_full.dis', 'r', encoding='ascii', errors='ignore') as f:
-    for line in f:
-        if '820f5' in line or '820f6' in line:
-            if 'stwu' in line or 'mflr' in line:
-                print(line.strip())
-"`
-Ran command: `python -c "
-import re
-pattern = re.compile(r'lis\s+r\d+,\s*4138|10\s*2a\s*11')
-with open('port/logs/default_full.dis', 'r', encoding='ascii', errors='ignore') as f:
-    for line in f:
-        if pattern.search(line):
-            print(line.strip())
-"`
-
-I have launched a search across the disassembly for the shader container magic (`0x102A1100` / `lis rX, 4138`) to find the exact shader container checks and creator functions. Waiting for results.
-
-Ran command: `python -c "
-with open('port/logs/default_full.dis', 'r', encoding='ascii', errors='ignore') as f:
-    record = False
-    for line in f:
-        if '820f9c80:' in line: record = True
-        if record:
-            print(line, end='')
-            if '820f9df0:' in line: break
-"`
-Ran command: `python -c "
-with open('port/logs/default_full.dis', 'r', encoding='ascii', errors='ignore') as f:
-    for line in f:
-        if '820f9c80' in line:
-            print(line.strip())
-"`
-Ran command: `python -c "
-with open('port/logs/default_full.dis', 'r', encoding='ascii', errors='ignore') as f:
-    for line in f:
-        if 'f9c80' in line or 'f9c8' in line:
-            if 'bl ' in line or 'b ' in line:
-                print(line.strip())
-"`
-Ran command: `python -c "
-with open('port/logs/default_full.dis', 'r', encoding='ascii', errors='ignore') as f:
-    for line in f:
-        if '82 0f 9c 80' in line or '820f9c80' in line:
-            print(line.strip())
-"`
-Ran command: `python -c "
-with open('port/logs/default_image.bin', 'rb') as f:
-    data = f.read()
-target = bytes.fromhex('820F9C80')
-idx = 0
-while True:
-    pos = data.find(target, idx)
-    if pos == -1: break
-    print(f'Found at file offset 0x{pos:X}, guest address 0x{0x82000000 + pos:08X}')
-    idx = pos + 1
-"`
-Ran command: `python -c "
-with open('port/logs/default_full.dis', 'r', encoding='ascii', errors='ignore') as f:
-    record = False
-    for line in f:
-        if '820f5738:' in line: record = True
-        if record:
-            print(line, end='')
-            if '820f57b8:' in line: break
-"`
-Ran command: `python -c "
-with open('port/logs/default_full.dis', 'r', encoding='ascii', errors='ignore') as f:
-    record = False
-    for line in f:
-        if '820f5868:' in line: record = True
-        if record:
-            print(line, end='')
-            if '820f58b0:' in line: break
-"`
-Ran command: `python -c "
-with open('port/logs/default_full.dis', 'r', encoding='ascii', errors='ignore') as f:
-    record = False
-    for line in f:
-        if '820f59f0:' in line: record = True
-        if record:
-            print(line, end='')
-            if '820f5a50:' in line: break
-"`
-Ran command: `python -c "
-with open('port/logs/default_full.dis', 'r', encoding='ascii', errors='ignore') as f:
-    for line in f:
-        if '820f9c80' in line:
-            print(line.strip())
-"`
-Ran command: `python -c "
-with open('port/logs/default_full.dis', 'r', encoding='ascii', errors='ignore') as f:
-    lines = []
-    for line in f:
-        lines.append(line)
-        if len(lines) > 25: lines.pop(0)
-        if '820f9c80:' in line:
-            print(''.join(lines))
-            break
-"`
-Ran command: `python -c "
-with open('port/logs/default_full.dis', 'r', encoding='ascii', errors='ignore') as f:
-    for line in f:
-        if '820f9c78' in line:
-            print(line.strip())
-"`
-Ran command: `python -c "
-with open('port/logs/default_full.dis', 'r', encoding='ascii', errors='ignore') as f:
-    lines = []
-    record = False
-    for line in f:
-        if '820f9970:' in line: record = True
-        if record:
-            lines.append(line)
-            if '820f9aa0:' in line: break
-    print(''.join(lines))
-"`
-Ran command: `python -c "
-with open('port/logs/default_full.dis', 'r', encoding='ascii', errors='ignore') as f:
-    record = False
-    for line in f:
-        if '820f6690:' in line: record = True
-        if record:
-            print(line, end='')
-            if '820f6700:' in line: break
-"`
-Ran command: `python -c "
-with open('port/logs/default_full.dis', 'r', encoding='ascii', errors='ignore') as f:
-    record = False
-    for line in f:
-        if '820f7d68:' in line: record = True
-        if record:
-            print(line, end='')
-            if '820f7de0:' in line: break
-"`
-Ran command: `python -c "
-with open('port/logs/default_full.dis', 'r', encoding='ascii', errors='ignore') as f:
-    record = False
-    for line in f:
-        if '820f5ca0:' in line: record = True
-        if record:
-            print(line, end='')
-            if '820f5ce0:' in line: break
-"`
-Ran command: `python -c "
-with open('port/logs/default_full.dis', 'r', encoding='ascii', errors='ignore') as f:
-    record = False
-    for line in f:
-        if '820f7d50:' in line: record = True
-        if record:
-            print(line, end='')
-            if '820f7d75:' in line: break
-"`
-
-I have launched an inspection of the epilogue of `sub_820F6690` to confirm its return value and am waiting for the result.
-
-Viewed shader_registry.cpp:40-124
-Viewed native_bridge.cpp:245-285
-Edited shader_registry.cpp
-Viewed native_bridge.cpp:210-270
-Edited native_bridge.cpp
-Ran command: `powershell -NoProfile -ExecutionPolicy Bypass -File tools\native_validate.ps1 -Step build -Native CAPTURE`
-
-I have launched the rebuild with the updated shader registry and capture flush logic (`SR_NATIVE=CAPTURE`). Waiting for compilation to finish.
-
-Ran command: `$proc = Start-Process -FilePath "port\out\build\win-amd64-release\superman_returns.exe" -ArgumentList @(
-  "--game_data_root=$pwd\game",
-  "--log_file=$pwd\logs\game.log",
-  "--sr_skip_intro=true",
-  "--sr_native_capture=true",
-  "--sr_native_capture_out=$pwd\logs\native_capture.json",
-  "--sr_native_dump_shader_dir=$pwd\logs\native_shaders"
-) -PassThru
-Start-Sleep 15
-Stop-Process -Id $proc.Id -Force
-Test-Path 'logs\native_capture.json'
-(Get-ChildItem 'logs\native_shaders').Count
-`
-
-I have launched a 15-second capture run to test the new shader resolver and verify shader dumping into `logs\native_shaders`. Waiting for the process.
-
-Viewed game.log:1-625
-Viewed shader_registry.cpp:70-115
-Edited shader_registry.cpp
-Ran command: `powershell -NoProfile -ExecutionPolicy Bypass -File tools\native_validate.ps1 -Step build -Native CAPTURE`
-
-I have launched the rebuild with diagnostic logging and am waiting for compilation.
-
-Ran command: `$proc = Start-Process -FilePath "port\out\build\win-amd64-release\superman_returns.exe" -ArgumentList @(
-  "--game_data_root=$pwd\game",
-  "--log_file=$pwd\logs\game.log",
-  "--sr_skip_intro=true",
-  "--sr_native_capture=true",
-  "--sr_native_capture_out=$pwd\logs\native_capture.json",
-  "--sr_native_dump_shader_dir=$pwd\logs\native_shaders"
-) -PassThru
-Start-Sleep 8
-Stop-Process -Id $proc.Id -Force
-Get-Content logs\game.log | Select-String "CreateShader"
-`
-
-I have launched the run to inspect the exact memory contents passed to `CreateShader`. Waiting for the process.
-
-Edited shader_registry.cpp
-Ran command: `powershell -NoProfile -ExecutionPolicy Bypass -File tools\native_validate.ps1 -Step build -Native CAPTURE`
-
-I have launched the rebuild with stream1 buffer logging and am waiting for compilation.
-
-Ran command: `$proc = Start-Process -FilePath "port\out\build\win-amd64-release\superman_returns.exe" -ArgumentList @(
-  "--game_data_root=$pwd\game",
-  "--log_file=$pwd\logs\game.log",
-  "--sr_skip_intro=true",
-  "--sr_native_capture=true",
-  "--sr_native_capture_out=$pwd\logs\native_capture.json",
-  "--sr_native_dump_shader_dir=$pwd\logs\native_shaders"
-) -PassThru
-Start-Sleep 8
-Stop-Process -Id $proc.Id -Force
-Get-Content logs\game.log | Select-String "ResolveContainer"
-`
-
-I have launched the run to inspect the exact words at `stream1` and am waiting for the process to conclude.
-
-Ran command: `python -c "
-# Let's inspect default_full.dis at 820f9c80 to see how the header at 96(r1) was constructed!
-with open('port/logs/default_full.dis', 'r', encoding='ascii', errors='ignore') as f:
-    record = False
-    for line in f:
-        if '820f9cc0:' in line: record = True
-        if record:
-            print(line, end='')
-            if '820f9d20:' in line: break
-"`
-Ran command: `python -c "
-with open('port/logs/default_image.bin', 'rb') as f:
-    f.seek(0x82079388 - 0x82000000)
-    data = f.read(36)
-import struct
-words = struct.unpack('>9I', data)
-for i, w in enumerate(words):
-    print(f'word {i}: 0x{w:08X} ({w})')
-"`
-Viewed shader_registry.cpp:90-130
-Edited shader_registry.cpp
-Ran command: `powershell -NoProfile -ExecutionPolicy Bypass -File tools\native_validate.ps1 -Step build -Native CAPTURE`
-
-I have launched the rebuild with post-hook inspection and am waiting for compilation.
-
-Ran command: `$proc = Start-Process -FilePath "port\out\build\win-amd64-release\superman_returns.exe" -ArgumentList @(
-  "--game_data_root=$pwd\game",
-  "--log_file=$pwd\logs\game.log",
-  "--sr_skip_intro=true",
-  "--sr_native_capture=true",
-  "--sr_native_capture_out=$pwd\logs\native_capture.json",
-  "--sr_native_dump_shader_dir=$pwd\logs\native_shaders"
-) -PassThru
-Start-Sleep 8
-Stop-Process -Id $proc.Id -Force
-Get-Content logs\game.log | Select-String "OnCreateShader POST"
-`
-
-I have launched the run to inspect post-hook shader contents and am waiting for the process to conclude.
-
-Ran command: `python -c "
-# Let's inspect the game.log or add a quick print
-with open('logs/game.log', 'r') as f:
-    for line in f:
-        if 'ResolveContainer stream1=' in line and '102A110' in line:
-            print(line.strip())
-            break
-"`
-Viewed extract_shaders.py:60-110
-Ran command: `python -c "
-with open('port/logs/default_full.dis', 'r', encoding='ascii', errors='ignore') as f:
-    for line in f:
-        addr = line.strip().split(':')[0]
-        try:
-            val = int(addr, 16)
-            if 0x820f9a00 <= val <= 0x820f9df0:
-                if 'stw' in line:
-                    print(line.strip())
-        except:
-            pass
-"`
-
-I have launched a search for all store instructions in the shader builder function range (`0x820f9a00`–`0x820f9df0`) and am waiting for the result.
-
-Ran command: `git log -S "820F5840" -p`
-Ran command: `# Let's inspect the game.log lines for stream1
-python -c "
-with open('logs/game.log', 'r') as f:
-    for line in f:
-        if 'ResolveContainer stream1=' in line:
-            print(line.strip())
-"`
-Edited shader_registry.cpp
-Ran command: `powershell -NoProfile -ExecutionPolicy Bypass -File tools\native_validate.ps1 -Step build -Native CAPTURE`
-
-I have launched the rebuild with container memory logging and am waiting for compilation.
-
-Ran command: `$proc = Start-Process -FilePath "port\out\build\win-amd64-release\superman_returns.exe" -ArgumentList @(
-  "--game_data_root=$pwd\game",
-  "--log_file=$pwd\logs\game.log",
-  "--sr_skip_intro=true",
-  "--sr_native_capture=true",
-  "--sr_native_capture_out=$pwd\logs\native_capture.json",
-  "--sr_native_dump_shader_dir=$pwd\logs\native_shaders"
-) -PassThru
-Start-Sleep 8
-Stop-Process -Id $proc.Id -Force
-Get-Content logs\game.log | Select-String "CONTAINER" -Context 0, 4
-`
-
-I have launched the run to inspect the exact container words and am waiting for the process to conclude.
-
-Ran command: `python tools\shaders\extract_shaders.py --image port\logs\default_image.bin`
-Ran command: `Get-ChildItem artifacts\shaders\raw | Measure-Object`
-Viewed shader_container.h:30-53
-Ran command: `git status`
-Viewed CHECKPOINT_NATIVE_RENDERER.md:1-196
-Ran command: `Get-ChildItem -Path artifacts/shaders, logs -ErrorAction SilentlyContinue`
-Ran command: `Get-ChildItem -Path artifacts -Recurse`
-Checked task List artifacts
-Ran command: `python -m pytest tests/tools/test_game_profile.py`
-Ran command: `git diff`
-Viewed shader_container.h:1-53
-Viewed extract_shaders.py:1-236
-Viewed manifest.json:1-40
-Ran command: `Select-String -Path port/logs/game.log -Pattern "CONTAINER", "OnCreateShader", "CreateShader" | Select-Object -First 30`
-Ran command: `Select-String -Path logs/game.log -Pattern "CONTAINER", "OnCreateShader", "CreateShader" | Select-Object -First 30`
-Ran command: `Get-Content logs/game.log | Select-Object -Last 60`
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "<sub_820F9C80>:" -Context 0, 50`
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "820f9c80:" -Context 0, 40`
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "820f9d24:" -Context 0, 40`
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "820f5840:" -Context 0, 40`
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "820f5c[0-9a-f]:" -Context 0, 30`
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "820f5ca" -Context 5, 25`
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "820f9c80"`
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "4b ff ba a5|4b ff ae a5|820f5840|820f6690"`
-Checked task Callers of CreateShader
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "820f9dc8:" -Context 0, 25`
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "820f9e30:" -Context 0, 30`
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "820f6690:" -Context 0, 30`
-Ran command: `Get-Content port/logs/default_full.dis -TotalCount 240533 | Select-Object -Last 20`
-Checked task Function heading check
-Viewed build_corpus.ps1:1-91
-Viewed fetch_xenosrecomp.py:1-60
-Viewed build_catalog.py:1-60
-Ran command: `git diff port/superman_returns_manifest.toml`
-Viewed native_validate.ps1:1-100
-Viewed native_validate.ps1:101-272
-Viewed bench.ps1:1-60
-Ran command: `Test-Path port\out\build\win-amd64-release\superman_returns.exe`
-Viewed game_profile.h:70-130
-Ran command: `(Select-String -Path logs/game.log -Pattern "CONTAINER").Count`
-Ran command: `Select-String -Path logs/game.log -Pattern "r4_words" | Select-Object -First 10`
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "820f6710:" -Context 0, 30`
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "820f6ac8:" -Context 0, 30`
-Viewed native_hooks.cpp:110-160
-Viewed native_hooks.cpp:200-260
-Viewed native_hooks.cpp:260-310
-Ran command: `Select-String -Path port/src/native_renderer/native_hooks.cpp -Pattern "CREATE_SHADER" -Context 2, 8`
-Ran command: `Select-String -Path port/src/native_renderer/*.cpp, port/src/native_renderer/*.h -Pattern "OnCreateShader"`
-Viewed shader_registry.cpp:130-167
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "stw.*36\(r20\)|stw.*36\(r24\)|stw.*36\(r4\)"`
-Checked task Find stw 36(r20)
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "820fd600:" -Context 5, 20`
-Ran command: `Get-ChildItem -Path logs/native_shaders -ErrorAction SilentlyContinue`
-Viewed build_catalog.py:60-140
-Viewed build_catalog.py:140-220
-Ran command: `Get-ChildItem -Path .tools -ErrorAction SilentlyContinue`
-Ran command: `powershell -NoProfile -ExecutionPolicy Bypass -File tools\shaders\build_corpus.ps1`
-Checked task Build shader corpus
-Ran command: `Get-ChildItem -Path tests -Recurse`
-Viewed test_shaders.cpp:1-100
-Checked task Build shader corpus
-Ran command: `Get-Item .tools\dxc\*, .tools\dxc -ErrorAction SilentlyContinue`
-Viewed CMakeLists.txt:140-195
-Viewed CMakeLists.txt:120-140
-Viewed CMakeLists.txt:80-115
-Viewed CMakeLists.txt:30-70
-Checked task Build shader corpus
-Ran command: `Get-Item .tools\dxc\*`
-Checked task Build shader corpus
-
-Please wait while the shader corpus build (`build_corpus.ps1`) completes downloading DXC, compiling the XenosRecomp translator, and generating the DXIL shaders. I will proceed as soon as it finishes.
-
-Checked task Build shader corpus
-
-I will wait for the `XenosRecompCorpus` build and shader translation to finish.
-
-Ran command: `(Get-ChildItem -Path artifacts\shaders\dxil\*.dxil).Count`
-Viewed 0001-conan-recomp.patch:1-60
-Ran command: `Select-String -Path .tools/xenosrecomp/src/XenosRecomp/shader_recompiler.cpp -Pattern "float4 r"`
-Viewed shader_recompiler.cpp:1850-1910
-Viewed shader_recompiler.cpp:1830-1850
-Ran command: `Select-String -Path .tools/xenosrecomp/src/XenosRecomp/shader_recompiler.cpp -Pattern "r\{\}" | Select-Object -First 10`
-Ran command: `Select-String -Path .tools/xenosrecomp/src/XenosRecomp/shader_recompiler.cpp -Pattern "USAGE_VARIABLES" -Context 2, 5`
-Ran command: `Select-String -Path artifacts/shaders/logs/*.log -Pattern "iNormal0|oNormal0|validation"`
-Viewed shader_recompiler.cpp:1590-1625
-Ran command: `Select-String -Path .tools/xenosrecomp/src/XenosRecomp/shader_recompiler.cpp -Pattern "INTERPOLATORS" -Context 2, 5`
-Viewed shader_recompiler.cpp:125-160
-Viewed EA21798EF58C11BD.ps.dxil.log:1-8
-Viewed EA21798EF58C11BD.ps.hlsl:320-340
-Ran command: `Select-String -Path artifacts/shaders/work/std/EA21798EF58C11BD.ps.hlsl -Pattern "tfetchCube" -Context 3, 3`
-Ran command: `Select-String -Path .tools/xenosrecomp/src/XenosRecomp/*.h, .tools/xenosrecomp/src/XenosRecomp/*.cpp, tools/shaders/*.py -Pattern "cubeMapDirections"`
-Ran command: `Select-String -Path tools/shaders/xenosrecomp/patches/*.patch -Pattern "cubeMapDirections"`
-Ran command: `Select-String -Path .tools/xenosrecomp/src/XenosRecomp/shader_recompiler.cpp -Pattern "USAGE_SEMANTICS" -Context 2, 10`
-Viewed shader_recompiler.cpp:142-155
-Viewed shader_recompiler.cpp:1880-1910
-Viewed shader_common.h:310-330
-Edited shader_common.h
-Edited shader_recompiler.cpp
-Edited shader_recompiler.cpp
-Edited shader_recompiler.cpp
-Ran command: `cmake --build .tools\xenosrecomp\build`
-Ran command: `& "$env:ProgramFiles(x86)\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath`
-Ran command: `& "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath`
-Ran command: `cmd.exe /c "call ""C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat"" -arch=x64 -host_arch=x64 >nul && set ""PATH=C:\Users\Gusta\Documents\outros-projetos\superman_returns_recomp\.tools\clang+llvm-23.1.2-x86_64-pc-windows-msvc\bin;C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin;C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;%PATH%"" && cmake --build .tools\xenosrecomp\build"`
-Checked task Recompile XenosRecompCorpus
-Checked task Recompile XenosRecompCorpus
-Ran command: `python tools\shaders\build_catalog.py`
-Checked task Run build_catalog.py
-
-I will wait for `build_catalog.py` to finish compiling all shaders with DXC.
-
-Ran command: `git -C .tools/xenosrecomp/src diff`
-Ran command: `git -C .tools/xenosrecomp/src status`
-Ran command: `git -C .tools/xenosrecomp/src checkout -b temp && git -C .tools/xenosrecomp/src commit -a -m "temp"`
-Created 0002-superman-returns.patch
-Ran command: `python tools\shaders\fetch_xenosrecomp.py --force`
-Viewed fetch_xenosrecomp.py:30-60
-Edited fetch_xenosrecomp.py
-Ran command: `python tools\shaders\fetch_xenosrecomp.py --force`
-Edited fetch_xenosrecomp.py
-Viewed fetch_xenosrecomp.py:38-56
-Edited fetch_xenosrecomp.py
-Ran command: `python tools\shaders\fetch_xenosrecomp.py --force`
-Viewed shader_recompiler.cpp:130-160
-Edited shader_common.h
-Edited shader_recompiler.cpp
-Edited shader_recompiler.cpp
-Edited shader_recompiler.cpp
-Ran command: `git -C .tools/xenosrecomp/src diff -R tools/shaders/xenosrecomp/patches/0001-conan-recomp.patch`
-Ran command: `git -C .tools/xenosrecomp/src reset --hard 339af41
-git -C .tools/xenosrecomp/src apply (Resolve-Path tools/shaders/xenosrecomp/patches/0001-conan-recomp.patch).Path
-git -C .tools/xenosrecomp/src commit -a -m "conan"`
-Edited shader_common.h
-Edited shader_recompiler.cpp
-Edited shader_recompiler.cpp
-Ran command: `git -C .tools/xenosrecomp/src diff`
-Ran command: `git -C .tools/xenosrecomp/src diff | Out-File -Encoding utf8 tools/shaders/xenosrecomp/patches/0002-superman-returns.patch`
-Ran command: `python tools\shaders\fetch_xenosrecomp.py --force`
-Ran command: `cmd.exe /c "call ""C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat"" -arch=x64 -host_arch=x64 >nul && set ""PATH=C:\Users\Gusta\Documents\outros-projetos\superman_returns_recomp\.tools\clang+llvm-23.1.2-x86_64-pc-windows-msvc\bin;C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin;C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;%PATH%"" && cmake --build .tools\xenosrecomp\build"`
-Checked task Rebuild XenosRecompCorpus
-Checked task Rebuild XenosRecompCorpus
-Ran command: `powershell -NoProfile -ExecutionPolicy Bypass -File tools\shaders\build_corpus.ps1`
-
-I will wait for `build_corpus.ps1` to finish running end-to-end.
-
-Ran command: `git status`
-Ran command: `Select-String -Path port/src/native_renderer/pipeline_cache.cpp -Pattern "LookupGuestShader" -Context 3, 5`
-Ran command: `Select-String -Path port/src/native_renderer/*.cpp, port/src/native_renderer/*.h -Pattern "LookupGuestShader"`
-Viewed native_renderer.cpp:3420-3455
-Ran command: `Select-String -Path port/src/native_renderer/native_renderer.cpp -Pattern "vs_hash" -Context 1, 5`
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "820f4e88:" -Context 0, 15`
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "820f4f[0-9a-f]:" -Context 0, 15`
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "820f4f0c:" -Context 0, 15`
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "820f6ac[0-9a-f]:|820f6ab[0-9a-f]:" -Context 0, 15`
-Checked task Check CreatePixelShader return
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "820f6fdc:" -Context 0, 15`
-Ran command: `Select-String -Path .tools/xenosrecomp/src/XenosRecomp/*.cpp -Pattern "FFFF0300|FFFE0300|0xFFFF0300"`
-Ran command: `powershell -NoProfile -ExecutionPolicy Bypass -File tools\native_validate.ps1 -Step build -Native RENDERER`
-Checked task Build RENDERER executable
-
-I will wait for the `SR_NATIVE=RENDERER` compilation to finish.
-
-Viewed bench.ps1:80-140
-Viewed native_ab_compare.py:1-60
-Ran command: `$p = Start-Process -FilePath "port\out\build\win-amd64-release\superman_returns.exe" -ArgumentList @("--game_data_root=game", "--log_file=logs\game_smoke.log", "--sr_renderer=native", "--sr_skip_intro=true") -PassThru
-Start-Sleep 8
-if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }
-Get-Content logs\game_smoke.log | Select-String "native" | Select-Object -First 30`
-Checked task Smoke test native renderer
-Ran command: `Select-String -Path logs/game_smoke.log -Pattern "native watchdog: thread 3668" -Context 0, 25`
-Ran command: `Select-String -Path logs/game_smoke.log -Pattern "sub_|0x82|0x7FF" -Context 0, 1 | Select-Object -First 40`
-Ran command: `$p = Start-Process -FilePath "port\out\build\win-amd64-release\superman_returns.exe" -ArgumentList @("--game_data_root=game", "--log_file=logs\game_smoke_25s.log", "--sr_renderer=native", "--sr_skip_intro=true") -PassThru
-Start-Sleep 20
-if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force }
-Get-Content logs\game_smoke_25s.log | Select-String "swap", "Swap", "draw", "Draw", "pass", "Pass", "fps" | Select-Object -First 30`
-
-I will wait for the 20-second native renderer run to complete.
-
-Viewed game_profile.h:180-230
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "820f5218:" -Context 0, 15`
-Checked task Disassembly SetPixelShader
-Ran command: `python -c "import json; m=json.load(open('artifacts/shaders/manifest.json')); print([s for s in m['shaders'] if 'default.xex' in s['first_source']['file']])"`
-Viewed shader_container.h:1-53
-Viewed shader_registry.cpp:1-167
-Ran command: `Get-ChildItem -Path logs -Recurse -File`
-Checked task List logs directory
-Viewed task-576.log:1-269
-Viewed game_smoke_25s.log:1-100
-Viewed extract_shaders.py:1-120
-Viewed extract_shaders.py:120-230
-Viewed native_bridge.cpp:140-200
-Viewed native_bridge.cpp:201-322
-Ran command: `Get-ChildItem -Path port\src\native_renderer -Recurse | Select-String -Pattern "unsupported draw"`
-Ran command: `Get-ChildItem -Path port\src\native_renderer -Recurse | Select-String -Pattern "shader object"`
-Checked task Search for shader object in native_renderer
-Viewed native_renderer.cpp:3450-3500
-Viewed native_renderer.cpp:3420-3450
-Ran command: `Test-Path logs\default_image.bin`
-Viewed srpaths.py:1-34
-Ran command: `Test-Path port\logs\default_image.bin`
-Viewed game_profile.h:1-60
-Viewed game_profile.h:61-120
-Ran command: `python -c "
-import struct
-img = open('port/logs/default_image.bin', 'rb').read()
-base = 0x82000000
-
-def dump(addr, size):
-    off = addr - base
-    print(f'=== {hex(addr)} ===')
-    for i in range(0, size, 4):
-        w = struct.unpack('>I', img[off+i:off+i+4])[0]
-        print(f'{hex(addr+i)}: {w:08x}')
-
-dump(0x820F9C80, 0x80)
-"`
-Ran command: `python -c "import capstone; print('capstone available')"`
-Ran command: `Get-ChildItem tools -Recurse -File`
-Viewed native_validate.ps1:1-100
-Viewed native_validate.ps1:200-272
-Ran command: `python -c "
-import struct
-
-img = open('port/logs/default_image.bin', 'rb').read()
-base = 0x82000000
-
-def dump(addr, size):
-    off = addr - base
-    print(f'=== {hex(addr)} ===')
-    for i in range(0, size, 4):
-        w = struct.unpack('>I', img[off+i:off+i+4])[0]
-        # Basic PPC opcode decode
-        op = w >> 26
-        rd = (w >> 21) & 0x1f
-        ra = (w >> 16) & 0x1f
-        rb = (w >> 11) & 0x1f
-        simm = w & 0xffff
-        if simm & 0x8000: simm -= 0x10000
-        print(f'{hex(addr+i)}: {w:08x}  op={op:02d} r{rd}, r{ra}, r{rb} (simm={simm})')
-
-dump(0x820F5840, 0x50)
-"`
-Ran command: `Get-ChildItem -Path port\generated -Recurse | Select-String -Pattern "sub_820F5840"`
-Checked task Search for sub_820F5840
-Viewed superman_returns_recomp.120.cpp:35-100
-Viewed superman_returns_recomp.96.cpp:180-250
-Viewed superman_returns_recomp.120.cpp:100-160
-Viewed superman_returns_recomp.120.cpp:240-300
-Viewed superman_returns_recomp.120.cpp:540-600
-Viewed superman_returns_recomp.120.cpp:601-680
-Viewed superman_returns_recomp.96.cpp:140-190
-Viewed superman_returns_recomp.96.cpp:80-140
-Viewed superman_returns_recomp.120.cpp:1-36
-Ran command: `Get-ChildItem -Path port\generated -Recurse | Select-String -Pattern "DEFINE_REX_FUNC\(sub_820F5738\)"`
-Checked task Locate sub_820F5738 definition
-Viewed superman_returns_recomp.5.cpp:31-80
-Viewed superman_returns_recomp.96.cpp:200-280
-Viewed superman_returns_recomp.96.cpp:281-350
-Ran command: `Get-ChildItem -Path port\generated -Recurse | Select-String -Pattern "sub_820F9C80"`
-Checked task Locate callers of sub_820F9C80
-Ran command: `python -c "
-import glob, re
-
-for f in glob.glob('port/generated/default/*.cpp'):
-    txt = open(f, 'r', errors='ignore').read()
-    m = re.findall(r'sub_820[Ff]9[Cc]80', txt)
-    if m:
-        print(f, len(m))
-"`
-Viewed superman_returns_recomp.96.cpp:1-40
-Viewed superman_returns_recomp.96.cpp:41-80
-Ran command: `python -c "
-import glob, re
-
-for f in glob.glob('port/generated/default/*.cpp'):
-    txt = open(f, 'r', errors='ignore').read()
-    m = re.findall(r'sub_820[Ff]9[Cc]78', txt)
-    if m:
-        print(f, len(m))
-"`
-Ran command: `python -c "
-import re
-for path in ['port/generated/default/superman_returns_recomp.26.cpp', 'port/generated/default/superman_returns_recomp.55.cpp']:
-    lines = open(path).readlines()
-    for idx, line in enumerate(lines):
-        if 'sub_820F9C78' in line:
-            print(f'=== {path}:{idx+1} ===')
-            for j in range(max(0, idx-20), min(len(lines), idx+25)):
-                print(f'{j+1}: {lines[j]}', end='')
-"`
-Viewed superman_returns_recomp.55.cpp:40-85
-Ran command: `python -c "
-import glob, re
-
-for f in glob.glob('port/generated/default/*.cpp'):
-    txt = open(f, 'r', errors='ignore').read()
-    m = re.findall(r'sub_820[Ff]99[Cc]8', txt)
-    if m:
-        print(f, len(m))
-"`
-Viewed superman_returns_recomp.26.cpp:50-88
-Viewed superman_returns_recomp.5.cpp:80-140
-Ran command: `python -c "
-import glob, re
-
-for f in glob.glob('port/generated/default/*.cpp'):
-    txt = open(f, 'r', errors='ignore').read()
-    m = re.findall(r'DEFINE_REX_FUNC\(sub_820[Ff]57[Cc]0\)', txt)
-    if m:
-        print(f, m)
-"`
-Viewed superman_returns_recomp.58.cpp:1-60
-Viewed superman_returns_recomp.58.cpp:61-80
-Viewed game_profile.h:190-250
-Ran command: `python -c "
-import glob, re
-
-for f in glob.glob('port/generated/default/*.cpp'):
-    txt = open(f, 'r', errors='ignore').read()
-    m = re.findall(r'12416\(r[0-9]+\)', txt)
-    if m:
-        print(f, m)
-"`
-Ran command: `python -c "
-lines = open('port/generated/default/superman_returns_recomp.50.cpp').readlines()
-for idx, l in enumerate(lines):
-    if '12416' in l:
-        for j in range(max(0, idx-10), min(len(lines), idx+15)):
-            print(f'{j+1}: {lines[j]}', end='')
-"`
-Ran command: `python -c "
-import glob, re
-
-for f in glob.glob('port/generated/default/*.cpp'):
-    lines = open(f).readlines()
-    for idx, l in enumerate(lines):
-        if '12416' in l and 'STORE' in l:
-            print(f'{f}:{idx+1}: {l.strip()}')
-        if '12420' in l and 'STORE' in l:
-            print(f'{f}:{idx+1}: {l.strip()}')
-"`
-Checked task Find STW to 12416 and 12420
-Viewed superman_returns_recomp.133.cpp:90-130
-Viewed superman_returns_recomp.133.cpp:130-180
-Viewed superman_returns_recomp.133.cpp:1-50
-Viewed superman_returns_recomp.105.cpp:80-135
-Ran command: `python -c "
-import glob, re
-
-for target in ['sub_820F4E88', 'sub_820F5238']:
-    print(f'=== Callers of {target} ===')
-    for f in glob.glob('port/generated/default/*.cpp'):
-        txt = open(f, 'r', errors='ignore').read()
-        m = re.findall(target, txt)
-        if m:
-            print(f, len(m))
-"`
-Ran command: `python -c "
-lines = open('port/generated/default/superman_returns_recomp.11.cpp').readlines()
-for idx, l in enumerate(lines):
-    if 'sub_820F4E88' in l:
-        for j in range(max(0, idx-10), min(len(lines), idx+10)):
-            print(f'{j+1}: {lines[j]}', end='')
-"`
-Ran command: `python -c "
-import glob, re
-
-for f in ['superman_returns_recomp.110.cpp', 'superman_returns_recomp.123.cpp', 'superman_returns_recomp.124.cpp', 'superman_returns_recomp.14.cpp', 'superman_returns_recomp.29.cpp']:
-    path = 'port/generated/default/' + f
-    lines = open(path).readlines()
-    for idx, l in enumerate(lines):
-        if 'sub_820F4E88' in l:
-            print(f'=== {f}:{idx+1} ===')
-            for j in range(max(0, idx-10), min(len(lines), idx+5)):
-                print(f'{j+1}: {lines[j]}', end='')
-"`
-Viewed superman_returns_recomp.123.cpp:14300-14325
-Ran command: `python -c "
-lines = open('port/generated/default/superman_returns_recomp.123.cpp').readlines()
-for idx, l in enumerate(lines):
-    if '76(r31)' in l and 'STORE' in l:
-        print(f'{idx+1}: {l.strip()}')
-    if '72(r31)' in l and 'STORE' in l:
-        print(f'{idx+1}: {l.strip()}')
-"`
-Ran command: `python -c "
-lines = open('port/generated/default/superman_returns_recomp.123.cpp').readlines()
-target = 14327
-for i in range(target, 0, -1):
-    if 'DEFINE_REX_FUNC' in lines[i]:
-        print(f'{i+1}: {lines[i]}')
-        break
-"`
-Viewed superman_returns_recomp.123.cpp:14002-14050
-Ran command: `python -c "
-import glob, re
-
-for f in glob.glob('port/generated/default/*.cpp'):
-    lines = open(f).readlines()
-    for idx, l in enumerate(lines):
-        if ('76(r' in l or '72(r' in l) and 'STORE_U32' in l:
-            # check surrounding lines
-            context = ''.join(lines[max(0, idx-5):min(len(lines), idx+5)])
-            if 'Create' in context or 'sub_820F' in context:
-                print(f'{f}:{idx+1}: {l.strip()}')
-"`
-Checked task Search for shader object assignments
-Ran command: `python -c "
-for idx, line in enumerate(open('logs/game_smoke_25s.log')):
-    if 'unsupported' in line.lower() or 'skip' in line.lower() or 'trace draw' in line.lower() or 'p0:' in line.lower():
-        print(f'{idx+1}: {line.strip()}')
-"`
-Ran command: `python -c "
-lines = open('port/generated/default/superman_returns_recomp.14.cpp').readlines()
-for idx, l in enumerate(lines):
-    if 'sub_820F99C8' in l:
-        print(f'{idx+1}: {l.strip()}')
-        for j in range(max(0, idx-15), min(len(lines), idx+25)):
-            print(f'{j+1}: {lines[j]}', end='')
-"`
-Ran command: `python -c "
-lines = open('port/generated/default/superman_returns_recomp.14.cpp').readlines()
-target = 12211
-for i in range(target, 0, -1):
-    if 'DEFINE_REX_FUNC' in lines[i]:
-        print(f'{i+1}: {lines[i]}')
-        break
-"`
-Viewed superman_returns_recomp.14.cpp:12211-12290
-Viewed superman_returns_recomp.14.cpp:11956-12000
-Viewed xdk_match.tsv:1-60
-Ran command: `Select-String -Path docs\data\xdk_match.tsv -Pattern "Shader"`
-Viewed native-port-plan.md:120-160
-Ran command: `Get-ChildItem -Path . -Recurse -Filter "*shader_registry*"`
-Ran command: `git diff port\src\native_renderer\shader_registry.cpp`
-Ran command: `python -c "
-import glob, re
-
-for f in glob.glob('port/generated/default/*.cpp'):
-    txt = open(f, 'r', errors='ignore').read()
-    if 'DEFINE_REX_FUNC(sub_820F6690)' in txt:
-        print(f)
-"`
-Ran command: `python -c "
-lines = open('port/generated/default/superman_returns_recomp.36.cpp').readlines()
-for idx, l in enumerate(lines):
-    if 'DEFINE_REX_FUNC(sub_820F6690)' in l:
-        print('=== PROLOGUE ===')
-        for j in range(idx, idx+35):
-            print(f'{j+1}: {lines[j]}', end='')
-        print('=== EPILOGUE ===')
-        # find return
-        for j in range(len(lines)-1, idx, -1):
-            if 'return;' in lines[j]:
-                for k in range(j-20, j+1):
-                    print(f'{k+1}: {lines[k]}', end='')
-                break
-        break
-"`
-Ran command: `python -c "
-lines = open('port/generated/default/superman_returns_recomp.36.cpp').readlines()
-found = False
-for idx, l in enumerate(lines):
-    if 'DEFINE_REX_FUNC(sub_820F6690)' in l:
-        found = True
-        continue
-    if found and 'DEFINE_REX_FUNC(' in l:
-        print(f'Next func at line {idx+1}: {l.strip()}')
-        for j in range(idx-25, idx):
-            print(f'{j+1}: {lines[j]}', end='')
-        break
-"`
-Ran command: `python -c "
-import glob, re
-
-for f in glob.glob('port/generated/default/*.cpp'):
-    txt = open(f, 'r', errors='ignore').read()
-    if 'DEFINE_REX_FUNC(sub_827C1438)' in txt:
-        print(f)
-"`
-Viewed superman_returns_recomp.30.cpp:1-60
-Ran command: `python -c "
-lines = open('port/generated/default/superman_returns_recomp.30.cpp').readlines()
-for idx, l in enumerate(lines):
-    if 'DEFINE_REX_FUNC(sub_827C1438)' in l:
-        print(f'{idx+1}: {l.strip()}')
-        for j in range(idx, min(len(lines), idx+40)):
-            print(f'{j+1}: {lines[j]}', end='')
-        break
-"`
-Ran command: `python -c "
-import glob, struct
-
-files = glob.glob('artifacts/shaders/raw/*.bin')
-print(f'Total raw files: {len(files)}')
-for p in files[:5]:
-    b = open(p, 'rb').read()
-    hdr = struct.unpack('>9I', b[:36])
-    print(p, 'len:', len(b), 'hdr:', [hex(x) for x in hdr])
-"`
-Ran command: `python -c "
-import struct
-b = open('artifacts/shaders/raw/04CC5C7EC9FDFD7E.ps.bin', 'rb').read()
-for i in range(0, 64, 16):
-    words = struct.unpack('>4I', b[i:i+16])
-    print(f'+{i:02X}: ' + ' '.join(f'{w:08X}' for w in words))
-"`
-Ran command: `python -c "
-import glob
-
-target = bytes.fromhex('000000640000001C00000057FFFF0300000000010000001C00000100')
-found = []
-for f in glob.glob('artifacts/shaders/raw/*.bin'):
-    b = open(f, 'rb').read()
-    if target in b:
-        found.append((f, b.find(target)))
-print('Matches found:', found)
-"`
-Ran command: `python -c "
-import glob
-
-target = bytes.fromhex('FFFF0300000000010000001C')
-found = []
-for f in glob.glob('artifacts/shaders/raw/*.bin'):
-    b = open(f, 'rb').read()
-    if target in b:
-        found.append((f, b.find(target)))
-print(f'Matches for target: {len(found)}')
-for m in found[:5]:
-    print(m)
-"`
-Ran command: `python -c "
-import struct
-b = open('artifacts/shaders/raw/220EA09D420C9BF6.ps.bin', 'rb').read()
-for i in range(0, 64, 16):
-    words = struct.unpack('>4I', b[i:i+16])
-    print(f'+{i:02X}: ' + ' '.join(f'{w:08X}' for w in words))
-"`
-Viewed superman_returns_recomp.14.cpp:12150-12205
-Ran command: `python -c "
-import glob, re
-
-for f in glob.glob('port/generated/default/*.cpp'):
-    txt = open(f, 'r', errors='ignore').read()
-    if 'DEFINE_REX_FUNC(sub_820FA7E0)' in txt:
-        print(f)
-"`
-Viewed superman_returns_recomp.73.cpp:1-60
-Ran command: `python -c "
-lines = open('port/generated/default/superman_returns_recomp.73.cpp').readlines()
-for idx, l in enumerate(lines):
-    if 'DEFINE_REX_FUNC(sub_820FA7E0)' in l:
-        print(f'{idx+1}: {l.strip()}')
-        for j in range(idx, min(len(lines), idx+40)):
-            print(f'{j+1}: {lines[j]}', end='')
-        break
-"`
-Ran command: `python -c "
-lines = open('port/generated/default/superman_returns_recomp.73.cpp').readlines()
-for idx, l in enumerate(lines):
-    if 'loc_820FA558:' in l or 'DEFINE_REX_FUNC(sub_820FA558)' in l:
-        print(f'{idx+1}: {l.strip()}')
-        for j in range(idx, min(len(lines), idx+40)):
-            print(f'{j+1}: {lines[j]}', end='')
-        break
-"`
-Ran command: `python -c "
-import glob, re
-
-for f in glob.glob('port/generated/default/*.cpp'):
-    txt = open(f, 'r', errors='ignore').read()
-    if 'DEFINE_REX_FUNC(sub_820FA558)' in txt:
-        print(f)
-"`
-Checked task Locate sub_820FA558
-Viewed superman_returns_recomp.60.cpp:1-60
-Viewed superman_returns_recomp.60.cpp:51-150
-Ran command: `python -c "
-import glob, re
-
-p = re.compile(r'STORE_U32\([^,]+ \+ 7[26],')
-for f in glob.glob('port/generated/default/*.cpp'):
-    lines = open(f).readlines()
-    for idx, l in enumerate(lines):
-        if p.search(l):
-            print(f'{f}:{idx+1}: {l.strip()}')
-"`
-Checked task Find all STORE_U32 at offset 72 and 76
-Viewed superman_returns_recomp.95.cpp:11690-11730
-Ran command: `python -c "
-lines = open('port/generated/default/superman_returns_recomp.95.cpp').readlines()
-target = 11700
-for i in range(target, 0, -1):
-    if 'DEFINE_REX_FUNC' in lines[i]:
-        print(f'{i+1}: {lines[i]}')
-        break
-"`
-Viewed superman_returns_recomp.95.cpp:11485-11570
-Viewed superman_returns_recomp.95.cpp:11620-11690
-Viewed superman_returns_recomp.89.cpp:22920-22970
-Viewed superman_returns_recomp.110.cpp:12540-12580
-Viewed superman_returns_recomp.110.cpp:12520-12542
-Ran command: `python -c "
-import glob, re
-
-# Look for functions that create vertex shader or pixel shader or contain strings/symbols
-for f in glob.glob('port/generated/default/*.cpp'):
-    lines = open(f).readlines()
-    for idx, l in enumerate(lines):
-        if '820F5840' in l or '820F6690' in l:
-            print(f'{f}:{idx+1}: {l.strip()}')
-"`
-Checked task Search for 820F5840 and 820F6690 in codebase
-Viewed superman_returns_recomp.60.cpp:150-250
-Ran command: `python -c "
-import glob, re
-
-for f in glob.glob('port/generated/default/*.cpp'):
-    txt = open(f, 'r', errors='ignore').read()
-    if '827B6A10' in txt:
-        print(f)
-"`
-Viewed superman_returns_recomp.134.cpp:1-60
-Ran command: `python -c "
-lines = open('port/generated/default/superman_returns_recomp.134.cpp').readlines()
-for idx, l in enumerate(lines):
-    if 'DEFINE_REX_FUNC(sub_827B6A10)' in l:
-        print(f'{idx+1}: {l.strip()}')
-        for j in range(idx, min(len(lines), idx+30)):
-            print(f'{j+1}: {lines[j]}', end='')
-        break
-"`
-Ran command: `python -c "
-import glob, re
-
-for f in glob.glob('port/generated/default/*.cpp'):
-    txt = open(f, 'r', errors='ignore').read()
-    if 'DEFINE_REX_FUNC(sub_827B5F40)' in txt:
-        print(f)
-"`
-Ran command: `python -c "
-lines = open('port/generated/default/superman_returns_recomp.72.cpp').readlines()
-for idx, l in enumerate(lines):
-    if 'DEFINE_REX_FUNC(sub_827B5F40)' in l:
-        print(f'{idx+1}: {l.strip()}')
-        for j in range(idx, min(len(lines), idx+60)):
-            print(f'{j+1}: {lines[j]}', end='')
-        break
-"`
-Viewed superman_returns_recomp.72.cpp:27995-28060
-Viewed superman_returns_recomp.14.cpp:12260-12350
-Ran command: `Test-Path logs\native_capture.json`
-Ran command: `git log -S "820F5840" -p port\src\native_renderer\game_profile.h`
-Ran command: `python -c "
-import glob, re
-
-for f in glob.glob('port/generated/default/*.cpp'):
-    lines = open(f).readlines()
-    for idx, l in enumerate(lines):
-        if '872' in l and ('STORE' in l or 'addi' in l or 'li ' in l or 'mulli' in l):
-            # check if it looks like an allocator or constructor
-            ctx = ''.join(lines[max(0, idx-5):min(len(lines), idx+5)])
-            if 'malloc' in ctx or 'alloc' in ctx or 'sub_82' in ctx:
-                print(f'{f}:{idx+1}: {l.strip()}')
-"`
-Checked task Search for pixel shader size 872 in recomp files
-Viewed superman_returns_recomp.6.cpp:4070-4110
-Ran command: `python -c "
-import glob, re
-
-for f in glob.glob('port/generated/default/*.cpp'):
-    lines = open(f).readlines()
-    for idx, l in enumerate(lines):
-        if 'STORE_U32(ctx.r31.u32 + 40,' in l:
-            print(f'{f}:{idx+1}: {l.strip()}')
-"`
-Checked task Locate D3DVertexShader constructor
-Viewed native_hooks.cpp:220-260
-Viewed native_renderer.cpp:2610-2650
-Ran command: `Select-String -Path port\src\native_renderer\native_renderer.cpp -Pattern "ApplyLoadAluConstants" -Context 5`
-Ran command: `python -c "
-lines = open('port/generated/default/superman_returns_recomp.30.cpp').readlines()
-target = 27173
-for j in range(target, min(len(lines), target+80)):
-    print(f'{j+1}: {lines[j]}', end='')
-"`
-Viewed CHECKPOINT_NATIVE_RENDERER.md:1-196
-Ran command: `git status`
-Ran command: `git diff port/src/native_renderer/`
-Viewed native_renderer.cpp:80-160
-Ran command: `Select-String -Path port/src/native_renderer/native_renderer.cpp -Pattern "LookupGuestShader" -Context 5,5`
-Viewed native_renderer.cpp:3430-3500
-Viewed game_profile.h:45-75
-Viewed game_profile.h:180-279
-Ran command: `Select-String -Path port/generated/default/*.cpp -Pattern "12416|12420"`
-
-I will wait for the search across the generated files to locate the shader setters and references to offsets 12416 and 12420.
-
-Checked task Search shader setters
-
-I will wait for the search to complete.
-
-Timed 3 seconds
-Viewed superman_returns_recomp.80.cpp:8390-8480
-Viewed superman_returns_recomp.26.cpp:10880-11020
-Viewed superman_returns_recomp.26.cpp:10850-10885
-Ran command: `Select-String -Path port/generated/default/superman_returns_recomp.26.cpp -Pattern "DEFINE_REX_FUNC" | Where-Object { $_.LineNumber -lt 10850 } | Select-Object -Last 3`
-Viewed superman_returns_recomp.133.cpp:15-140
-Viewed superman_returns_recomp.133.cpp:140-200
-Viewed superman_returns_recomp.57.cpp:490-530
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "12420\(" -Context 5,5`
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "lis\s+r\d+,-32105" | Select-Object -First 20`
-Viewed default_full.dis:308750-308770
-Viewed native_capture.json:2-51
-Ran command: `Get-ChildItem -Path logs/`
-Ran command: `Select-String -Path logs/game_smoke.log -Pattern "native|skip|shader|OnCreate" | Select-Object -First 30`
-Ran command: `Select-String -Path logs/game_smoke.log -Pattern "skip_shader|draw without" -Context 2,5`
-Ran command: `Get-Content -Path logs/game_smoke.log -Tail 50`
-Ran command: `Select-String -Path logs/game_smoke.log -Pattern "watchdog|native" | Select-Object -First 30`
-Viewed game_smoke.log:650-670
-Ran command: `Select-String -Path logs/game_smoke.log -Pattern "thread 25516" -Context 0,15`
-Ran command: `Select-String -Path logs/game_smoke_25s.log -Pattern "p0:|swap|Draw|draw" | Select-Object -First 30`
-Viewed superman_returns_recomp.55.cpp:30-120
-Viewed superman_returns_recomp.55.cpp:121-175
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "820f99c8"`
-Viewed default_full.dis:993720-993760
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "bl\s+0x820f4e88"`
-
-I will wait for the search to complete.
-
-Timed 2 seconds
-Viewed default_full.dis:787630-787660
-Viewed default_full.dis:1576390-1576430
-Viewed default_full.dis:237510-237550
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "820f5218:" -Context 2,15`
-
-I will wait for the search to complete.
-
-Timed 2 seconds
-Viewed default_full.dis:235785-235850
-Viewed default_full.dis:236300-236350
-Viewed default_full.dis:236180-236240
-Viewed default_full.dis:242800-242850
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "820fa7e0:" -Context 2,15`
-Viewed default_full.dis:241130-241180
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "bl\s+0x820f5840|bl\s+0x820f6690"`
-
-I will wait for the search to complete.
-
-Timed 2 seconds
-Viewed default_full.dis:2013945-2013985
-Viewed superman_returns_recomp.6.cpp:4080-4160
-Viewed superman_returns_recomp.6.cpp:4050-4080
-Ran command: `Select-String -Path .tools/**/*.h -Pattern "D3DShader" | Select-Object -First 20`
-Ran command: `Get-ChildItem -Recurse -Filter "*.h" .tools/rexglue-sdk-source/`
-
-I will wait for the search to complete.
-
-Timed 2 seconds
-
-I will wait for the listing to finish.
-
-Timed 2 seconds
-Ran command: `Get-ChildItem -Path docs/`
-Viewed native-renderer.md:1-68
-Viewed native-port-plan.md:1-160
-Viewed default_full.dis:1149610-1149640
-Viewed default_full.dis:1585090-1585130
-Viewed superman_returns_recomp.26.cpp:10830-10915
-Viewed default_full.dis:857150-857200
-Viewed superman_returns_recomp.26.cpp:10725-10760
-Viewed default_full.dis:858050-858100
-Viewed default_full.dis:857510-857560
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "\b872\(" -Context 2,5`
-Viewed default_full.dis:240590-240630
-Viewed default_full.dis:240630-240670
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "bl\s+0x820f9e50"`
-Viewed default_full.dis:993760-993850
-Viewed default_full.dis:1788200-1788250
-Ran command: `Select-String -Path port/logs/default_full.dis -Pattern "8267d338:" -Context 2,15`
-
-I will wait for the search to complete.
-
-Timed 2 seconds
-Viewed native_renderer.cpp:3420-3440
-Viewed shader_registry.cpp:1-140
-Viewed shader_registry.cpp:140-167
-Ran command: `Select-String -Path port/src/native_renderer/ -Pattern "LookupGuestShader"`
-Ran command: `Select-String -Path port/src/native_renderer/* -Pattern "LookupGuestShader"`
-Viewed default_full.dis:235300-235360
-Viewed default_full.dis:235550-235600
-Viewed default_full.dis:235600-235660
-Ran command: `powershell -NoProfile -ExecutionPolicy Bypass -File tools\native_validate.ps1 -Step build -Native RENDERER`
-
-I will wait for the build command to complete.
-
-Timed 10 seconds
-Viewed native_renderer.cpp:3425-3445
-Edited native_renderer.cpp
-Ran command: `powershell -NoProfile -ExecutionPolicy Bypass -File tools\native_validate.ps1 -Step build -Native RENDERER`
-
-I will wait for the build to finish.
-
-Timed 8 seconds
-
-I will wait for the build to finish.
-
-Timed 3 seconds
-
-I will wait for the build to finish.
-
-Timed 3 seconds
-Checked task Build with diagnostics
-
-I will wait for task 1040 to finish.
-
-Timed 10 seconds
-Ran command: `powershell -Command "Start-Process -FilePath 'port\out\build\win-amd64-release\superman_returns.exe' -ArgumentList '--sr_renderer=native','--game_data_root=game','--log_file=logs/game_diag.log' -NoNewWindow; Start-Sleep -Seconds 12; Stop-Process -Name 'superman_returns' -Force -ErrorAction SilentlyContinue"`
-
-I will wait for the diagnostic smoke run to finish.
-
-Timed 10 seconds
-
-I will wait for the smoke run to complete.
-
-Timed 5 seconds
-Ran command: `Select-String -Path logs/game_diag.log -Pattern "DIAG DRAW|VS |PS "`
-Ran command: `Get-Content -Path logs/game_diag.log -Tail 40`
-Ran command: `Select-String -Path logs/game_diag.log -Pattern "drawn|skip|shader|DIAG" | Select-Object -First 30`
-Ran command: `powershell -Command "Start-Process -FilePath 'port\out\build\win-amd64-release\superman_returns.exe' -ArgumentList '--sr_renderer=native','--game_data_root=game','--log_file=logs/game_diag.log' -NoNewWindow; Start-Sleep -Seconds 25; Stop-Process -Name 'superman_returns' -Force -ErrorAction SilentlyContinue"`
-
-I will wait for the 25-second diagnostic run to complete.
-
-Timed 20 seconds
-
-I will wait for the run to finish.
-
-Timed 10 seconds
-
-I will wait for the diagnostic command to finish.
-
-Timed 5 seconds
-
-I will wait for the run to complete.
-
-Timed 5 seconds
-Ran command: `Select-String -Path logs/game_diag.log -Pattern "DIAG DRAW" -Context 0,6`
-Ran command: `python -c "import json; c = json.load(open('artifacts/shaders/catalog.json')); print('Total shaders:', len(c['shaders'])); print('Sample hashes:', list(c['shaders'].keys())[:5])"`
-Ran command: `python -c "import json; c = json.load(open('artifacts/shaders/catalog.json')); print(json.dumps(c['shaders'][0], indent=2))"`
-Ran command: `python -c "import json; c = json.load(open('artifacts/shaders/catalog.json')); print([(s['hash'], s['stage'], s['entry']) for s in c['shaders'][:5]])"`
-Ran command: `python -c "import json; c = json.load(open('artifacts/shaders/catalog.json')); print(c['shaders'][0].keys())"`
-Ran command: `python -c "import json; c = json.load(open('artifacts/shaders/catalog.json')); print([(s['container_hash'], s['type']) for s in c['shaders'][:10]])"`
-Viewed shader_container.h:1-53
-Ran command: `python -c "import json; c = json.load(open('artifacts/shaders/catalog.json')); print('Types in catalog:', set(s['type'] for s in c['shaders']))"`
-Ran command: `python -c "import glob, struct; bins = glob.glob('logs/native_shaders/*.bin'); print('Found bins:', len(bins)); [print(b, hex(struct.unpack('>I', open(b, 'rb').read(4))[0])) for b in bins[:5]]"`
-Viewed extract_shaders.py:1-60
-Viewed extract_shaders.py:60-110
-Ran command: `python -c "import json; c = json.load(open('artifacts/shaders/catalog.json')); print('Shaders with size 656:', [(s['container_hash'], s['type'], s['size']) for s in c['shaders'] if s['size'] == 656]); print('Shaders with size 504:', [(s['container_hash'], s['type'], s['size']) for s in c['shaders'] if s['size'] == 504])"`
-Ran command: `python -c "import json; c = json.load(open('artifacts/shaders/catalog.json')); print('All sizes:', sorted(set(s['size'] for s in c['shaders'])))"`
-
-Error: API error (attempt 1): RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 1h15m16s. (Error ID: bd534ff9-7ace-4371-a475-afc055027715-1112)
-
-Error: API error (attempt 2): RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 1h15m9s. (Error ID: bd534ff9-7ace-4371-a475-afc055027715-1113)
-
-Error: API error (attempt 3): RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 1h14m58s. (Error ID: bd534ff9-7ace-4371-a475-afc055027715-1114)
-
-Error: API error (attempt 4): RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 1h14m42s. (Error ID: bd534ff9-7ace-4371-a475-afc055027715-1115)
-
-Error: API error (attempt 5): RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 1h14m16s. (Error ID: bd534ff9-7ace-4371-a475-afc055027715-1116)
-
-Error: API error (attempt 6): RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 1h13m32s. (Error ID: bd534ff9-7ace-4371-a475-afc055027715-1117)
-
-Error: API error (attempt 7): RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 1h11m32s. (Error ID: bd534ff9-7ace-4371-a475-afc055027715-1118)
-
-Error: API error (attempt 8): RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 1h8m47s. (Error ID: bd534ff9-7ace-4371-a475-afc055027715-1119)
-
-Error: Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 1h5m35s. (Error ID: bd534ff9-7ace-4371-a475-afc055027715-1120)
-Viewed shader_registry.cpp:1-167
-Viewed shader_registry.h:1-24
-
-Now let me look at the draw validation area of `native_renderer.cpp`:
-
-Viewed native_renderer.cpp:3415-3490
-
-Good, I can see the full picture. Now let me implement the fix:
-
-1. **`shader_registry.h`** — add `TryRegisterInlineShaders` declaration
-2. **`shader_registry.cpp`** — add `TryRegisterInlineShaders` function + constants for VS/PS offsets
-3. **`native_renderer.cpp`** — replace the diagnostic block with the `TryRegisterInlineShaders` call + restore the lookup loop
-
-Edited shader_registry.h
-
-Now add `TryRegisterInlineShaders` to the `.cpp`, right after `LookupGuestShader`:
-
-Edited shader_registry.cpp
-
-Now replace the diagnostic block in `native_renderer.cpp` with the `TryRegisterInlineShaders` call:
-
-Edited native_renderer.cpp
-
-Now check if `native_renderer.cpp` already includes `shader_registry.h` (it should, but verify the include):
-
-Ran command: `Select-String -Path "port\src\native_renderer\native_renderer.cpp" -Pattern "shader_registry" | Select-Object -First 5`
-Checked task Include check
-Viewed task-1135.log
-
-Empty — no match. Let me check the includes at the top of `native_renderer.cpp`:
-
-Viewed native_renderer.cpp:1-40
-
-`shader_registry.h` is already included at line 45. Now build:
-
-Ran command: `powershell -NoProfile -ExecutionPolicy Bypass -File tools\native_validate.ps1 -Step build -Native RENDERER 2>&1`
-Checked task Build with inline shader fix
-
-Build is running. I'll wait for it to complete.
-
-Viewed task-1144.log
-
-Still building (log not written yet). I'll wait for the task notification.
-
-Timed 90 seconds
-
-Here's what was just implemented while the build runs:
-
----
-
-### Changes made
-
-**`shader_registry.h`** — added two things:
-- `kVSContainerOffset = 40` / `kPSContainerOffset = 872` — the disassembly-confirmed offsets
-- `TryRegisterInlineShaders(base, vs_obj, ps_obj)` declaration
-
-**`shader_registry.cpp`** — added `TryRegisterInlineShaders`:
-- Iterates over both shader object pointers
-- Skips if already in `g_shaders` (no re-hashing)
-- Tries VS offset (+40) first, then PS offset (+872) via the existing `TryHashContainer`
-- On success: calls `DumpContainer` (respects `sr_native_dump_shader_dir`) then inserts into `g_shaders` and logs one `TryRegisterInline:` line per new shader
-- Lock held for the whole function (same mutex as `LookupGuestShader`)
-
-**`native_renderer.cpp`** — removed the 23-line diagnostic block, replaced with a 2-line call + the existing lookup loop:
-```cpp
-TryRegisterInlineShaders(base, vs_obj, ps_obj);
-for (uint32_t off : {kDevShaderA, kDevShaderB}) { ... }
-```
-
-The expected outcome once built: `TryRegisterInline:` log lines appear on the first draw that touches each shader object, and the draw counter flips from `p0:0/Nshader` to `p0:N/0`.
-
-Checked task Build with inline shader fix
-
-Still building — recompilation in progress (`[1/150]`). Let me set another timer.
-
-Timed 180 seconds
-
-Build is at `[1/150]` doing the recompile pass — it'll run a few more minutes. I'll check back when it finishes or after 3 minutes.
-
-Checked task Build with inline shader fix
-
-Compiling — just warnings on `fopen` (pre-existing, not our change). Still going. Another timer:
-
-Timed 180 seconds
-
-Good — the `shader_registry.cpp` compile is active (the `fopen` warning is pre-existing, unrelated to our changes). Waiting for link to finish.
-
-The compile succeeded — all 5 steps completed. The link failed only because `superman_returns.exe` is locked (a previous run is still active). Kill it and rebuild:
-
-Ran command: `Stop-Process -Name "superman_returns" -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 500; Write-Host "done"`
-Checked task Kill superman_returns.exe
-Viewed task-1166.log
-Ran command: `powershell -NoProfile -ExecutionPolicy Bypass -File tools\native_validate.ps1 -Step build -Native RENDERER 2>&1`
-
-Process killed, rebuild running. This time only the link step should run (objects are already cached). Waiting:
-
-Timed 120 seconds
-
-Error: Model produced invalid output.
-
-Waiting for the rebuild to complete (link-only pass after the kill).
-
-Build clean. Now run the 25s smoke to check for active draws:
-
-Ran command: `powershell -NoProfile -ExecutionPolicy Bypass -File tools\native_validate.ps1 -Step smoke -SmokeSecs 25 2>&1`
-
-Wrong step name. Let me check the valid steps:
-
-Ran command: `Select-String -Path "tools\native_validate.ps1" -Pattern "ValidateSet|Step.*capture|smoke|game" | Select-Object -First 10`
-
-The `capture` step runs the game and collects logs. Let me look at how the capture step works to know what log file to check:
-
-Viewed native_validate.ps1:100-220
-Viewed native_validate.ps1:220-272
-
-The `capture` step is for the CAPTURE build. For the RENDERER build the right thing to do is run the game via `bench.ps1` and then read `logs/game.log`. Let me check how `bench.ps1` works:
-
-Viewed bench.ps1:1-186
-
-The bench requires a full gameplay session (HUD detection etc.) — too heavy just to check draw counts. Instead, let me directly launch the game briefly and grep `game.log` for the key signals (`TryRegisterInline`, draw stats):
-
-Ran command: `
-$exe = "port\out\build\win-amd64-release\superman_returns.exe"
-$log = "logs\game.log"
-if (Test-Path $log) { Clear-Content $log }
-$proc = Start-Process -FilePath $exe -ArgumentList @(
-  "--game_data_root=`"$PWD\game`"",
-  "--log_file=`"$PWD\$log`"",
-  "--sr_renderer=native",
-  "--sr_skip_intro=true"
-) -WorkingDirectory (Split-Path (Resolve-Path $exe)) -PassThru
-Write-Host "Started pid $($proc.Id)"
-Start-Sleep 30
-Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-Write-Host "Stopped"
-`
-Timed 40 seconds
-
-30-second smoke run launched. Waiting for it to finish before reading the log.
-
-Smoke done. Read the key lines from `game.log`:
-
-Ran command: `Select-String -Path "logs\game.log" -Pattern "TryRegisterInline|skip_shader|p0:|draw stats|native stats" | Select-Object -First 40 | ForEach-Object { $_.Line }`
-
-`TryRegisterInline` is firing for many shaders. Now check the actual draw stats — whether draws are executing vs being skipped:
-
-Ran command: `Select-String -Path "logs\game.log" -Pattern "p\d+:\d+/\d+|skip_shader|NativeStats|frame stats" | Select-Object -Last 30 | ForEach-Object { $_.Line }`
-
-Still `p0:0/Nshader`. The `TryRegisterInline` calls are registering shaders, but the hashes aren't matching the catalog — the lookup succeeds but the subsequent draw still skips. Let me look at what happens after `LookupGuestShader` succeeds — specifically the shader lookup by hash in the DXIL pak:
-
-Ran command: `
-# Check if any TryRegisterInline hashes match the catalog
-$catalog = Get-Content "artifacts\shaders\catalog.json" | ConvertFrom-Json
-$catalogHashes = $catalog.shaders | ForEach-Object { $_.container_hash }
-
-# Get hashes from the log
-$logHashes = Select-String -Path "logs\game.log" -Pattern "hash=([0-9A-F]{16})" |
-  ForEach-Object { $_.Matches[0].Groups[1].Value } | Sort-Object -Unique
-
-Write-Host "Shaders registered at draw time: $($logHashes.Count)"
-Write-Host "Catalog size: $($catalogHashes.Count)"
-$matches = $logHashes | Where-Object { $catalogHashes -contains $_ }
-Write-Host "Matching catalog: $($matches.Count)"
-$logHashes | Select-Object -First 5 | ForEach-Object { Write-Host "  log: $_" }
-$catalogHashes | Select-Object -First 5 | ForEach-Object { Write-Host "  cat: $_" }
-`
-
-**Zero matches** — 120 hashes registered at draw time, 167 in the catalog, but none overlap. This is a hash mismatch: the inline containers are being hashed differently from how the catalog was built. The most likely cause is **byte-order**: the catalog was built from raw dumped `.bin` files (big-endian as-is from Xbox memory), but `TryHashContainer` hashes `base + container` which is the guest memory mapped at a host virtual address — and the `XXH3_64bits` call hashes the bytes as they sit in memory.
-
-Let me check how the catalog was built and what the dump files look like vs the inline container bytes:
-
-Ran command: `
-# Compare: dump a known container from the DIAG DRAW log
-# vs_obj=4001EA00, container at +40 = 4001EA28 (hex)
-# The TryRegisterInline log showed obj=4001EA00 container=4001EA28 hash=EC41779F9CFA6456
-
-# Check if any catalog .bin file starts with the same first 4 bytes
-# Inline first dword at 4001EA28 should be 0x102A1100 big-endian (as seen in DIAG DRAW)
-# Let's look at catalog bins that start with those bytes
-Get-ChildItem "artifacts\shaders\dxil" -ErrorAction SilentlyContinue | Select-Object -First 3
-Get-ChildItem "logs\native_shaders" -Filter "*.bin" -ErrorAction SilentlyContinue | Select-Object -First 5
-`
-Ran command: `
-# Check how the catalog was built - look at the build_corpus script to understand hash computation
-Select-String -Path "tools\shaders\build_corpus.ps1" -Pattern "hash|xxh|container" -CaseSensitive:$false | Select-Object -First 20 | ForEach-Object { $_.Line.Trim() }
-`
-Ran command: `
-# Find where catalog.json is written and how container_hash is computed
-Select-String -Path "tools\shaders\*.py" -Pattern "container_hash|xxh3|xxhash|hash" -CaseSensitive:$false | Select-Object -First 30 | ForEach-Object { "$($_.Filename):$($_.LineNumber): $($_.Line.Trim())" }
-`
-Ran command: `Select-String -Path "tools\shaders\extract_shaders.py" -Pattern "xxh|hash|container_hash" | Select-Object -First 20 | ForEach-Object { "$($_.LineNumber): $($_.Line.Trim())" }`
-
-Found it. Line 88: `"container_hash": h64(blob)` where `blob` is read from disk and `h64 = xxhash.xxh3_64_intdigest`. The catalog was built from **CAPTURE-mode dumped `.bin` files** extracted from the game's compressed data — those bytes were extracted from the game's filesystem, **not** from live Xbox 360 guest memory.
-
-The key question: are the bytes identical? The guest memory uses big-endian Xbox 360 byte order, and the `.bin` files from `extract_shaders.py` come from reading the raw game data files. Let me check what `extract_shaders.py` actually reads from:
-
-Viewed extract_shaders.py:50-110
-
-The Python extractor uses `struct.Struct(">6I")` — big-endian, same as guest memory. And `blob = data[off:off + size]` is the raw container bytes, hashed directly. So both sides use XXH3_64 over the raw big-endian container bytes.
-
-The problem must be in what the `--dump-dir` CAPTURE build wrote vs what the inline memory has now. Let me check if there are any `.bin` files in `logs/native_shaders` from the CAPTURE build and compare their hashes to what the inline path produces now:
-
-Ran command: `
-# Check what bins exist from the CAPTURE dump, and compare first few bytes vs inline
-$bins = Get-ChildItem "logs\native_shaders" -Filter "*.bin" -ErrorAction SilentlyContinue | Select-Object -First 5
-$bins | ForEach-Object { 
-    $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
-    $hex = ($bytes[0..15] | ForEach-Object { $_.ToString("X2") }) -join " "
-    Write-Host "$($_.Name): size=$($bytes.Length) first16=[$hex]"
-}
-Write-Host "---"
-Write-Host "Total bins: $($(Get-ChildItem 'logs\native_shaders' -Filter '*.bin' -ErrorAction SilentlyContinue).Count)"
-`
-
-No CAPTURE-dumped bins. The catalog was built from `extract_shaders.py` which reads the **game data files directly** (not runtime dumps). Let me now enable the dump in the RENDERER build by running with `sr_native_dump_shader_dir` to capture what the inline containers look like on disk and cross-check their hashes against the catalog:
-
-Ran command: `
-$exe = "port\out\build\win-amd64-release\superman_returns.exe"
-$log = "logs\game_inline_dump.log"
-$dumpDir = "$PWD\logs\inline_shaders"
-New-Item -ItemType Directory -Force $dumpDir | Out-Null
-if (Test-Path $log) { Clear-Content $log }
-$proc = Start-Process -FilePath $exe -ArgumentList @(
-  "--game_data_root=`"$PWD\game`"",
-  "--log_file=`"$PWD\$log`"",
-  "--sr_renderer=native",
-  "--sr_skip_intro=true",
-  "--sr_native_dump_shader_dir=`"$dumpDir`""
-) -WorkingDirectory (Split-Path (Resolve-Path $exe)) -PassThru
-Write-Host "Started pid $($proc.Id)"
-Start-Sleep 15
-Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-Write-Host "Stopped"
-$bins = Get-ChildItem $dumpDir -Filter "*.bin" -ErrorAction SilentlyContinue
-Write-Host "Dumped $($bins.Count) bins"
-$bins | Select-Object -First 3 | ForEach-Object {
-    $b = [System.IO.File]::ReadAllBytes($_.FullName)
-    $hex = ($b[0..11] | ForEach-Object { $_.ToString("X2") }) -join " "
-    Write-Host "  $($_.Name): size=$($b.Length) hdr=[$hex]"
-}
-`
-Timed 30 seconds
-
-Error: Model produced invalid output.
-
-Waiting for the 15s inline shader dump run to finish.
-
-Zero bins dumped — `DumpContainer` isn't being reached (likely the static cvar init fires before the arg is processed). Let me instead write a quick Python script to hash the first inline dump bin directly from guest memory byte-ranges and compare with catalog:
-
-Viewed extract_shaders.py:110-175
-
-The extractor scans raw game files (`path.read_bytes()`), not a decoded XEX image. So the catalog bytes come directly from the on-disk `.stx`/`.fxc` game data files. The XDK loader reads those same files and loads them into guest memory — but it may **modify** the container in place (e.g., patching the constant table, resolving pointer fixups) before the first draw.
-
-Let me check the shader container header format more carefully — specifically what fields exist in the virtual section that could be patched at load time:
-
-Viewed shader_container.h:1-53
-
-Crucial finding at **line 6**:
-```
-+0 flags  0x102A1100 = pixel shader, 0x102A1101 = vertex shader
-```
-
-And `h.is_vertex = (h.flags & 1) != 0` — so `0x102A1101` (bit0=1) = VS, `0x102A1100` (bit0=0) = PS. That's consistent with the header comment.
-
-But from the DIAG DRAW log: `vs_obj` (loaded from `dev+0x3080`, i.e., `SetVertexShader` stores to `dev+0x3080`) has inline container at `+40` with flags `0x102A1100` = **PS flag**! And the TryRegisterInline log confirms: `obj=4001EA00 container=4001EA28 hash=... PS`.
-
-This is **backwards**: the object stored at `dev+kDevShaderA` (the slot `SetVertexShader` writes to) has a PS-flagged container, and vice versa. Either:
-1. `kDevShaderA`/`kDevShaderB` are swapped (A=PS slot, B=VS slot), or
-2. The inline container offsets are swapped (+40 = PS container inside VS object, +872 = VS container inside PS object)
-
-Let me verify which device slot holds which shader type by checking the disassembly again:
-
-Ran command: `Select-String -Path "port\logs\default_full.dis" -Pattern "820f4e88:|820f5218:|12416\(r|12420\(r|12416|12420" | Select-Object -First 20 | ForEach-Object { $_.Line }`
-
-This confirms:
-- `820f4e88` = `SetVertexShader`: stores r29 (the VS object) to **offset 12416 = 0x3080** (`dev+0x3080` = `kDevShaderA`)
-- `820f5218` = `SetPixelShader`: stores r29 (the PS object) to **offset 12420 = 0x3084** (`dev+0x3084` = `kDevShaderB`)
-
-So `kDevShaderA=0x3080` = VS slot, `kDevShaderB=0x3084` = PS slot. That's correct.
-
-But the VS object at `dev+0x3080` has inline container at `+40` with flags `0x102A1100` (PS flag). This means the **container type flag interpretation is wrong** — OR the container at `vs_obj+40` is not the VS container but a different embedded struct, and the actual VS container is at a different offset.
-
-Let me look at both `addi r11,r29,40` and `addic. r11,r29,872` in context to understand what they're accessing:
-
-Ran command: `
-# Get the lines around 820f4e88 (SetVertexShader) that reference addi r11,r29,40
-$lines = Get-Content "port\logs\default_full.dis"
-$start = ($lines | Select-String "^    820f4e88:").LineNumber - 1
-$end = [Math]::Min($start + 200, $lines.Count - 1)
-$lines[$start..$end] | Select-String "r29|r11|3080|3084|40\b|8b8\b|12416|12420" | Select-Object -First 20 | ForEach-Object { $_.Line }
-`
-
-While that runs, let me do a faster diagnosis — write a Python script that reads the catalog and compares first-dword bytes with what the inline containers show:
-
-Ran command: `
-python -c "
-import json, struct, xxhash, pathlib, sys
-
-catalog = json.loads(pathlib.Path('artifacts/shaders/catalog.json').read_bytes())
-raw_dir = pathlib.Path('artifacts/shaders/raw')
-
-# Check first few catalog entries - what are their first 12 bytes?
-for sh in catalog['shaders'][:5]:
-    h = sh['container_hash']
-    tp = sh['type']
-    sz = sh['size']
-    f = raw_dir / f'{h}.{tp}.bin'
-    if f.exists():
-        b = f.read_bytes()
-        flags, vs, ps = struct.unpack_from('>3I', b)
-        print(f'{h} {tp} size={sz} flags=0x{flags:08X} vs={vs:#x} ps={ps:#x}')
-        # Recompute hash to verify
-        chk = xxhash.xxh3_64_intdigest(b)
-        print(f'  recomputed={chk:016X} match={format(chk,\"016X\")==h}')
-"
-`
-Created check_catalog.py
-Ran command: `python "C:\Users\Gusta\.gemini\antigravity\brain\83caafd3-7cbc-4fb4-a771-1e7d11452e23\scratch\check_catalog.py"`
-Checked task SetVertexShader disassembly context
-
-The key facts from the catalog check:
-- **All catalog bins hash correctly** (match=True) — the catalog is valid.
-- **Catalog PS shaders all have `flags=0x102A1100`** — this IS the PS flag. The field naming in the Python script (column called `vs=` and `ps=`) refers to `virtual_size` and `physical_size`, not shader type.
-- **Zero inline hashes match catalog** — the XDK is modifying the container after loading it from disk.
-
-The root cause: the XDK shader loader **patches the container in guest memory** (resolves constant table pointers, etc.) after reading it from disk, making the in-memory bytes different from the on-disk bytes. We need to hash the container **before** the XDK modifies it, not at draw time.
-
-The correct approach: **dump the raw `.bin` bytes from disk at the same time `extract_shaders.py` runs** — OR — **re-run the CAPTURE build to get `OnCreateShader` working at the right time**.
-
-Actually, the simpler fix: look at `native_bridge.cpp` — the CAPTURE build runs `OnCreateShader` and those containers DID get written before. Let me look at when `sub_820F99C8` (the outer assembler) is called — if we hook that as an exit hook, the container will be complete. Let me find and check the right hook point:
-
-Ran command: `
-# Check what game_profile.h says about CREATE_SHADER hooks
-Select-String -Path "port\src\native_renderer\game_profile.h" -Pattern "CREATE_SHADER|820F9|820F99|820F9C" | ForEach-Object { "$($_.LineNumber): $($_.Line.Trim())" }
-`
-
-So `CREATE_SHADER_A=0x820F5840` = `CreateVertexShader`, `CREATE_SHADER_B=0x820F6690` = `CreatePixelShader`. These are called from **inside** `sub_820F9C78` which finalizes the container header AFTER they return. 
-
-The real fix is to **re-hash the container at draw time from the game data files**, not from guest memory. The cleanest solution: run `extract_shaders.py` again but this time also use the `--dump-dir` from a working CAPTURE dump to get the right hashes. 
-
-But actually there's an even simpler path — the inline containers in guest memory ARE valid (ParseShaderContainerHeader succeeds), they're just modified post-load. We need to hash the **pre-modification** version. The best approach is to hook **`sub_820F9C78`** (the outer function that finalizes the container) as an exit hook — at that point `r3` returns the shader object pointer and the container embedded inside it is freshly written but not yet modified by `SetVertexShader`/`SetPixelShader` bind-time patching.
-
-Let me check what `sub_820F9C78` looks like and what it receives in/returns:
-
-Ran command: `
-# Check the recompiled file for sub_820F9C78 - which generated cpp contains it
-Select-String -Path "port\generated\default\superman_returns_recomp.*.cpp" -Pattern "820F9C78|sub_820F9C78" | Select-Object -First 5 | ForEach-Object { $_.Filename + ":" + $_.LineNumber + ": " + $_.Line.Trim() }
-`
-Ran command: `
-# Check what file defines sub_820F9C78
-Select-String -Path "port\generated\default\superman_returns_recomp.*.cpp" -Pattern "DEFINE_REX_FUNC.*820F9C78" | Select-Object -First 3 | ForEach-Object { $_.Filename + ":" + $_.LineNumber + ": " + $_.Line.Trim() }
-`
-Viewed superman_returns_recomp.96.cpp:40-130
-Viewed superman_returns_recomp.96.cpp:130-280
-Viewed superman_returns_recomp.96.cpp:280-360
-
-Now I understand the full picture of `sub_820F9C78`:
-
-- Line 58-61: **r29 = r3** (device/effect object), **r26 = r4** (MemStream descriptor)
-- Line 89: **r31 = r26 + 20** (= `stream1` address; this is the MemStream containing the container)
-- Line 117-120: `r3 = r31`, `r25 = Load32(r31+4)` — reads stream1's size field
-- Line 209-211: calls `sub_820F5840` (CreateVertexShader) with `r3=r28`, `r4=r26`
-- Line 239-241: calls `sub_820F6690` (CreatePixelShader) with `r3=r28-288`, `r4=r26`  
-- Line 269: **`stw r25, 4(r31)`** — writes `r25` (the size field) back to `stream1+4` AFTER the CreateShader calls!
-
-**This is the smoking gun.** `r25` was loaded from `stream1+4` at line 120 (before the CreateShader calls). Then the CreateShader calls run (our hooks fire at this point). Then at line 269, `r25` is stored back to `stream1+4`. The size was zeroed out by the MemStream allocation logic during CreateShader, and restored after — but our hook at `sub_820F5840`/`sub_820F6690` fires while the size is zero.
-
-The in-memory container IS present in guest memory (at `vs_obj+40`), but the issue is that these inline bytes have been **modified by the XDK bind-time patching** that happens after the initial load.
-
-Let me look at this from a completely different angle. The catalog was built from game data files. What if we run `extract_shaders.py` with the `--dump-dir` option pointing to bins dumped from the CAPTURE build? Let me check the CAPTURE build logs to see if it ever successfully captured any shaders:
-
-Ran command: `
-# Check what the CAPTURE build logged for CreateShader - look for older game.log or native_capture logs
-Get-ChildItem "logs" | Sort-Object LastWriteTime -Descending | Select-Object -First 15 | ForEach-Object { "$($_.LastWriteTime) $($_.Name) $($_.Length)" }
-`
-
-The disasm search didn't find the right context (it searched the whole dis for matches and got garbage). 
-
-The key insight from reading `sub_820F9C78` is clear: **at line 269 `stw r25,4(r31)` restores the physical_size field**. This means our `OnCreateShader` hook fires while `stream1+4` (physical_size) is still 0, but after the function finishes the container at `stream1` IS complete. 
-
-The right fix path is to **hook `sub_820F9C78` itself as an exit hook** — after it returns, the container is complete AND it hasn't been modified by bind-time patching yet. Let me look at what `r3` holds on exit — from line 298-300:
-```
-lwz r3,19772(r29)   // returns error code
-```
-So r3 on exit is an error code, not the shader object. The shader object pointer is **`r28-288`** and **`r28`** where `r28 = r29+304` (line 193). And from line 259-270, `r31` (which is `stream1 = r26+20`) is the MemStream with the container. At exit, `r26` (= original r4) still holds the MemStream descriptor.
-
-**The plan:** Add a new hook on `sub_820F9C78` — on exit, read `r26` (saved as r26 throughout the function), and hash the container from `stream1 = r26+20` (now with valid sizes). Let me add this to `game_profile.h` and `shader_registry.cpp`:
-
-Viewed game_profile.h:105-130
-
-Now add the `CREATE_SHADER_OUTER` hook for `sub_820F9C78` to `game_profile.h`, and implement the exit-hook in `shader_registry.cpp`:
-
-Edited game_profile.h
-
-Now check what the `SR_ROLE` table looks like so I can add the outer hook to it:
-
-Viewed game_profile.h:1-185
-Edited game_profile.h
-Viewed game_profile.h:175-185
-Edited game_profile.h
-
-Now add the `OnCreateShaderOuter` hook implementation to `shader_registry.cpp`. This hook fires after `sub_820F9C78` completes — at that point `r4_in` (the MemStream descriptor) is still valid and `stream1 = Load32(r4+20)` now has complete header bytes. It also needs to map the resulting shader objects back: the VS object is at `r28` (which from the disasm = `r29+304` = `effect_obj+304`) and PS at `r28-288`:
-
-Actually, looking more carefully at the disasm:
-- Line 193: `r28 = r29 + 304`  
-- VS shader object = `r28` passed to `CreateVertexShader` at line 209
-- PS shader object = `r28 - 288` passed to `CreatePixelShader` at line 233
-
-But on exit, `r28` is no longer available from `ctx` since it was saved/restored. What IS available is the return value of the inner `sub_820F5840`/`sub_820F6690` (in `r3` on each return), but those aren't saved.
-
-The cleanest approach: after `sub_820F9C78` completes, we have `r4_in` (the MemStream descriptor). `stream1 = Load32(base, r4_in+20)` is the container start — it now has valid headers. We hash it once, and also look at `r3_out` to check success. But we don't know which shader objects were created.
-
-Actually the better approach: instead of mapping to shader objects here, we add the container hash to a **separate set** called `g_known_containers` — and then in `TryRegisterInlineShaders`, instead of comparing inline-hashed data against the corpus PAK, we check if the inline hash matches what was registered in `g_known_containers`. But that still doesn't fix the hash mismatch!
-
-Wait — let me step back. The real question is: **why do the inline container bytes differ from the on-disk bytes?** The extract_shaders.py scans game files and finds containers with magic `0x102A1100`. Those bytes land in guest memory when the XDK loader reads them. If the XDK doesn't modify them, the hashes should match.
-
-The XDK COULD modify the container in-place during `sub_820F9C78` — for example, patching a vtable or constant-table pointer in the virtual section. Let me verify this by checking if there's a bind-time write to the container bytes. But that would be in `sub_820F5840`/`sub_820F6690`.
-
-Actually the simplest test: **rebuild the corpus** from the inline-dumped bins (if we can get them). Let me fix the dump by using `sr_native_dump_shader_dir` before the static init fires. The issue was the `static const` in `DumpContainer`. Let me change it to a regular check:
-
-Viewed shader_registry.cpp:83-105
-
-The `static const std::string dir = REXCVAR_GET(...)` is the problem — the `static` makes it capture the value once at first call. But the cvar is available at startup so this should be fine... unless the cvar isn't being parsed from command-line args before the first call.
-
-Actually, the deeper issue: **we need to verify whether the XDK modifies the container in guest memory or not**. The fastest way is to dump the inline container bytes to disk directly from `TryRegisterInlineShaders` using `std::fwrite`, bypassing `DumpContainer`'s cvar dependency, and then compare with catalog bins.
-
-Let me add temporary raw-dump logging directly in `TryRegisterInlineShaders`:
-
-Edited shader_registry.cpp
-
-Now build and run a quick 15s session to collect inline bins, then compare against catalog:
-
-Ran command: `Stop-Process -Name "superman_returns" -Force -ErrorAction SilentlyContinue; powershell -NoProfile -ExecutionPolicy Bypass -File tools\native_validate.ps1 -Step build -Native RENDERER 2>&1`
-Timed 120 seconds
-
-Build running. Summary of the diagnostic path:
-
-**Root cause confirmed:** The catalog was built from on-disk game files. The XDK loader places those bytes in guest memory — but somewhere between loading and first draw, the container bytes get **modified in place** (likely constant-table pointer patching in the virtual section), so the draw-time hash differs from the catalog hash. Zero matches out of 120 vs 167.
-
-**Fix strategy (parallel):**
-1. The inline raw dump (just added) will give us the actual in-memory container bytes → we can feed these to `extract_shaders.py --dump-dir` to rebuild the corpus with the correct hashes.
-2. Alternatively, hook `sub_820F9C78` as an exit hook — it fires when `stream1+4` (physical_size) is freshly restored, potentially before any bind-time patching.
-
-The raw dump approach is the fastest path. Once the build completes, run 15s, then `extract_shaders.py --dump-dir logs/` on the `inline_*.bin` files and rebuild the corpus.
-
-Build clean. Run 15s to collect the inline bins:
-
-Ran command: `
-$exe = "port\out\build\win-amd64-release\superman_returns.exe"
-$log = "logs\game_dump2.log"
-if (Test-Path $log) { Clear-Content $log }
-$proc = Start-Process -FilePath $exe -ArgumentList @(
-  "--game_data_root=`"$PWD\game`"",
-  "--log_file=`"$PWD\$log`"",
-  "--sr_renderer=native",
-  "--sr_skip_intro=true"
-) -WorkingDirectory (Split-Path (Resolve-Path $exe)) -PassThru
-Write-Host "Started pid $($proc.Id)"
-Start-Sleep 15
-Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-Write-Host "Stopped"
-$bins = Get-ChildItem "logs" -Filter "inline_*.bin" -ErrorAction SilentlyContinue
-Write-Host "Found $($bins.Count) inline bins"
-$bins | Select-Object -First 3 | ForEach-Object {
-    $b = [System.IO.File]::ReadAllBytes($_.FullName)
-    $hex = ($b[0..11] | ForEach-Object { $_.ToString("X2") }) -join " "
-    Write-Host "  $($_.Name): size=$($b.Length) hdr=[$hex]"
-}
-`
-Timed 25 seconds
-
-Error: API error (attempt 1): RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h35m19s. (Error ID: bd534ff9-7ace-4371-a475-afc055027715-1280)
-
-Error: API error (attempt 2): RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h35m13s. (Error ID: bd534ff9-7ace-4371-a475-afc055027715-1281)
-
-Error: API error (attempt 3): RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h35m4s. (Error ID: bd534ff9-7ace-4371-a475-afc055027715-1282)
-
-Error: API error (attempt 4): RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h34m52s. (Error ID: bd534ff9-7ace-4371-a475-afc055027715-1283)
-
-Error: API error (attempt 5): RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h34m30s. (Error ID: bd534ff9-7ace-4371-a475-afc055027715-1284)
-
-Error: API error (attempt 6): RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h33m29s. (Error ID: bd534ff9-7ace-4371-a475-afc055027715-1285)
-
-Error: API error (attempt 7): RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h31m38s. (Error ID: bd534ff9-7ace-4371-a475-afc055027715-1286)
-
-Error: API error (attempt 8): RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h28m46s. (Error ID: bd534ff9-7ace-4371-a475-afc055027715-1287)
-
-Error: Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h25m10s. (Error ID: bd534ff9-7ace-4371-a475-afc055027715-1288)
-
-Still 0 bins. The `fopen` is writing relative to the **exe's working directory** (`port\out\build\win-amd64-release\`), not the project root. Let me check what's there:
-
-Ran command: `Get-ChildItem "port\out\build\win-amd64-release" -Filter "inline_*.bin" | Select-Object -First 5; Get-ChildItem "port\out\build\win-amd64-release\logs" -Filter "inline_*.bin" -ErrorAction SilentlyContinue | Select-Object -First 5`
-
-Error: API error (attempt 1): RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h24m55s. (Error ID: bd534ff9-7ace-4371-a475-afc055027715-1292)
-
-Error: API error (attempt 2): RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h24m49s. (Error ID: bd534ff9-7ace-4371-a475-afc055027715-1293)
-
-Error: API error (attempt 3): RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h24m41s. (Error ID: bd534ff9-7ace-4371-a475-afc055027715-1294)
-
-Error: API error (attempt 4): RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h24m27s. (Error ID: bd534ff9-7ace-4371-a475-afc055027715-1295)
+# Diagnosticar cena preta no renderer
+
+> Preto com som: o jogo roda, mas nada chega à tela. Vou ver no log o caminho de apresentação (resolve, swap, present) e o que o renderer faz a cada frame.
+> Há um recurso de dump de frame. Vou usá-lo: dumpo todos os surfaces e a saída final aos 45 s para ver se o que chega à apresentação está preto ou é a apresentação que falha.
+> As superfícies do frame estão todas zeradas, com a única textura não-zero sendo uma constante `(0,0,30,1)` — nenhuma cena foi realmente composta. Vou ativar o log de draws/resolves por alguns frames para ver o que o jogo está tentando desenhar.
+> O frame mostra uma cena 3D completa, mas só \~5% dos draws são emitidos — o resto falha por shader fora da biblioteca ou `PSO creation failed`, explicando a tela preta. Vou investigar o erro de PSO verificando como os tipos da declaração estão sendo mapeados.
+> Encontrei o problema: o tipo de elemento `0x2A2187` (2_10_10_10 empacotado) não está mapeado e acaba descartado, deixando o VS sem NORMAL/TANGENT e quebrando o PSO. Vou verificar como o HLSL gerado declara essas entradas antes de ajustar o mapeamento.
+> O HLSL já espera exatamente isso: "DEC3N … IA binds as R32_UINT". Adiciono o mapeamento.
+> PSOs com falha caíram de 35 para 2 e os draws emitidos de \~12 mil para \~657 mil (a \~28 FPS). Agora vejo se o que aparece na tela mudou com o frame dump.
+> As superfícies HDR continuam zeradas mesmo com \~657 mil draws emitidos, indicando que os draws não estão escrevendo (ou escrevem zero). Vou inspecionar no trace o estado de um draw da cena: constantes de VS, viewport e depth.
+> Status: comparando as constantes do espelho PM4 com o shadow do device (valida o layout) num draw da cena.
+> As constantes parecem corretas (c0 do espelho e do shadow coincidem no draw 160000, confirmando 0x700). Agora vou testar por bisseção com as opções de debug para identificar o que zera a cena: profundidade e winding.
+> Vou adicionar uma opção de debug que dumpa os surfaces antes do N-ésimo resolve do frame, para ver o conteúdo da cena (surface `f3`) antes de ser sobrescrito pelo pass seguinte.
+> Achei interessante: a cena fica uniforme `(0,0,30,1)` entre os draws 760 e 900, parecendo um fundo/céu em HDR que a geometria posterior não altera. Vou testar sem teste de profundidade para ver se essa geometria passa a aparecer.
+> Meu patch de texto cortou um trecho a mais. Restauro a parte perdida (comentário, `CreationRecord`, globais e o início de `RecordCreation`).
+> Cerca de 65% dos shaders chegam pela rota de cópia de objeto sem registro de criação, cujo hash é instável. Vou localizar a função do XDK que cria o objeto a partir do container pronto para capturá-lo pristino também nessa rota.
+> Encontrei `sub_820F5148`, que parece criar o objeto final a partir do container finalizado, copiando-o integralmente. Vou hookar a entrada dessa função para capturar o container pristino de todos os shaders e confirmar a hipótese.
+> `sub_820F5148` é o criador de **VS** (magic `102A1101`, container em `obj+872`). Falta o equivalente para PS (container em `obj+40`). Procuro a função irmã.
+> Vou corrigir os endereços do perfil para `820F5148` (VS) e `820F4D90` (PS), já que o checkpoint apontava incorretamente para o serializador interno (`820F5840/820F6690`), e simplificar o registro.
+> Agora o perfil: apontar os dois papéis para os criadores reais e atualizar os comentários, além de ajustar o cabeçalho do arquivo.
+> Build e testes ok. Capturando o corpus com a chave estável (containers pristinos na criação).
+> Run 2 não acrescentou nenhum hash novo (183 e 183): a chave agora é estável. Construindo o corpus a partir dela.
+> O catálogo novo tem 223 containers únicos e 221 compilam (os "failures" anteriores eram variantes patchadas instáveis). Testando no jogo.
+> Faltam só 3 shaders (antes eram 60), mas agora aparecem 245 falhas de PSO. Vejo o motivo.
+> Todos os layouts que falham têm `BINORMAL0`, que o VS não declara. Vou filtrar o input layout pela assinatura de entrada do próprio DXIL (chunk `ISG1`).
+> Existe `--d3d12_debug` para trazer as mensagens da camada de debug do D3D12 para o log. Uso para ver o motivo exato do `E_INVALIDARG`.
+> Sem o pixel shader o PSO é criado: o DXIL do PS é rejeitado. Vou checar se os DXILs novos estão assinados (chunk `HASH` zerado faz o D3D12 recusar com `E_INVALIDARG`).
+> Encontrei a causa: o DXIL gera `double` a partir de ternários com literais no HLSL, e a GPU Intel integrada não suporta FP64, fazendo o D3D12 rejeitar o PSO. Vou localizar de onde isso vem no HLSL gerado.
+> Nenhum DXIL usa `double` agora (0 de 221). Testando no jogo.
+> Agora 98% dos draws são emitidos e a saída final tem 99% dos pixels não-zero. Vejo a imagem.
+> A tela de título do jogo renderiza nativamente: logo, "SUPERMAN RETURNS", "PRESS START". Agora limpo os diagnósticos temporários, e rebuildo e testo.
+
+<details><summary>11 previous messages</summary>
+
+> Vou conferir o estado do código e os diagnósticos temporários, preservar as correções de renderização e concluir a limpeza com build e testes.
+>
+> <details><summary>Ran 14 commands</summary>
+>
+> - Ran `git status --short`
+> - Ran `rg --files -g AGENTS.md -g '*CHECKPOINT*' -g '*checkpoint*' -g '*README*' -g CMakeLists.txt -g CMakePresets.json`
+> - Ran `git log -6 --oneline`
+> - Ran `Get-Content README.md -TotalCount 180`
+> - Ran `Get-Content CHECKPOINT_NATIVE_RENDERER.md -Tail 160`
+> - Ran `Get-ChildItem -Force | Select-Object Name,Mode`
+> - Ran `rg --files tests tools | rg 'native|shader|test_'`
+> - Ran `Get-Content build.cmd -TotalCount 160`
+> - Ran `Get-ChildItem logs -File | Sort-Object LastWriteTime -Descending | Select-Object -First 20 Name,LastWriteTime,Length`
+> - Ran `rg -n '2A2187|820F5148|820F4D90|ISG1|debug|dump_before|disable_depth|disable_cull' port/src/native_renderer tools/shaders/xenosrecomp`
+> - Ran `git show --stat HEAD`
+> - Ran `Get-ChildItem logs -Directory | Select-Object Name; Get-ChildItem build -Directory | Select-Object Name`
+> - Ran `Get-Content port/src/native_renderer/native_renderer.cpp -TotalCount 240`
+> - Ran `Get-Content logs/build_fix.log -Tail 30; Get-Content tests/native/CMakeLists.txt; Get-Content tools/native_validate.ps1 -TotalCount 110`
+>
+> </details>
+>
+> As correções de shaders e layout já estão no último commit. Porém, o log do build após a limpeza termina com três erros de compilação; vou verificar essas referências antes de validar o executável.
+>
+> <details><summary>Ran 4 commands</summary>
+>
+> - Ran `Get-Content tools/bench.ps1 -TotalCount 150`
+> - Ran `Get-Command cmake,python -ErrorAction SilentlyContinue | Select-Object Name,Source; Get-ChildItem build/tests-native -File | Select-Object Name`
+> - Ran `git show HEAD -- port/src/native_renderer/native_renderer.cpp`
+> - Ran `Select-String -Path logs/build_fix.log -Pattern 'error:' -Context 3,3`
+>
+> </details>
+>
+> A limpeza deixou declarações duplicadas no tratamento de falha de PSO e removeu o retorno de erro e o cálculo do tempo de criação. Vou restaurar esse fluxo e retirar o log detalhado de cada PSO criado.
+>
+> <details><summary>Edited a file, ran 9 commands</summary>
+>
+> - Wrote `./port/src/native_renderer/native_renderer.cpp` (+11 -10)
+> - Ran `.\build.cmd`
+> - Ran `python -m pytest tests/tools/test_game_profile.py tests/tools/test_shader_tools.py -q`
+> - Ran `cmake --build build/tests-native`
+> - Ran `rg -n 'bench.*(duration|seconds|quit)|exit_after|shutdown_after' port/src .tools/rexglue-sdk-source/src -g '*.cpp' -g '*.h'`
+> - Ran `Get-ChildItem logs/var_n1,logs/var_n2,logs/var_n3 -File | Select-Object DirectoryName,Name,Length; Get-Content logs/game_ok1.log -Tail 15`
+> - Ran `ctest --test-dir build/tests-native --output-on-failure`
+> - Ran `rg -n 'bench_exit_after_s|bench_screenshot|bench.*elapsed' port/src tools -g '*.cpp' -g '*.h' -g '*.ps1'`
+> - Ran `rg --files tools | rg 'dump|smoke'; Get-Process superman_returns -ErrorAction SilentlyContinue | Select-Object Id,Path; git diff --check`
+> - Ran `Get-Content port/src/native_renderer/sdk_compat.h -TotalCount 140; rg -n 'bench|elapsed|SR_LOG_FPS' port/src/superman_returns*`
+>
+> </details>
+>
+> O build passou, assim como os seis testes de ferramentas e a suíte nativa. Vou rodar o executável recompilado por cerca de um minuto e capturar a saída aos 45 segundos para conferir se a tela de título continua aparecendo.
+>
+> <details><summary>Ran 6 commands</summary>
+>
+> - Ran `$taskRoot = (Get-Location).Path
+> $taskExe = Join-Path $taskRoot 'port/out/build/win-amd64-release/superman_returns.exe'
+> $taskDump = Join-Path $taskRoot 'logs/cleanup_verify'
+> $taskLog = Join-Path $taskDump 'game.log'
+> New-Item -ItemType Directory -Force -Path $taskDump | Out-Null
+> $taskArgs = @('--game_data_root="' + (Join-Path $taskRoot 'game') + '"', '--log_file="' + $taskLog + '"', '--sr_renderer=native', '--sr_skip_intro=true', '--sr_native_dump_frame_at_s=45', '--sr_native_dump_dir="' + $taskDump + '"')
+> $taskProc = Start-Process -FilePath $taskExe -ArgumentList $taskArgs -WorkingDirectory (Split-Path $taskExe) -WindowStyle Hidden -PassThru
+> try {
+>   if (-not $taskProc.WaitForExit(60000)) {
+>     $taskProc.CloseMainWindow() | Out-Null
+>     if (-not $taskProc.WaitForExit(5000)) { Stop-Process -Id $taskProc.Id }
+>   }
+>   Write-Output "Verification process $($taskProc.Id) ended"
+> } finally {
+>   if (-not $taskProc.HasExited) { Stop-Process -Id $taskProc.Id }
+> }`
+> - Ran `git diff --stat; git diff -- port/superman_returns_manifest.toml; Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 5140 -First 42`
+> - Ran `Get-Content logs/cleanup_verify/game.log -Tail 10; Get-Content logs/cleanup_verify/game.log -TotalCount 20`
+> - Ran `python -c "import numpy; import PIL; print('Frame analysis dependencies available')"`
+> - Ran `git diff -- port/src/native_renderer/native_renderer.cpp; Select-String -Path logs/cleanup_verify/game.log -Pattern 'PSO creation failed|unsupported.*shader|dumped' | Select-Object -Last 8`
+> - Ran `Get-ChildItem logs/cleanup_verify -Filter '*output*' | Select-Object Name,Length; Get-Content logs/cleanup_verify/game.log -Tail 12`
+>
+> </details>
+>
+> A execução está usando o renderer nativo, com cerca de 98% dos draws emitidos. Ainda há falhas pontuais de PSO no log; vou conferir o dump final para validar o resultado visual após a limpeza.
+>
+> <details><summary>Ran 4 commands</summary>
+>
+> - Ran `Get-ChildItem logs/cleanup_verify -Filter '*output*' | Select-Object Name,Length; Select-String -Path logs/cleanup_verify/game.log -Pattern 'dumped|frame 1200|missing from the pre-shader' | Select-Object -Last 6`
+> - Ran `python -c "from pathlib import Path; import struct; import numpy as np; from PIL import Image; p=Path('logs/cleanup_verify/output_1280x720.raw'); b=p.read_bytes(); w,h,f,pitch=struct.unpack('<4I',b[:16]); print('frame header:',w,h,f,pitch); a=np.frombuffer(b, dtype=np.uint8, offset=16).reshape(h,pitch)[:,:w*4].reshape(h,w,4).copy(); print('nonzero RGB pixels:', round(100*np.any(a[:,:,:3],axis=2).mean(),2)); a=a[:,:,[2,1,0,3]] if f in (87,91) else a; Image.fromarray(a).save(p.with_suffix('.png')); print(p.with_suffix('.png').resolve())"`
+> - Ran `git diff --check; git status --short`
+> - Ran `python -c "from pathlib import Path; import struct; import numpy as np; from PIL import Image; p=Path('logs/cleanup_verify/output_1280x720.raw'); b=p.read_bytes(); w,h,f,pitch=struct.unpack('<4I',b[:16]); assert f==24; rows=np.frombuffer(b,dtype=np.uint8,offset=16).reshape(h,pitch); v=rows[:,:w*4].copy().view('<u4').reshape(h,w); a=np.stack([((v >> s) & 1023) for s in (0,10,20)],axis=-1); print('nonzero RGB pixels:',round(100*np.any(a,axis=2).mean(),2)); Image.fromarray((a.astype(np.float32)*255/1023).round().astype(np.uint8)).save(p.with_suffix('.png'))"`
+>
+> </details>
+>
+> Viewed an image
+</details>
+
+Corrigi o trecho quebrado na limpeza dos logs de PSO. Build concluído, seis testes de ferramentas e suíte nativa passando.
+
+O dump aos 45 s confirma a tela de título no renderer nativo, com 99,03% dos pixels não-zero. Ainda há falhas pontuais de PSO; gameplay não foi validado.
+
+![Tela de título renderizada](./logs/cleanup_verify/output_1280x720.png)
+
+> Agora é a gameplay
+
+<details><summary>30 previous messages</summary>
+
+> Vou avançar da tela de título até o jogo e capturar a gameplay com o renderer nativo, conferindo a imagem e as falhas no log.
+>
+> <details><summary>Ran 7 commands</summary>
+>
+> - Ran `Get-Content tools/bench.ps1 | Select-Object -Skip 140 -First 150`
+> - Ran `Get-Process superman_returns -ErrorAction SilentlyContinue | Select-Object Id,Path; rg -n 'screenshot|dump_swap|ab_swaps|sr_skip_intro' tools/native_validate.ps1 port/src/superman_returns_app.cpp port/src/superman_returns_app.h`
+> - Ran `powershell -NoProfile -ExecutionPolicy Bypass -File tools/bench.ps1 -Name native_gameplay_verify -ExtraArgs '--sr_renderer=native' -TitleTimeout 60 -Settle 25 -Window 12 -WorldTimeout 120`
+> - Ran `Get-Content port/src/native_renderer/shader_registry.cpp -TotalCount 200; Get-Content tools/shaders/build_corpus.ps1 -TotalCount 130`
+> - Ran `Get-Content logs/bench_progress.txt -Tail 8; Get-Content logs/game.log -Tail 8`
+> - Ran `Get-Content logs/bench_progress.txt -Tail 4; Get-Content logs/game.log -Tail 5`
+> - Ran `Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+> $taskBounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+> $taskImage = New-Object System.Drawing.Bitmap $taskBounds.Width,$taskBounds.Height
+> $taskGraphics = [System.Drawing.Graphics]::FromImage($taskImage)
+> try { $taskGraphics.CopyFromScreen($taskBounds.Location,[System.Drawing.Point]::Empty,$taskBounds.Size); $taskImage.Save((Join-Path (Get-Location) 'logs/gameplay_progress.png')) } finally { $taskGraphics.Dispose(); $taskImage.Dispose() }`
+>
+> </details>
+>
+> Viewed an image
+>
+> O jogo já chegou ao HUD da gameplay, mas a cena está azul e não há geometria visível. Vou capturar os shaders e as superfícies dessa etapa para descobrir onde a composição do mundo está falhando.
+>
+> <details><summary>Ran 4 commands</summary>
+>
+> - Ran `Get-Content logs/game.log -Tail 18; Get-Content logs/bench_progress.txt -Tail 6; rg -n 'PSO creation failed|unsupported shader|watchdog|fatal' logs/game.log | Select-Object -Last 15`
+> - Ran `rg -n 'dump|trace' port/src/native_renderer/native_renderer.cpp | Select-Object -First 65; rg -n 'd3d12_debug' .tools/rexglue-sdk-source/src/graphics/d3d12 -g '*.cpp'`
+> - Ran `$taskProc = Get-Process -Id 29856 -ErrorAction SilentlyContinue
+> if ($taskProc) { $taskProc.CloseMainWindow() | Out-Null; if (-not $taskProc.WaitForExit(5000)) { Stop-Process -Id $taskProc.Id } }`
+> - Ran `powershell -NoProfile -ExecutionPolicy Bypass -File tools/bench.ps1 -Name native_gameplay_diag -ExtraArgs '--sr_renderer=native --d3d12_debug=true --sr_native_dump_shader_dir=logs/gameplay_shaders --sr_native_dump_frame_at_s=60 --sr_native_trace_frame_at_s=60 --sr_native_dump_dir=logs/gameplay_dump' -TitleTimeout 60 -Settle 10 -Window 8 -WorldTimeout 75`
+>
+> </details>
+>
+> Viewed an image
+>
+> <details><summary>Ran 6 commands</summary>
+>
+> - Ran `Get-Content logs/bench_progress.txt -Tail 8; Select-String logs/game.log -Pattern 'D3D12.*(error|ERROR)|D3D12 debug|PSO creation failed' | Select-Object -Last 10`
+> - Ran `Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 2180 -First 68; Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 3320 -First 100`
+> - Ran `Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 690 -First 74; Get-Content port/src/native_renderer/native_graphics_system.cpp -TotalCount 165`
+> - Ran `Get-ChildItem logs/gameplay_shaders -File -ErrorAction SilentlyContinue | Measure-Object; Get-Content logs/bench_progress.txt -Tail 3; rg -n 'trace|D3D12' logs/game.log | Select-Object -Last 8`
+> - Ran `Get-ChildItem port/out/build/win-amd64-release/logs -Directory -ErrorAction SilentlyContinue | Select-Object Name; Get-Content logs/bench_progress.txt -Tail 4; Get-Content logs/game.log -Tail 4; Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 3040 -First 105`
+> - Ran `Get-ChildItem port/out/build/win-amd64-release/logs/gameplay_shaders -File | Measure-Object; Get-ChildItem port/out/build/win-amd64-release/logs/gameplay_dump -File -ErrorAction SilentlyContinue | Select-Object -First 4 Name; Get-Content logs/bench_progress.txt -Tail 5`
+>
+> </details>
+>
+> Viewed an image
+>
+> <details><summary>Ran a command</summary>
+>
+> - Ran `rg -n 'vs c160|float4 main|g_ScreenXform|SV_Position' artifacts/shaders/hlsl -g '*.hlsl' | Select-Object -First 8; Get-ChildItem artifacts/shaders -Directory | Select-Object Name`
+>
+> </details>
+>
+> O HUD e o texto do tutorial aparecem, mas o mundo continua oculto pelo azul. Os draws estão sendo emitidos; vou testar a profundidade e inspecionar um frame completo para separar uma falha de geometria de uma falha na composição final.
+>
+> <details><summary>Ran 9 commands</summary>
+>
+> - Ran `powershell -NoProfile -ExecutionPolicy Bypass -File tools/bench.ps1 -Name native_gameplay_noz -ExtraArgs '--sr_renderer=native --sr_native_debug_no_ztest=true --sr_native_dump_frame_at_s=40 --sr_native_trace_frame_at_s=40 --sr_native_dump_dir=logs/gameplay_noz_dump' -Settle 10 -Window 12 -WorldTimeout 75`
+> - Ran `Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 3240 -First 90; rg -n 'proj|projection|Conan|reversed' port/src/native_renderer/game_profile.h tools/shaders/xenosrecomp/corpus_main.cpp`
+> - Ran `Get-Content tools/shaders/gen_projection_regs.py -TotalCount 170; Get-Content tools/shaders/xenosrecomp/patches/0002-superman-returns.patch -TotalCount 100`
+> - Ran `Get-Content artifacts/shaders/hlsl/C63F6F22679609F0.vs.hlsl | Select-Object -Last 65; Get-Content port/src/native_renderer/pm4_mirror.cpp -TotalCount 230`
+> - Ran `Get-Content port/src/native_renderer/game_profile.h | Select-Object -Skip 190 -First 54; Get-Content logs/bench_progress.txt -Tail 3`
+> - Ran `rg -n 'LoadReg\(|ExecDraw|ScanRing|ring_last_|follow_indirect' port/src/native_renderer/native_renderer.cpp | Select-Object -First 70; Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 3500 -First 130; Get-Content artifacts/shaders/hlsl/C63F6F22679609F0.vs.hlsl | Select-Object -Skip 435 -First 85`
+> - Ran `Get-Content logs/bench_progress.txt -Tail 4; Get-ChildItem port/out/build/win-amd64-release/logs/gameplay_noz_dump -File -ErrorAction SilentlyContinue | Select-Object -First 3 Name; Get-Content logs/game.log -Tail 5; Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 310 -First 35`
+> - Ran `Get-ChildItem logs/gameplay_noz_dump -File -ErrorAction SilentlyContinue | Select-Object -First 5 Name; Get-Content logs/game.log -Tail 6; Get-Content logs/bench_progress.txt -Tail 4; Get-ChildItem port/out/build/win-amd64-release/logs/gameplay_noz_dump -File -ErrorAction SilentlyContinue | Select-Object -First 5 Name`
+> - Ran `Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 4920 -First 65; Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 5060 -First 42; rg -n 'trace.*(frame|dump)|dumped|unknown.*sr_native|Unable.*dir' logs/game.log | Select-Object -Last 12`
+>
+> </details>
+>
+> Viewed an image
+>
+> <details><summary>Ran a command</summary>
+>
+> - Ran `rg 'trace draw' logs/game.log | Select-Object -First 8; rg 'trace.*vp' logs/game.log | Select-Object -First 5; rg 'trace p0.*bind RT|trace.*resolve' logs/game.log | Select-Object -Last 25`
+>
+> </details>
+>
+> Sem o teste de profundidade, Superman e parte da cidade aparecem. O trace mostra um problema concreto: o viewport chega ao D3D12 com profundidade `0..0`, comprimindo todos os draws no mesmo valor. Vou conferir o layout do viewport no XDK e corrigir essa leitura.
+>
+> <details><summary>Ran 10 commands</summary>
+>
+> - Ran `rg -n 'PPC_FUNC_IMPL\(__imp__sub_82100310\)|PPC_FUNC_IMPL\(__imp__sub_82102608\)|PPC_FUNC_IMPL\(__imp__sub_820F.*' port/generated/default -g '*.cpp' | Select-Object -First 3; rg -n 'sub_82100310|sub_82102608|sub_82112050' port/generated/default -g '*.cpp' | Select-Object -First 12; rg -n 'viewport|SetViewport' port/src/render_scale.cpp port/src/native_renderer/game_profile.h`
+> - Ran `rg -n 'DEFINE_REX_FUNC\(sub_82100310\)|DEFINE_REX_FUNC\(sub_82102608\)' port/generated/default -g '*.cpp'; Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 3393 -First 85`
+> - Ran `Get-Content port/generated/default/superman_returns_recomp.40.cpp | Select-Object -Skip 110 -First 270; Get-Content port/generated/default/superman_returns_recomp.67.cpp | Select-Object -Skip 130 -First 150`
+> - Ran `rg -n '12432|12436|12384|12388|12392|12396|12400|12404|12408|12412|12416|12420|12424|12428' port/generated/default -g '*.cpp' | Select-Object -First 65`
+> - Ran `rg -n 'viewport|Viewport|12432' docs tools tests -g '*.md' -g '*.py' -g '*.cpp' | Select-Object -First 20`
+> - Ran `Get-Content port/generated/default/superman_returns_recomp.126.cpp | Select-Object -Skip 300 -First 120; Get-Content port/generated/default/superman_returns_recomp.116.cpp | Select-Object -Skip 270 -First 104; Get-Content port/generated/default/superman_returns_recomp.105.cpp | Select-Object -Skip 23820 -First 55; rg -n '(addi r[0-9]+,r[0-9]+,12[34][0-9]{2}|stfs f[0-9]+,12[34][0-9]{2})' port/generated/default -g '*.cpp' | Select-Object -First 65`
+> - Ran `Get-Content port/generated/default/superman_returns_recomp.27.cpp | Select-Object -Skip 108 -First 210; Get-Content port/generated/default/superman_returns_recomp.2.cpp -TotalCount 100; Get-Content tests/native/test_game_profile.cpp | Select-Object -Skip 42 -First 50`
+> - Ran `rg -n '12376|12380|12384|12388|12392|12396' port/generated/default/superman_returns_recomp.*.cpp | Select-Object -First 65; Get-Content port/generated/default/superman_returns_recomp.133.cpp | Select-Object -Skip 8595 -First 70; rg -n 'DEFINE_REX_FUNC\(sub_820F2' port/generated/default/superman_returns_recomp.2.cpp`
+> - Ran `rg -n '12376|12380|12384|12388|12392|12396' port/generated/default -g 'superman_returns_recomp.*.cpp' | Select-Object -First 55; rg -n 'DEFINE_REX_FUNC\(sub_820F2CA0\)|DEFINE_REX_FUNC\(sub_820F2810\)' port/generated/default -g '*.cpp'`
+> - Ran `Get-Content port/generated/default/superman_returns_recomp.118.cpp -TotalCount 280; Get-Content port/generated/default/superman_returns_recomp.135.cpp -TotalCount 155; Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 5190 -First 140`
+>
+> </details>
+>
+> Confirmei no código recompilado: o viewport fica em `device+0x3058`, com X, Y, largura e altura como inteiros e MinZ/MaxZ como floats. O renderer lia `0x3090` e tratava tudo como float. Vou corrigir o offset e as leituras usadas pelo viewport e pelo ajuste de meio pixel.
+>
+> <details><summary>Edited 3 files, ran 6 commands</summary>
+>
+> - Wrote `./port/src/native_renderer/game_profile.h` (+1 -1)
+> - Wrote `./port/src/native_renderer/native_renderer.cpp` (+7 -8)
+> - Wrote `./tests/native/test_game_profile.cpp` (+2 -1)
+> - Ran `rg -n 'LoadF32.*kDevViewport|Load32.*kDevViewport' port/src/native_renderer/native_renderer.cpp; .\build.cmd`
+> - Ran `python -m pytest tests/tools/test_game_profile.py tests/tools/test_shader_tools.py -q`
+> - Ran `rg -n 'save|Save|Write|ofstream' port/src/native_renderer/pipeline_cache.cpp; Get-ChildItem port/out/build/win-amd64-release -Filter '*pipeline*' | Select-Object Name,LastWriteTime,Length; Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 4860 -First 60`
+> - Ran `cmake --build build/tests-native; ctest --test-dir build/tests-native --output-on-failure`
+> - Ran `$taskCache = Join-Path (Get-Location) 'port/out/build/win-amd64-release/superman_returns_pipelines.bin'
+> if (Test-Path -LiteralPath $taskCache) { Move-Item -LiteralPath $taskCache -Destination (Join-Path (Get-Location) 'logs/pipelines_before_viewport_fix.bin') }
+> New-Item -ItemType Directory -Force -Path 'port/out/build/win-amd64-release/logs/gameplay_fixed_dump' | Out-Null
+> powershell -NoProfile -ExecutionPolicy Bypass -File tools/bench.ps1 -Name native_gameplay_fixed -ExtraArgs '--sr_renderer=native --sr_native_dump_frame_at_s=40 --sr_native_trace_frame_at_s=40 --sr_native_dump_dir=logs/gameplay_fixed_dump' -Settle 10 -Window 12 -WorldTimeout 75`
+> - Ran `Get-Content port/src/native_renderer/pipeline_cache.cpp | Select-Object -Skip 144 -First 72; Get-Content logs/bench_progress.txt -Tail 3; Get-Content logs/game.log -Tail 3; git diff --stat`
+>
+> </details>
+>
+> A correção compilou e os testes passaram. Estou repetindo a gameplay com o teste de profundidade ligado e um cache de pipelines novo, para validar o resultado sem a opção de debug.
+>
+> <details><summary>Ran 2 commands</summary>
+>
+> - Ran `Get-Content logs/bench_progress.txt -Tail 4; Get-Content logs/game.log -Tail 5; Get-ChildItem port/out/build/win-amd64-release/logs/gameplay_fixed_dump -File | Select-Object -First 5 Name`
+> - Ran `Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+> $taskBounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+> $taskImage = New-Object System.Drawing.Bitmap $taskBounds.Width,$taskBounds.Height
+> $taskGraphics = [System.Drawing.Graphics]::FromImage($taskImage)
+> try { $taskGraphics.CopyFromScreen($taskBounds.Location,[System.Drawing.Point]::Empty,$taskBounds.Size); $taskImage.Save((Join-Path (Get-Location) 'logs/gameplay_fixed_progress.png')) } finally { $taskGraphics.Dispose(); $taskImage.Dispose() }`
+>
+> </details>
+>
+> Viewed an image
+>
+> <details><summary>Ran 11 commands</summary>
+>
+> - Ran `Get-Content logs/bench_progress.txt -Tail 3; rg 'trace   vp' logs/game.log | Select-Object -First 2`
+> - Ran `Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 2330 -First 65; Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 4750 -First 66; rg 'trace.*(clear|resolve flags|bind RT)' logs/game.log | Select-Object -First 25; Get-ChildItem port/out/build/win-amd64-release/logs/gameplay_fixed_dump -Filter '*depth*' | Select-Object Name,Length`
+> - Ran `python -c "from pathlib import Path; import struct; import numpy as np; p=Path('port/out/build/win-amd64-release/logs/gameplay_fixed_dump'); [(print(f.name,struct.unpack('<4I',f.read_bytes()[:16]),np.unique(np.frombuffer(f.read_bytes()[16:],dtype='<u4'),return_counts=True)[0][:8])) for f in p.glob('*depth.raw')]; print('surfaces:',[f.name for f in p.glob('surf*color.raw')])"`
+> - Ran `rg 'trace.*(resolve flags|clear)' logs/game.log | Select-Object -Last 24; rg -n 'clear_z|BeginTiling|ExecClear|depth_clear' port/src/native_renderer/native_renderer.cpp | Select-Object -First 45; rg -n 'zfunc|z_enable' .tools/rexglue-sdk/win-amd64/include/rex/graphics/registers.h | Select-Object -First 10`
+> - Ran `Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 1690 -First 150; Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 5540 -First 73; Get-Content port/src/native_renderer/native_hooks.cpp | Select-Object -Skip 40 -First 210; Get-Content port/src/native_renderer/game_profile.h | Select-Object -Skip 58 -First 24`
+> - Ran `rg -n 'DEFINE_REX_FUNC\(sub_82101998\)' port/generated/default -g '*.cpp'; rg 'D3DDevice_Clear' logs/game.log | Select-Object -First 16; rg -n 'ClearDepthStencilView' port/src/native_renderer/native_renderer.cpp`
+> - Ran `Get-Content port/generated/default/superman_returns_recomp.84.cpp | Select-Object -Skip 130 -First 160; Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 1898 -First 104; Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 1398 -First 24; Get-Content port/generated/default/superman_returns_recomp.27.cpp | Select-Object -Skip 68 -First 42`
+> - Ran `rg -n 'DEFINE_REX_FUNC\(sub_8210C5F8\)' port/generated/default -g '*.cpp'; rg -n 'kClearZBuffer|kClearStencil|flags.*0x' port/src/native_renderer/native_renderer.cpp | Select-Object -Last 20; Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 4506 -First 90; rg -n 'RESOLVE.*CLEAR|ResolveFlags|D3DRESOLVE' .tools -g '*.h' -g '*.cpp' -g '*.md' --max-count 3 | Select-Object -First 15`
+> - Ran `Get-Content port/generated/default/superman_returns_recomp.97.cpp | Select-Object -Skip 187 -First 270`
+> - Ran `rg -n 'sub_82101A58\(ctx|sub_821013D0\(ctx|sub_82101998\(ctx' port/generated/default -g '*.cpp' | Select-Object -First 25; rg -n 'DEFINE_REX_FUNC\(sub_82101A58\)' port/generated/default -g '*.cpp'; rg 'trace draw' logs/game.log | Select-Object -Last 3; rg -n 'depth.*Clear|copy.*clear|rb_copy_control' .tools/rexglue-sdk-source/src/graphics -g '*.cpp' | Select-Object -First 15`
+> - Ran `Get-Content port/generated/default/superman_returns_recomp.28.cpp | Select-Object -Skip 128 -First 125; Get-Content port/src/native_renderer/native_renderer.h | Select-Object -Skip 120 -First 62; rg -n 'void Renderer::Clear|ExecClear\(' port/src/native_renderer/native_renderer.cpp port/src/native_renderer/native_renderer.h; Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 5518 -First 24; Get-Content port/generated/default/superman_returns_recomp.99.cpp | Select-Object -Skip 21244 -First 76`
+>
+> </details>
+>
+> O viewport agora está correto (`0..1`), mas a profundidade ainda fica zerada. Encontrei outra diferença do XDK: o jogo chama diretamente a rotina de clear com cor em float4, enquanto o hook estava na versão que recebe cor empacotada. Vou interceptar a rotina usada pelo jogo para capturar também os clears de profundidade.
+>
+> <details><summary>Edited 4 files, ran 10 commands</summary>
+>
+> - Wrote `./port/src/native_renderer/game_profile.h` (+3 -2)
+> - Wrote `./port/src/native_renderer/native_hooks.cpp` (+13 -6)
+> - Wrote `./port/src/native_renderer/native_renderer.cpp` (+15 -14)
+> - Wrote `./port/src/native_renderer/native_renderer.h` (+3 -3)
+> - Ran `Get-Content port/src/native_renderer/native_hooks.cpp -TotalCount 48; .\build.cmd`
+> - Wrote `./port/src/native_renderer/native_hooks.cpp` (+1 -1)
+> - Ran `.\build.cmd`
+> - Wrote `./port/src/native_renderer/native_renderer.h` (+1 -1)
+> - Ran `.\build.cmd`
+> - Ran `cmake --build build/tests-native; ctest --test-dir build/tests-native --output-on-failure; python -m pytest tests/tools/test_game_profile.py -q`
+> - Ran `rg -n 'u\[[67]\]|Clear\(' port/src/native_renderer/native_renderer.cpp port/src/native_renderer/native_renderer.h port/src/native_renderer/native_hooks.cpp | Select-Object -Last 18; git diff --check`
+> - Ran `New-Item -ItemType Directory -Force -Path 'port/out/build/win-amd64-release/logs/gameplay_clear_dump' | Out-Null
+> powershell -NoProfile -ExecutionPolicy Bypass -File tools/bench.ps1 -Name native_gameplay_clear -ExtraArgs '--sr_renderer=native --sr_native_dump_frame_at_s=40 --sr_native_trace_frame_at_s=40 --sr_native_dump_dir=logs/gameplay_clear_dump' -Settle 10 -Window 12 -WorldTimeout 75`
+> - Ran `rg 'D3DDevice_Clear' logs/game.log | Select-Object -First 16; Get-Content logs/bench_progress.txt -Tail 3; Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 5350 -First 23; Get-Content tests/tools/test_game_profile.py -TotalCount 155`
+> - Ran `Get-Content logs/bench_progress.txt -Tail 4; Get-Content logs/game.log -Tail 4; Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 414 -First 30; Get-Content .tools/rexglue-sdk/win-amd64/include/rex/graphics/registers.h | Select-Object -Skip 795 -First 20`
+> - Ran `Get-ChildItem port/out/build/win-amd64-release/logs/gameplay_clear_dump -File | Select-Object -First 3 Name; Get-Content logs/bench_progress.txt -Tail 3; Get-Content logs/game.log -Tail 4`
+> - Ran `python -c "from pathlib import Path; import struct; import numpy as np; from PIL import Image; p=Path('port/out/build/win-amd64-release/logs/gameplay_clear_dump/output_1280x720.raw'); b=p.read_bytes(); w,h,f,pitch=struct.unpack('<4I',b[:16]); v=np.frombuffer(b,dtype=np.uint8,offset=16).reshape(h,pitch)[:,:w*4].copy().view('<u4').reshape(h,w); assert f==24; a=np.stack([((v >> s) & 1023) for s in (0,10,20)],axis=-1); Image.fromarray((a.astype(np.float32)*255/1023).round().astype(np.uint8)).save(p.with_suffix('.png'))"`
+>
+> </details>
+>
+> Viewed an image
+>
+> Agora a gameplay aparece com profundidade ligada: Superman, rua, prédios, HUD e minimapa estão visíveis. O clear estava sendo perdido pelo hook anterior. Ainda vejo geometria deformada e iluminação escura; vou concluir a validação de movimento e registrar essas limitações.
+>
+> <details><summary>Ran a command</summary>
+>
+> - Ran `Get-Content logs/bench_progress.txt -Tail 5; git diff --stat; git status --short`
+>
+> </details>
+>
+> Viewed an image
+>
+> <details><summary>Ran a command</summary>
+>
+> - Ran `rg 'unsupported shader|PSO creation failed|frame 1200' logs/game.log | Select-Object -Last 10; git diff -- port/src/native_renderer/native_renderer.h port/src/native_renderer/native_hooks.cpp`
+>
+> </details>
+>
+> O teste de movimento terminou: Superman avançou pela rua, com média de 22,5 FPS nessa medição curta. Vou registrar as duas correções e o estado atual da imagem, incluindo os defeitos de geometria e iluminação que ainda restam.
+>
+> <details><summary>Created a file, edited a file, ran a command</summary>
+>
+> - Wrote `./README.md` (+3 -1)
+> - Wrote `./docs/native-gameplay-validation.md` (+36 -0)
+> - Ran `Copy-Item -LiteralPath logs/game.log -Destination port/out/build/win-amd64-release/logs/gameplay_clear_dump/game.log
+> ctest --test-dir build/tests-native --output-on-failure
+> python -m pytest tests/tools/test_game_profile.py tests/tools/test_shader_tools.py -q
+> git diff --check`
+>
+> </details>
+</details>
+
+A gameplay já aparece e responde ao movimento. Corrigi o viewport e o hook de clear que deixavam a cena azul.
+
+Build e testes passaram. A medição curta deu 22,5 FPS em movimento. Ainda há geometria deformada e iluminação escura; a fidelidade visual precisa de mais correções.
+
+![Gameplay nativa](./port/out/build/win-amd64-release/logs/gameplay_clear_dump/output_1280x720.png)
+
+> Fazer seguir com eles então
+
+<details><summary>29 previous messages</summary>
+
+> Vou seguir com a geometria deformada e a iluminação escura. Primeiro vou identificar os draws afetados e comparar seus buffers e shaders com o que o Xenos recebe.
+>
+> <details><summary>Ran 2 commands</summary>
+>
+> - Ran `git status --short; Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 3820 -First 335`
+> - Ran `rg -n 'tfetchDEC3N|tfetchR11G11B10|R11G11B10' tools/shaders/xenosrecomp/patches .tools/xenosrecomp -g '*.h' -g '*.cpp' --max-count 6 | Select-Object -First 20; Get-Content tools/rdc_dump_target.py -TotalCount 110; rg --files tools | rg 'capture|rdc|shader'`
+>
+> </details>
+>
+> Context compaction
+>
+> Source: automatic
+> Status: completed
+>
+> <details><summary>Ran 8 commands</summary>
+>
+> - Ran `rg -n -A 75 -B 10 'float4 tfetchR11G11B10|g_SpecConstants|SwapBufferRange' .tools/xenosrecomp/src/XenosRecomp/shader_common.h port/src/native_renderer/native_renderer.cpp`
+> - Ran `Get-Content .tools/xenosrecomp/src/XenosRecomp/shader_common.h | Select-Object -Skip 330 -First 68`
+> - Ran `rg -n -A 95 'void Renderer::SwapBufferRange|uint32_t spec =|SPEC_CONSTANT_R11|g_SpecConstants\(\)' port/src/native_renderer/native_renderer.cpp artifacts/shaders/hlsl/C63F6F22679609F0.vs.hlsl tools/shaders/build_catalog.py`
+> - Ran `Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 3734 -First 42`
+> - Ran `Get-Content tools/shaders/build_catalog.py | Select-Object -Skip 145 -First 31`
+> - Ran `rg -n -A 40 'MapDeclType|swapped_texcoords|swappedTexcoords|s\[72\]' port/src/native_renderer/native_renderer.cpp`
+> - Ran `rg -n '2_10_10_10|2_10_10|k_10_11_11|k_11_11_10|2A2187|DEC3N' port/src .tools/xenosrecomp/src tools/shaders/xenosrecomp/patches rexglue -g '*.h' -g '*.cpp' -g '*.patch'`
+> - Ran `Get-Content artifacts/shaders/hlsl/C63F6F22679609F0.vs.hlsl | Select-Object -First 9`
+>
+> </details>
+>
+> Encontrei uma inconsistência nas normais: o shader espera uma flag para desempacotá-las, mas o renderer nunca a ativa. Também vou conferir o formato exato, pois o helper atual decodifica 11/11/10 bits e a declaração usada pelo jogo indica 10/10/10.
+>
+> <details><summary>Created a file, edited 2 files, ran 19 commands</summary>
+>
+> - Ran `rg -n 'decl |layout |type 002A|2A2187|2A2190|2A2390' port/out/build/win-amd64-release/logs/gameplay_clear_dump/game.log | Select-Object -First 22`
+> - Ran `rg --files | rg 'xenos.h|vertex.*fetch|test.*renderer|CMakeLists|000[123].*patch|fetch_xenos'`
+> - Ran `Get-Content tools/shaders/fetch_xenosrecomp.py | Select-Object -First 190`
+> - Ran `Get-Content tests/tools/test_shader_tools.py | Select-Object -First 190`
+> - Ran `Get-Content tools/shaders/xenosrecomp/patches/0003-no-double-literals.patch | Select-Object -First 60`
+> - Ran `Get-Content tools/shaders/build_corpus.ps1 | Select-Object -First 95`
+> - Wrote `./port/src/native_renderer/native_renderer.cpp` (+16 -2)
+> - Wrote `./tools/shaders/xenosrecomp/patches/0004-dec3n-normals.patch` (+34 -0)
+> - Ran `rg -n 'vertex_decl' port/src/native_renderer/game_profile.h`
+> - Ran `git apply --check --recount ../../../../tools/shaders/xenosrecomp/patches/0004-dec3n-normals.patch`
+> - Wrote `./tools/shaders/xenosrecomp/patches/0004-dec3n-normals.patch` (+1 -1)
+> - Ran `git apply --check ../../../tools/shaders/xenosrecomp/patches/0004-dec3n-normals.patch`
+> - Ran `Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 2252 -First 27`
+> - Wrote `./tools/shaders/xenosrecomp/patches/0004-dec3n-normals.patch` (+2 -2)
+> - Ran `git apply --check ../../../tools/shaders/xenosrecomp/patches/0004-dec3n-normals.patch`
+> - Ran `powershell -NoProfile -ExecutionPolicy Bypass -File tools/shaders/build_corpus.ps1 -NoSpirv`
+> - Ran `Get-Content tests/native/CMakeLists.txt | Select-Object -First 135`
+> - Ran `rg -n 'SPEC_CONSTANT|0x2A2187|normal|DECLARE|R32_UINT' tests/native port/src/native_renderer -g '*test*' -g '*.h'`
+> - Ran `Get-ChildItem logs -Directory | Select-Object Name; Get-ChildItem port/out/build/win-amd64-release/logs -Directory | Select-Object Name`
+> - Ran `Get-Content artifacts/shaders/manifest.json -TotalCount 18`
+> - Ran `Get-ChildItem logs -Recurse -Filter *.vs.bin | Group-Object DirectoryName | Select-Object Count,Name`
+> - Ran `Get-ChildItem logs/rt_corpus3 | Select-Object -First 8 Name; Get-ChildItem logs/rt_corpus | Select-Object -First 8 Name; rg -n 'rt_corpus3|DumpDir' docs README.md logs/*.txt`
+> - Ran `powershell -NoProfile -ExecutionPolicy Bypass -File tools/shaders/build_corpus.ps1 -DumpDir logs/rt_corpus3 -NoSpirv`
+>
+> </details>
+>
+> Ajustei o decode para 10 bits com sinal e normalizei os componentes. Estou reconstruindo os shaders com o corpus capturado em execução; depois vou comparar a cena antes e depois para verificar o efeito na iluminação e nos polígonos deformados.
+>
+> <details><summary>Ran 10 commands</summary>
+>
+> - Ran `.\build.cmd`
+> - Ran `Get-Content artifacts/shaders/hlsl/2C45BFFE76D77398.vs.hlsl | Select-Object -Skip 490 -First 130`
+> - Ran `rg -n -A 10 -B 5 'iPosition1|tfetchR11|oPos.x' artifacts/shaders/hlsl/2C45BFFE76D77398.vs.hlsl | Select-Object -Last 75`
+> - Ran `powershell -NoProfile -ExecutionPolicy Bypass -File tools/bench.ps1 -Name native_gameplay_normals -ExtraArgs '--sr_native_pipeline_cache=false' -Settle 10 -Window 12 -WorldTimeout 75`
+> - Ran `Get-Content artifacts/shaders/hlsl/2C45BFFE76D77398.vs.hlsl | Select-Object -Skip 658 -First 48`
+> - Ran `Get-Content logs/bench_progress.txt -Tail 12; Get-Content .tools/rexglue-sdk/win-amd64/include/rex/graphics/xenos.h -ErrorAction SilentlyContinue | Select-String -Pattern '2_10_10_10|10_11_11' -Context 1,1`
+> - Ran `Get-Content tools/bench.ps1 | Select-Object -First 65; rg -n 'sr_renderer|ExtraArgs' tools/bench.ps1 port/src/*.cpp`
+> - Ran `Get-Content logs/game.log -Tail 7`
+> - Ran `Get-Content logs/bench_progress.txt -Tail 5`
+> - Ran `rg -n 'VertexIndex|vertex index|r0.x|SV_VertexID|instance' .tools/xenosrecomp/src/XenosRecomp/shader_recompiler.cpp | Select-Object -First 35`
+>
+> </details>
+>
+> O jogo já entrou na cena com os shaders corrigidos. Enquanto a captura termina, encontrei outro ponto relevante: alguns shaders calculam a transformação de instâncias a partir de `r0.x`, mas esse registrador parece começar em zero. Vou verificar a ligação com o índice do vértice.
+>
+> <details><summary>Ran a command</summary>
+>
+> - Ran `Get-Content .tools/xenosrecomp/src/XenosRecomp/shader_recompiler.cpp | Select-Object -Skip 1630 -First 65; rg -n -A 12 -B 8 'iVertexId' .tools/xenosrecomp/src/XenosRecomp/shader_recompiler.cpp`
+>
+> </details>
+>
+> Viewed an image
+>
+> <details><summary>Ran 4 commands</summary>
+>
+> - Ran `rg -n 'vertex index|vertex_index|vertex_id' .tools/rexglue-sdk/win-amd64/include/rex/graphics -g '*shader*' | Select-Object -First 30`
+> - Ran `Get-Content .tools/xenosrecomp/src/XenosRecomp/shader_recompiler.cpp | Select-Object -Skip 1858 -First 53`
+> - Ran `Get-Content tools/capture_frame.ps1 | Select-Object -First 110`
+> - Ran `rg -n 'vector.*scalar|scalar.*vector|scratch|prev|simult|dest|exec' .tools/xenosrecomp/src/XenosRecomp/shader_recompiler.cpp | Select-Object -Last 60`
+>
+> </details>
+>
+> Viewed an image
+>
+> <details><summary>Created 2 files, edited 2 files, ran 15 commands</summary>
+>
+> - Ran `Get-Content .tools/xenosrecomp/src/XenosRecomp/shader_recompiler.cpp | Select-Object -Skip 2290 -First 95`
+> - Ran `rg -n -A 34 -B 18 'recompileAlu|RecompileAlu|TranslateALU|AluVector|aluVector|vectorInstr|emitAlu|RecompileVector|recompileVector' .tools/xenosrecomp/src/XenosRecomp/shader_recompiler.cpp`
+> - Ran `rg -n 'VertexIndex|vertex index|r0.x|vertex_id' .tools/rexglue-sdk -g '*.h' | Select-Object -First 20`
+> - Ran `Get-Content .tools/xenosrecomp/src/XenosRecomp/shader_recompiler.cpp | Select-Object -Skip 405 -First 240`
+> - Wrote `./tools/shaders/xenosrecomp/patches/0005-vertex-id.patch` (+21 -0)
+> - Wrote `./tools/shaders/xenosrecomp/patches/0005-vertex-id.patch` (+1 -5)
+> - Ran `git apply --check ../../../tools/shaders/xenosrecomp/patches/0005-vertex-id.patch`
+> - Ran `powershell -NoProfile -ExecutionPolicy Bypass -File tools/shaders/build_corpus.ps1 -DumpDir logs/rt_corpus3 -NoSpirv`
+> - Ran `rg -n 'scalar.*vector|parallel|simult|same instruction' .tools/rexglue-sdk/win-amd64/include/rex/graphics/format/ucode.h | Select-Object -First 30`
+> - Ran `.\build.cmd`
+> - Ran `powershell -NoProfile -ExecutionPolicy Bypass -File tools/bench.ps1 -Name native_gameplay_vertexid -ExtraArgs '--sr_renderer=native --sr_native_pipeline_cache=false' -Settle 10 -Window 12 -WorldTimeout 75`
+> - Ran `Get-Content .tools/rexglue-sdk/win-amd64/include/rex/graphics/format/ucode.h | Select-Object -Skip 1333 -First 75`
+> - Ran `Get-Content .tools/xenosrecomp/src/XenosRecomp/shader_recompiler.cpp | Select-Object -Skip 1230 -First 130`
+> - Ran `Get-Content .tools/xenosrecomp/src/XenosRecomp/shader_recompiler.cpp | Select-Object -Skip 525 -First 18; rg -n '^void ShaderRecompiler::' .tools/xenosrecomp/src/XenosRecomp/shader_recompiler.cpp`
+> - Wrote `./tools/shaders/xenosrecomp/patches/0006-parallel-alu.patch` (+40 -0)
+> - Ran `git apply --check ../../../tools/shaders/xenosrecomp/patches/0006-parallel-alu.patch`
+> - Ran `Get-Content logs/bench_progress.txt -Tail 4`
+> - Wrote `./tools/shaders/xenosrecomp/patches/0006-parallel-alu.patch` (+8 -2)
+> - Ran `git apply --check ../../../tools/shaders/xenosrecomp/patches/0006-parallel-alu.patch`
+>
+> </details>
+>
+> Viewed an image
+>
+> <details><summary>Ran a command</summary>
+>
+> - Ran `powershell -NoProfile -ExecutionPolicy Bypass -File tools/shaders/build_corpus.ps1 -DumpDir logs/rt_corpus3 -NoSpirv`
+>
+> </details>
+>
+> O índice de vértice agora chega aos shaders de instâncias, mas os prédios ainda aparecem deformados. Achei um segundo erro no tradutor: a operação escalar lê registradores já alterados pela operação vetorial da mesma instrução. No Xenos, ambas devem ler os valores anteriores; estou corrigindo essa ordem.
+>
+> <details><summary>Created a file, edited a file, explored a file, ran 9 commands</summary>
+>
+> - Ran `Get-Content tools/shaders/xenosrecomp/corpus_main.cpp | Select-Object -First 150`
+>
+> - Ran `Get-Content .tools/xenosrecomp/src/XenosRecomp/shader_recompiler.h | Select-Object -First 145`
+>
+> - Ran `.\build.cmd`
+>
+> - Ran `powershell -NoProfile -ExecutionPolicy Bypass -File tools/bench.ps1 -Name native_gameplay_alu -ExtraArgs '--sr_renderer=native --sr_native_pipeline_cache=false' -Settle 10 -Window 12 -WorldTimeout 75`
+>
+> <details><summary>Explored a file</summary>
+>
+> - Read `./tools/shaders/xenosrecomp/CMakeLists.txt`
+>
+> </details>
+>
+> - Ran `rg -n -A 40 -B 8 'register struct Alu|struct AluInstruction|union AluInstruction' .tools/xenosrecomp/src/XenosRecomp/shader_code.h`
+>
+> - Ran `Get-Content logs/bench_progress.txt -Tail 4; Get-Content docs/native-gameplay-validation.md`
+>
+> - Ran `rg -n -A 80 'enum class AluScalarOpcode' .tools/xenosrecomp/src/XenosRecomp/shader_code.h | Select-Object -First 80`
+>
+> - Ran `Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -First 65`
+>
+> - Ran `Get-ChildItem logs/rdc | Select-Object Name,Length; Get-Content logs/bench_progress.txt -Tail 4`
+>
+> - Wrote `./tools/shaders/xenosrecomp/CMakeLists.txt` (+17 -1)
+> - Wrote `./tools/shaders/xenosrecomp/test_recompiler.cpp` (+50 -0)
+>
+> </details>
+>
+> Viewed an image
+>
+> As correções compilaram e a gameplay continua funcionando, mas a captura ainda mostra falhas grandes na cidade. Vou separar dois testes agora: inverter o winding para verificar as faces ausentes e conferir a conversão de cor na apresentação para entender a imagem escura.
+>
+> <details><summary>Ran 11 commands</summary>
+>
+> - Ran `powershell -NoProfile -ExecutionPolicy Bypass -File tools/bench.ps1 -Name native_gameplay_flip -ExtraArgs '--sr_renderer=native --sr_native_pipeline_cache=false --sr_native_debug_no_embedded_pipelines=true --sr_native_flip_winding=true' -Settle 10 -Window 12 -WorldTimeout 75`
+> - Ran `rg -n 'gamma|Gamma|present|Present' port/src/native_renderer/native_renderer.cpp | Select-Object -Last 60`
+> - Ran `Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 4870 -First 115`
+> - Ran `rg -n -A 48 -B 6 'GetGammaRamp256|LUT|gamma_ramp' port/src/native_renderer/native_graphics_system.cpp port/src/native_renderer/native_renderer.cpp port/src/native_renderer/shaders*`
+> - Ran `rg --files port/src/native_renderer | Select-String 'blit|shader|constant'`
+> - Ran `Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 2340 -First 90`
+> - Ran `rg -n -A 18 -B 4 'face :' .tools/rexglue-sdk/win-amd64/include/rex/graphics/registers.h; Get-Content port/src/native_renderer/shaders/blit.hlsl | Select-Object -First 120`
+> - Ran `Get-Content port/src/native_renderer/native_graphics_system.cpp | Select-Object -Skip 500 -First 88`
+> - Ran `cmake --build .tools/xenosrecomp/build`
+> - Ran `powershell -NoProfile -ExecutionPolicy Bypass -File tools/shaders/build_corpus.ps1 -DumpDir logs/rt_corpus3 -NoSpirv`
+> - Ran `Get-Content logs/bench_progress.txt -Tail 4; Get-Content port/src/native_renderer/native_graphics_system.h | Select-Object -Last 85`
+>
+> </details>
+>
+> Viewed an image
+>
+> <details><summary>Edited a file, ran 20 commands</summary>
+>
+> - Ran `rg -n -A 60 'SR_ADDR_DRAW_INDEXED|DrawIndexed\(' port/src/native_renderer/native_hooks.cpp port/src/native_renderer/native_renderer.cpp | Select-Object -First 150`
+> - Ran `ctest --test-dir .tools/xenosrecomp/build --output-on-failure`
+> - Ran `rg -n 'DrawIndexed|draw_indexed' port/src/native_renderer/game_profile.h`
+> - Ran `Get-Content port/src/native_renderer/game_profile.h | Select-Object -Skip 30 -First 22; rg -n -A 160 'ExecDrawIndexedVertices' port/src/native_renderer/native_renderer.cpp | Select-Object -Last 160`
+> - Wrote `./tools/shaders/xenosrecomp/test_recompiler.cpp` (+2 -2)
+> - Ran `rg -n 'PPC_FUNC_IMPL\(__imp__sub_820FC000\)' port/generated/default/*.cpp`
+> - Ran `rg -n -A 75 'void Renderer::ExecDrawIndexedVertices' port/src/native_renderer/native_renderer.cpp`
+> - Ran `rg -n 'PPC_FUNC_IMPL\(__imp__sub_820FC000\)' port/generated/default`
+> - Ran `rg -n 'PPC_FUNC_IMPL\(__imp__sub_820FC000\)' port/generated/default -l`
+> - Ran `rg -n -A 16 'sr_native_debug_buffers_always_dirty|sr_native_worker|sr_native_gamma_ramp' port/src/native_renderer/native_renderer.cpp | Select-Object -First 54`
+> - Ran `rg -n 'PPC_FUNC_IMPL.*820FC000' port/generated/default`
+> - Ran `powershell -NoProfile -ExecutionPolicy Bypass -File tools/bench.ps1 -Name native_gameplay_dirty -ExtraArgs '--sr_renderer=native --sr_native_pipeline_cache=false --sr_native_debug_buffers_always_dirty=true --sr_native_worker=false' -Settle 10 -Window 12 -WorldTimeout 75`
+> - Ran `Get-Content .tools/rexglue-sdk/win-amd64/include/rex/graphics/registers.h | Select-Object -Skip 328 -First 56`
+> - Ran `rg -n '820FC000' port/generated/default | Select-Object -First 8`
+> - Ran `Get-Content port/generated/default/superman_returns_recomp.118.cpp -TotalCount 22`
+> - Ran `Get-Content .tools/xenosrecomp/build/CMakeCache.txt | Select-String 'CMAKE_MAKE_PROGRAM|CMAKE_CXX_COMPILER:'`
+> - Ran `rg -n -A 185 'DEFINE_REX_FUNC\(sub_820FC000\)' port/generated/default/superman_returns_recomp.22.cpp`
+> - Ran `powershell -NoProfile -ExecutionPolicy Bypass -File tools/shaders/build_corpus.ps1 -DumpDir logs/rt_corpus3 -NoSpirv`
+> - Ran `Get-Content port/generated/default/superman_returns_recomp.22.cpp | Select-Object -Skip 700 -First 235`
+> - Ran `ctest --test-dir .tools/xenosrecomp/build --output-on-failure`
+> - Ran `Get-Content logs/bench_progress.txt -Tail 5`
+>
+> </details>
+>
+> Viewed an image
+>
+> A inversão do winding piorou a imagem, e reenvio completo dos buffers sem o worker manteve as deformações. Esses testes reduzem a suspeita de culling invertido e dados antigos no cache. Agora estou comparando os parâmetros do draw com os pacotes emitidos pelo XDK.
+>
+> <details><summary>Ran 6 commands</summary>
+>
+> - Ran `Get-Content port/generated/default/superman_returns_recomp.22.cpp | Select-Object -Skip 420 -First 255`
+> - Ran `rg -n '3D|2D|GetPostVS|GetBufferData|inputAssembly' tools/rdc_inspect_pass.py | Select-Object -First 35; Get-ChildItem '.tools/renderdoc' -Recurse -Filter qrenderdoc.exe | Select-Object -First 1 FullName`
+> - Ran `rg -n -A 25 'VGT_DMA_SIZE|enum class Endian' .tools/rexglue-sdk/win-amd64/include/rex/graphics/registers.h .tools/rexglue-sdk/win-amd64/include/rex/graphics/xenos.h | Select-Object -First 70; Get-Content port/generated/default/superman_returns_recomp.22.cpp | Select-Object -Skip 350 -First 70`
+> - Ran `rg -n 'index_format|index32|BufferPlan|VertexRange' port/src/native_renderer/native_renderer.h | Select-Object -First 40`
+> - Ran `Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 3780 -First 65; Get-Content port/src/native_renderer/native_renderer.h | Select-Object -Skip 404 -First 18`
+> - Ran `rg -n 'index_format ==|index_format !=' port/src/native_renderer/native_renderer.cpp`
+>
+> </details>
+>
+> Achei uma diferença concreta no index buffer: o XDK escolhe o modo de endian a partir do cabeçalho, enquanto o renderer sempre faz swap de 16 ou 32 bits conforme o tamanho do índice. Se o jogo usa swap por dword em índices de 16 bits, isso troca a ordem dos pares e conecta vértices errados. Vou preservar o modo emitido pelo XDK e testar.
+>
+> <details><summary>Created 2 files, edited 3 files, ran 6 commands</summary>
+>
+> - Wrote `./port/src/native_renderer/index_endian.h` (+22 -0)
+> - Wrote `./port/src/native_renderer/native_renderer.cpp` (+19 -27)
+> - Wrote `./port/src/native_renderer/native_renderer.h` (+3 -2)
+> - Ran `.\build.cmd`
+> - Ran `rg -n 'index_endian|else if \(index32|index_format & 3|index_format >>' port/src/native_renderer/native_renderer.cpp; Get-Content tests/native/test_game_profile.cpp -TotalCount 45; Get-Content tests/native/main.cpp -TotalCount 75`
+> - Ran `Get-Content tests/native/test.h -ErrorAction SilentlyContinue -TotalCount 60`
+> - Wrote `./port/src/native_renderer/native_renderer.cpp` (+6 -0)
+> - Wrote `./tests/native/CMakeLists.txt` (+2 -1)
+> - Wrote `./tests/native/test_index_endian.cpp` (+25 -0)
+> - Ran `cmake --build build/tests-native`
+> - Ran `.\build.cmd`
+> - Ran `ctest --test-dir build/tests-native --output-on-failure`
+>
+> </details>
+>
+> System error
+>
+> Selected model is at capacity. Please try a different model.
+</details>
+
+<details><summary>9 previous messages</summary>
+
+> <details><summary>Ran 8 commands</summary>
+>
+> - Ran `Get-Process superman_returns -ErrorAction SilentlyContinue | Select-Object Id; Get-Content logs/bench_progress.txt -Tail 2`
+> - Ran `rg --files tools | rg 'test|build'; Get-Content build.cmd -TotalCount 85`
+> - Ran `powershell -NoProfile -ExecutionPolicy Bypass -File tools/bench.ps1 -Name native_gameplay_indexdma -ExtraArgs '--sr_renderer=native --sr_native_pipeline_cache=false' -Settle 10 -Window 12 -WorldTimeout 75`
+> - Ran ``$vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath; $clang = Join-Path $PWD '.tools\clang+llvm-23.1.2-x86_64-pc-windows-msvc\bin'; $cmake = Join-Path $vs 'Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin'; $ninja = Join-Path $vs 'Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja'; & cmd /c "call `"$vs\Common7\Tools\VsDevCmd.bat`" -arch=x64 -host_arch=x64 >nul && set `"PATH=$clang;$cmake;$ninja;%PATH%`" && cmake -S tests/native -B build/tests-native -G Ninja -DCMAKE_CXX_COMPILER=clang++ && cmake --build build/tests-native && ctest --test-dir build/tests-native --output-on-failure"``
+> - Ran `rg -n -A 70 -B 6 'DC_LUT_PWL_DATA|gamma_ramp.*pwl|gamma_ramp_pwl|DC_LUT_CONTROL' .tools/rexglue-sdk-source/src/graphics/command_processor.cpp .tools/rexglue-sdk-source/src/graphics/d3d12/command_processor.cpp | Select-Object -First 150`
+> - Ran `rg -n 'index DMA' logs/game.log; Get-Content logs/bench_progress.txt -Tail 3`
+> - Ran `Get-ChildItem logs -Filter 'bench*png' | Select-Object -First 25 Name; rg -n 'GetGammaRamp256' port/src/sr_graphics_system.cpp -A 25; rg -n -A 20 'gamma_ramp.*pwl|use_pwl|gamma_ramp_256' .tools/rexglue-sdk-source/src/graphics/d3d12/command_processor.cpp | Select-Object -Last 75`
+> - Ran `rg -n 'index DMA' logs/game.log; Get-Content logs/bench_progress.txt -Tail 4`
+>
+> </details>
+>
+> Viewed an image
+>
+> <details><summary>Ran 2 commands</summary>
+>
+> - Ran `rg -n -B 6 -A 8 'bool use_pwl_gamma_ramp' .tools/rexglue-sdk-source/src/graphics/d3d12/command_processor.cpp; rg -n -A 40 'float4Constants|kDevVsConst|GpuConstant\(' port/src/native_renderer/native_renderer.cpp | Select-Object -Last 100`
+> - Ran `powershell -NoProfile -ExecutionPolicy Bypass -File tools/capture_frame.ps1 -Name native_gameplay_probe -ExtraArgs '--sr_renderer=native --sr_native_pipeline_cache=false' -Settle 12`
+>
+> </details>
+>
+> Viewed an image
+>
+> <details><summary>Ran 3 commands</summary>
+>
+> - Ran `Get-Content tools/rdc_inspect_pass.py | Select-Object -First 135`
+> - Ran `Get-Content tools/rdc_gpu_profile.py | Select-Object -First 90`
+> - Ran `Get-ChildItem 'C:/Program Files/RenderDoc' -Filter qrenderdoc.exe -ErrorAction SilentlyContinue | Select-Object FullName; Get-Content tools/capture_frame.ps1 | Select-Object -Skip 105 -First 45; Get-ChildItem logs/rdc -Filter '*native*' | Select-Object Name,Length`
+>
+> </details>
+>
+> A rodada registrou apenas endian 8-in-16, então o ajuste do index buffer não explica a deformação observada nessa cena. Capturei um frame no RenderDoc para inspecionar os dados do draw e a saída do vertex shader diretamente.
+>
+> <details><summary>Created a file, ran 10 commands</summary>
+>
+> - Wrote `./tools/rdc_mesh_probe.py` (+63 -0)
+> - Ran `$env:SR_RDC = (Resolve-Path logs/rdc/native_gameplay_probe_capture.rdc).Path; $env:SR_RDC_OUT = Join-Path $PWD 'logs/rdc/native_mesh_probe.json'; Start-Process 'C:/Program Files/RenderDoc/qrenderdoc.exe' -ArgumentList '--python', (Join-Path $PWD 'tools/rdc_mesh_probe.py') -WindowStyle Hidden -Wait`
+> - Ran `Get-Content logs/rdc/native_mesh_probe.json -TotalCount 24 -ErrorAction SilentlyContinue; rg -n 'PSO creation failed|not in MapDecl|not in library' logs/game.log | Select-Object -First 10`
+> - Ran `python -c "import json; a=json.load(open('logs/rdc/native_mesh_probe.json')); [print(x['event'],x['action']['numIndices'],[(y['name'],y['vertexBuffer'],y['byteOffset']) for y in x['attributes']],x['positions'][:3]) for x in a]"`
+> - Ran `Get-Process qrenderdoc -ErrorAction SilentlyContinue | Select-Object Id,StartTime; Get-Content logs/rdc/native_mesh_probe.json | Select-String 'vertexByteStride|indexByteStride|topology|byteStride' | Select-Object -First 24`
+> - Ran `rg -n -A 35 '^enum class VertexFormat' .tools/rexglue-sdk/win-amd64/include/rex/graphics/xenos.h; rg -n -A 80 -B 7 '2C82A1|Position.*1|iPosition' .tools/xenosrecomp/src/XenosRecomp/shader_recompiler.cpp | Select-Object -First 110`
+> - Ran `Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'renderdoc|powershell' -and $_.CommandLine -match 'rdc|mesh_probe' } | Select-Object ProcessId,ParentProcessId,Name,CommandLine`
+> - Ran `Get-Content .tools/xenosrecomp/src/XenosRecomp/shader_recompiler.cpp | Select-Object -Skip 200 -First 76`
+> - Ran `python -c "import json; x=json.load(open('logs/rdc/native_mesh_probe.json'))[0]; print(x['attributes']);print(x['buffers']); print(x['post_vs'])"`
+> - Ran `rg -n 'POSITION1|iPosition1' artifacts/shaders/hlsl/29C1ACD9F4373197.vs.hlsl`
+> - Ran `Get-Content .tools/rexglue-sdk-source/src/graphics/pipeline/shader/dxbc_translator.cc -ErrorAction SilentlyContinue | Select-Object -First 2`
+>
+> </details>
+>
+> O RenderDoc mostrou a causa mais forte até agora: um draw pede 63.894 vértices, mas o buffer ligado contém só 2.146. O shader do jogo usa um índice calculado para reutilizar esse buffer entre instâncias; o input assembler nativo lê sequencialmente e acaba fora dele. Vou adaptar esse caminho de instancing.
+>
+> <details><summary>Ran 8 commands</summary>
+>
+> - Ran `rg -n '^#define instance_data' artifacts/shaders/hlsl/*.vs.hlsl`
+> - Ran `rg -n 'instance_data' artifacts/shaders/hlsl -g '*.vs.hlsl' | Select-Object -First 30`
+> - Ran `rg -n -A 24 'struct Shader|LoadShader\(' port/src/native_renderer/native_renderer.h | Select-Object -First 75; Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 3110 -First 29`
+> - Ran `Get-Content port/src/native_renderer/shader_registry.h | Select-Object -First 165; Get-Content port/src/native_renderer/shader_container.h | Select-Object -First 175`
+> - Ran `Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 4130 -First 54`
+> - Ran `Get-Content port/src/native_renderer/shader_library.h | Select-Object -First 110; Get-Content .tools/xenosrecomp/src/XenosRecomp/shader_recompiler.cpp | Select-Object -Skip 1695 -First 10; rg -n 'ShaderHash|vs_hash =' port/src/native_renderer/native_renderer.cpp | Select-Object -Last 10`
+> - Ran `rg -n -A 75 '^def reflect' tools/shaders/build_catalog.py; Get-Content .tools/xenosrecomp/src/XenosRecomp/shader.h | Select-Object -First 110`
+> - Ran `Get-Content port/src/native_renderer/native_renderer.cpp | Select-Object -Skip 3550 -First 27; rg -n 'ShaderIdentity|LookupGuestShader' port/src/native_renderer/native_renderer.cpp | Select-Object -First 12`
+>
+> </details>
+</details>

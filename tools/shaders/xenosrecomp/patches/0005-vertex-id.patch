@@ -1,0 +1,18 @@
+--- a/XenosRecomp/shader_recompiler.cpp
++++ b/XenosRecomp/shader_recompiler.cpp
+@@ -1668,3 +1668,6 @@
+         }
+ 
++    #ifdef CONAN_RECOMP
++        out += "\tin uint iVertexId : SV_VertexID,\n";
++    #endif
+     #ifdef UNLEASHED_RECOMP
+@@ -1904,3 +1907,8 @@
+             else
+             {
++#ifdef CONAN_RECOMP
++                if (!isPixelShader && i == 0)
++                    out += "float4(float(iVertexId & 0xFFFFFFu), 0.0f, 0.0f, 0.0f);\n";
++                else
++#endif
+                 out += "0.0;\n";

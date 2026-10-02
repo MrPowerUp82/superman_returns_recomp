@@ -138,8 +138,8 @@ class Renderer {
   void BeginTiling(uint8_t* base, uint32_t count, uint32_t rects, uint32_t clear_color,
                    float clear_z, uint32_t clear_stencil);
   void EndTiling();
-  // D3DDevice_Clear(dev, Count, pRects, Flags, Color (D3DCOLOR), Z, Stencil).
-  void Clear(uint8_t* base, uint32_t count, uint32_t rects, uint32_t flags, uint32_t color,
+  // Shared XDK clear entry; color is linear float4 (including HDR values).
+  void Clear(uint8_t* base, uint32_t count, uint32_t rects, uint32_t flags, const float color[4],
              float z, uint32_t stencil);
   // GpuBeginShaderConstantF4 handed the game a ring pointer for `count`
   // float4 constants: the game writes the ring copy (not the device shadow).
@@ -205,7 +205,7 @@ class Renderer {
   struct WorkCmd {
     Op op = Op::kRing;
     int pass = 0;
-    uint32_t u[6] = {};
+    uint32_t u[8] = {};
     float f = 0.0f;
     uint64_t u64 = 0;
     uint32_t ring_offset = 0, ring_bytes = 0;
@@ -286,7 +286,7 @@ class Renderer {
   void ExecBeginTiling(uint8_t* base, uint32_t count, uint32_t rects, uint32_t clear_color,
                        float clear_z, uint32_t clear_stencil);
   void ExecEndTiling();
-  void ExecClear(uint8_t* base, uint32_t count, uint32_t rects, uint32_t flags, uint32_t color,
+  void ExecClear(uint8_t* base, uint32_t count, uint32_t rects, uint32_t flags, const float color[4],
                  float z, uint32_t stencil);
   void ExecOnSwap(uint8_t* base, uint32_t front_buffer_texture, uint64_t swap_number);
   void ExecOnPassEnd(int pass);
@@ -413,6 +413,7 @@ class Renderer {
     int32_t base_vertex = 0;
     bool index32 = false;
     void Resolve();
+    uint32_t index_endian = 0;
   };
   bool BindVertexStreams(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd);
 

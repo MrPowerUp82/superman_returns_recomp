@@ -12,6 +12,8 @@ Projeto experimental de recompilação estática da versão Xbox 360 de **Superm
 
 O jogo compila, carrega os arquivos `.AST`, renderiza via D3D12 (plugin `xenos`) e chega à tela de título 3D (**PRESS START**) com áudio. Menus e gameplay ainda não foram testados.
 
+Em 2026-10-02, o renderer `native` também chegou ao início da gameplay: Superman, rua, prédios, HUD e minimapa aparecem, e o movimento com teclado foi verificado. Foram corrigidos o layout do viewport e o hook de clear com cor float4. Ainda há geometria deformada, iluminação escura e pipelines ausentes; a imagem não está validada contra o Xenos. Detalhes em [validação da gameplay nativa](docs/native-gameplay-validation.md).
+
 ### Correções específicas do jogo
 
 - **Travamento do áudio / crash após 1–2 min em cenas 3D** ([`port/src/xma_fixes.cpp`](port/src/xma_fixes.cpp)): o mixer de áudio fica em espera ativa pelo decodificador XMA sem timeout. Sob a emulação de XMA do runtime alguns contextos nunca entregam amostras (contexto já liberado, ou buffer de saída marcado cheio), a thread de áudio travava, a fila de comandos de 1 MB (`sub_8264C540`) parava de ser esvaziada e transbordava sobre o heap. Um hook midasm em `0x826595B8` reativa o contexto e, se ele estiver liberado, se o kick não mudar nada (sem entrada ou buffer de saída cheio) ou se não entregar em 1 ms, faz o mixer seguir para o próximo stream.
