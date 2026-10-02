@@ -71,3 +71,45 @@ def test_pack_format_matches_the_renderer_reader(tmp_path):
     assert [(h, s) for h, s, _, _ in entries] == [(1, 1), (0xAA, 0), (0xAA, 1)]
     blobs = {(h, s): data[o:o + n] for h, s, o, n in entries}
     assert blobs[(0xAA, 0)] == b"VS-A!" and blobs[(0xAA, 1)] == b"PS-A" and blobs[(1, 1)] == b"P1"
+
+
+def test_make_preshaders_library_layout(tmp_path):
+    """make_preshaders.py writes the format shader_library.h reads: sorted
+    (hash, stage) entries with the original container and its DXIL, FNV-1a 64
+    of the body in the header; containers without DXIL are left out."""
+    corpus = tmp_path / "shaders"
+    (corpus / "raw").mkdir(parents=True)
+    (corpus / "dxil").mkdir()
+    ps, vs, orphan = container(True), container(False, b"\x22" * 8), container(True, b"\x44" * 12)
+    names = {}
+    for blob, stage, dx in ((ps, "ps", b"DXPS"), (vs, "vs", b"DXVS!"), (orphan, "ps", None)):
+        h = f"{xxhash.xxh3_64_intdigest(blob):016X}"
+        names[stage if dx else "orphan"] = h
+        (corpus / "raw" / f"{h}.{stage}.bin").write_bytes(blob)
+        if dx:
+            (corpus / "dxil" / f"{h}.{stage}.dxil").write_bytes(dx)
+    install = tmp_path / "exe"
+    out = run("make_preshaders.py", "--corpus", corpus, "--install", install)
+    assert "2 shaders (1 vs, 1 ps)" in out and "1 containers without DXIL" in out
+    lib = corpus / "superman_returns_shaders.srsl"
+    data = lib.read_bytes()
+    assert (install / lib.name).read_bytes() == data
+    assert data[:8] == b"SRSHLIB\0"
+    version, count, checksum = struct.unpack_from("<IIQ", data, 8)
+    assert (version, count) == (1, 2)
+    h = 0xCBF29CE484222325
+    for b in data[24:]:
+        h = ((h ^ b) * 0x100000001B3) & (2**64 - 1)
+    assert h == checksum
+    pos, entries = 24, []
+    for _ in range(count):
+        ch, stage, csize, dsize, reserved = struct.unpack_from("<QIIII", data, pos)
+        pos += 24
+        entries.append((ch, stage, data[pos:pos + csize], data[pos + csize:pos + csize + dsize]))
+        pos += csize + dsize
+    assert pos == len(data)
+    assert [(e[0], e[1]) for e in entries] == sorted((e[0], e[1]) for e in entries)
+    by_stage = {e[1]: e for e in entries}
+    assert by_stage[0][2] == vs and by_stage[0][3] == b"DXVS!"
+    assert by_stage[1][2] == ps and by_stage[1][3] == b"DXPS"
+    assert "OK" in run("make_preshaders.py", "--verify", lib)

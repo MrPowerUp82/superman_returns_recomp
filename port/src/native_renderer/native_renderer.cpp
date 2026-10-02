@@ -714,10 +714,11 @@ bool Renderer::EnsureInitialized() {
     }
   }).detach();
 
-  REXLOG_INFO("native: renderer initialized, shaders from {}",
-              EmbeddedShaderPack().count() && REXCVAR_GET(sr_native_shader_dir).empty()
-                  ? fmt::format("embedded pack ({} shaders)", EmbeddedShaderPack().count())
-                  : shader_dir_);
+  {
+    std::string where;
+    ShaderCorpusAvailable(&where);
+    REXLOG_INFO("native: renderer initialized, shaders from {}", where);
+  }
   init_failed_ = false;
   initialized_ = true;
   return true;
@@ -2010,9 +2011,20 @@ bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_fo
 
 
 // Thread-safe lookup into the embedded shader pack (pipeline precompilation).
+// Order everywhere: sr_native_shader_dir (explicit loose files), the
+// pre-shader library (sr_native_preshaders), the embedded pack, the default
+// loose-file directory.
 bool PackShaderLookup(uint64_t hash, bool vertex, const void** data, size_t* size) {
+  if (!REXCVAR_GET(sr_native_shader_dir).empty()) return false;
+  if (const ShaderLibrary* lib = PreShaderLibrary()) {
+    const PreShader* s = lib->Find(hash, vertex);
+    if (!s) return false;
+    *data = s->dxil.data();
+    *size = s->dxil.size();
+    return true;
+  }
   const ShaderPackView& pack = EmbeddedShaderPack();
-  if (!pack.count() || !REXCVAR_GET(sr_native_shader_dir).empty()) return false;
+  if (!pack.count()) return false;
   ShaderPackEntry e;
   if (!pack.Find(hash, vertex, e)) return false;
   *data = pack.base() + e.offset;
@@ -2023,6 +2035,13 @@ bool PackShaderLookup(uint64_t hash, bool vertex, const void** data, size_t* siz
 bool ShaderCorpusAvailable(std::string* where) {
   const ShaderPackView& pack = EmbeddedShaderPack();
   const std::string dir_cvar = REXCVAR_GET(sr_native_shader_dir);
+  std::string lib_where;
+  if (dir_cvar.empty()) {
+    if (const ShaderLibrary* lib = PreShaderLibrary(&lib_where)) {
+      if (where) *where = fmt::format("pre-shaders {}, {} shaders", lib_where, lib->size());
+      return true;
+    }
+  }
   if (pack.count() && dir_cvar.empty()) {
     if (where) *where = fmt::format("embedded pack, {} shaders", pack.count());
     return true;
@@ -2045,6 +2064,19 @@ const std::vector<uint8_t>* Renderer::LoadShader(uint64_t hash, bool vertex) {
   std::snprintf(name, sizeof(name), "%016llX.%s.dxil", (unsigned long long)hash,
                 vertex ? "vs" : "ps");
   std::unique_ptr<std::vector<uint8_t>> data;
+  const ShaderLibrary* lib =
+      REXCVAR_GET(sr_native_shader_dir).empty() ? PreShaderLibrary() : nullptr;
+  if (lib) {
+    if (const PreShader* s = lib->Find(hash, vertex)) {
+      data = std::make_unique<std::vector<uint8_t>>(s->dxil);
+    } else {
+      REXLOG_WARN("native: shader {} not in the pre-shader library", name);
+      LogUnsupportedOnce("shader missing from the pre-shader library", hash, name);
+    }
+    auto* result = data.get();
+    shader_bytecode_[hash] = std::move(data);
+    return result;
+  }
   // Embedded pack unless sr_native_shader_dir points at loose files.
   const ShaderPackView& pack = EmbeddedShaderPack();
   if (pack.count() && REXCVAR_GET(sr_native_shader_dir).empty()) {
