@@ -135,6 +135,9 @@ REXCVAR_DEFINE_BOOL(sr_native_async_pipelines, true, "Superman Returns Native",
                     "for a few frames instead of stalling. Other passes wait (EXP-053)");
 REXCVAR_DEFINE_BOOL(sr_native_alpha_to_coverage, true, "Superman Returns Native",
                     "Xenos alpha to mask (RB_COLORCONTROL) as host alpha to coverage on MSAA targets");
+REXCVAR_DEFINE_STRING(sr_native_debug_vs, "", "Superman Returns Native",
+                      "Debug: log streams, vertex range and first/last vertices of draws using this "
+                      "vertex shader (hex container hash)");
 REXCVAR_DEFINE_INT32(sr_native_debug_vb_addr, 0, "Superman Returns Native",
                      "Debug: log plans and first vertices of draws using this vertex buffer base");
 REXCVAR_DEFINE_BOOL(sr_native_half_pixel_offset, true, "Superman Returns Native",
@@ -2477,6 +2480,18 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
     stats_.pso_create_ms += ms;
     REXLOG_INFO("native: PSO #{} created in {:.2f} ms (pass {} vs {:016X} ps {:016X})",
                 stats_.pso_created + 1, ms, g_current_pass, vs_hash, ps_hash);
+    std::string layout;
+    for (const auto& e : elements) {
+      layout += fmt::format(" {}{}:s{}+{}:f{}", e.SemanticName, e.SemanticIndex, e.InputSlot,
+                            e.AlignedByteOffset, uint32_t(e.Format));
+    }
+    std::string raw;
+    for (uint32_t i = 0; i < decl_count; ++i) {
+      uint32_t e = decl + 0x34 + 12 * i;
+      raw += fmt::format(" u{}.{}:s{}+{}:t{:X}", Load8(base, e + 9), Load8(base, e + 10),
+                         Load16(base, e), Load16(base, e + 2), Load32(base, e + 4));
+    }
+    REXLOG_INFO("native: PSO layout vs {:016X} host:{} | guest decl:{}", vs_hash, layout, raw);
   }
   // Remember it for the next start's precompilation.
   if (elements.size() <= PsoRecord::kMaxElements) {
@@ -3143,6 +3158,28 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
     cb_vs_gpu_ = vs.gpu;
     cb_vs_version_ = use_mirror ? mirror_.vs_version : 0;
   }
+  if (!REXCVAR_GET(sr_native_debug_vs).empty() && use_mirror &&
+      current_vs_hash_ == std::strtoull(REXCVAR_GET(sr_native_debug_vs).c_str(), nullptr, 16)) {
+    static int logged = 0;
+    if (logged < 12) {
+      ++logged;
+      const float* c = reinterpret_cast<const float*>(mirror_.regs() + Pm4Mirror::kAluConstantBase);
+      std::string m;
+      for (uint32_t r = 0; r < 11; ++r) {
+        m += fmt::format(" c{}=({:.3f} {:.3f} {:.3f} {:.3f})", r, c[r * 4], c[r * 4 + 1], c[r * 4 + 2], c[r * 4 + 3]);
+      }
+      std::string sh;
+      for (uint32_t r = 0; r < 11; ++r) {
+        float f[4];
+        for (uint32_t k = 0; k < 4; ++k) {
+          uint32_t w = Load32(base, dev + kDevVsConstants + r * 16 + 4 * k);
+          std::memcpy(&f[k], &w, 4);
+        }
+        sh += fmt::format(" c{}=({:.3f} {:.3f} {:.3f} {:.3f})", r, f[0], f[1], f[2], f[3]);
+      }
+      REXLOG_INFO("native dbg vs consts v{}:{} | shadow:{}", mirror_.vs_version, m, sh);
+    }
+  }
   if (!use_mirror || override_ps || cb_ps_version_ != mirror_.ps_version || !cb_ps_gpu_) {
     UploadAlloc ps;
     if (!Upload(4096, 256, ps)) return false;
@@ -3726,6 +3763,7 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
                                          rtv_formats, rt_count, dsv_format, strip_cut);
   if (!pso) {
     ++stats_.skip_pso;
+    ++stats_.skip_pso_pairs[{vs_hash, ps_hash, g_current_pass}];
     stats_.pass_last_skip[g_current_pass & 31] = "pso";
     LogUnsupportedOnce("pipeline", vs_hash ^ (ps_hash << 1));
     return false;
@@ -4174,6 +4212,33 @@ bool Renderer::PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRan
       }
     }
     batch_->streams.push_back(sp);
+    if (!REXCVAR_GET(sr_native_debug_vs).empty()) {
+      uint64_t want = std::strtoull(REXCVAR_GET(sr_native_debug_vs).c_str(), nullptr, 16);
+      const GuestShaderInfo* a = LookupGuestShader(Load32(base, dev + kDevShaderA));
+      const GuestShaderInfo* b = LookupGuestShader(Load32(base, dev + kDevShaderB));
+      bool match = (a && a->is_vertex && a->container_hash == want) ||
+                   (b && b->is_vertex && b->container_hash == want);
+      static int logged = 0;
+      if (match && logged < 90) {
+        ++logged;
+        uint32_t first = 0, last = 0;
+        if (range && range->end != ~0u) {
+          range->Resolve();
+          first = range->first;
+          last = range->end;
+        }
+        auto vtx = [&](uint32_t index) {
+          std::string v;
+          uint32_t at = 0xA0000000u + address + index * stride;
+          for (uint32_t k = 0; k < stride / 4 && k < 6; ++k) v += fmt::format(" {:.3f}", LoadF32(base, at + 4 * k));
+          return v;
+        };
+        REXLOG_INFO("native dbg vs s{} addr {:08X} size {} stride {} buf {:08X}+{}/{} range [{},{}) "
+                    "action {} | v[first]{} | v[last-1]{}",
+                    s, address, size, stride, buffer_base, offset, buffer_size, first, last,
+                    int(sp.buffer.action), (size >= stride) ? vtx(first) : "", (last > first && (last - 1) * stride < size) ? vtx(last - 1) : "");
+      }
+    }
   }
   return true;
 }
@@ -5131,6 +5196,14 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
       }
     }
     REXLOG_INFO("native: per pass drawn/skipped:{}", per_pass);
+    // Which (vs, ps) pairs account for the pipeline skips.
+    std::vector<std::pair<uint64_t, std::tuple<uint64_t, uint64_t, int>>> top;
+    for (const auto& [k, n] : stats_.skip_pso_pairs) top.emplace_back(n, k);
+    std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+    for (size_t i = 0; i < top.size() && i < 12; ++i) {
+      const auto& [vs, ps, pass] = top[i].second;
+      REXLOG_INFO("native: pso skips {} vs={:016X} ps={:016X} pass {}", top[i].first, vs, ps, pass);
+    }
   }
 }
 

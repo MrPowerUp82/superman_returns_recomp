@@ -46,6 +46,8 @@ namespace rex::system {
 class IGraphicsSystem;
 }
 #include <string>
+#include <map>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -163,6 +165,8 @@ class Renderer {
     uint64_t draws = 0;
     uint64_t draws_skipped = 0;
     uint64_t skip_shader = 0, skip_pso = 0, skip_prim = 0, skip_rt = 0, skip_vb = 0;
+    // Draws skipped for want of a pipeline, per (vs, ps) pair and render pass.
+    std::map<std::tuple<uint64_t, uint64_t, int>, uint64_t> skip_pso_pairs;
     uint64_t resolves = 0;
     uint64_t resolve_textures_created = 0;
     uint64_t pso_created = 0;
