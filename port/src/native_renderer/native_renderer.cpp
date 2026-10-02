@@ -62,6 +62,10 @@ REXCVAR_DEFINE_INT32(sr_native_dump_before_draw, -1, "Superman Returns Native",
                      "Debug: with sr_native_dump_frame_at_s, dump every native surface into "
                      "sr_native_dump_dir right before the Nth draw call (0-based, drawn or "
                      "skipped) of that frame, prefixed d<N>_");
+REXCVAR_DEFINE_STRING(sr_native_dump_vs, "", "Superman Returns Native",
+                      "Debug: with sr_native_dump_frame_at_s, dump every native surface right before the "
+                      "first draw using this vertex shader (hex container hash, files before_*) and "
+                      "right after it (after_*)");
 REXCVAR_DEFINE_INT32(sr_native_dump_before_resolve, -1, "Superman Returns Native",
                      "Debug: with sr_native_dump_frame_at_s, dump every native surface into "
                      "sr_native_dump_dir right before the Nth resolve (0-based) of that frame, "
@@ -3577,7 +3581,18 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
   {
     const int want = REXCVAR_GET(sr_native_dump_before_draw);
     const int index = draw_calls_in_frame_++;
-    if (want >= 0 && index == want && !frame_dump_done_ && frame_open_ &&
+    // sr_native_dump_vs: dump before the first draw of that vertex shader and
+    // at the next draw (= right after it).
+    const bool dump_after = dump_vs_after_pending_;
+    bool dump_vs = false;
+    if (!dump_after && !REXCVAR_GET(sr_native_dump_vs).empty()) {
+      const uint64_t vs_want = std::strtoull(REXCVAR_GET(sr_native_dump_vs).c_str(), nullptr, 16);
+      for (uint32_t off : {kDevShaderA, kDevShaderB}) {
+        const GuestShaderInfo* info = LookupGuestShader(Load32(base, dev + off));
+        if (info && info->is_vertex && info->container_hash == vs_want) dump_vs = true;
+      }
+    }
+    if (((want >= 0 && index == want) || dump_vs || dump_after) && !frame_dump_done_ && frame_open_ &&
         REXCVAR_GET(sr_native_dump_frame_at_s) > 0 &&
         compat::BenchElapsedMs() >= REXCVAR_GET(sr_native_dump_frame_at_s) * 1000.0) {
       // Streams were bound before PrepareDraw. Keep their SRV leases pinned
@@ -3600,7 +3615,8 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
       ID3D12CommandList* lists[] = {command_list_.Get()};
       queue_->ExecuteCommandLists(1, lists);
       queue_->Signal(fence_.Get(), next_fence_value_++);
-      DumpFrameResources(fmt::format("d{}_", index), true);
+      DumpFrameResources(dump_after ? std::string("after_")
+                         : dump_vs  ? std::string("before_") : fmt::format("d{}_", index), true);
       for (auto& retired : retired_srvs_)
         if (retired.first == UINT64_MAX) retired.first = next_fence_value_;
       order_srv_leases();
@@ -3610,8 +3626,13 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
       bound_rt_count_ = 0;
       bound_ds_ = nullptr;
       std::memset(bound_rts_, 0, sizeof(bound_rts_));
-      frame_dump_done_ = true;
-      REXLOG_INFO("native: dumped before draw {}", index);
+      if (dump_vs) {
+        dump_vs_after_pending_ = true;  // the next draw dumps the "after" state
+      } else {
+        dump_vs_after_pending_ = false;
+        frame_dump_done_ = true;
+      }
+      REXLOG_INFO("native: dumped {} draw {}", dump_after ? "after" : dump_vs ? "before vs" : "before", index);
     }
   }
   static const uint64_t pass_mask = [] {
@@ -4255,6 +4276,12 @@ bool Renderer::BindVertexStreams(uint8_t* base, const WorkBatch& batch, const Wo
     const StreamPlan& sp = batch.streams[cmd.stream_first + i];
     const BufferEntry* vb = ApplyBuffer(base, sp.buffer);
     if (!vb) {
+      static int logged = 0;
+      if (logged++ < 20) {
+        REXLOG_WARN("native: vertex stream {} of draw {} has no host buffer (addr {:08X} size {} stride {} "
+                    "action {} offset {})", sp.stream, draw_calls_in_frame_, sp.buffer.address,
+                    sp.buffer.size, sp.buffer.stride, int(sp.buffer.action), sp.offset);
+      }
       ok = false;
       continue;
     }
@@ -4318,6 +4345,14 @@ void Renderer::ExecDrawVertices(uint8_t* base, const WorkBatch& batch, const Wor
     ++stats_.draws_skipped; ++stats_.pass_skips[g_current_pass & 31];
     return;
   }
+  if (!REXCVAR_GET(sr_native_debug_vs).empty() &&
+      current_vs_hash_ == std::strtoull(REXCVAR_GET(sr_native_debug_vs).c_str(), nullptr, 16)) {
+    static int logged = 0;
+    if (logged++ < 30) {
+      REXLOG_INFO("native dbg vs exec (non-indexed): draw {} prim {} start {} vertices {} quads {} ps {:016X} topology {}",
+                  draw_calls_in_frame_ - 1, prim, start_vertex, vertex_count, quads, current_ps_hash_, int(topology));
+    }
+  }
   if (quads) {
     uint32_t quad_count = vertex_count / 4;
     UploadAlloc ib;
@@ -4361,14 +4396,49 @@ void Renderer::ExecDrawIndexedVertices(uint8_t* base, const WorkBatch& batch,
   // Buffers first (planned uploads must happen even for skipped draws).
   bool streams_ok = BindVertexStreams(base, batch, cmd);
   const BufferEntry* ib = cmd.has_index ? ApplyBuffer(base, cmd.index) : nullptr;
-  if (!dev || !index_count || !PrepareDraw(base, dev, prim, topology, quads, cut) || quads ||
-      !streams_ok || !ib) {
+  const bool prepared = dev && index_count && PrepareDraw(base, dev, prim, topology, quads, cut);
+  const uint32_t quad_indices = cmd.u[5];  // expanded triangle indices of an indexed quad list
+  if (!prepared || (quads && !quad_indices) || !streams_ok || !ib) {
+    if (!REXCVAR_GET(sr_native_debug_vs).empty() &&
+        current_vs_hash_ == std::strtoull(REXCVAR_GET(sr_native_debug_vs).c_str(), nullptr, 16)) {
+      static int logged = 0;
+      if (logged++ < 12) {
+        REXLOG_INFO("native dbg vs SKIP indexed: prepared {} quads {} streams_ok {} ib {} (has_index {} "
+                    "index_size {}) prim {} indices {}", prepared, quads, streams_ok, ib != nullptr,
+                    cmd.has_index, cmd.index_size, prim, index_count);
+      }
+    }
     ++stats_.draws_skipped; ++stats_.pass_skips[g_current_pass & 31];
+    return;
+  }
+  if (quads) {
+    UploadAlloc tris;
+    if (!Upload(size_t(quad_indices) * 4, 4, tris)) return;
+    std::memcpy(tris.cpu, batch.bytes.data() + cmd.u[4], size_t(quad_indices) * 4);
+    D3D12_INDEX_BUFFER_VIEW qv{tris.gpu, quad_indices * 4, DXGI_FORMAT_R32_UINT};
+    command_list_->IASetIndexBuffer(&qv);
+    command_list_->DrawIndexedInstanced(quad_indices, 1, 0, base_vertex, 0);
+    ++stats_.draws; ++trace_draws_; Breadcrumb();
+    ++stats_.pass_draws[g_current_pass & 31];
     return;
   }
   D3D12_INDEX_BUFFER_VIEW ibv{ib->resource->GetGPUVirtualAddress(), cmd.index_size,
                               cmd.index32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT};
   command_list_->IASetIndexBuffer(&ibv);
+  if (!REXCVAR_GET(sr_native_debug_vs).empty() &&
+      current_vs_hash_ == std::strtoull(REXCVAR_GET(sr_native_debug_vs).c_str(), nullptr, 16)) {
+    static int logged = 0;
+    if (logged++ < 30) {
+      std::string st;
+      for (uint32_t i = 0; i < cmd.stream_count; ++i) {
+        const StreamPlan& sp = batch.streams[cmd.stream_first + i];
+        st += fmt::format(" s{}:{}B/{}", sp.stream, sp.size, sp.stride);
+      }
+      REXLOG_INFO("native dbg vs exec: draw {} prim {} indices {} start {} base_vertex {} ps {:016X} "
+                  "ib {}B index32 {} streams{}", draw_calls_in_frame_ - 1, prim, index_count, start_index,
+                  base_vertex, current_ps_hash_, cmd.index_size, cmd.index32, st);
+    }
+  }
   command_list_->DrawIndexedInstanced(index_count, 1, start_index, base_vertex, 0);
   ++stats_.draws; ++trace_draws_; Breadcrumb();
   ++stats_.pass_draws[g_current_pass & 31];
@@ -5657,6 +5727,28 @@ void Renderer::DrawIndexedVertices(uint8_t* base, uint32_t prim, int32_t base_ve
     cur_.has_index = ok;
     cur_.index32 = index32;
     cur_.index_size = size;
+    if (prim == uint32_t(xenos::PrimitiveType::kQuadList) && ok &&
+        uint64_t(start_index + index_count) * isize <= size) {
+      // Quads have no host topology: every group of 4 indices (a b c d) becomes
+      // the triangles (a b c) (a c d), like the non-indexed expansion. The
+      // expanded list is captured with the command; base_vertex stays a draw
+      // argument.
+      const uint8_t* idx = REX_KERNEL_MEMORY()->TranslatePhysical<const uint8_t*>(address);
+      const uint32_t quads = index_count / 4;
+      std::vector<uint32_t> tris(size_t(quads) * 6);
+      for (uint32_t q = 0; q < quads; ++q) {
+        uint32_t a = LoadIndex(idx, start_index + q * 4 + 0, index32, endian);
+        uint32_t b = LoadIndex(idx, start_index + q * 4 + 1, index32, endian);
+        uint32_t c = LoadIndex(idx, start_index + q * 4 + 2, index32, endian);
+        uint32_t d = LoadIndex(idx, start_index + q * 4 + 3, index32, endian);
+        uint32_t* t = &tris[size_t(q) * 6];
+        t[0] = a; t[1] = b; t[2] = c; t[3] = a; t[4] = c; t[5] = d;
+      }
+      cur_.u[4] = uint32_t(batch_->bytes.size());
+      cur_.u[5] = uint32_t(tris.size());
+      batch_->bytes.insert(batch_->bytes.end(), reinterpret_cast<const uint8_t*>(tris.data()),
+                           reinterpret_cast<const uint8_t*>(tris.data()) + tris.size() * 4);
+    }
   }
   cur_.streams_ok = PlanStreams(base, dev, Load32(base, dev + kDevVertexDecl), &draw_range);
   EndCmd(base);

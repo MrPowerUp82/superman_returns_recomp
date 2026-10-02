@@ -596,6 +596,7 @@ class Renderer {
   void DumpFrameResources(const std::string& prefix = "", bool surfaces_only = false,
                           bool output_only = false);
   bool frame_dump_done_ = false;
+  bool dump_vs_after_pending_ = false;  // sr_native_dump_vs: dump again at the next draw
   // Frame trace (sr_native_trace_frame_at_s): 0 idle, 1 tracing this frame, 2 done.
   int trace_state_ = 0;
   bool dump_all_active_ = false;
