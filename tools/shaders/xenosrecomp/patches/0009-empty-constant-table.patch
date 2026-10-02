@@ -1,0 +1,21 @@
+--- a/XenosRecomp/shader_recompiler.cpp
++++ b/XenosRecomp/shader_recompiler.cpp
+@@ -1374,14 +1374,16 @@
+     const auto shaderContainer = reinterpret_cast<const ShaderContainer*>(shaderData);
+ 
+     assert((shaderContainer->flags & 0xFFFFFF00) == 0x102A1100);
+-    assert(shaderContainer->constantTableOffset != NULL);
+ 
+     out += include;
+     out += '\n';
+ 
+     isPixelShader = (shaderContainer->flags & 0x1) == 0;
+ 
+-    const auto constantTableContainer = reinterpret_cast<const ConstantTableContainer*>(shaderData + shaderContainer->constantTableOffset);
++    // Minimal shaders (clear/copy quads) are created without a constant table.
++    static const uint8_t emptyConstantTable[sizeof(ConstantTableContainer)] = {};
++    const auto constantTableContainer = reinterpret_cast<const ConstantTableContainer*>(
++        shaderContainer->constantTableOffset != NULL ? shaderData + shaderContainer->constantTableOffset : emptyConstantTable);
+     constantTableData = reinterpret_cast<const uint8_t*>(&constantTableContainer->constantTable);
+ 
+     out += "#ifdef __spirv__\n\n";

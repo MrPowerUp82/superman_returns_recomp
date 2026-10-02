@@ -68,7 +68,8 @@ def parse_container(data: bytes, off: int):
     if size == 0 or off + size > len(data):
         return None
     # Stronger sanity than XenosRecomp: offsets must land inside the virtual section.
-    if not (0 < ctab < vsize and 0 < shoff < vsize and deft < vsize):
+    # ctab == 0: minimal shaders created without a constant table.
+    if not (ctab < vsize and 0 < shoff < vsize and deft < vsize):
         return None
     if shoff + SHADER_HDR.size > vsize:
         return None

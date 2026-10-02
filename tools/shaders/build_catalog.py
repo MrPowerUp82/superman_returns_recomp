@@ -63,9 +63,13 @@ def reflect(blob: bytes):
     is_ps = (flags & 1) == 0
     r = {"constants": [], "samplers": [], "bools": [], "ints": []}
     ct = ctab_off + 4  # ConstantTableContainer{u32 size; ConstantTable}
-    n_const, info_off = u32(blob, ct + 12), u32(blob, ct + 16)
-    r["ctab_creator"] = cstr(blob, ct + u32(blob, ct + 4)) if u32(blob, ct + 4) else None
-    r["ctab_target"] = cstr(blob, ct + u32(blob, ct + 24)) if u32(blob, ct + 24) else None
+    if ctab_off == 0:  # minimal shader created without a constant table
+        n_const, info_off = 0, 0
+        r["ctab_creator"] = r["ctab_target"] = None
+    else:
+        n_const, info_off = u32(blob, ct + 12), u32(blob, ct + 16)
+        r["ctab_creator"] = cstr(blob, ct + u32(blob, ct + 4)) if u32(blob, ct + 4) else None
+        r["ctab_target"] = cstr(blob, ct + u32(blob, ct + 24)) if u32(blob, ct + 24) else None
     for i in range(n_const):
         o = ct + info_off + i * 20
         name = cstr(blob, ct + u32(blob, o))
