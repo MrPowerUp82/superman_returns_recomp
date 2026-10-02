@@ -169,6 +169,7 @@ class Renderer {
     std::map<std::tuple<uint64_t, uint64_t, int>, uint64_t> skip_pso_pairs;
     uint64_t buffer_watch_dirty = 0;
     uint64_t buffer_hash_dirty = 0;
+    uint64_t edram_reinterprets = 0;
     uint64_t resolves = 0;
     uint64_t resolve_textures_created = 0;
     uint64_t pso_created = 0;

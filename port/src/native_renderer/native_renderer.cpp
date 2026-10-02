@@ -80,6 +80,13 @@ REXCVAR_DEFINE_BOOL(sr_native_hdr_from_ldr_black, true, "Superman Returns Native
                     "from black (0,0,0,1) instead of reinterpreting the bits: the cleared 8888 value "
                     "0xFF000000 reads as 7e3 (0,0,30,1), which distance-faded terrain blended into "
                     "blue dashes along curbs");
+REXCVAR_DEFINE_BOOL(sr_native_debug_skip_reinterpret_draw, false, "Superman Returns Native",
+                    "Debug (wrong pixels): skip the full-screen draw of EDRAM reinterpretation to time its cost");
+REXCVAR_DEFINE_BOOL(sr_native_merge_7e3_surfaces, true, "Superman Returns Native",
+                    "Share one host surface between the guest formats 2_10_10_10_FLOAT (3) and "
+                    "2_10_10_10_FLOAT_AS_16_16_16_16 (12): they are the same 7e3 EDRAM encoding, and "
+                    "keeping two surfaces cost a full-screen copy at every switch between them "
+                    "(~35 per frame)");
 REXCVAR_DEFINE_INT32(sr_native_dump_before_resolve, -1, "Superman Returns Native",
                      "Debug: with sr_native_dump_frame_at_s, dump every native surface into "
                      "sr_native_dump_dir right before the Nth resolve (0-based) of that frame, "
@@ -1338,6 +1345,7 @@ Renderer::HostSurface* Renderer::GetSurface(uint8_t* base, uint32_t surface_obje
   width = std::max(width, min_width);
   height = std::max(height, min_height);
   uint32_t format = (color_depth_info >> 16) & 0xF;
+  if (!depth && format == 3 && REXCVAR_GET(sr_native_merge_7e3_surfaces)) format = 12;
   // Guest surfaces alias by EDRAM location: different surface objects with the
   // same EDRAM base (e.g. the depth pre-pass and the opaque pass depth) share
   // contents on Xenos, so the host RT is keyed by EDRAM base + format + size,
@@ -1886,7 +1894,8 @@ bool Renderer::ReinterpretSurface(HostSurface& dst, HostSurface& src) {
   command_list_->RSSetViewports(1, &vp);
   command_list_->RSSetScissorRects(1, &sc);
   command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-  command_list_->DrawInstanced(3, 1, 0, 0);
+  if (!REXCVAR_GET(sr_native_debug_skip_reinterpret_draw)) command_list_->DrawInstanced(3, 1, 0, 0);
+  ++stats_.edram_reinterprets;
   Breadcrumb("edram reinterpret");
   // Guest state must be rebound (root signature, heaps, targets).
   frame_state_bound_ = false;
@@ -3786,6 +3795,12 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
                 LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_BLENDCONTROL0),
                 LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_DEPTHCONTROL),
                 LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_COLOR_MASK), els);
+    REXLOG_INFO("trace scissor #{} window {:08X}-{:08X} screen {:08X}-{:08X} offset {:08X}", draw_index,
+                mirror_.reg(rex::graphics::XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL),
+                mirror_.reg(rex::graphics::XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR),
+                mirror_.reg(rex::graphics::XE_GPU_REG_PA_SC_SCREEN_SCISSOR_TL),
+                mirror_.reg(rex::graphics::XE_GPU_REG_PA_SC_SCREEN_SCISSOR_BR),
+                mirror_.reg(rex::graphics::XE_GPU_REG_PA_SC_WINDOW_OFFSET));
   }
   bool depth_only = !ps_hash && vs_hash && Load32(base, dev + kDevShaderA) == 0;
   if (!vs_hash || (!ps_hash && !depth_only) || !decl) {
@@ -5386,6 +5401,7 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
                   retired_.size(), srv_heap_next_, retired_srvs_.size(), rtv_heap_next_,
                   upload_peak_ >> 10, overflow_pages_created_);
     }
+    REXLOG_INFO("native: EDRAM reinterpretations {} over {} frames", stats_.edram_reinterprets, frame_count_);
     REXLOG_INFO("native: buffers made dirty by the write watch {} / by the per-frame hash {}",
                 stats_.buffer_watch_dirty, stats_.buffer_hash_dirty);
     REXLOG_INFO("native: gpu fence wait {} ms total, frames {}", stats_.gpu_wait_us / 1000,
