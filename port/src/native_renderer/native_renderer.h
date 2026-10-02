@@ -322,6 +322,24 @@ class Renderer {
   int ts_last_pass_ = -1;
   double ts_pass_ms_[32] = {};
   void PassTimestamp(int pass);
+  // Per-command GPU profile of one frame (sr_native_profile_frame_at_s).
+  static constexpr uint32_t kProfMax = 16384;
+  struct ProfMark {
+    uint8_t op;
+    bool drew;
+    uint64_t vs, ps;
+    std::string rt;
+  };
+  bool SkipGpuDraw() const;
+  void ProfileBegin();
+  void ProfileMark(Op op, bool drew);
+  void ProfileEnd();
+  void ProfileReport();
+  Microsoft::WRL::ComPtr<ID3D12QueryHeap> prof_heap_;
+  Microsoft::WRL::ComPtr<ID3D12Resource> prof_readback_;
+  std::vector<ProfMark> prof_marks_;
+  bool prof_active_ = false, prof_done_ = false;
+  int64_t prof_frame_ = -1;
   uint64_t ts_frames_ = 0;
   std::chrono::steady_clock::time_point ts_last_log_{};
   bool CreateDrawResources();
@@ -473,6 +491,7 @@ class Renderer {
   float bound_scale_ = 1.0f;   // host pixels per guest pixel of the current bind set
   // User settings (cvars), fixed at startup.
   float render_scale_ = 1.0f, shadow_scale_ = 1.0f, bloom_scale_ = 1.0f;
+  float shadow_mul_ = 1.0f;  // sr_native_shadow_scale_mul (shape-detected shadow map)
   bool full_scene_resolution_ = false, foliage_aa_ = false;
   uint32_t msaa_samples_ = 0;
   int32_t anisotropy_ = -1;

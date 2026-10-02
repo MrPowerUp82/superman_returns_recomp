@@ -87,6 +87,16 @@ REXCVAR_DEFINE_BOOL(sr_native_merge_7e3_surfaces, true, "Superman Returns Native
                     "2_10_10_10_FLOAT_AS_16_16_16_16 (12): they are the same 7e3 EDRAM encoding, and "
                     "keeping two surfaces cost a full-screen copy at every switch between them "
                     "(~35 per frame)");
+REXCVAR_DEFINE_DOUBLE(sr_native_profile_frame_at_s, 0.0, "Superman Returns Native",
+                      "Debug: after this many seconds since the first swap, time every command of one "
+                      "frame on the GPU (timestamp after each draw/resolve/clear) and log the cost "
+                      "per (vertex shader, pixel shader) pair and per operation");
+REXCVAR_DEFINE_DOUBLE(sr_native_shadow_scale_mul, 1.0, "Superman Returns Native",
+                      "Multiplier on the shadow map resolution (shadow_quality x this); below 1 trades "
+                      "shadow sharpness for GPU time");
+REXCVAR_DEFINE_INT32(sr_native_debug_nodraw_format, -1, "Superman Returns Native",
+                     "Debug (wrong pixels): record every state of the draws that target this guest color "
+                     "format but skip the draw call itself, to split state cost from draw cost");
 REXCVAR_DEFINE_INT32(sr_native_dump_before_resolve, -1, "Superman Returns Native",
                      "Debug: with sr_native_dump_frame_at_s, dump every native surface into "
                      "sr_native_dump_dir right before the Nth resolve (0-based) of that frame, "
@@ -185,9 +195,11 @@ REXCVAR_DEFINE_DOUBLE(sr_native_render_scale, 1.0, "Superman Returns Native",
 REXCVAR_DEFINE_INT32(sr_native_shadow_quality, 1, "Superman Returns Native",
                      "Shadow map resolution multiplier (1 = original 1024, 2 = 2048, 4 = 4096)")
     .range(1, 4);
-REXCVAR_DEFINE_INT32(sr_native_msaa_samples, 0, "Superman Returns Native",
+REXCVAR_DEFINE_INT32(sr_native_msaa_samples, 1, "Superman Returns Native",
                      "MSAA samples for the surfaces the game multisamples (0 = game's 4x, "
-                     "1 = off, 2, 4, 8; launcher: Off / 4x / 8x)")
+                     "1 = off, 2, 4, 8; launcher: Off / 4x / 8x). Only the 640x640 shadow map is "
+                     "multisampled in the scene; at 4x it cost ~7 ms of a ~35 ms GPU frame, off it "
+                     "costs ~2.5 ms")
     .range(0, 8);
 REXCVAR_DEFINE_BOOL(sr_native_full_scene_resolution, true, "Superman Returns Native",
                     "Scale scene surfaces by output width / game_profile kSceneWidth (Conan rendered "
@@ -632,6 +644,7 @@ bool Renderer::EnsureInitialized() {
   init_failed_ = true;
   render_scale_ = float(std::clamp(REXCVAR_GET(sr_native_render_scale), 1.0, 4.0));
   shadow_scale_ = float(std::clamp(REXCVAR_GET(sr_native_shadow_quality), 1, 4));
+  shadow_mul_ = float(std::clamp(REXCVAR_GET(sr_native_shadow_scale_mul), 0.25, 1.0));
   {
     int32_t m = REXCVAR_GET(sr_native_msaa_samples);
     msaa_samples_ = m >= 8 ? 8u : m >= 4 ? 4u : m >= 2 ? 2u : m == 1 ? 1u : 0u;
@@ -1178,6 +1191,143 @@ void Renderer::Transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES& state
   state = after;
 }
 
+// ---------------------------------------------------------------------------
+// Per-command GPU profile of one frame (sr_native_profile_frame_at_s).
+// ---------------------------------------------------------------------------
+
+bool Renderer::SkipGpuDraw() const {
+  const int32_t format = REXCVAR_GET(sr_native_debug_nodraw_format);
+  return format >= 0 && bound_rts_[0] && !bound_rts_[0]->depth &&
+         int32_t(bound_rts_[0]->guest_format) == format;
+}
+
+void Renderer::ProfileBegin() {
+  const double at = REXCVAR_GET(sr_native_profile_frame_at_s);
+  if (at <= 0.0 || prof_done_ || prof_active_ || !frame_open_) return;
+  if (compat::BenchElapsedMs() < at * 1000.0) return;
+  if (!ts_frequency_) {
+    if (FAILED(queue_->GetTimestampFrequency(&ts_frequency_))) {
+      prof_done_ = true;
+      return;
+    }
+  }
+  if (!prof_heap_) {
+    D3D12_QUERY_HEAP_DESC qd{};
+    qd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+    qd.Count = kProfMax;
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_READBACK;
+    D3D12_RESOURCE_DESC rd{};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    rd.Width = 8 * kProfMax;
+    rd.Height = 1;
+    rd.DepthOrArraySize = 1;
+    rd.MipLevels = 1;
+    rd.SampleDesc.Count = 1;
+    rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if (FAILED(device_->CreateQueryHeap(&qd, IID_PPV_ARGS(&prof_heap_))) ||
+        FAILED(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &rd,
+                                                D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                IID_PPV_ARGS(&prof_readback_)))) {
+      prof_heap_.Reset();
+      prof_done_ = true;
+      return;
+    }
+  }
+  prof_marks_.clear();
+  prof_active_ = true;
+  prof_frame_ = int64_t(frame_count_);
+  command_list_->EndQuery(prof_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
+  prof_marks_.push_back({255, false, 0, 0, std::string()});
+  REXLOG_INFO("native profile: timing frame {}", frame_count_);
+}
+
+void Renderer::ProfileMark(Op op, bool drew) {
+  if (!prof_active_ || prof_marks_.size() >= kProfMax - 1) return;
+  const uint32_t index = uint32_t(prof_marks_.size());
+  command_list_->EndQuery(prof_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, index);
+  const bool is_draw = op == Op::kDraw || op == Op::kDrawIndexed || op == Op::kDrawInline;
+  std::string rt;
+  if (is_draw && bound_rts_[0]) rt = SurfaceName(bound_rts_[0]);
+  prof_marks_.push_back({uint8_t(op), is_draw && drew, is_draw ? current_vs_hash_ : 0,
+                         is_draw ? current_ps_hash_ : 0, std::move(rt)});
+}
+
+void Renderer::ProfileEnd() {
+  if (!prof_active_) return;
+  const uint32_t n = uint32_t(prof_marks_.size());
+  command_list_->EndQuery(prof_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, n);
+  command_list_->ResolveQueryData(prof_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, n + 1,
+                                  prof_readback_.Get(), 0);
+  prof_marks_.push_back({254, false, 0, 0, std::string()});
+}
+
+void Renderer::ProfileReport() {
+  if (!prof_active_) return;
+  prof_active_ = false;
+  prof_done_ = true;
+  const uint64_t wait_value = frame_fence_values_[frame_index_];
+  fence_->SetEventOnCompletion(wait_value, fence_event_);
+  WaitForSingleObject(fence_event_, 5000);
+  const uint32_t n = uint32_t(prof_marks_.size());
+  const uint64_t* t = nullptr;
+  D3D12_RANGE range{0, size_t(8) * n};
+  if (n < 3 || FAILED(prof_readback_->Map(0, &range, reinterpret_cast<void**>(const_cast<uint64_t**>(&t))))) {
+    return;
+  }
+  const double to_ms = 1000.0 / double(ts_frequency_);
+  REXLOG_INFO("native profile: {} timestamps, frequency {} raw t[0..3] {} {} {} {} last {}", n, ts_frequency_, t[0],
+              t[1], t[2], t[3], t[n - 1]);
+  struct Acc {
+    double ms = 0.0;
+    uint32_t count = 0;
+    uint32_t drawn = 0;
+  };
+  std::map<std::pair<uint64_t, uint64_t>, Acc> by_pair;
+  std::map<std::string, Acc> by_rt, by_op;
+  static const char* names[] = {"draw", "drawidx", "drawinline", "resolve", "begintiling",
+                                "endtiling", "swap", "passend", "ring", "clear"};
+  double total = 0.0;
+  for (uint32_t i = 1; i + 1 < n; ++i) {
+    const double dt = t[i] >= t[i - 1] ? double(t[i] - t[i - 1]) * to_ms : 0.0;
+    const ProfMark& m = prof_marks_[i];
+    total += dt;
+    const bool is_draw = m.op <= 2;
+    if (is_draw) {
+      Acc& a = by_pair[{m.vs, m.ps}];
+      a.ms += dt;
+      ++a.count;
+      a.drawn += m.drew ? 1 : 0;
+      Acc& r = by_rt[m.rt.empty() ? "-" : m.rt];
+      r.ms += dt;
+      ++r.count;
+    }
+    Acc& o = by_op[names[m.op % 10]];
+    o.ms += dt;
+    ++o.count;
+  }
+  const double frame_ms = t[n - 1] >= t[0] ? double(t[n - 1] - t[0]) * to_ms : 0.0;
+  REXLOG_INFO("native profile: frame {} GPU {:.2f} ms over {} commands (sum of command deltas {:.2f} ms)",
+              prof_frame_, frame_ms, n - 2, total);
+  for (const auto& [name, a] : by_op) {
+    REXLOG_INFO("native profile: op {:12} {:4} cmds {:7.3f} ms ({:4.1f}%)", name, a.count, a.ms,
+                100.0 * a.ms / std::max(total, 1e-9));
+  }
+  for (const auto& [name, a] : by_rt) {
+    REXLOG_INFO("native profile: rt {:24} {:4} draws {:7.3f} ms ({:4.1f}%)", name, a.count, a.ms,
+                100.0 * a.ms / std::max(total, 1e-9));
+  }
+  std::vector<std::pair<std::pair<uint64_t, uint64_t>, Acc>> pairs(by_pair.begin(), by_pair.end());
+  std::sort(pairs.begin(), pairs.end(), [](const auto& a, const auto& b) { return a.second.ms > b.second.ms; });
+  for (size_t i = 0; i < pairs.size() && i < 30; ++i) {
+    const auto& [key, a] = pairs[i];
+    REXLOG_INFO("native profile: vs {:016X} ps {:016X} {:4} draws ({:4} drawn) {:7.3f} ms ({:4.1f}%) avg {:6.1f} us",
+                key.first, key.second, a.count, a.drawn, a.ms, 100.0 * a.ms / std::max(total, 1e-9),
+                a.ms * 1000.0 / std::max<uint32_t>(a.count, 1));
+  }
+  prof_readback_->Unmap(0, nullptr);
+}
+
 void Renderer::BeginFrameTimestamp() {
   if (!ts_heap_) {
     D3D12_QUERY_HEAP_DESC qd{};
@@ -1325,6 +1475,7 @@ bool Renderer::BeginFrame() {
   bound_rt_count_ = 0;
   bound_ds_ = nullptr;
   std::memset(bound_rts_, 0, sizeof(bound_rts_));
+  ProfileBegin();
   return true;
 }
 
@@ -1390,6 +1541,12 @@ Renderer::HostSurface* Renderer::GetSurface(uint8_t* base, uint32_t surface_obje
     s.scale = 1.0f;
   } else if (g_current_pass == kPassRenderShadowMaps && width == height) {
     s.scale = shadow_scale_;
+    s.shadow = true;
+  } else if (kPassRenderShadowMaps < 0 && shadow_mul_ != 1.0f && width == height && width >= 512 &&
+             (depth || format == 4)) {
+    // The profile has no shadow pass role: the square 640x640 16_16 target and
+    // its depth are the shadow map.
+    s.scale = shadow_mul_;
     s.shadow = true;
   } else {
     s.scale = render_scale_;
@@ -4510,9 +4667,9 @@ void Renderer::ExecDrawVertices(uint8_t* base, const WorkBatch& batch, const Wor
     }
     D3D12_INDEX_BUFFER_VIEW ibv{ib.gpu, quad_count * 24, DXGI_FORMAT_R32_UINT};
     command_list_->IASetIndexBuffer(&ibv);
-    command_list_->DrawIndexedInstanced(quad_count * 6, 1, 0, 0, 0);
+    if (!SkipGpuDraw()) command_list_->DrawIndexedInstanced(quad_count * 6, 1, 0, 0, 0);
   } else {
-    command_list_->DrawInstanced(vertex_count, 1, start_vertex, 0);
+    if (!SkipGpuDraw()) command_list_->DrawInstanced(vertex_count, 1, start_vertex, 0);
   }
   ++stats_.draws; ++trace_draws_; Breadcrumb();
   ++stats_.pass_draws[g_current_pass & 31];
@@ -4558,7 +4715,7 @@ void Renderer::ExecDrawIndexedVertices(uint8_t* base, const WorkBatch& batch,
     std::memcpy(tris.cpu, batch.bytes.data() + cmd.u[4], size_t(quad_indices) * 4);
     D3D12_INDEX_BUFFER_VIEW qv{tris.gpu, quad_indices * 4, DXGI_FORMAT_R32_UINT};
     command_list_->IASetIndexBuffer(&qv);
-    command_list_->DrawIndexedInstanced(quad_indices, 1, 0, base_vertex, 0);
+    if (!SkipGpuDraw()) command_list_->DrawIndexedInstanced(quad_indices, 1, 0, base_vertex, 0);
     ++stats_.draws; ++trace_draws_; Breadcrumb();
     ++stats_.pass_draws[g_current_pass & 31];
     return;
@@ -4580,7 +4737,7 @@ void Renderer::ExecDrawIndexedVertices(uint8_t* base, const WorkBatch& batch,
                   base_vertex, current_ps_hash_, cmd.index_size, cmd.index32, st);
     }
   }
-  command_list_->DrawIndexedInstanced(index_count, 1, start_index, base_vertex, 0);
+  if (!SkipGpuDraw()) command_list_->DrawIndexedInstanced(index_count, 1, start_index, base_vertex, 0);
   ++stats_.draws; ++trace_draws_; Breadcrumb();
   ++stats_.pass_draws[g_current_pass & 31];
 }
@@ -4727,7 +4884,7 @@ void Renderer::ExecDrawInlineVertices(uint8_t* base, uint32_t prim, uint32_t dat
     std::memcpy(rect_vb.cpu, expanded.data(), expanded.size());
     D3D12_VERTEX_BUFFER_VIEW rect_view{rect_vb.gpu, uint32_t(expanded.size()), stride};
     command_list_->IASetVertexBuffers(0, 1, &rect_view);
-    command_list_->DrawInstanced(uint32_t(expanded.size() / stride), 1, 0, 0);
+    if (!SkipGpuDraw()) command_list_->DrawInstanced(uint32_t(expanded.size() / stride), 1, 0, 0);
     ++stats_.draws; ++trace_draws_; Breadcrumb();
     ++stats_.pass_draws[g_current_pass & 31];
     return;
@@ -4751,9 +4908,9 @@ void Renderer::ExecDrawInlineVertices(uint8_t* base, uint32_t prim, uint32_t dat
     }
     D3D12_INDEX_BUFFER_VIEW ibv{ib.gpu, quad_count * 12, DXGI_FORMAT_R16_UINT};
     command_list_->IASetIndexBuffer(&ibv);
-    command_list_->DrawIndexedInstanced(quad_count * 6, 1, 0, 0, 0);
+    if (!SkipGpuDraw()) command_list_->DrawIndexedInstanced(quad_count * 6, 1, 0, 0, 0);
   } else {
-    command_list_->DrawInstanced(vertex_count, 1, 0, 0);
+    if (!SkipGpuDraw()) command_list_->DrawInstanced(vertex_count, 1, 0, 0);
   }
   ++stats_.draws; ++trace_draws_; Breadcrumb();
   ++stats_.pass_draws[g_current_pass & 31];
@@ -5255,6 +5412,7 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
                      rex::ui::d3d12::D3D12Presenter::kGuestOutputInternalState);
         }
         EndFrameTimestamp();
+        ProfileEnd();
         command_list_->Close();
         ID3D12CommandList* lists[] = {command_list_.Get()};
         queue_->ExecuteCommandLists(1, lists);
@@ -5294,6 +5452,7 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
 
   if (frame_open_) {
     EndFrameTimestamp();
+    ProfileEnd();
     command_list_->Close();
     ID3D12CommandList* lists[] = {command_list_.Get()};
     queue_->ExecuteCommandLists(1, lists);
@@ -5301,6 +5460,7 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
   }
   queue_->Signal(fence_.Get(), next_fence_value_);
   frame_fence_values_[frame_index_] = next_fence_value_++;
+  ProfileReport();
   if (dump_all_active_) {
     dump_all_active_ = false;
     frame_dump_done_ = true;
@@ -5914,6 +6074,8 @@ void Renderer::Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd
   if (cmd.ring_bytes) {
     mirror_.ScanCopy(base, batch.bytes.data() + cmd.ring_offset, cmd.ring_bytes);
   }
+  const bool profiling = prof_active_ && frame_open_;
+  const uint64_t prof_stats_draws = stats_.draws;
   switch (cmd.op) {
     case Op::kDraw:
       ExecDrawVertices(base, batch, cmd);
@@ -5949,6 +6111,7 @@ void Renderer::Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd
     case Op::kRing:
       break;
   }
+  if (profiling) ProfileMark(cmd.op, stats_.draws != prof_stats_draws);
   t_capture_count = 0;
   t_capture_ranges = nullptr;
 }
