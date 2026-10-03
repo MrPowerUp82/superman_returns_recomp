@@ -10,6 +10,7 @@ repository fetches it. Re-running replaces src/ after a pin or patch change.
 usage: python tools/shaders/fetch_xenosrecomp.py [--force]
 """
 import argparse
+import hashlib
 import os
 import shutil
 import stat
@@ -34,11 +35,14 @@ def git(*args, cwd=None):
     subprocess.run(["git", *args], cwd=cwd, check=True)
 
 
+def patch_fingerprint(patches):
+    return hashlib.sha256(b"".join(p.name.encode()+b"\0"+p.read_bytes()+b"\0" for p in patches)).hexdigest()
+
 def fetch_source(force):
     src = XENOSRECOMP / "src"
     stamp = src / ".sr_pin"
     patches = sorted((HERE / "xenosrecomp" / "patches").glob("*.patch"))
-    want = XENOSRECOMP_PIN + "\n" + "\n".join(p.name for p in patches)
+    want = XENOSRECOMP_PIN + "\n" + "\n".join(p.name for p in patches) + "\n" + patch_fingerprint(patches)
     if src.exists() and not force and stamp.exists() and stamp.read_text() == want:
         print(f"[xenosrecomp] source up to date at {src}")
         return

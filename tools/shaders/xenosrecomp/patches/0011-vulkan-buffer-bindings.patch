@@ -1,0 +1,280 @@
+--- a/XenosRecomp/shader_common.h
++++ b/XenosRecomp/shader_common.h
+@@ -39,6 +39,18 @@
+ 
+ #ifdef __spirv__
+ 
++#ifdef SR_VULKAN_BUFFERS
++[[vk::binding(0,0)]] ByteAddressBuffer g_VertexShaderConstants;
++[[vk::binding(1,0)]] ByteAddressBuffer g_PixelShaderConstants;
++[[vk::binding(2,0)]] ByteAddressBuffer g_SharedConstants;
++#define SR_LOAD_FLOAT4(STAGE,OFFSET) asfloat(g_ ## STAGE ## ShaderConstants.Load4(OFFSET))
++#define SR_SHARED_UINT(OFFSET) g_SharedConstants.Load(OFFSET)
++#define SR_SHARED_UINT4(OFFSET) g_SharedConstants.Load4(OFFSET)
++#define SR_SHARED_FLOAT(OFFSET) asfloat(g_SharedConstants.Load(OFFSET))
++#define SR_SHARED_FLOAT2(OFFSET) asfloat(g_SharedConstants.Load2(OFFSET))
++#define SR_SHARED_FLOAT4(OFFSET) asfloat(g_SharedConstants.Load4(OFFSET))
++#else
++
+ struct PushConstants
+ {
+     uint64_t VertexShaderConstants;
+@@ -48,43 +60,61 @@
+ 
+ [[vk::push_constant]] ConstantBuffer<PushConstants> g_PushConstants;
+ 
++#define SR_LOAD_FLOAT4(STAGE,OFFSET) vk::RawBufferLoad<float4>(g_PushConstants.STAGE ## ShaderConstants + (OFFSET), 0x10)
++#define SR_SHARED_UINT(OFFSET) vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + (OFFSET))
++#define SR_SHARED_UINT4(OFFSET) vk::RawBufferLoad<uint4>(g_PushConstants.SharedConstants + (OFFSET))
++#define SR_SHARED_FLOAT(OFFSET) vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + (OFFSET))
++#define SR_SHARED_FLOAT2(OFFSET) vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + (OFFSET))
++#define SR_SHARED_FLOAT4(OFFSET) vk::RawBufferLoad<float4>(g_PushConstants.SharedConstants + (OFFSET))
++#endif
++
+ #ifdef REBLUE_RECOMP
+ // 256-bit boolean register file (BD bool addresses reach ~158), then per-usage 16-bit-pair swap masks.
+-#define g_Booleans(i)              vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 256 + (i)*4)
+-#define g_SwappedTexcoords         vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 288)
+-#define g_HalfPixelOffset          vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 292)
+-#define g_AlphaThreshold           vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 300)
+-#define g_SwappedNormals           vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 304)
+-#define g_SwappedBinormals         vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 308)
+-#define g_SwappedTangents          vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 312)
+-#define g_SwappedBlendWeights      vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 316)
+-#define g_SwappedPositions         vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 320)
+-#define g_SintTexcoords            vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 324)
+-#define g_ShadowPcfScale           vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 328)
++#define g_Booleans(i)              SR_SHARED_UINT(256 + (i)*4)
++#define g_SwappedTexcoords         SR_SHARED_UINT(288)
++#define g_HalfPixelOffset          SR_SHARED_FLOAT2(292)
++#define g_AlphaThreshold           SR_SHARED_FLOAT(300)
++#define g_SwappedNormals           SR_SHARED_UINT(304)
++#define g_SwappedBinormals         SR_SHARED_UINT(308)
++#define g_SwappedTangents          SR_SHARED_UINT(312)
++#define g_SwappedBlendWeights      SR_SHARED_UINT(316)
++#define g_SwappedPositions         SR_SHARED_UINT(320)
++#define g_SintTexcoords            SR_SHARED_UINT(324)
++#define g_ShadowPcfScale           SR_SHARED_FLOAT(328)
+ #elif defined(CONAN_RECOMP)
+ // Conan layout (tools/xenosrecomp/patches): c16-c17 = the 256-bit Xenos bool file
+ // (VS 0..127, PS 128..255, LSB-first per dword like SHADER_CONSTANT_BOOL_*),
+ // c18 = misc, c19-c26 = the 32 Xenos loop constants (SHADER_CONSTANT_LOOP_00..31:
+ // count bits 0-7, start bits 8-15, signed step bits 16-23; VS i0-15 = 0-15,
+ // PS i0-15 = 16-31).
+-#define g_Booleans(i)              vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 256 + (i)*4)
+-#define g_SwappedTexcoords         vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 288)
+-#define g_HalfPixelOffset          vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 292)
+-#define g_AlphaThreshold           vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 300)
+-#define g_VertexFetch(i)           vk::RawBufferLoad<uint4>(g_PushConstants.SharedConstants + 512 + (i)*16)
+-#define g_LoopConstant(i)          vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 304 + (i)*4)
+-#define g_ScreenXform              vk::RawBufferLoad<float4>(g_PushConstants.SharedConstants + 432)
+-#define g_SpecConstantsRuntime     vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 448)
+-#else
+-#define g_Booleans                 vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 256)
+-#define g_SwappedTexcoords         vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 260)
+-#define g_HalfPixelOffset          vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 264)
+-#define g_AlphaThreshold           vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 272)
+-#endif
+-
++#define g_Booleans(i)              SR_SHARED_UINT(256 + (i)*4)
++#define g_SwappedTexcoords         SR_SHARED_UINT(288)
++#define g_HalfPixelOffset          SR_SHARED_FLOAT2(292)
++#define g_AlphaThreshold           SR_SHARED_FLOAT(300)
++#define g_VertexFetch(i)           SR_SHARED_UINT4(512 + (i)*16)
++#define g_LoopConstant(i)          SR_SHARED_UINT(304 + (i)*4)
++#define g_ScreenXform              SR_SHARED_FLOAT4(432)
++#define g_SpecConstantsRuntime     SR_SHARED_UINT(448)
++#else
++#define g_Booleans                 SR_SHARED_UINT(256)
++#define g_SwappedTexcoords         SR_SHARED_UINT(260)
++#define g_HalfPixelOffset          SR_SHARED_FLOAT2(264)
++#define g_AlphaThreshold           SR_SHARED_FLOAT(272)
++#endif
++
++#ifdef SR_VULKAN_BUFFERS
++#define g_PixelPosScale SR_SHARED_FLOAT(452)
++#define g_ShadowAtlasTexelScale SR_SHARED_FLOAT(456)
++#define g_ShadowSoftness SR_SHARED_FLOAT(460)
++#define g_SoftParticleW SR_SHARED_FLOAT2(464)
++#define g_SoftParticleDistance SR_SHARED_FLOAT(472)
++#define g_SoftParticleTexelScale SR_SHARED_FLOAT(476)
++#define g_SoftParticleDepth SR_SHARED_UINT(480)
++#define g_SpecConstants() g_SpecConstantsRuntime
++#else
+ [[vk::constant_id(0)]] const uint g_SpecConstants = 0;
+-
+ #define g_SpecConstants() g_SpecConstants
++#endif
+ 
+ #else
+ 
+@@ -176,10 +206,26 @@
+ #define conanGamma(i, v) (v)
+ #endif
+ 
++#ifdef SR_VULKAN_BUFFERS
++[[vk::binding(0,1)]] Texture2D<float4> g_Texture2DDescriptorHeap[32];
++#else
+ Texture2D<float4> g_Texture2DDescriptorHeap[] : register(t0, space0);
++#endif
++#ifdef SR_VULKAN_BUFFERS
++[[vk::binding(1,1)]] Texture3D<float4> g_Texture3DDescriptorHeap[32];
++#else
+ Texture3D<float4> g_Texture3DDescriptorHeap[] : register(t0, space1);
++#endif
++#ifdef SR_VULKAN_BUFFERS
++[[vk::binding(2,1)]] TextureCube<float4> g_TextureCubeDescriptorHeap[32];
++#else
+ TextureCube<float4> g_TextureCubeDescriptorHeap[] : register(t0, space2);
++#endif
++#ifdef SR_VULKAN_BUFFERS
++[[vk::binding(0,2)]] SamplerState g_SamplerDescriptorHeap[32];
++#else
+ SamplerState g_SamplerDescriptorHeap[] : register(s0, space3);
++#endif
+ 
+ uint2 getTexture2DDimensions(Texture2D<float4> texture)
+ {
+@@ -342,7 +388,11 @@
+ }
+ // Dynamically indexed Xenos fetches (instancing): host-order, interleaved
+ // vertex streams. Descriptor metadata comes from the actual D3D declaration.
++#ifdef SR_VULKAN_BUFFERS
++[[vk::binding(0,3)]] ByteAddressBuffer g_VertexBufferHeap[32];
++#else
+ ByteAddressBuffer g_VertexBufferHeap[] : register(t0, space5);
++#endif
+ #define srVertexFetch(semantic, index, packed) srVertexFetchImpl(g_VertexFetch(semantic), index, packed)
+ float4 srVertexFetchImpl(uint4 meta, float index, bool packed)
+ {
+--- a/XenosRecomp/shader_recompiler.cpp
++++ b/XenosRecomp/shader_recompiler.cpp
+@@ -1444,12 +1444,12 @@
+             {
+                 uint32_t tailCount = (isPixelShader ? PS_FLOAT_CONSTANT_COUNT : 256) - constantInfo->registerIndex;
+ 
+-                println("#define {}(INDEX) select((INDEX) < {}, vk::RawBufferLoad<float4>(g_PushConstants.{}ShaderConstants + ({} + min(INDEX, {})) * 16, 0x10), 0.0)",
++                println("#define {}(INDEX) select((INDEX) < {}, SR_LOAD_FLOAT4({}, ({} + min(INDEX, {})) * 16), 0.0)",
+                     constantName, tailCount, shaderName, constantInfo->registerIndex.get(), tailCount - 1);
+             }
+             else
+             {
+-                println("#define {} vk::RawBufferLoad<float4>(g_PushConstants.{}ShaderConstants + {}, 0x10)",
++                println("#define {} SR_LOAD_FLOAT4({}, {})",
+                     constantName, shaderName, constantInfo->registerIndex * 16);
+             }
+             
+@@ -1474,11 +1474,11 @@
+         {
+             for (size_t j = 0; j < std::size(TEXTURE_DIMENSIONS); j++)
+             {
+-                println("#define {}_Texture{}DescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {})",
++                println("#define {}_Texture{}DescriptorIndex SR_SHARED_UINT({})",
+                     constantName, TEXTURE_DIMENSIONS[j], j * 64 + constantInfo->registerIndex * 4);
+             }
+ 
+-            println("#define {}_SamplerDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {})",
++            println("#define {}_SamplerDescriptorIndex SR_SHARED_UINT({})",
+                 constantName, std::size(TEXTURE_DIMENSIONS) * 64 + constantInfo->registerIndex * 4);
+ 
+             samplers.emplace(constantInfo->registerIndex, constantName);
+@@ -1496,16 +1496,16 @@
+             continue;
+         for (size_t j = 0; j < std::size(TEXTURE_DIMENSIONS); j++)
+         {
+-            println("#define s{}_Texture{}DescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {})",
++            println("#define s{}_Texture{}DescriptorIndex SR_SHARED_UINT({})",
+                 r, TEXTURE_DIMENSIONS[j], j * 64 + r * 4);
+         }
+-        println("#define s{}_SamplerDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {})",
++        println("#define s{}_SamplerDescriptorIndex SR_SHARED_UINT({})",
+             r, std::size(TEXTURE_DIMENSIONS) * 64 + r * 4);
+     }
+ #endif
+ 
+ #ifdef CONAN_RECOMP
+-    println("#define CONST_REL(INDEX) select((uint)(INDEX) < 256, vk::RawBufferLoad<float4>(g_PushConstants.{}ShaderConstants + min((uint)(INDEX), 255) * 16, 0x10), 0.0)",
++    println("#define CONST_REL(INDEX) select((uint)(INDEX) < 256, SR_LOAD_FLOAT4({}, min((uint)(INDEX), 255) * 16), 0.0)",
+         isPixelShader ? "Pixel" : "Vertex");
+ #endif
+ 
+@@ -1664,6 +1664,9 @@
+ #else
+             const char* interpolation = "";
+ #endif
++            out += "#if defined(__spirv__) && defined(SR_VULKAN_BUFFERS)\n";
++            println("[[vk::location({})]]", usage == DeclUsage::TexCoord ? usageIndex : (usage == DeclUsage::Color ? 16 : 18) + usageIndex);
++            out += "#endif\n";
+             println("\tin {3}float4 i{0}{1} : {2}{1},", USAGE_VARIABLES[uint32_t(usage)], usageIndex, USAGE_SEMANTICS[uint32_t(usage)], interpolation);
+         }
+ 
+@@ -1726,6 +1729,45 @@
+             // The SPIR-V location table lacks some semantics (NORMAL1, ...).
+             // The DXIL path matches inputs by semantic, so the location is
+             // only dropped for them.
++            out += "#if defined(__spirv__) && defined(SR_VULKAN_BUFFERS)\n";
++            static constexpr DeclUsageLocation portableLocations[] = {
++                { DeclUsage::Position, 0, 0 },
++                { DeclUsage::Position, 1, 1 },
++                { DeclUsage::Position, 2, 2 },
++                { DeclUsage::Position, 3, 3 },
++                { DeclUsage::Position, 4, 4 },
++                { DeclUsage::Normal, 0, 5 },
++                { DeclUsage::Normal, 1, 6 },
++                { DeclUsage::Tangent, 0, 7 },
++                { DeclUsage::Binormal, 0, 8 },
++                { DeclUsage::BlendIndices, 0, 9 },
++                { DeclUsage::BlendWeight, 0, 10 },
++                { DeclUsage::Color, 0, 11 },
++                { DeclUsage::Color, 1, 12 },
++                { DeclUsage::TexCoord, 0, 13 },
++                { DeclUsage::TexCoord, 1, 14 },
++                { DeclUsage::TexCoord, 2, 15 },
++                { DeclUsage::TexCoord, 3, 16 },
++                { DeclUsage::TexCoord, 4, 17 },
++                { DeclUsage::TexCoord, 5, 18 },
++                { DeclUsage::TexCoord, 6, 19 },
++                { DeclUsage::TexCoord, 7, 20 },
++                { DeclUsage::TexCoord, 8, 21 },
++                { DeclUsage::TexCoord, 9, 22 },
++                { DeclUsage::TexCoord, 10, 23 },
++                { DeclUsage::TexCoord, 11, 24 },
++                { DeclUsage::TexCoord, 12, 25 },
++                { DeclUsage::TexCoord, 13, 26 },
++                { DeclUsage::TexCoord, 14, 27 },
++                { DeclUsage::TexCoord, 15, 28 }
++            };
++            bool located = false;
++            for (auto& row : portableLocations)
++                if (row.usage == vertexElement.usage && row.usageIndex == vertexElement.usageIndex) {
++                    print("[[vk::location({})]] ", row.location); located = true; break;
++                }
++            if (!located) out += "\n#error Unsupported SR Vulkan vertex semantic\n";
++            out += "\n#else\n";
+             for (auto& usageLocation : USAGE_LOCATIONS)
+             {
+                 if (usageLocation.usage == vertexElement.usage && usageLocation.usageIndex == vertexElement.usageIndex)
+@@ -1734,6 +1776,8 @@
+                     break;
+                 }
+             }
++
++            out += "\n#endif\n";
+ 
+             println("in {0} i{1}{2} : {3}{2},", usageType, USAGE_VARIABLES[uint32_t(vertexElement.usage)],
+                 uint32_t(vertexElement.usageIndex), USAGE_SEMANTICS[uint32_t(vertexElement.usage)]);
+@@ -1754,8 +1798,12 @@
+ 
+         out += "\tout precise float4 oPos : SV_Position";
+ 
+-        for (auto& [usage, usageIndex] : INTERPOLATORS)
+-            print(",\n\tout float4 o{0}{1} : {2}{1}", USAGE_VARIABLES[uint32_t(usage)], usageIndex, USAGE_SEMANTICS[uint32_t(usage)]);
++        for (auto& [usage, usageIndex] : INTERPOLATORS) {
++            out += ",\n#if defined(__spirv__) && defined(SR_VULKAN_BUFFERS)\n";
++            println("[[vk::location({})]]", usage == DeclUsage::TexCoord ? usageIndex : (usage == DeclUsage::Color ? 16 : 18) + usageIndex);
++            out += "#endif\n";
++            print("\tout float4 o{0}{1} : {2}{1}", USAGE_VARIABLES[uint32_t(usage)], usageIndex, USAGE_SEMANTICS[uint32_t(usage)]);
++        }
+     }
+ 
+     out += ")\n";

@@ -33,7 +33,11 @@ static bool readFile(const std::filesystem::path& p, std::vector<uint8_t>& out)
     return true;
 }
 
+#ifdef _WIN32
+int wmain(int argc, wchar_t** argv)
+#else
 int main(int argc, char** argv)
+#endif
 {
 #ifdef _WIN32
     // Asserts must print to stderr and terminate, never pop a dialog.
@@ -50,7 +54,7 @@ int main(int argc, char** argv)
     std::vector<uint8_t> includeData;
     if (!readFile(argv[1], includeData))
     {
-        fprintf(stderr, "cannot read %s\n", argv[1]);
+        fprintf(stderr, "cannot read shader_common.h\n");
         return 1;
     }
     std::string includeText;
