@@ -38,6 +38,7 @@
 
 #include "game_profile.h"
 #include "index_endian.h"
+#include "../graphics/guest/constant_snapshot.h"
 #include "native_bridge.h"
 #include "native_graphics_system.h"
 #include "sdk_compat.h"
@@ -3384,20 +3385,12 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
   // NaN (same as the Xenos-path E041 sanitizer). Source: the PM4 mirror (GPU
   // truth, host order) or the byte-swapped device shadow.
   auto fill = [&](uint32_t mirror_base, uint32_t shadow_offset, uint32_t* dst) {
-    if (use_mirror) {
-      const float* src = reinterpret_cast<const float*>(mirror_.regs() + mirror_base);
-      float* out = reinterpret_cast<float*>(dst);
-      for (uint32_t i = 0; i < 1024; i += 4) {
-        __m128 v = _mm_loadu_ps(src + i);
-        _mm_storeu_ps(out + i, _mm_andnot_ps(_mm_cmpunord_ps(v, v), v));
-      }
-      return;
-    }
-    const uint32_t* src = reinterpret_cast<const uint32_t*>(base + dev + shadow_offset);
-    for (uint32_t i = 0; i < 1024; ++i) {
-      uint32_t v = __builtin_bswap32(src[i]);
-      dst[i] = ((v & 0x7F800000u) == 0x7F800000u && (v & 0x007FFFFFu)) ? 0u : v;
-    }
+    const uint32_t* src = use_mirror ? mirror_.regs() + mirror_base
+        : reinterpret_cast<const uint32_t*>(base + dev + shadow_offset);
+    std::array<uint32_t,1024> captured;
+    std::string error;
+    graphics::guest::CaptureFloatConstants({src,1024}, !use_mirror, captured, error);
+    std::memcpy(dst,captured.data(),sizeof(captured));
   };
   if (!use_mirror || cb_vs_version_ != mirror_.vs_version || !cb_vs_gpu_) {
     UploadAlloc vs;
@@ -6285,15 +6278,12 @@ void Renderer::DrawIndexedVertices(uint8_t* base, uint32_t prim, int32_t base_ve
       // expanded list is captured with the command; base_vertex stays a draw
       // argument.
       const uint8_t* idx = REX_KERNEL_MEMORY()->TranslatePhysical<const uint8_t*>(address);
-      const uint32_t quads = index_count / 4;
-      std::vector<uint32_t> tris(size_t(quads) * 6);
-      for (uint32_t q = 0; q < quads; ++q) {
-        uint32_t a = LoadIndex(idx, start_index + q * 4 + 0, index32, endian);
-        uint32_t b = LoadIndex(idx, start_index + q * 4 + 1, index32, endian);
-        uint32_t c = LoadIndex(idx, start_index + q * 4 + 2, index32, endian);
-        uint32_t d = LoadIndex(idx, start_index + q * 4 + 3, index32, endian);
-        uint32_t* t = &tris[size_t(q) * 6];
-        t[0] = a; t[1] = b; t[2] = c; t[3] = a; t[4] = c; t[5] = d;
+      std::vector<uint32_t> tris;
+      std::string error;
+      if (!graphics::guest::NormalizeIndices({idx,size},start_index,index_count,
+            {index32,endian,UINT32_MAX},graphics::guest::Primitive::kQuads,tris,error)) {
+        cur_.has_index = false;
+        REXLOG_WARN("native: quad normalization failed: {}",error);
       }
       cur_.u[4] = uint32_t(batch_->bytes.size());
       cur_.u[5] = uint32_t(tris.size());

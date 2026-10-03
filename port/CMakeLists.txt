@@ -153,6 +153,8 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
             ${SR_NATIVE_ROOT}/native_graphics_system.cpp
             ${SR_NATIVE_ROOT}/native_renderer.cpp
             ${SR_NATIVE_ROOT}/pm4_mirror.cpp
+            ${SR_NATIVE_ROOT}/../graphics/guest/draw_state.cpp
+            ${SR_NATIVE_ROOT}/../graphics/guest/constant_snapshot.cpp
             ${SR_NATIVE_ROOT}/texture_decode.cpp
             ${SR_NATIVE_ROOT}/shader_registry.cpp
             ${SR_NATIVE_ROOT}/shader_translator.cpp
