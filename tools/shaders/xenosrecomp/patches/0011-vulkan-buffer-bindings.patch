@@ -147,6 +147,18 @@
  #define srVertexFetch(semantic, index, packed) srVertexFetchImpl(g_VertexFetch(semantic), index, packed)
  float4 srVertexFetchImpl(uint4 meta, float index, bool packed)
  {
+@@ -463,7 +513,11 @@
+ 
+ float4 tfetchTexcoord(uint swappedTexcoords, float4 value, uint semanticIndex)
+ {
++#ifdef SR_VULKAN_BUFFERS
++    return semanticIndex < 32 && (swappedTexcoords & (1u << (semanticIndex & 31u))) != 0 ? value.yxwz : value;
++#else
+     return (swappedTexcoords & (1ull << semanticIndex)) != 0 ? value.yxwz : value;
++#endif
+ }
+ #endif
+ 
 --- a/XenosRecomp/shader_recompiler.cpp
 +++ b/XenosRecomp/shader_recompiler.cpp
 @@ -1444,12 +1444,12 @@

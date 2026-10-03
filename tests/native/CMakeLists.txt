@@ -10,6 +10,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(SR_NATIVE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../port/src/native_renderer")
 add_executable(sr_native_tests
     main.cpp
+    test_shader_requirements.cpp
     test_guest_state.cpp
     "${SR_NATIVE_DIR}/../graphics/guest/draw_state.cpp"
     "${SR_NATIVE_DIR}/../graphics/guest/constant_snapshot.cpp"
