@@ -5,6 +5,7 @@ namespace {
 uint32_t creates = 0, destroys = 0;
 VkFormat format = VK_FORMAT_B8G8R8A8_UNORM;
 VkSharingMode sharing;
+VkExtent2D surface_extent{UINT32_MAX, UINT32_MAX};
 std::vector<uint32_t> families;
 template <class T> T H() {
   static uintptr_t n = 100;
@@ -14,7 +15,7 @@ VkResult VKAPI_CALL Idle(VkDevice) { return VK_SUCCESS; }
 VkResult VKAPI_CALL Caps(VkPhysicalDevice, VkSurfaceKHR,
                          VkSurfaceCapabilitiesKHR *c) {
   *c = {};
-  c->currentExtent = {UINT32_MAX, UINT32_MAX};
+  c->currentExtent = surface_extent;
   c->minImageExtent = {1, 1};
   c->maxImageExtent = {4096, 4096};
   c->minImageCount = 2;
@@ -123,4 +124,17 @@ SR_TEST(recreate_rebuilds_format_dependents) {
   SR_CHECK_EQ(destroys, 1);
   SR_CHECK_EQ(s.choice.format.format, format);
   SR_CHECK_EQ(s.generation, 2);
+}
+SR_TEST(surface_zero_extent_suspends_and_restores) {
+  Context c(Fake());
+  c.device = H<VkDevice>();
+  Swapchain s;
+  Error e;
+  surface_extent = {0, 0};
+  bool suspended = s.Recreate(c, {1280, 720}, true, e);
+  surface_extent = {UINT32_MAX, UINT32_MAX};
+  SR_CHECK(suspended);
+  SR_CHECK(s.handle == VK_NULL_HANDLE);
+  SR_CHECK(s.Recreate(c, {1280, 720}, true, e));
+  SR_CHECK(s.handle != VK_NULL_HANDLE);
 }

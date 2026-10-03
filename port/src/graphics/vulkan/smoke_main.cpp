@@ -120,7 +120,9 @@ int Run(const SmokeOptions &o,
         continue;
       }
     }
-    if (recreate || events.extent.width != last.width ||
+    if (recreate ||
+        (!chain.handle && events.extent.width && events.extent.height) ||
+        events.extent.width != last.width ||
         events.extent.height != last.height) {
       if (!rebuild(events.extent))
         return fail();
@@ -162,7 +164,7 @@ int Run(const SmokeOptions &o,
   log(context.validation_active
           ? "Validation active"
           : "Validation not active; no validation-layer claim");
-  return 0;
+  return context.validation_errors.load() ? 1 : 0;
 }
 } // namespace
 int wmain(int argc, wchar_t **argv) {

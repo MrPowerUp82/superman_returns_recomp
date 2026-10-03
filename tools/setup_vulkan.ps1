@@ -8,4 +8,6 @@ if (-not (Test-Path -LiteralPath $headers)) {
 }
 $actual=& git -C $headers rev-parse HEAD
 if ($LASTEXITCODE -ne 0 -or $actual.Trim() -ne $revision) { throw 'Unexpected Vulkan-Headers revision; existing checkout preserved' }
+$changes=& git -C $headers status --porcelain --untracked-files=no
+if ($LASTEXITCODE -ne 0 -or $changes) { throw 'Vulkan-Headers has local tracked changes; existing checkout preserved' }
 Write-Host 'Vulkan-Headers v1.3.290 ready.'

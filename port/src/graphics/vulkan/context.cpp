@@ -19,8 +19,13 @@ Context::Debug(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
   bool error = (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0;
   if (error)
     c.validation_errors.fetch_add(1);
-  c.Log(std::string(error ? "validation ERROR: " : "validation WARNING: ") +
-        (data && data->pMessage ? data->pMessage : "unknown"));
+  try {
+    c.Log(std::string(error ? "validation ERROR: " : "validation WARNING: ") +
+          (data && data->pMessage ? data->pMessage : "unknown"));
+  } catch (...) {
+    // Diagnostics must never unwind across the Vulkan callback boundary.
+    // Error accounting above remains available even if logging fails.
+  }
   return VK_FALSE;
 }
 Context::~Context() {

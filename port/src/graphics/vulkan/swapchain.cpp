@@ -45,6 +45,11 @@ bool Swapchain::Recreate(Context &c, VkExtent2D requested, bool vsync,
                                                          &caps),
              "Surface capabilities", e))
     return false;
+  if (caps.currentExtent.width != UINT32_MAX &&
+      (!caps.currentExtent.width || !caps.currentExtent.height)) {
+    c.Log("swapchain suspended (surface zero extent)");
+    return true;
+  }
   std::vector<VkSurfaceFormatKHR> formats;
   std::vector<VkPresentModeKHR> modes;
   if (!Query<VkSurfaceFormatKHR>(

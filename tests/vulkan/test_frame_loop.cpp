@@ -5,7 +5,7 @@ namespace {
 std::vector<std::string> calls;
 std::vector<VkSemaphore> present_semaphores;
 int image = 0;
-VkResult acquire_result = VK_SUCCESS, submit_result = VK_SUCCESS;
+VkResult acquire_result = VK_SUCCESS, submit_result = VK_SUCCESS, present_result = VK_SUCCESS;
 uintptr_t next = 10;
 template <class T> T Handle() { return reinterpret_cast<T>(next++); }
 VkResult VKAPI_CALL Idle(VkDevice) {
@@ -71,7 +71,7 @@ VkResult VKAPI_CALL Submit(VkQueue, uint32_t, const VkSubmitInfo *, VkFence) {
 VkResult VKAPI_CALL Present(VkQueue, const VkPresentInfoKHR *p) {
   calls.push_back("present");
   present_semaphores.push_back(*p->pWaitSemaphores);
-  return VK_SUCCESS;
+  return present_result;
 }
 Dispatch Functions() {
   Dispatch f;
@@ -108,7 +108,7 @@ struct Fixture {
     s.choice.extent = {1280, 720};
     calls.clear();
     present_semaphores.clear();
-    acquire_result = submit_result = VK_SUCCESS;
+    acquire_result = submit_result = present_result = VK_SUCCESS;
     SR_CHECK(loop.Initialize(c, s, e));
     calls.clear();
   }
@@ -153,5 +153,14 @@ SR_TEST(submit_failure_stops_instead_of_waiting_unsignaled_fence) {
   SR_CHECK(f.Draw() == FrameOutcome::kFailed);
   calls.clear();
   SR_CHECK(f.Draw() == FrameOutcome::kFailed);
+  SR_CHECK(calls.empty());
+}
+SR_TEST(device_lost_present_is_not_masked_by_suboptimal_acquire) {
+  Fixture f;
+  acquire_result=VK_SUBOPTIMAL_KHR;
+  present_result=VK_ERROR_DEVICE_LOST;
+  SR_CHECK(f.Draw()==FrameOutcome::kFailed);
+  calls.clear();
+  SR_CHECK(f.Draw()==FrameOutcome::kFailed);
   SR_CHECK(calls.empty());
 }

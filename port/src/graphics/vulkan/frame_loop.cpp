@@ -154,10 +154,10 @@ FrameLoop::Draw(Context &c, Swapchain &s,
   cursor_ = (cursor_ + 1) % slots_.size();
   if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR)
     ++presented;
+  if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR && r != VK_ERROR_OUT_OF_DATE_KHR)
+    return fail(r, "QueuePresent");
   if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR || suboptimal)
     return FrameOutcome::kRecreate;
-  if (r != VK_SUCCESS)
-    return fail(r, "QueuePresent");
   return FrameOutcome::kPresented;
 }
 } // namespace superman_returns::graphics::vulkan
