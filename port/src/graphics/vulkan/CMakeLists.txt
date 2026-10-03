@@ -1,0 +1,8 @@
+set(SR_VULKAN_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/../../../../.tools/vulkan-headers/include" CACHE PATH "Pinned Vulkan headers")
+if(NOT EXISTS "${SR_VULKAN_HEADERS}/vulkan/vulkan.h")
+  message(FATAL_ERROR "Run tools/setup_vulkan.ps1 to fetch headers")
+endif()
+add_library(sr_vulkan_core STATIC policy.cpp)
+target_include_directories(sr_vulkan_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "${SR_VULKAN_HEADERS}")
+target_compile_features(sr_vulkan_core PUBLIC cxx_std_23)
+target_compile_definitions(sr_vulkan_core PUBLIC VK_NO_PROTOTYPES)

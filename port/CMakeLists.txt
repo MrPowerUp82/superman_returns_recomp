@@ -10,6 +10,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(generated/rexglue.cmake)
 
+option(SR_VULKAN_FOUNDATION "Build standalone Vulkan foundation smoke test" OFF)
+if(SR_VULKAN_FOUNDATION)
+    add_subdirectory(src/graphics/vulkan)
+endif()
+
 option(SR_LSFG "Build experimental direct-DLL LSFG presentation and GPU smoke test" OFF)
 if(SR_LSFG)
     add_subdirectory(src/lsfg)
