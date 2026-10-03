@@ -6,8 +6,9 @@ COMO JOGAR
   1. Os arquivos do seu jogo precisam estar em game\ (default.xex e a pasta DATA).
      O instalador (pagina do projeto) copia isso para voce a partir do seu ISO ou da
      sua pasta extraida; ele roda no navegador e nao envia nada para a internet.
-  2. Execute run_keyboard.cmd (teclado e mouse) ou run.cmd (controle de Xbox/XInput).
-     Opcoes extras vao depois do nome, por exemplo: run.cmd --fullscreen
+  2. Execute SupermanReturnsLauncher.exe, escolha as opcoes e clique em JOGAR.
+     O launcher inclui seu runtime .NET. As preferencias ficam no AppData local.
+     run_keyboard.cmd e run.cmd continuam disponiveis como alternativas.
   3. Na primeira execucao o jogo traduz os shaders no seu PC, em segundo plano e uma so
      vez (pasta shader_cache\). Leva alguns minutos e as primeiras cenas podem engasgar.
   4. O log fica em logs\game.log. Anexe-o se abrir uma issue.
@@ -25,7 +26,8 @@ CONTROLES (teclado e mouse)
 
 ENGLISH
   Put your own game files in game\ (default.xex and the DATA folder; the installer page
-  does it in your browser, nothing is uploaded). Run run_keyboard.cmd or run.cmd.
+  does it in your browser, nothing is uploaded). Open SupermanReturnsLauncher.exe
+  and click JOGAR. Its .NET runtime is bundled. The batch launch scripts also work.
   The first run translates the shaders on your PC in the background (shader_cache\).
   Windows 10/11 64-bit with Direct3D 12. The log is logs\game.log.
 

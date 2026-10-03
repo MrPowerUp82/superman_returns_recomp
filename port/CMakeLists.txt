@@ -11,6 +11,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(generated/rexglue.cmake)
 
 option(SR_VULKAN_FOUNDATION "Build standalone Vulkan foundation smoke test" OFF)
+option(SR_GUEST_TEXTURE_TESTS "Build texture layout tests using SDK Xenos helpers" OFF)
+if(SR_GUEST_TEXTURE_TESTS)
+    add_executable(sr_guest_texture_tests ../tests/native/main.cpp ../tests/native/test_texture_layout.cpp
+        src/graphics/guest/captured_batch.cpp src/graphics/guest/texture_layout.cpp src/graphics/guest/texture_capture.cpp)
+    target_link_libraries(sr_guest_texture_tests PRIVATE rex::runtime)
+    target_include_directories(sr_guest_texture_tests PRIVATE ../tests/native)
+endif()
 if(SR_VULKAN_FOUNDATION)
     add_subdirectory(src/graphics/vulkan)
 endif()
@@ -155,6 +162,13 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
             ${SR_NATIVE_ROOT}/pm4_mirror.cpp
             ${SR_NATIVE_ROOT}/../graphics/guest/draw_state.cpp
             ${SR_NATIVE_ROOT}/../graphics/guest/captured_batch.cpp
+            ${SR_NATIVE_ROOT}/../graphics/guest/pm4_capture.cpp
+            ${SR_NATIVE_ROOT}/../graphics/guest/texture_layout.cpp
+            ${SR_NATIVE_ROOT}/../graphics/guest/texture_capture.cpp
+            ${SR_NATIVE_ROOT}/../graphics/guest/render_state.cpp
+            ${SR_NATIVE_ROOT}/../graphics/guest/edram_alias.cpp
+            ${SR_NATIVE_ROOT}/../graphics/guest/vertex_layout.cpp
+            ${SR_NATIVE_ROOT}/../graphics/guest/render_packet.cpp
             ${SR_NATIVE_ROOT}/../graphics/guest/constant_snapshot.cpp
             ${SR_NATIVE_ROOT}/texture_decode.cpp
             ${SR_NATIVE_ROOT}/shader_registry.cpp

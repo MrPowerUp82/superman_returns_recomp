@@ -13,7 +13,14 @@ add_executable(sr_native_tests
     test_shader_requirements.cpp
     test_guest_state.cpp
     test_render_packets.cpp
+    test_render_state.cpp
+    test_vertex_layout.cpp
+    "${SR_NATIVE_DIR}/../graphics/guest/vertex_layout.cpp"
+    "${SR_NATIVE_DIR}/../graphics/guest/render_state.cpp"
+    "${SR_NATIVE_DIR}/../graphics/guest/edram_alias.cpp"
+    "${SR_NATIVE_DIR}/../graphics/guest/render_packet.cpp"
     "${SR_NATIVE_DIR}/../graphics/guest/captured_batch.cpp"
+    "${SR_NATIVE_DIR}/../graphics/guest/pm4_capture.cpp"
     "${SR_NATIVE_DIR}/../graphics/guest/draw_state.cpp"
     "${SR_NATIVE_DIR}/../graphics/guest/constant_snapshot.cpp"
     test_texture.cpp

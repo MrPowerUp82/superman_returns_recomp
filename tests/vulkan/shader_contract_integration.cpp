@@ -4,6 +4,7 @@
 #include "../../port/src/graphics/guest/draw_state.h"
 #include "../../port/src/graphics/shaders/shader_requirements.h"
 #include "context.h"
+#include "descriptor_sets.h"
 #include "platform/win32_surface.h"
 #include "triangle.h"
 #include <array>
@@ -376,11 +377,11 @@ public:
     writes[5].pImageInfo = sampler_infos.data();
     f.vkUpdateDescriptorSets(c.device, 6, writes, 0, nullptr);
   }
-  void Pipeline(const std::filesystem::path &directory) {
+  void Pipeline(const std::filesystem::path &directory, std::span<const VkDescriptorSetLayout> game_layouts={}) {
     VkPipelineLayoutCreateInfo li{
         VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     li.setLayoutCount = 4;
-    li.pSetLayouts = layouts.data();
+    li.pSetLayouts = game_layouts.empty()?layouts.data():game_layouts.data();
     Require(
         c.f.vkCreatePipelineLayout(c.device, &li, nullptr, &pipeline_layout),
         "Pipeline layout");
@@ -448,8 +449,9 @@ public:
             "Graphics pipeline");
   }
   std::vector<uint8_t> Draw(size_t indices, uint32_t count, size_t target,
-                            size_t readback) {
+                            size_t readback,const std::function<void()>& prepare={}) {
     Begin();
+    if(prepare) prepare();
     VkClearValue clear{};
     clear.color.float32[3] = 1;
     VkRenderPassBeginInfo bi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
@@ -514,7 +516,7 @@ void Pixel(const std::vector<uint8_t> &data, uint32_t x, uint32_t y,
                                std::to_string(data[(y * 64 + x) * 4 + c]));
 }
 int Run(const std::filesystem::path &shaders_dir, const std::string &uuid,
-        uint32_t &validation_errors) {
+        uint32_t &validation_errors,bool production=false) {
   Win32Window window;
   Context context;
   context.logger = [&](const std::string &s) {
@@ -532,7 +534,7 @@ int Run(const std::filesystem::path &shaders_dir, const std::string &uuid,
     throw std::runtime_error(e.operation + ": " + e.message);
   VkPhysicalDeviceFeatures features{};
   features.shaderStorageBufferArrayDynamicIndexing = VK_TRUE;
-  if (!context.OpenDevice(surface, uuid, e, &features))
+  if (!context.OpenDevice(surface, uuid, e, &features,production))
     throw std::runtime_error(
         e.operation + ": " + e.message +
         "; shaderStorageBufferArrayDynamicIndexing requested");
@@ -557,6 +559,9 @@ int Run(const std::filesystem::path &shaders_dir, const std::string &uuid,
     throw std::runtime_error(
         "Descriptor-set storage buffer/range limit insufficient");
   Fixture fixture(context);
+  ResourceStore resources(context);
+  DescriptorStore descriptors(context);
+  if(production && !descriptors.Initialize(e)) throw std::runtime_error(e.operation+": "+e.message);
   fixture.Commands();
   auto vs = fixture.NewBuffer(4096, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT),
        ps = fixture.NewBuffer(4096, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT),
@@ -608,8 +613,8 @@ int Run(const std::filesystem::path &shaders_dir, const std::string &uuid,
       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
   fixture.Submit();
   fixture.RenderTarget(target);
-  fixture.Descriptors(vs, ps, shared, vertex, texture);
-  fixture.Pipeline(shaders_dir);
+  if(!production) fixture.Descriptors(vs, ps, shared, vertex, texture);
+  fixture.Pipeline(shaders_dir,production?std::span<const VkDescriptorSetLayout>(descriptors.Layouts()):std::span<const VkDescriptorSetLayout>{});
   guest::ConstantSnapshot state;
   state.ps[1] = 0x3f800000;
   state.ps[3] = 0x3f800000;
@@ -624,7 +629,20 @@ int Run(const std::filesystem::path &shaders_dir, const std::string &uuid,
     fixture.Write(ps, std::as_bytes(std::span(state.ps)));
     fixture.Write(shared, std::as_bytes(std::span(state.shared)));
     auto pixels =
-        fixture.Draw(indices, uint32_t(normalized.size()), target, readback);
+        fixture.Draw(indices, uint32_t(normalized.size()), target, readback,production?std::function<void()>([&] {
+          if(!resources.BeginSubmission(fixture.command,uint64_t(variant)+1,e) || !resources.CreateDummies(e) ||
+             !resources.UploadBuffer(7,std::as_bytes(std::span(vertices)),1,e)) throw std::runtime_error(e.operation+": "+e.message);
+          guest::DrawPacket packet;packet.constants=state;packet.vertex_fetch[0]={7,0,4,0x2C2259};
+          guest::VertexStream stream{};stream.stream=7;stream.size=sizeof(vertices);stream.stride=4;stream.update.plan.key=7;packet.streams.push_back(stream);
+          packet.texture_fetch[0][0]=2|(3<<10)|(3<<13);packet.texture_fetch[0][1]=0x1006;packet.texture_fetch[0][5]=1<<9;
+          guest::LinearTexture linear;linear.width=linear.height=1;linear.format=guest::LinearFormat::kRGBA8Unorm;linear.levels={{1,1,4,1,0}};linear.data={255,255,255,255};
+          if(!resources.UploadTexture(TextureResourceId(packet.texture_fetch[0]),linear,1,e)) throw std::runtime_error(e.operation+": "+e.message);
+          auto bindings=BuildBindings(packet,e);if(!e.message.empty()) throw std::runtime_error(e.message);
+          auto sets=descriptors.Prepare(bindings,packet.texture_fetch,resources,uint64_t(variant)+1,e);
+          if(!sets) throw std::runtime_error(e.operation+": "+e.message);
+          fixture.sets=sets->sets;
+        }):std::function<void()>{});
+    if(production) {descriptors.Retire(uint64_t(variant)+1);resources.Retire(uint64_t(variant)+1);}
     std::array<uint8_t, 4> color =
         variant == 0   ? std::array<uint8_t, 4>{0, 255, 0, 255}
         : variant == 1 ? std::array<uint8_t, 4>{255, 0, 0, 255}
@@ -648,7 +666,9 @@ int main(int argc, char **argv) {
   int result = 1;
   try {
     std::string uuid;
-    if (argc == 2 && std::string_view(argv[1]).starts_with("--gpu-uuid="))
+    bool production=argc==2 && std::string_view(argv[1])=="--production-bindings";
+    if(production) {}
+    else if (argc == 2 && std::string_view(argv[1]).starts_with("--gpu-uuid="))
       uuid = std::string(argv[1]).substr(11);
     else if (argc != 1)
       throw std::runtime_error(
@@ -658,7 +678,7 @@ int main(int argc, char **argv) {
     if (!count || count >= 32768)
       throw std::runtime_error("Executable path unavailable");
     result = Run(std::filesystem::path(path).parent_path() / "contract-shaders",
-                 uuid, validation_errors);
+                 uuid, validation_errors,production);
   } catch (const std::exception &e) {
     std::cerr << "ERROR " << e.what() << std::endl;
   }

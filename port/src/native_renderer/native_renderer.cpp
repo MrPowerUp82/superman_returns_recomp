@@ -5,6 +5,10 @@
 // docs/native-port-plan.md section 2.
 //
 #include "native_renderer.h"
+#include "../graphics/guest/render_state.h"
+#include "../graphics/guest/edram_alias.h"
+#include "../graphics/guest/render_packet.h"
+#include "../graphics/guest/pm4_capture.h"
 
 #include <dxgi1_4.h>
 
@@ -125,6 +129,11 @@ REXCVAR_DEFINE_INT32(sr_native_dump_swap, 0, "Superman Returns Native",
 REXCVAR_DEFINE_BOOL(sr_native_pm4_mirror, true, "Superman Returns Native",
                     "Take shader/fetch constants from the parsed command stream (GPU truth) "
                     "instead of the XDK device shadow");
+REXCVAR_DEFINE_BOOL(sr_native_packet_check, false, "Superman Returns Native",
+                    "Development: decode captured neutral render packets alongside D3D12; "
+                    "reports capture errors and does not select Vulkan");
+REXCVAR_DEFINE_INT32(sr_native_packet_check_every, 120, "Superman Returns Native",
+                     "Development: capture one frame every N swaps (1 captures every frame)");
 REXCVAR_DEFINE_BOOL(sr_native_fixed16_snorm, false, "Superman Returns Native",
                     "Experiment: store EDRAM k_16_16_16_16 render targets as SNORM (clamp to "
                     "[-1, 1]) instead of float");
@@ -284,6 +293,27 @@ void NoteGuestDevice(uint32_t dev) {
 
 namespace {
 
+std::span<const uint8_t> ReadCommittedGuest(uint8_t* base, uint32_t address, uint32_t length) {
+  if(uint64_t(address)+length>(uint64_t{1}<<32)) return {};
+  const uint8_t* source=base+address;
+  if(address>=0xa0000000u && address<0xc0000000u) {
+    uint32_t physical=address-0xa0000000u;
+    if(uint64_t(physical)+length>0x20000000ull) return {};
+    // PM4 references GPU physical memory. A cached virtual alias may be
+    // PAGE_NOACCESS while the SDK's physical mapping remains committed.
+    source=REX_KERNEL_MEMORY()->TranslatePhysical<const uint8_t*>(physical);
+  }
+  const uint8_t* p=source;
+  const uint8_t* end=p+length;
+  while(p<end) {
+    MEMORY_BASIC_INFORMATION region{};
+    if(!VirtualQuery(p,&region,sizeof(region)) || region.State!=MEM_COMMIT ||
+       (region.Protect&(PAGE_NOACCESS|PAGE_GUARD)) || !region.Protect) return {};
+    p=static_cast<const uint8_t*>(region.BaseAddress)+region.RegionSize;
+  }
+  return {source,length};
+}
+
 // D3DDevice layout and the device pointer come from game_profile.h (Conan's
 // values there, unconfirmed for Superman Returns).
 constexpr const profile::DeviceLayout& kDev = profile::kDevice;
@@ -384,34 +414,50 @@ struct DeclFormat {
   uint32_t size;
   uint32_t swap;  // bytes per swapped word
 };
-DeclFormat MapDeclType(uint32_t type) {
+DXGI_FORMAT MapDeclHostFormat(uint32_t type) {
   switch (type) {
-    case 0x2C83A4: return {DXGI_FORMAT_R32_FLOAT, 4, 4};
-    case 0x2C23A5: return {DXGI_FORMAT_R32G32_FLOAT, 8, 4};
-    case 0x2A23B9: return {DXGI_FORMAT_R32G32B32_FLOAT, 12, 4};
-    case 0x1A23A6: return {DXGI_FORMAT_R32G32B32A32_FLOAT, 16, 4};
-    case 0x182886: return {DXGI_FORMAT_B8G8R8A8_UNORM, 4, 4};  // D3DCOLOR
+    case 0x2C83A4: return DXGI_FORMAT_R32_FLOAT;
+    case 0x2C23A5: return DXGI_FORMAT_R32G32_FLOAT;
+    case 0x2A23B9: return DXGI_FORMAT_R32G32B32_FLOAT;
+    case 0x1A23A6: return DXGI_FORMAT_R32G32B32A32_FLOAT;
+    case 0x182886: return DXGI_FORMAT_B8G8R8A8_UNORM;  // D3DCOLOR
     case 0x1A2286:
-    case 0x1A2386: return {DXGI_FORMAT_R8G8B8A8_UINT, 4, 4};
+    case 0x1A2386: return DXGI_FORMAT_R8G8B8A8_UINT;
     case 0x1A2086:
-    case 0x1A2186: return {DXGI_FORMAT_R8G8B8A8_UNORM, 4, 4};
-    case 0x2C2359: return {DXGI_FORMAT_R16G16_SINT, 4, 2};
+    case 0x1A2186: return DXGI_FORMAT_R8G8B8A8_UNORM;
+    case 0x2C2359: return DXGI_FORMAT_R16G16_SINT;
     // USHORT2 is unnormalized. The VS restores integer coordinates from the
     // float-compatible UNORM input via srVertexInput and declaration metadata.
-    case 0x2C2259: return {DXGI_FORMAT_R16G16_UNORM, 4, 2};
-    case 0x1A235A: return {DXGI_FORMAT_R16G16B16A16_SNORM, 8, 2};
-    case 0x2C2159: return {DXGI_FORMAT_R16G16_SNORM, 4, 2};
-    case 0x1A215A: return {DXGI_FORMAT_R16G16B16A16_SNORM, 8, 2};
-    case 0x2C2059: return {DXGI_FORMAT_R16G16_UNORM, 4, 2};
-    case 0x1A205A: return {DXGI_FORMAT_R16G16B16A16_UNORM, 8, 2};
-    case 0x2C82A1: return {DXGI_FORMAT_R32_UINT, 4, 4};
+    case 0x2C2259: return DXGI_FORMAT_R16G16_UNORM;
+    case 0x1A235A: return DXGI_FORMAT_R16G16B16A16_SNORM;
+    case 0x2C2159: return DXGI_FORMAT_R16G16_SNORM;
+    case 0x1A215A: return DXGI_FORMAT_R16G16B16A16_SNORM;
+    case 0x2C2059: return DXGI_FORMAT_R16G16_UNORM;
+    case 0x1A205A: return DXGI_FORMAT_R16G16B16A16_UNORM;
+    case 0x2C82A1: return DXGI_FORMAT_R32_UINT;
     case 0x2A2187:  // DEC3N: signed normalized 10/10/10, decoded by the VS.
     case 0x2A2190:
-    case 0x2A2390: return {DXGI_FORMAT_R32_UINT, 4, 4};
-    case 0x2C235F: return {DXGI_FORMAT_R16G16_FLOAT, 4, 2};
-    case 0x1A2360: return {DXGI_FORMAT_R16G16B16A16_FLOAT, 8, 2};
-    default: return {DXGI_FORMAT_UNKNOWN, 0, 4};
+    case 0x2A2390: return DXGI_FORMAT_R32_UINT;
+    case 0x2C235F: return DXGI_FORMAT_R16G16_FLOAT;
+    case 0x1A2360: return DXGI_FORMAT_R16G16B16A16_FLOAT;
+    default: return DXGI_FORMAT_UNKNOWN;
   }
+}
+
+DeclFormat MapDeclType(uint32_t type) {
+  auto encoding=graphics::guest::GetVertexEncoding(type);
+  return {MapDeclHostFormat(type),encoding.size,encoding.swap};
+}
+std::vector<graphics::guest::VertexAttribute> ReadVertexDeclaration(uint8_t* base,uint32_t decl) {
+  std::vector<graphics::guest::VertexAttribute> out;
+  if(!decl) return out;
+  uint32_t count=std::min(Load32(base,decl+0x18),64u);
+  for(uint32_t i=0;i<count;++i) {
+    uint32_t a=decl+0x34+i*12,stream=Load16(base,a);
+    if(stream==0xff) break;
+    out.push_back({stream,Load16(base,a+2),Load32(base,a+4),Load8(base,a+9),Load8(base,a+10)});
+  }
+  return out;
 }
 
 const char* UsageSemantic(uint32_t usage) {
@@ -1495,22 +1541,24 @@ Renderer::HostSurface* Renderer::GetSurface(uint8_t* base, uint32_t surface_obje
   uint32_t surface_info = Load32(base, surface_object + 0x18);
   uint32_t color_depth_info = Load32(base, surface_object + 0x1C);
   uint32_t size_bits = Load32(base, surface_object + 0x24);
-  uint32_t width = (size_bits >> 18) + 1;
-  uint32_t height = ((size_bits >> 3) & 0x7FFF) + 1;
+  const auto geometry = graphics::guest::DecodeSurfaceGeometry(
+      surface_info, color_depth_info, size_bits, depth);
+  uint32_t width = geometry.width;
+  uint32_t height = geometry.height;
   if (tiling_active_) {
     width = std::max(width, tiling_width_);
     height = std::max(height, tiling_height_);
   }
   width = std::max(width, min_width);
   height = std::max(height, min_height);
-  uint32_t format = (color_depth_info >> 16) & 0xF;
+  uint32_t format = geometry.format;
   if (!depth && format == 3 && REXCVAR_GET(sr_native_merge_7e3_surfaces)) format = 12;
   // Guest surfaces alias by EDRAM location: different surface objects with the
   // same EDRAM base (e.g. the depth pre-pass and the opaque pass depth) share
   // contents on Xenos, so the host RT is keyed by EDRAM base + format + size,
   // not by the surface object (EXP-013). Depth keeps no format distinction.
-  uint32_t edram_base = color_depth_info & 0xFFF;
-  uint32_t guest_msaa = (surface_info >> 16) & 3;
+  uint32_t edram_base = geometry.edram_base;
+  uint32_t guest_msaa = geometry.guest_msaa;
   uint32_t samples = REXCVAR_GET(sr_native_msaa) ? (guest_msaa == 2 ? 4u : guest_msaa == 1 ? 2u : 1u)
                                               : 1u;
   // msaa_samples setting: applies to the surfaces the game multisamples.
@@ -1524,18 +1572,7 @@ Renderer::HostSurface* Renderer::GetSurface(uint8_t* base, uint32_t surface_obje
   }
   HostSurface& s = surfaces_[key];
   s.edram_base = edram_base;
-  {
-    // Footprint of the guest surface itself (per tile when tiling).
-    uint32_t pitch = surface_info & 0x3FFF;
-    if (!pitch) pitch = (size_bits >> 18) + 1;
-    uint32_t guest_height = ((size_bits >> 3) & 0x7FFF) + 1;
-    uint32_t msaa = (surface_info >> 16) & 3;
-    uint32_t samples_x = msaa >= 2 ? 2 : 1, samples_y = msaa >= 1 ? 2 : 1;
-    bool wide = !depth && (format == 5 || format == 7 || format == 15);
-    uint32_t tile_w = wide ? 40 : 80;
-    s.edram_tiles = ((pitch * samples_x + tile_w - 1) / tile_w) *
-                    ((guest_height * samples_y + 15) / 16);
-  }
+  s.edram_tiles = geometry.edram_tiles;
   s.guest_format = depth ? 0xFFu : format;
   s.width = width;
   s.height = height;
@@ -2072,36 +2109,17 @@ bool Renderer::ReinterpretSurface(HostSurface& dst, HostSurface& src) {
 
 void Renderer::ResolveEdramAliasing(HostSurface* s) {
   if (!s || !s->edram_tiles || !REXCVAR_GET(sr_native_edram_aliasing)) return;
-  constexpr uint32_t kEdramTiles = 2048;
-  auto overlaps = [](uint32_t a0, uint32_t an, uint32_t b0, uint32_t bn) {
-    // Ranges on the 2048-tile ring.
-    for (uint32_t shift : {0u, kEdramTiles}) {
-      if (a0 + shift < b0 + bn && b0 < a0 + shift + an) return true;
-      if (b0 + shift < a0 + an && a0 < b0 + shift + bn) return true;
-    }
-    return false;
+  auto alias_surface=[](HostSurface& surface) {
+    return graphics::guest::AliasSurface{uint64_t(reinterpret_cast<uintptr_t>(&surface)),surface.depth,
+      {surface.width,surface.height,surface.edram_base,surface.guest_format,0,surface.edram_tiles},surface.last_write,surface.scale};
   };
-  uint64_t newest = 0;
-  HostSurface* newest_same = nullptr;
-  for (auto& [key, other] : surfaces_) {
-    if (&other == s || other.last_write <= s->last_write) continue;
-    if (std::find(std::begin(bind_set_), std::end(bind_set_), &other) != std::end(bind_set_)) {
-      continue;
-    }
-    if (other.edram_base == s->edram_base && other.depth == s->depth) {
-      // Same EDRAM placement, other format: the bits are shared (e.g. the
-      // p9 8888 foliage/decal buffer reads the previous HDR 7e3 scene).
-      if (!s->depth && other.width == s->width && other.height == s->height &&
-          other.scale == s->scale &&
-          (!newest_same || other.last_write > newest_same->last_write)) {
-        newest_same = &other;
-      }
-      continue;
-    }
-    if (overlaps(s->edram_base, s->edram_tiles, other.edram_base, other.edram_tiles)) {
-      newest = std::max(newest, other.last_write);
-    }
-  }
+  std::vector<graphics::guest::AliasSurface> aliases;aliases.reserve(surfaces_.size());
+  for(auto& [key,other]:surfaces_) aliases.push_back(alias_surface(other));
+  std::array<uint64_t,5> bound{};
+  for(uint32_t i=0;i<5;++i) bound[i]=uint64_t(reinterpret_cast<uintptr_t>(bind_set_[i]));
+  auto plan=graphics::guest::PlanEdramAlias(alias_surface(*s),aliases,bound);
+  uint64_t newest=plan.newest_other;
+  auto* newest_same=reinterpret_cast<HostSurface*>(uintptr_t(plan.source));
   if (trace_state_ == 1) {
     REXLOG_INFO("trace edram aliasing {}: newest same {} ({}) newest other {} own {}",
                 SurfaceName(s), newest_same ? SurfaceName(newest_same) : "-",
@@ -3745,18 +3763,17 @@ void Renderer::ApplyFixedFunctionState(uint8_t* base, uint32_t dev) {
   vp.Height = float(Load32(base, dev + kDevViewport + 12));
   vp.MinDepth = LoadF32(base, dev + kDevViewport + 16);
   vp.MaxDepth = LoadF32(base, dev + kDevViewport + 20);
-  if (vp.Width <= 0 || vp.Height <= 0 || vp.Width > 8192 || vp.Height > 8192) {
-    vp.TopLeftX = vp.TopLeftY = 0;
-    vp.Width = kOutputWidth;
-    vp.Height = kOutputHeight;
-  }
-  vp.MinDepth = std::clamp(vp.MinDepth, 0.0f, 1.0f);
-  vp.MaxDepth = std::clamp(vp.MaxDepth, 0.0f, 1.0f);
+  std::optional<graphics::guest::Extent> screen_space;
   if (ScreenSpaceDraw(base, dev)) {
-    // Positions are already in pixels (see g_ScreenXform); cover the target.
-    vp.TopLeftX = vp.TopLeftY = 0;
-    ScreenSpaceTargetSize(vp.Width, vp.Height);
+    float width, height;
+    ScreenSpaceTargetSize(width, height);
+    screen_space = graphics::guest::Extent{width, height};
   }
+  const auto normalized = graphics::guest::NormalizeViewport(
+      {vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height, vp.MinDepth, vp.MaxDepth},
+      {float(kOutputWidth), float(kOutputHeight)}, screen_space, 1.0f);
+  vp = {normalized.x, normalized.y, normalized.width, normalized.height,
+        normalized.min_depth, normalized.max_depth};
   if (trace_state_ == 1) {
     auto regf = [&](uint32_t r) {
       uint32_t v = LoadReg(base, dev, r);
@@ -3794,31 +3811,13 @@ void Renderer::ApplyFixedFunctionState(uint8_t* base, uint32_t dev) {
   if (REXCVAR_GET(sr_native_scissor) && !tiling_active_) {
     uint32_t tl = mirror_.reg(rex::graphics::XE_GPU_REG_PA_SC_WINDOW_SCISSOR_TL);
     uint32_t br = mirror_.reg(rex::graphics::XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR);
-    int32_t x0 = int32_t(tl & 0x7FFF), y0 = int32_t((tl >> 16) & 0x7FFF);
-    int32_t x1 = int32_t(br & 0x7FFF), y1 = int32_t((br >> 16) & 0x7FFF);
-    if (!(tl >> 31)) {
-      uint32_t off = mirror_.reg(rex::graphics::XE_GPU_REG_PA_SC_WINDOW_OFFSET);
-      int32_t ox = int32_t(off << 17) >> 17, oy = int32_t((off >> 16) << 17) >> 17;
-      x0 += ox;
-      y0 += oy;
-      x1 += ox;
-      y1 += oy;
-    }
-    uint32_t stl = mirror_.reg(rex::graphics::XE_GPU_REG_PA_SC_SCREEN_SCISSOR_TL);
-    uint32_t sbr = mirror_.reg(rex::graphics::XE_GPU_REG_PA_SC_SCREEN_SCISSOR_BR);
-    if (sbr) {
-      x0 = std::max(x0, int32_t(stl & 0x7FFF));
-      y0 = std::max(y0, int32_t((stl >> 16) & 0x7FFF));
-      x1 = std::min(x1, int32_t(sbr & 0x7FFF));
-      y1 = std::min(y1, int32_t((sbr >> 16) & 0x7FFF));
-    }
-    x0 = std::max(x0, 0);
-    y0 = std::max(y0, 0);
-    x1 = std::max(x1, x0);
-    y1 = std::max(y1, y0);
-    if (br) {
-      scissor = ScaleRect({LONG(x0), LONG(y0), LONG(x1), LONG(y1)}, bound_scale_);
-    }
+    const auto decoded_scissor = graphics::guest::DecodeScissor(
+        {tl, br, mirror_.reg(rex::graphics::XE_GPU_REG_PA_SC_WINDOW_OFFSET),
+         mirror_.reg(rex::graphics::XE_GPU_REG_PA_SC_SCREEN_SCISSOR_TL),
+         mirror_.reg(rex::graphics::XE_GPU_REG_PA_SC_SCREEN_SCISSOR_BR)},
+        true, false, bound_scale_);
+    scissor = {decoded_scissor.left, decoded_scissor.top,
+               decoded_scissor.right, decoded_scissor.bottom};
     if (trace_state_ == 1) {
       REXLOG_INFO("trace   scissor tl {:08X} br {:08X} -> {},{}-{},{}", tl, br, scissor.left,
                   scissor.top, scissor.right, scissor.bottom);
@@ -4010,38 +4009,41 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
   }
   D3D12_PRIMITIVE_TOPOLOGY_TYPE topology_type = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
   quads = false;
-  switch (static_cast<xenos::PrimitiveType>(prim)) {
-    case xenos::PrimitiveType::kTriangleList:
+  graphics::guest::Primitive primitive;
+  std::string primitive_error;
+  if (!graphics::guest::DecodePrimitive(prim, primitive, primitive_error)) {
+    ++stats_.skip_prim;
+    stats_.pass_last_skip[g_current_pass & 31] = "prim";
+    LogUnsupportedOnce("primitive type", prim);
+    return false;
+  }
+  switch (primitive) {
+    case graphics::guest::Primitive::kTriangles:
       topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
       break;
-    case xenos::PrimitiveType::kTriangleStrip:
+    case graphics::guest::Primitive::kTriangleStrip:
       topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
       break;
-    case xenos::PrimitiveType::kQuadList:
+    case graphics::guest::Primitive::kQuads:
       topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
       quads = true;
       break;
-    case xenos::PrimitiveType::kLineList:
+    case graphics::guest::Primitive::kLines:
       topology = D3D_PRIMITIVE_TOPOLOGY_LINELIST;
       topology_type = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
       break;
-    case xenos::PrimitiveType::kLineStrip:
+    case graphics::guest::Primitive::kLineStrip:
       topology = D3D_PRIMITIVE_TOPOLOGY_LINESTRIP;
       topology_type = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
       break;
-    case xenos::PrimitiveType::kPointList:
+    case graphics::guest::Primitive::kPoints:
       topology = D3D_PRIMITIVE_TOPOLOGY_POINTLIST;
       topology_type = D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
       break;
-    case xenos::PrimitiveType::kRectangleList:
+    case graphics::guest::Primitive::kRectangles:
       // Expanded on the CPU into a triangle list by the caller.
       topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
       break;
-    default:
-      ++stats_.skip_prim;
-      stats_.pass_last_skip[g_current_pass & 31] = "prim";
-      LogUnsupportedOnce("primitive type", prim);
-      return false;
   }
   DXGI_FORMAT rtv_formats[4];
   uint32_t rt_count = 0;
@@ -4156,38 +4158,9 @@ void Renderer::SwapBufferRange(uint8_t* base, const BufferEntry& entry, uint32_t
     }
     return;
   }
-  // Vertex data: swap each element of the declaration for this stream. `begin`
-  // is aligned to a vertex (phase + k * stride).
-  uint32_t decl = entry.decl, stride = entry.stride;
-  uint32_t decl_count = Load32(base, decl + 0x18);
-  uint32_t stream = entry.index_format >> 8;
-  for (uint32_t i = 0; i < decl_count; ++i) {
-    uint32_t e = decl + 0x34 + 12 * i;
-    uint32_t e_stream = Load16(base, e);
-    if (e_stream == 0xFF) break;
-    if (e_stream != stream) continue;
-    uint32_t offset = Load16(base, e + 2);
-    DeclFormat fmt = MapDeclType(Load32(base, e + 4));
-    if (!fmt.size || offset + fmt.size > stride) continue;
-    for (uint32_t v = 0; v + stride <= size; v += stride) {
-      uint8_t* p = data + v + offset;
-      if (fmt.swap == 4) {
-        for (uint32_t w = 0; w < fmt.size; w += 4) {
-          uint32_t x;
-          std::memcpy(&x, p + w, 4);
-          x = __builtin_bswap32(x);
-          std::memcpy(p + w, &x, 4);
-        }
-      } else {
-        for (uint32_t w = 0; w < fmt.size; w += 2) {
-          uint16_t x;
-          std::memcpy(&x, p + w, 2);
-          x = __builtin_bswap16(x);
-          std::memcpy(p + w, &x, 2);
-        }
-      }
-    }
-  }
+  // Identical element endian conversion for both render backends.
+  graphics::guest::SwapVertexElements({data,size},entry.stride,0,
+      entry.index_format>>8,ReadVertexDeclaration(base,entry.decl));
 }
 
 void Renderer::VertexRange::Resolve() {
@@ -4893,32 +4866,8 @@ void Renderer::ExecDrawInlineVertices(uint8_t* base, uint32_t prim, uint32_t dat
   inline_scratch.resize(vb_size);
   uint8_t* vdata = inline_scratch.data();
   std::memcpy(vdata, GuestPtr(base, data, uint32_t(vb_size)), vb_size);
-  uint32_t decl_count = Load32(base, decl + 0x18);
-  for (uint32_t i = 0; i < decl_count; ++i) {
-    uint32_t e = decl + 0x34 + 12 * i;
-    if (Load16(base, e) == 0xFF) break;
-    uint32_t offset = Load16(base, e + 2);
-    DeclFormat fmt = MapDeclType(Load32(base, e + 4));
-    if (!fmt.size || offset + fmt.size > stride) continue;
-    for (uint32_t v = 0; v < vertex_count; ++v) {
-      uint8_t* p = vdata + size_t(v) * stride + offset;
-      if (fmt.swap == 4) {
-        for (uint32_t w = 0; w < fmt.size; w += 4) {
-          uint32_t x;
-          std::memcpy(&x, p + w, 4);
-          x = __builtin_bswap32(x);
-          std::memcpy(p + w, &x, 4);
-        }
-      } else {
-        for (uint32_t w = 0; w < fmt.size; w += 2) {
-          uint16_t x;
-          std::memcpy(&x, p + w, 2);
-          x = __builtin_bswap16(x);
-          std::memcpy(p + w, &x, 2);
-        }
-      }
-    }
-  }
+  graphics::guest::SwapVertexElements({vdata,vb_size},stride,0,UINT32_MAX,
+      ReadVertexDeclaration(base,decl));
   if (trace_state_ == 1) {
     std::string vs;
     for (uint32_t k = 0; k < std::min<uint32_t>(vertex_count * stride / 4, 40); ++k) {
@@ -5983,15 +5932,39 @@ void Renderer::BeginCmd(Op op) {
   if (!batch_) batch_ = std::make_unique<WorkBatch>();
   cur_ = WorkCmd{};
   cur_.op = op;
+  cur_.command_serial = ++capture_serial_;
+  cur_.tiling_active = capture_tiling_active_;
+  cur_.packet_check = REXCVAR_GET(sr_native_packet_check) && graphics::guest::IsCaptureFrame(
+      front_frame_, uint32_t(std::max(1,REXCVAR_GET(sr_native_packet_check_every))));
   cur_.pass = g_guest_pass;
   cur_.range_first = uint32_t(batch_->ranges.size());
   cur_.stream_first = uint32_t(batch_->streams.size());
 }
 
 void Renderer::EndCmd(uint8_t* base) {
+  if (cur_.packet_check && cur_.ring_bytes) {
+    std::string capture_error;
+    cur_.pm4_capture_ok = graphics::guest::CapturePm4Dependencies(*batch_, cur_,
+        [base](uint32_t address, uint32_t length) {
+          return ReadCommittedGuest(base,address,length);
+        }, capture_error, &capture_mirror_);
+    if (!cur_.pm4_capture_ok)
+      REXLOG_WARN("native PM4 capture: {}", capture_error);
+  }
+  if (REXCVAR_GET(sr_native_packet_check) && !cur_.packet_check && cur_.ring_bytes) {
+    // Keep the same frontend parser current between sampled frames. Only a
+    // selected diagnostic frame freezes referenced bytes for packet decoding.
+    capture_mirror_.ScanCopyUsing(batch_->bytes.data()+cur_.ring_offset,cur_.ring_bytes,
+        [base](uint32_t address,uint32_t length) {return ReadCommittedGuest(base,address,length);});
+  }
+  if (cur_.packet_check && cur_.device &&
+      (cur_.op==Op::kDraw || cur_.op==Op::kDrawIndexed || cur_.op==Op::kDrawInline))
+    CaptureTextures(base);
   cur_.range_count = uint32_t(batch_->ranges.size()) - cur_.range_first;
   cur_.stream_count = uint32_t(batch_->streams.size()) - cur_.stream_first;
   batch_->cmds.push_back(cur_);
+  if(cur_.op==Op::kBeginTiling) capture_tiling_active_=true;
+  if(cur_.op==Op::kEndTiling) capture_tiling_active_=false;
   if (!worker_mode_) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     Execute(base, *batch_, batch_->cmds.back());
@@ -6011,11 +5984,90 @@ void Renderer::CaptureBytes(uint8_t* base, uint32_t address, uint32_t length) {
   batch_->ranges.push_back({address, length, uint32_t(offset)});
 }
 
+void Renderer::CaptureTextures(uint8_t* base) {
+  for (uint32_t slot=0;slot<32;++slot) {
+    std::array<uint32_t,6> fetch{};
+    for(uint32_t i=0;i<6;++i) {
+      uint32_t reg=Pm4Mirror::kFetchConstantBase+slot*6+i;
+      fetch[i]=capture_mirror_.written(reg) ? capture_mirror_.reg(reg)
+          : Load32(base,cur_.device+kDev.fetch_constants+slot*24+i*4);
+    }
+    if(!IsTextureBound(fetch[0])) continue;
+    auto& entry=captured_textures_[fetch];
+    bool dirty=!entry.snapshot;
+    if(entry.snapshot) {
+      for(const auto& range:entry.snapshot->ranges)
+        if(texture_watch_ && TextureWrittenSince(range.address,range.length,entry.watch_seq)) dirty=true;
+      if(entry.checked_frame!=front_frame_) {
+        uint64_t total=0;
+        for(const auto& range:entry.snapshot->ranges) total+=range.length;
+        // Verify small dynamic movie/UI textures each frame. Without access
+        // callbacks, every texture needs verification at its first use.
+        if(total<=256u*1024 || !texture_watch_) dirty=true;
+      }
+    }
+    entry.checked_frame=front_frame_;
+    if(dirty) {
+      std::string error;
+      std::vector<graphics::guest::TextureRange> ranges;
+      if(!graphics::guest::DescribeTextureRanges(fetch,ranges,error)) {
+        cur_.texture_errors.emplace_back(slot,std::move(error));
+        continue;
+      }
+      uint64_t hash=0xcbf29ce484222325ull;
+      entry.watch_seq=write_seq_.load(std::memory_order_acquire);
+      for(const auto& range:ranges) {
+        if(texture_watch_) ArmTextureWatch(range.address,range.length);
+        auto bytes=ReadCommittedGuest(base,0xa0000000u+range.address,range.length);
+        if(bytes.size()!=range.length) {error="Texture memory is not readable";break;}
+        hash=XXH3_64bits_withSeed(bytes.data(),bytes.size(),hash);
+      }
+      if(!error.empty()) {cur_.texture_errors.emplace_back(slot,std::move(error));continue;}
+      if(!entry.snapshot || hash!=entry.content_hash) {
+        if(!graphics::guest::CaptureTexture(fetch,cur_.command_serial,
+            [base](uint32_t address,uint32_t length){
+              return ReadCommittedGuest(base,address,length);
+            },entry.snapshot,error)) {
+          cur_.texture_errors.emplace_back(slot,std::move(error));
+          continue;
+        }
+        // Hash exactly the owned bytes, rather than a preceding live read.
+        // A loader may write between the change check and the snapshot copy.
+        hash=0xcbf29ce484222325ull;
+        for(const auto& range:entry.snapshot->ranges) {
+          auto bytes=entry.snapshot->memory.Read(0xa0000000u+range.address,range.length);
+          hash=XXH3_64bits_withSeed(bytes.data(),bytes.size(),hash);
+        }
+        entry.content_hash=hash;
+      }
+    }
+    cur_.textures[slot]=entry.snapshot;
+  }
+  // Commands retain ownership even when the frontend cache is pruned.
+  if(captured_textures_.size()>2048) {
+    for(auto it=captured_textures_.begin();it!=captured_textures_.end();) {
+      if(it->second.checked_frame+120<front_frame_) it=captured_textures_.erase(it);
+      else ++it;
+    }
+  }
+}
+
 // Device state the worker reads for a draw/resolve (Load32 through captures):
 // device pointer, vertex fetch shadow, register shadow, vertex declaration
 // pointer, surface/shader/stream/index pointers and viewport, and the objects
 // they point to.
 void Renderer::CaptureDevice(uint8_t* base, uint32_t dev) {
+  cur_.device = dev;
+  if (cur_.packet_check) {
+    CaptureBytes(base, dev + kDev.fetch_constants, 32 * 24);
+    CaptureBytes(base, dev + kDev.vs_bools, kDev.register_shadow-kDev.vs_bools);
+    for (const auto& range : profile::kRegisterShadow)
+      CaptureBytes(base, dev + range.offset, range.count * 4);
+    uint32_t vs = Load32(base, dev + kDev.shader_a), ps = Load32(base, dev + kDev.shader_b);
+    TryRegisterInlineShaders(base, vs, ps);
+    cur_.vertex_shader = CaptureGuestShader(vs);
+    cur_.pixel_shader = CaptureGuestShader(ps);
+  }
   if (profile::kDevicePtrAddr) CaptureBytes(base, profile::kDevicePtrAddr, 4);
   CaptureBytes(base, dev, 8);
   CaptureBytes(base, dev + kDev.fetch_constants + 0x280, 0x80);  // vertex fetch slots
@@ -6126,7 +6178,47 @@ void Renderer::Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd
   }
   exec_copies_before_ = mirror_.copy_draws;
   if (cmd.ring_bytes) {
-    mirror_.ScanCopy(base, batch.bytes.data() + cmd.ring_offset, cmd.ring_bytes);
+    if (cmd.packet_check) {
+      graphics::guest::CapturedMemory memory;
+      std::string error;
+      if (graphics::guest::CapturedMemory::Capture(batch, cmd, memory, error)) {
+        mirror_.ScanCopyUsing(batch.bytes.data() + cmd.ring_offset, cmd.ring_bytes,
+            [&memory](uint32_t address, uint32_t length) -> std::span<const uint8_t> {
+              try { return memory.Read(address, length); }
+              catch (const std::out_of_range&) { return {}; }
+            });
+      } else {
+        REXLOG_WARN("native PM4 captured reader: {}", error);
+      }
+    } else {
+      mirror_.ScanCopy(base, batch.bytes.data() + cmd.ring_offset, cmd.ring_bytes);
+    }
+  }
+  if (cmd.packet_check) {
+    graphics::guest::RenderPacket packet;
+    std::string error;
+    if (!graphics::guest::DecodeRenderPacket(batch, cmd, mirror_, packet, error)) {
+      ++stats_.packet_errors;
+      if (stats_.packet_errors <= 8)
+        REXLOG_WARN("native packet check: op {} pass {}: {}", int(cmd.op), cmd.pass, error);
+    } else {
+      ++stats_.packets_decoded;
+      if(auto* draw=std::get_if<graphics::guest::DrawPacket>(&packet)) {
+        for(const auto& texture:draw->textures) if(texture) ++stats_.packet_texture_refs;
+        for(const auto& [slot,reason]:draw->texture_errors) {
+          if(++stats_.packet_texture_errors<=8)
+            REXLOG_WARN("native texture capture: slot {} format {} dimension {} base {:08X}: {}",slot,
+                        draw->texture_fetch[slot][1]&0x3f,(draw->texture_fetch[slot][5]>>9)&3,
+                        draw->texture_fetch[slot][1]&0xfffff000,reason);
+        }
+        if(!draw->vertex_shader || !draw->pixel_shader) ++stats_.packet_shader_missing;
+      }
+    }
+    if (cmd.op == Op::kSwap)
+      REXLOG_INFO("native packet check: {} decoded, {} capture errors, {} texture refs, "
+                  "{} texture capture failures (including resolve-only formats), {} shader captures missing",
+                  stats_.packets_decoded, stats_.packet_errors, stats_.packet_texture_refs,
+                  stats_.packet_texture_errors, stats_.packet_shader_missing);
   }
   const bool profiling = prof_active_ && frame_open_;
   const uint64_t prof_stats_draws = stats_.draws;
@@ -6315,7 +6407,7 @@ void Renderer::DrawInlineVertices(uint8_t* base, uint32_t prim, uint32_t data,
 
 void Renderer::Resolve(uint8_t* base, uint32_t flags, uint32_t src_rect, uint32_t dest_texture,
                        uint32_t dest_point, uint32_t clear_color, float clear_z,
-                       uint32_t clear_stencil) {
+                       uint32_t clear_stencil,uint32_t level,uint32_t slice) {
   if (!REXCVAR_GET(sr_native_resolves)) return;
   std::lock_guard<std::mutex> lock(front_mutex_);
   guest_base_ = base;
@@ -6334,6 +6426,8 @@ void Renderer::Resolve(uint8_t* base, uint32_t flags, uint32_t src_rect, uint32_
   cur_.u[3] = dest_point;
   cur_.u[4] = clear_color;
   cur_.u[5] = clear_stencil;
+  cur_.u[6] = level;
+  cur_.u[7] = slice;
   cur_.f = clear_z;
   EndCmd(base);
 }

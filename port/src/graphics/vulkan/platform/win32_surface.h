@@ -15,7 +15,7 @@ public:
   ~Win32Window();
   Win32Window(const Win32Window &) = delete;
   Win32Window &operator=(const Win32Window &) = delete;
-  bool Open(uint32_t, uint32_t, Error &);
+  bool Open(uint32_t, uint32_t, Error &,bool visible=true);
   VkSurfaceKHR CreateSurface(Context &, Error &);
   WindowEvents PumpEvents();
   void Resize(uint32_t, uint32_t);

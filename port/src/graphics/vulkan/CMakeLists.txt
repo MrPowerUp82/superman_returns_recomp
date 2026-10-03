@@ -2,7 +2,7 @@ set(SR_VULKAN_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/../../../../.tools/vulkan-hea
 if(NOT EXISTS "${SR_VULKAN_HEADERS}/vulkan/vulkan.h")
   message(FATAL_ERROR "Run tools/setup_vulkan.ps1 to fetch headers")
 endif()
-add_library(sr_vulkan_core STATIC policy.cpp loader.cpp context.cpp swapchain.cpp frame_loop.cpp triangle.cpp smoke_options.cpp)
+add_library(sr_vulkan_core STATIC policy.cpp loader.cpp context.cpp swapchain.cpp frame_loop.cpp triangle.cpp smoke_options.cpp device_requirements.cpp descriptors.cpp descriptor_sets.cpp resources.cpp image_state.cpp render_targets.cpp ../guest/edram_alias.cpp)
 target_link_libraries(sr_vulkan_core PRIVATE ${CMAKE_DL_LIBS})
 target_include_directories(sr_vulkan_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "${SR_VULKAN_HEADERS}")
 target_compile_features(sr_vulkan_core PUBLIC cxx_std_23)

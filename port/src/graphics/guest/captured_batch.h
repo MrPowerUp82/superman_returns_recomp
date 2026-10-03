@@ -1,4 +1,6 @@
 #pragma once
+#include "shader_capture.h"
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -7,6 +9,7 @@
 #include <utility>
 #include <vector>
 namespace superman_returns::graphics::guest {
+struct TextureCapture;
 template <typename T> struct DefaultInitAllocator : std::allocator<T> {
   template <typename U> struct rebind {
     using other = DefaultInitAllocator<U>;
@@ -55,6 +58,12 @@ enum class Op : uint8_t {
 };
 struct WorkCmd {
   Op op = Op::kRing;
+  uint32_t device =
+      0; // Captured device identity, independent of current guest globals.
+  std::shared_ptr<const ShaderCapture> vertex_shader, pixel_shader;
+  std::array<std::shared_ptr<const TextureCapture>, 32> textures;
+  std::vector<std::pair<uint32_t, std::string>> texture_errors;
+  uint64_t command_serial = 0;
   int pass = 0;
   uint32_t u[8] = {};
   float f = 0.0f;
@@ -63,6 +72,9 @@ struct WorkCmd {
   uint32_t range_first = 0, range_count = 0;
   uint32_t stream_first = 0, stream_count = 0;
   bool streams_ok = true;
+  bool pm4_capture_ok = true;
+  bool tiling_active = false;
+  bool packet_check = false;
   bool has_index = false;
   bool index32 = false;
   uint32_t index_size = 0;
@@ -96,4 +108,7 @@ private:
   };
   std::shared_ptr<const Snapshot> snapshot_;
 };
+constexpr bool IsCaptureFrame(uint64_t frame,uint32_t every) {
+  return frame % (every ? every : 1) == 0;
+}
 } // namespace superman_returns::graphics::guest

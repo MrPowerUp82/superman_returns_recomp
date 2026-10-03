@@ -192,7 +192,7 @@ bool Context::EnumerateCandidates(VkSurfaceKHR target,
   return true;
 }
 bool Context::OpenDevice(VkSurfaceKHR owned, std::string_view uuid, Error &e,
-                         const VkPhysicalDeviceFeatures *requested_features) {
+                         const VkPhysicalDeviceFeatures *requested_features,bool require_mirror_clamp) {
   if (device || surface) {
     e = {"OpenDevice", VK_ERROR_INITIALIZATION_FAILED,
          "Device already initialized"};
@@ -224,17 +224,29 @@ bool Context::OpenDevice(VkSurfaceKHR owned, std::string_view uuid, Error &e,
     q.pQueuePriorities = &priority;
     queues.push_back(q);
   }
-  const char *extension = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+  std::vector<const char*> extensions{VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+  if(require_mirror_clamp) {
+    std::vector<VkExtensionProperties> available;
+    if(!Query<VkExtensionProperties>([&](uint32_t* count,VkExtensionProperties* values) {
+      return f.vkEnumerateDeviceExtensionProperties(physical,nullptr,count,values);
+    },available,"Device extensions",e)) return false;
+    if(std::none_of(available.begin(),available.end(),[](const auto& v) {return std::strcmp(v.extensionName,VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME)==0;})) {
+      e={"Device extension",VK_ERROR_EXTENSION_NOT_PRESENT,"VK_KHR_sampler_mirror_clamp_to_edge required by game samplers"};return false;
+    }
+    extensions.push_back(VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME);
+  }
   VkDeviceCreateInfo ci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
   ci.queueCreateInfoCount = uint32_t(queues.size());
   ci.pQueueCreateInfos = queues.data();
-  ci.enabledExtensionCount = 1;
-  ci.ppEnabledExtensionNames = &extension;
+  ci.enabledExtensionCount = uint32_t(extensions.size());
+  ci.ppEnabledExtensionNames = extensions.data();
   ci.pEnabledFeatures = requested_features;
 
   if (!Check(f.vkCreateDevice(physical, &ci, nullptr, &device), "CreateDevice",
              e))
     return false;
+  enabled_features=requested_features?*requested_features:VkPhysicalDeviceFeatures{};
+  mirror_clamp_enabled=require_mirror_clamp;
   if (!injected_ && !loader_.LoadDevice(f, device, e))
     return false;
   f.vkGetDeviceQueue(device, graphics_family, 0, &graphics_queue);

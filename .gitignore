@@ -14,3 +14,7 @@ logs/
 artifacts/
 __pycache__/
 build/
+
+# .NET launcher build output
+**/bin/
+**/obj/

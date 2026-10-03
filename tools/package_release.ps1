@@ -30,6 +30,7 @@ if (-not $NoBuild) {
     $env:SR_BUILD_DIR = $null
     $env:SR_EMBED_SHADERS = $null
   }
+  & (Join-Path $root 'tools\build_launcher.ps1')
 }
 
 function Need($path, $hint) {
@@ -38,6 +39,8 @@ function Need($path, $hint) {
 }
 
 $exe = Need (Join-Path $BuildDir 'superman_returns.exe') 'Run without -NoBuild.'
+$launcherDir = Join-Path $root 'artifacts\launcher'
+$launcher = Need (Join-Path $launcherDir 'SupermanReturnsLauncher.exe') 'Run tools\build_launcher.ps1 first.'
 foreach ($leftover in 'superman_returns_shaders.srsl', 'superman_returns_shaders.pak') {
   if (Test-Path (Join-Path $BuildDir $leftover)) {
     throw "$leftover is in ${BuildDir}: that build embeds game-derived shaders. Use a SR_EMBED_SHADERS=OFF build folder."
@@ -52,11 +55,17 @@ $vs = & $vswhere -latest -products * -property installationPath
 $crt = Get-ChildItem (Join-Path $vs 'VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT') -Directory | Select-Object -Last 1
 if (-not $crt) { throw 'The Visual C++ redistributable folder was not found.' }
 
-$stage = Join-Path $OutDir 'stage'
-if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+$OutDir = [IO.Path]::GetFullPath($OutDir)
+$stage = [IO.Path]::GetFullPath((Join-Path $OutDir 'stage'))
+if (-not $stage.StartsWith($OutDir.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Invalid staging directory.' }
+if (Test-Path $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
 New-Item -ItemType Directory -Force $stage, (Join-Path $stage 'shader_tools'), (Join-Path $stage 'licenses') | Out-Null
 
 Copy-Item $exe $stage
+Copy-Item $launcher $stage
+foreach ($notice in 'DOTNET-LICENSE.txt', 'DOTNET-ThirdPartyNotices.txt') {
+  Copy-Item (Need (Join-Path $launcherDir $notice) 'Rebuild the launcher.') (Join-Path $stage 'licenses')
+}
 foreach ($dll in 'rexruntime.dll', 'rexgpu-xenos.dll') { Copy-Item (Need (Join-Path $BuildDir $dll) '') $stage }
 foreach ($name in 'msvcp140.dll', 'msvcp140_atomic_wait.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') {
   Copy-Item (Need (Join-Path $crt.FullName $name) '') $stage
@@ -89,7 +98,7 @@ foreach ($f in 'run.cmd', 'run_keyboard.cmd', 'LEIAME.txt', 'THIRD_PARTY_NOTICES
 }
 
 $commit = (git -C $root rev-parse --short HEAD).Trim()
-$dirty = if ((git -C $root status --porcelain -- port tools build.cmd) ) { '-dirty' } else { '' }
+$dirty = if ((git -C $root status --porcelain -- port tools launcher build.cmd) ) { '-dirty' } else { '' }
 $version = "$(Get-Date -Format 'yyyy.MM.dd')-$commit$dirty"
 $info = [ordered]@{ version = $version; commit = $commit; built = (Get-Date).ToUniversalTime().ToString('o'); xex_sha256 = 'c8f243acd99de9a91f5ae4f409721c0e954e3d5eb96861419d3da07b8106db2b' }
 $info | ConvertTo-Json | Set-Content (Join-Path $stage 'version.json') -Encoding utf8

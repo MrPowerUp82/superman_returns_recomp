@@ -143,12 +143,16 @@ SR_DEFINE_HOOK(SR_ADDR_RESOLVE) {
   const uint32_t dev = ctx.r3.u32, flags = ctx.r4.u32, rect = ctx.r5.u32, dest = ctx.r6.u32,
                  point = ctx.r7.u32, clear_color = ctx.r10.u32;
   const float clear_z = float(ctx.f1.f64);
+  const uint32_t level=ctx.r8.u32,slice=ctx.r9.u32;
+  // sub_8210C5F8 reads ClearStencil at old SP+92 (new SP+460
+  // after its 368-byte prologue). Capture before calling the original.
+  const uint32_t clear_stencil=__builtin_bswap32(*reinterpret_cast<const uint32_t*>(base+ctx.r1.u32+92));
   OnDeviceCall("Resolve", dev, flags);
   // Original first: the resolve's RB_COPY_* registers land in the command
   // stream the PM4 mirror parses.
   SR_ORIGINAL(SR_ADDR_RESOLVE)(ctx, base);
   if (native::Enabled()) {
-    native::Renderer::Get().Resolve(base, flags, rect, dest, point, clear_color, clear_z, 0);
+    native::Renderer::Get().Resolve(base, flags, rect, dest, point, clear_color, clear_z, clear_stencil,level,slice);
   }
 }
 #endif

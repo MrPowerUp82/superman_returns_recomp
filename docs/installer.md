@@ -8,7 +8,7 @@ O port pode ser distribuído **sem nenhum dado do jogo e sem nenhum shader tradu
 | --- | --- | --- |
 | Página do instalador | `docs/index.html`, `docs/js/*` | Lê o ISO (XDVDFS) ou a pasta do jogo no navegador, confere o SHA-256 do `default.xex`, baixa o build e grava tudo em uma pasta ou em um `.zip`. Nada sai do computador do usuário. |
 | Tradução de shaders em runtime | `port/src/native_renderer/shader_translator.*` | Cada container de shader que o jogo cria vai para o `sr_xenosrecomp.exe` (emissor HLSL) e o `dxc.exe`, em processos filhos e threads de fundo; o DXIL fica em `shader_cache/`. |
-| Pacote | `tools/package_release.ps1`, `tools/release/` | Executável sem pack nem biblioteca de shaders embutidos, `shader_tools/`, runtimes do Visual C++, scripts `run*.cmd`, licenças. |
+| Pacote | `tools/package_release.ps1`, `tools/release/` | Executável sem pack nem biblioteca de shaders embutidos, launcher GUI portátil com .NET, `shader_tools/`, runtimes do Visual C++, scripts `run*.cmd`, licenças. |
 | Publicação | `tools/publish_release.ps1` | Branch órfão `builds` (a página baixa de lá, pois `raw.githubusercontent.com` tem CORS e os assets de release não) e uma release com o mesmo zip. |
 
 ## Gerar e publicar um build
@@ -18,7 +18,7 @@ powershell -File tools\package_release.ps1          # compila em port\out\build\
 powershell -File tools\publish_release.ps1 -Confirm  # branch builds + release (exige o repositório sem alterações pendentes)
 ```
 
-O pacote sai em `artifacts/release/superman_returns_win64.zip` (~32 MB) com `version.json` e o SHA-256. Para só empacotar um build existente: `-NoBuild`.
+O pacote sai em `artifacts/release/superman_returns_win64.zip` (~94 MB com o runtime do launcher) com `version.json` e o SHA-256. A compilação do launcher requer .NET 8 SDK. Para só empacotar builds existentes, gere o launcher com `tools/build_launcher.ps1` e use `-NoBuild`.
 
 Para ativar a página: Settings → Pages → Deploy from a branch → `main` / `docs`.
 

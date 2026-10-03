@@ -40,6 +40,7 @@
 
 #include "game_profile.h"
 #include "../graphics/guest/captured_batch.h"
+#include "../graphics/guest/texture_capture.h"
 #include "pipeline_cache.h"
 #include "pm4_mirror.h"
 
@@ -115,7 +116,8 @@ class Renderer {
   // Resolve(dev, Flags, pSrcRect, pDestTexture, pDestPoint, Level, Slice,
   //         pClearColor, ClearZ, ClearStencil, pParameters)
   void Resolve(uint8_t* base, uint32_t flags, uint32_t src_rect, uint32_t dest_texture,
-               uint32_t dest_point, uint32_t clear_color, float clear_z, uint32_t clear_stencil);
+               uint32_t dest_point, uint32_t clear_color, float clear_z, uint32_t clear_stencil,
+               uint32_t level=0,uint32_t slice=0);
   // BeginTiling(dev, Flags, Count, pTileRects, pClearColor, ClearZ, ClearStencil)
   void BeginTiling(uint8_t* base, uint32_t count, uint32_t rects, uint32_t clear_color,
                    float clear_z, uint32_t clear_stencil);
@@ -142,6 +144,8 @@ class Renderer {
   void InvalidateGuestRange(uint32_t address, uint32_t size);
 
   struct Stats {
+    uint64_t packets_decoded = 0, packet_errors = 0, packet_swaps = 0;
+    uint64_t packet_texture_refs = 0, packet_texture_errors = 0, packet_shader_missing = 0;
     uint64_t draws = 0;
     uint64_t draws_skipped = 0;
     uint64_t skip_shader = 0, skip_pso = 0, skip_prim = 0, skip_rt = 0, skip_vb = 0;
@@ -184,6 +188,7 @@ class Renderer {
   // Front end (guest threads, front_mutex_).
   void BeginCmd(Op op);
   void EndCmd(uint8_t* base);
+  void CaptureTextures(uint8_t* base);
   void CaptureBytes(uint8_t* base, uint32_t address, uint32_t length);
   void CaptureDevice(uint8_t* base, uint32_t dev);
   void CaptureRing(uint8_t* base, uint32_t dev);
@@ -630,6 +635,17 @@ class Renderer {
   void ResolveEdramAliasing(HostSurface* s);
   uint64_t alias_clear_frame_ = ~0ull;
   Pm4Mirror mirror_;
+  // Development frontend capture uses the same parser; Vulkan will consume
+  // frontend packets directly and will not rescan commands on its worker.
+  Pm4Mirror capture_mirror_;
+  uint64_t capture_serial_ = 0;
+  bool capture_tiling_active_ = false;
+  struct CapturedTextureEntry {
+    std::shared_ptr<const graphics::guest::TextureCapture> snapshot;
+    uint64_t content_hash=0, checked_frame=~0ull;
+    uint32_t watch_seq=0;
+  };
+  std::map<std::array<uint32_t,6>,CapturedTextureEntry> captured_textures_;
   std::vector<uint32_t> mirror_snapshot_;  // mirror at sr_native_dump_swap (A/B check)
   uint32_t ring_last_ = 0;
   uint64_t ring_resyncs_ = 0;

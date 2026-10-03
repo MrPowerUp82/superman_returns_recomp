@@ -148,6 +148,12 @@ bool TryHashContainer(uint8_t* base, uint32_t container, GuestShaderInfo& info) 
       ShaderHasInstanceData(base + container, header.virtual_size);
   info.container_hash = XXH3_64bits(base + container, header.total_size());
   info.match = PreShaderMatch::kNone;
+  auto capture = std::make_shared<graphics::guest::ShaderCapture>();
+  capture->hash = info.container_hash;
+  capture->vertex = info.is_vertex;
+  capture->dynamic_vertex_fetch = info.dynamic_vertex_fetch;
+  capture->container.assign(base + container, base + container + header.total_size());
+  info.capture = std::move(capture);
   return true;
 }
 
@@ -167,6 +173,12 @@ bool IdentifyAt(uint8_t* base, uint32_t container, GuestShaderInfo& info) {
   info.is_vertex = s->vertex;
   info.dynamic_vertex_fetch = s->dynamic_vertex_fetch;
   info.match = how;
+  auto capture = std::make_shared<graphics::guest::ShaderCapture>();
+  capture->hash = info.container_hash;
+  capture->vertex = info.is_vertex;
+  capture->dynamic_vertex_fetch = info.dynamic_vertex_fetch;
+  capture->container = s->container;
+  info.capture = std::move(capture);
   return true;
 }
 
@@ -188,6 +200,12 @@ uint32_t ResolveInline(uint8_t* base, uint32_t obj, bool vertex, GuestShaderInfo
         candidate.is_vertex = s->vertex;
         candidate.dynamic_vertex_fetch = s->dynamic_vertex_fetch;
         candidate.match = how;
+        auto capture = std::make_shared<graphics::guest::ShaderCapture>();
+        capture->hash = s->container_hash;
+        capture->vertex = s->vertex;
+        capture->dynamic_vertex_fetch = s->dynamic_vertex_fetch;
+        capture->container = s->container;
+        candidate.capture = std::move(capture);
         found = true;
       }
     }
@@ -350,6 +368,12 @@ const GuestShaderInfo* LookupGuestShader(uint32_t guest_object) {
   std::lock_guard<std::mutex> lock(g_mutex);
   auto it = g_shaders.find(guest_object);
   return it == g_shaders.end() ? nullptr : &it->second;
+}
+
+std::shared_ptr<const graphics::guest::ShaderCapture> CaptureGuestShader(uint32_t guest_object) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  auto it = g_shaders.find(guest_object);
+  return it == g_shaders.end() ? nullptr : it->second.capture;
 }
 
 void TryRegisterInlineShaders(uint8_t* base, uint32_t vs_obj, uint32_t ps_obj) {

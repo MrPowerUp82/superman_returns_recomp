@@ -15,6 +15,7 @@
 #include "native_graphics_system.h"
 
 #include <algorithm>
+#include <charconv>
 #include <string>
 
 #include <fmt/format.h>
@@ -37,6 +38,8 @@
 #include <rex/ui/d3d12/d3d12_provider.h>
 #include <rex/ui/presenter.h>
 #include <rex/ui/windowed_app_context.h>
+#include <dxgi1_2.h>
+#include <wrl/client.h>
 
 #include "game_profile.h"
 #include "hang_watchdog.h"
@@ -50,6 +53,8 @@ REXCVAR_DEFINE_INT32(sr_native_fps_limit, 30, "Superman Returns Native",
                      "sr_native_unlocked_vblank_hz)")
     .range(0, 1000);
 REXCVAR_DEFINE_BOOL(sr_native_gpu_trace, false, "Superman Returns Native", "Debug: log native GPU packets/registers");
+REXCVAR_DEFINE_STRING(sr_native_gpu_luid, "", "Superman Returns Native",
+                     "Launcher GPU identity (16 hexadecimal digits); empty uses d3d12_adapter");
 // The kit's fork declares unlocked_vblank_rate in the runtime; the stock SDK
 // does not, so the unlocked rate is a project cvar.
 REXCVAR_DEFINE_INT32(sr_native_unlocked_vblank_hz, 240, "Superman Returns Native",
@@ -65,6 +70,35 @@ namespace gpu = rex::graphics;
 
 namespace {
 std::atomic<NativeGraphicsSystem*> g_active_system{nullptr};
+
+// Windows graphics preferences can reorder EnumAdapters1 per executable.
+// Resolve the launcher's LUID inside this process before creating the provider.
+bool ResolveLauncherGpu() {
+  const auto text = rex::cvar::GetFlagByName("sr_native_gpu_luid");
+  if (text.empty()) return true;
+  uint64_t luid = 0;
+  const auto parsed = std::from_chars(text.data(), text.data() + text.size(), luid, 16);
+  if (text.size() != 16 || parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size()) {
+    REXLOG_ERROR("native graphics: invalid launcher GPU identity {}", text);
+    return false;
+  }
+  Microsoft::WRL::ComPtr<IDXGIFactory2> factory;
+  if (FAILED(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)))) return false;
+  for (UINT index = 0; ; ++index) {
+    Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+    if (factory->EnumAdapters1(index, &adapter) != S_OK) break;
+    DXGI_ADAPTER_DESC1 desc{};
+    if (FAILED(adapter->GetDesc1(&desc))) continue;
+    const uint64_t candidate = (uint64_t(uint32_t(desc.AdapterLuid.HighPart)) << 32) |
+                               desc.AdapterLuid.LowPart;
+    if (candidate == luid) {
+      REXLOG_INFO("native graphics: launcher GPU {} resolved to adapter {}", text, index);
+      return rex::cvar::SetFlagByName("d3d12_adapter", std::to_string(index));
+    }
+  }
+  REXLOG_ERROR("native graphics: selected launcher GPU {} is unavailable", text);
+  return false;
+}
 }  // namespace
 
 NativeGraphicsSystem* ActiveNativeGraphicsSystem() { return g_active_system.load(); }
@@ -139,6 +173,7 @@ rex::ui::GraphicsProvider* NativeGraphicsSystem::provider() const { return provi
 
 rex::X_STATUS NativeGraphicsSystem::SetupPresentation(rex::ui::WindowedAppContext* app_context) {
   if (presenter_) return X_STATUS_SUCCESS;
+  if (!ResolveLauncherGpu()) return X_STATUS_UNSUCCESSFUL;
   provider_ = rex::ui::d3d12::D3D12Provider::Create();
   if (!provider_) {
     REXLOG_ERROR("native graphics: unable to create the D3D12 provider");
@@ -174,6 +209,7 @@ rex::X_STATUS NativeGraphicsSystem::SetupGuestGpu(rex::runtime::FunctionDispatch
   function_dispatcher_ = function_dispatcher;
   kernel_state_ = kernel_state;
   if (!provider_) {
+    if (!ResolveLauncherGpu()) return X_STATUS_UNSUCCESSFUL;
     provider_ = rex::ui::d3d12::D3D12Provider::Create();
     if (!provider_) return X_STATUS_UNSUCCESSFUL;
   }

@@ -10,6 +10,8 @@
 
 #include <cstdint>
 #include <string>
+#include <memory>
+#include "../graphics/guest/shader_capture.h"
 
 #include "shader_library.h"
 
@@ -21,10 +23,12 @@ struct GuestShaderInfo {
   bool dynamic_vertex_fetch = false;
   // How the container was recognised; kNone = legacy hash without a library.
   PreShaderMatch match = PreShaderMatch::kNone;
+  std::shared_ptr<const graphics::guest::ShaderCapture> capture;
 };
 
 // Returns nullptr for objects not created through the hooked XDK creators.
 const GuestShaderInfo* LookupGuestShader(uint32_t guest_object);
+std::shared_ptr<const graphics::guest::ShaderCapture> CaptureGuestShader(uint32_t guest_object);
 
 // The pre-translated shader library (sr_native_preshaders), or nullptr when it
 // is disabled or missing. `where` receives its path or why it is absent.

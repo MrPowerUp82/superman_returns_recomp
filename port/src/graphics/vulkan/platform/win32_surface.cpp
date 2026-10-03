@@ -19,7 +19,7 @@ LRESULT CALLBACK Win32Window::Procedure(HWND window, UINT message, WPARAM w,
   }
   return DefWindowProcW(window, message, w, l);
 }
-bool Win32Window::Open(uint32_t width, uint32_t height, Error &e) {
+bool Win32Window::Open(uint32_t width, uint32_t height, Error &e,bool visible) {
   auto instance = GetModuleHandleW(nullptr);
   WNDCLASSW wc{};
   wc.lpfnWndProc = Procedure;
@@ -42,7 +42,7 @@ bool Win32Window::Open(uint32_t width, uint32_t height, Error &e) {
          "Unable to create Vulkan test window"};
     return false;
   }
-  ShowWindow(window_, SW_SHOW);
+  if(visible) ShowWindow(window_, SW_SHOW);
   return true;
 }
 VkSurfaceKHR Win32Window::CreateSurface(Context &c, Error &e) {

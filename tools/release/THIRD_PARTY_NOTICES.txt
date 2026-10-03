@@ -17,5 +17,9 @@ Microsoft Visual C++ runtime (msvcp140.dll, msvcp140_atomic_wait.dll, vcruntime1
 vcruntime140_1.dll) - redistributed as permitted by the Visual Studio distributable code
 terms (app-local deployment).
 
+.NET 8 and Windows Desktop/WPF runtime (bundled inside SupermanReturnsLauncher.exe) -
+https://github.com/dotnet - MIT and third-party licenses, licenses\DOTNET-LICENSE.txt
+and licenses\DOTNET-ThirdPartyNotices.txt.
+
 Game shaders are translated on the user's machine from the user's own copy of the game;
 no translated shader and no game data is part of this package.

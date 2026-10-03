@@ -16,33 +16,48 @@
 
 #include <cstdint>
 #include <cstring>
+#include <functional>
+#include <span>
 
 namespace superman_returns::native {
 
 class Pm4Mirror {
- public:
+public:
+  using MemoryReader =
+      std::function<std::span<const uint8_t>(uint32_t, uint32_t)>;
   static constexpr uint32_t kRegisterCount = 0x5003;
-  static constexpr uint32_t kAluConstantBase = 0x4000;  // VS c0-255, PS c256-511 (x4 dwords)
+  static constexpr uint32_t kAluConstantBase =
+      0x4000; // VS c0-255, PS c256-511 (x4 dwords)
   static constexpr uint32_t kFetchConstantBase = 0x4800;
   static constexpr uint32_t kBoolConstantBase = 0x4900;
   static constexpr uint32_t kLoopConstantBase = 0x4908;
 
   // Parses the command stream between guest virtual addresses [begin, end).
-  void Scan(const uint8_t* base, uint32_t begin, uint32_t end, int depth = 0) {
+  void Scan(const uint8_t *base, uint32_t begin, uint32_t end, int depth = 0) {
     ScanFrom(base, base, begin, end, depth);
   }
   // Parses a copy of a command segment (`size` bytes at `words`, big-endian);
   // packets that reference memory (LOAD_ALU_CONSTANT, INDIRECT_BUFFER) read
   // guest memory through `base`.
-  void ScanCopy(const uint8_t* base, const uint8_t* words, uint32_t size) {
+  void ScanCopy(const uint8_t *base, const uint8_t *words, uint32_t size) {
     ScanFrom(base, words, 0, size, 0);
   }
+  // Same parser, but every referenced byte comes from an owned capture.
+  // Returned spans must remain valid for the entire (possibly nested) scan.
+  void ScanCopyUsing(const uint8_t *words, uint32_t size,
+                     const MemoryReader &reader) {
+    ScanFrom(nullptr, words, 0, size, 0, &reader);
+  }
 
-  uint32_t reg(uint32_t index) const { return index < kRegisterCount ? regs_[index] : 0; }
-  const uint32_t* regs() const { return regs_; }
-  // Registers written at least once since startup (0x4000-0x4A00 range tracked).
+  uint32_t reg(uint32_t index) const {
+    return index < kRegisterCount ? regs_[index] : 0;
+  }
+  const uint32_t *regs() const { return regs_; }
+  // Registers written at least once since startup (0x4000-0x4A00 range
+  // tracked).
   bool written(uint32_t index) const {
-    return index >= kAluConstantBase && index < kAluConstantBase + kTrackedCount &&
+    return index >= kAluConstantBase &&
+           index < kAluConstantBase + kTrackedCount &&
            written_[index - kAluConstantBase];
   }
 
@@ -52,6 +67,7 @@ class Pm4Mirror {
   uint64_t indirect_buffers = 0;
   // LOAD_ALU_CONSTANT sources that were not readable host memory (skipped).
   uint64_t unreadable_alu_loads = 0;
+  uint64_t unreadable_indirect_buffers = 0;
   bool follow_indirect = true;
   // RB_COPY_* state captured at the last resolve (copy-mode draw); the XDK
   // resets these registers right after the copy.
@@ -62,13 +78,14 @@ class Pm4Mirror {
   uint64_t vs_version = 1, ps_version = 1;
   uint64_t indirect_dwords = 0;
 
- private:
+private:
   // Main stream read from `stream` + address; memory references via `base`.
-  void ScanFrom(const uint8_t* base, const uint8_t* stream, uint32_t begin, uint32_t end,
-                int depth);
+  void ScanFrom(const uint8_t *base, const uint8_t *stream, uint32_t begin,
+                uint32_t end, int depth, const MemoryReader *reader = nullptr);
   static constexpr uint32_t kTrackedCount = 0xA00;
   void Write(uint32_t index, uint32_t value) {
-    if (index >= kRegisterCount) return;
+    if (index >= kRegisterCount)
+      return;
     if (index - kAluConstantBase < 0x800u) {
       ++(index < kAluConstantBase + 0x400 ? vs_version : ps_version);
     }
@@ -81,4 +98,4 @@ class Pm4Mirror {
   bool written_[kTrackedCount] = {};
 };
 
-}  // namespace superman_returns::native
+} // namespace superman_returns::native

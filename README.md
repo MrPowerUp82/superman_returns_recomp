@@ -27,6 +27,12 @@ Quem não quer compilar pode usar a página do instalador (GitHub Pages deste re
 
 ## Como jogar
 
+O launcher com GUI permite escolher GPU, resolução, controles e opções gráficas antes
+de iniciar. Compile-o com `powershell -File tools/build_launcher.ps1` e abra
+`artifacts/launcher/SupermanReturnsLauncher.exe`. A versão portátil inclui .NET;
+detalhes em [launcher/README.md](launcher/README.md). O pacote de distribuição também
+inclui o launcher. A seleção de GPU exige o executável do jogo da mesma build.
+
 Depois de compilar com `build.cmd`:
 
 | Script | Uso |

@@ -1,0 +1,29 @@
+# Launcher Windows
+
+GUI WPF em português, adaptada do pacote fornecido pelo usuário. Inicia o renderer
+nativo Direct3D 12 com as flags existentes do projeto. Vulkan ainda não está disponível.
+
+Oferece resolução, tela cheia sem bordas/janela, GPU DXGI, teclado/mouse ou controle,
+escala interna, FXAA, filtro de texturas, sombras, MSAA, VSync e limite de FPS.
+30 FPS é o padrão; 60/120 FPS são experimentais e não garantem ganho de desempenho.
+A escala interna nativa começa em 100%; aumentá-la aumenta o trabalho da GPU.
+
+Detecta o executável e a pasta `game` ou permite selecioná-los. Valida `default.xex`
+e `DATA` antes de iniciar. As preferências ficam em
+`%LOCALAPPDATA%\SupermanReturns\launcher\<identificador-da-instalação>.ini`.
+O jogo grava `logs/game.log` ao lado do executável.
+
+A GPU selecionada é enviada pelo LUID do DXGI e resolvida dentro do processo do jogo,
+pois a preferência gráfica do Windows pode mudar a ordem dos adaptadores por aplicativo.
+Esse controle exige uma build que reconheça `sr_native_gpu_luid`; use o jogo do mesmo pacote.
+
+Compilar requer Windows e .NET 8 SDK:
+
+```powershell
+powershell -File tools/build_launcher.ps1
+dotnet run --project tests/launcher/LauncherChecks.csproj -c Release
+```
+
+A publicação em `artifacts/launcher` inclui o runtime e funciona sem instalar .NET.
+`tools/package_release.ps1` inclui esse executável e os avisos do runtime no ZIP.
+Com `-NoBuild`, compile o launcher previamente. Os scripts `.cmd` continuam funcionando.

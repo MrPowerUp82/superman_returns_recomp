@@ -158,6 +158,15 @@ SR_TEST(partial_device_failure_cleans_surface_and_instance) {
   SR_CHECK(events == std::vector<std::string>({"create", "create-device-failed",
                                                "surface", "destroy"}));
 }
+SR_TEST(required_mirror_clamp_extension_is_not_silently_ignored) {
+  events.clear();auto f=Fake();
+  f.vkEnumeratePhysicalDevices=OneDevice;f.vkGetPhysicalDeviceProperties2=DeviceProperties;
+  f.vkEnumerateDeviceExtensionProperties=DeviceExtensions;f.vkGetPhysicalDeviceQueueFamilyProperties=DeviceFamilies;
+  f.vkGetPhysicalDeviceSurfaceSupportKHR=DevicePresent;f.vkCreateDevice=FailedDevice;
+  Context c(f);Error e;SR_CHECK(c.CreateInstance({},false,e));
+  SR_CHECK(!c.OpenDevice(reinterpret_cast<VkSurfaceKHR>(2),"",e,nullptr,true));
+  SR_CHECK(e.operation=="Device extension");SR_CHECK(e.result==VK_ERROR_EXTENSION_NOT_PRESENT);
+}
 SR_TEST(context_destroys_each_created_handle_once) {
   events.clear();
   {
