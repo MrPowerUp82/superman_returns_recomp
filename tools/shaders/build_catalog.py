@@ -11,7 +11,7 @@ with DXC, parse reflection from the container, and write:
   artifacts/shaders/dxil/<hash>.<vs|ps>.dxil          vs_6_0/ps_6_0, spec constants = 0 (default variant)
   artifacts/shaders/dxil/<hash>.<vs|ps>.lib.dxil      lib_6_3 (only when specConstantsMask != 0; the
                                                      form UnleashedRecomp/re:Blue link at runtime)
-  artifacts/shaders/spirv/<hash>.<vs|ps>.spv          -spirv -fvk-use-dx-layout (optional, --spirv)
+  artifacts/shaders/spirv/<hash>.<vs|ps>.spv          versioned Vulkan buffer ABI (optional, --spirv)
   artifacts/shaders/logs/<hash>.<vs|ps>.<step>.log    translator / DXC diagnostics for failures
   artifacts/shaders/catalog.json                      machine-readable catalog
   artifacts/shaders/SHADER_CATALOG.md                 human summary + table
@@ -27,6 +27,7 @@ import json
 import os
 import re
 import struct
+import shutil
 import subprocess
 import sys
 from collections import Counter
@@ -34,6 +35,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from srpaths import ARTIFACTS, DXC, ROOT, SHADER_COMMON, TRANSLATOR  # noqa: E402
+
+from compile_vulkan import compile_shader, Toolchain
 
 REGSET = ["bool", "int4", "float4", "sampler"]
 PCLASS = ["scalar", "vector", "matrix_rows", "matrix_columns", "object", "struct"]
@@ -145,6 +148,18 @@ def process(s, a, dirs):
     stem = f"{s['container_hash']}.{s['type']}"
     raw = dirs["raw"] / f"{stem}.bin"
     res = {"status": "extracted"}
+    if a.spirv:
+        vk = compile_shader(raw, s["type"], dirs["raw"].parent / "vulkan-m2",
+            Toolchain(Path(getattr(a,"vulkan_translator",None) or a.translator),
+                      Path(getattr(a,"vulkan_include",None) or a.include),Path(a.dxc)))
+        res["spirv_attempted"] = True
+        res["spirv"] = vk.status == "ready"
+        res["spirv_cache_key"] = vk.cache_key
+        if res["spirv"]:
+            shutil.copyfile(vk.binary_path,dirs["spirv"] / f"{stem}.spv")
+        else:
+            res["spirv_failure"] = vk.diagnostic
+            (dirs["logs"] / f"{stem}.spirv.log").write_text(vk.diagnostic,encoding="utf-8")
     rc, out, err = run([a.translator, a.include, str(dirs["hlsl"]), str(raw)])
     m = re.search(r"^OK \S+ (\w+) specConstantsMask=([0-9A-F]+) structured=(\d)", out, re.M)
     hlsl = dirs["hlsl"] / f"{stem}.hlsl"
@@ -190,17 +205,6 @@ def process(s, a, dirs):
             res["failure"] = "dxc lib_6_3: " + first_error(err + out)
             return res
     res["status"] = "compiles"
-    if a.spirv:
-        spv = dirs["spirv"] / f"{stem}.spv"
-        args = [a.dxc, "-T", prof, "-HV", "2021", "-all-resources-bound", "-spirv", "-fvk-use-dx-layout",
-                "-Qstrip_debug", str(hlsl), "-Fo", str(spv)]
-        if s["type"] == "vs":
-            args.insert(-2, "-fvk-invert-y")
-        rc, out, err = run(args)
-        res["spirv"] = rc == 0
-        if rc != 0:
-            (dirs["logs"] / f"{stem}.spirv.log").write_text(err + out)
-            res["spirv_failure"] = first_error(err + out)
     return res
 
 
@@ -225,6 +229,8 @@ def main():
     ap.add_argument("--translator", default=str(TRANSLATOR))
     ap.add_argument("--include", default=str(SHADER_COMMON))
     ap.add_argument("--dxc", default=str(DXC))
+    ap.add_argument("--vulkan-translator")
+    ap.add_argument("--vulkan-include")
     ap.add_argument("--spirv", action="store_true", default=True)
     ap.add_argument("--no-spirv", dest="spirv", action="store_false")
     ap.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 4) - 1))
