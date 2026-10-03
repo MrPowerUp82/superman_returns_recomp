@@ -39,6 +39,7 @@
 #include <type_traits>
 
 #include "game_profile.h"
+#include "../graphics/guest/captured_batch.h"
 #include "pipeline_cache.h"
 #include "pm4_mirror.h"
 
@@ -96,29 +97,8 @@ bool ShaderCorpusAvailable(std::string* where);
 // address `address`, stored at `offset` in the batch's byte arena.
 // Allocator whose value-initialization is a no-op: resize() of the capture
 // byte arena must not zero memory that is overwritten right away (memcpy).
-template <typename T>
-struct DefaultInitAllocator : std::allocator<T> {
-  template <typename U>
-  struct rebind {
-    using other = DefaultInitAllocator<U>;
-  };
-  DefaultInitAllocator() = default;
-  template <typename U>
-  DefaultInitAllocator(const DefaultInitAllocator<U>&) noexcept {}
-  template <typename U>
-  void construct(U* p) noexcept(std::is_nothrow_default_constructible_v<U>) {
-    ::new (static_cast<void*>(p)) U;
-  }
-  template <typename U, typename... Args>
-  void construct(U* p, Args&&... args) {
-    std::allocator_traits<std::allocator<T>>::construct(static_cast<std::allocator<T>&>(*this), p,
-                                                        std::forward<Args>(args)...);
-  }
-};
-
-struct CaptureRange {
-  uint32_t address, length, offset;
-};
+using graphics::guest::DefaultInitAllocator;
+using graphics::guest::CaptureRange;
 
 class Renderer {
  public:
@@ -196,48 +176,11 @@ class Renderer {
   // The guest threads only capture what a command reads from guest memory
   // (PM4 segment words, device/object state, dirty buffer ranges, inline
   // vertices) and queue it; a worker thread records the D3D12 commands.
-  struct BufferPlan {
-    uint64_t key = 0;
-    uint32_t address = 0, size = 0, decl = 0, stride = 0, format = 0, phase = 0;
-    uint32_t reset_index = UINT32_MAX;
-    uint8_t action = 0;  // 0 = use as is, 1 = upload [begin, end), 2 = create + upload all
-    uint32_t begin = 0, end = 0;
-  };
-  struct StreamPlan {
-    uint32_t stream = 0, offset = 0, size = 0, stride = 0;
-    BufferPlan buffer;
-  };
-  enum class Op : uint8_t {
-    kDraw, kDrawIndexed, kDrawInline, kResolve, kBeginTiling, kEndTiling, kSwap, kPassEnd, kRing,
-    kClear
-  };
-  struct WorkCmd {
-    Op op = Op::kRing;
-    int pass = 0;
-    uint32_t u[8] = {};
-    float f = 0.0f;
-    uint64_t u64 = 0;
-    uint32_t ring_offset = 0, ring_bytes = 0;
-    uint32_t range_first = 0, range_count = 0;
-    uint32_t stream_first = 0, stream_count = 0;
-    bool streams_ok = true;
-    bool has_index = false;
-    bool index32 = false;
-    uint32_t index_size = 0;
-    BufferPlan index;
-  };
-  struct WorkBatch {
-    std::vector<WorkCmd> cmds;
-    std::vector<uint8_t, DefaultInitAllocator<uint8_t>> bytes;
-    std::vector<CaptureRange> ranges;
-    std::vector<StreamPlan> streams;
-    void Clear() {
-      cmds.clear();
-      bytes.clear();
-      ranges.clear();
-      streams.clear();
-    }
-  };
+  using BufferPlan = graphics::guest::BufferPlan;
+  using StreamPlan = graphics::guest::StreamPlan;
+  using Op = graphics::guest::Op;
+  using WorkCmd = graphics::guest::WorkCmd;
+  using WorkBatch = graphics::guest::WorkBatch;
   // Front end (guest threads, front_mutex_).
   void BeginCmd(Op op);
   void EndCmd(uint8_t* base);

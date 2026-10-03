@@ -12,6 +12,8 @@ add_executable(sr_native_tests
     main.cpp
     test_shader_requirements.cpp
     test_guest_state.cpp
+    test_render_packets.cpp
+    "${SR_NATIVE_DIR}/../graphics/guest/captured_batch.cpp"
     "${SR_NATIVE_DIR}/../graphics/guest/draw_state.cpp"
     "${SR_NATIVE_DIR}/../graphics/guest/constant_snapshot.cpp"
     test_texture.cpp
