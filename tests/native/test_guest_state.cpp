@@ -70,11 +70,11 @@ SR_TEST(restart_only_cuts_strips) {
   SR_CHECK_EQ(out[1], 0xfffffe);
 }
 SR_TEST(ushort2_type_is_preserved) {
-  VertexFetchMeta meta{2, 0, 4, 5};
+  VertexFetchMeta meta{2, 0, 4, 0x2C2259};
   ConstantSnapshot snap;
   std::memcpy(snap.shared.data() + 512, &meta, sizeof(meta));
   VertexFetchMeta copy{};
   std::memcpy(&copy, snap.shared.data() + 512, sizeof(copy));
-  SR_CHECK_EQ(copy.type, 5);
+  SR_CHECK_EQ(copy.type, 0x2C2259);
   SR_CHECK_EQ(copy.stride, 4);
 }

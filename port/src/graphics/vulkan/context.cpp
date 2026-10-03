@@ -191,7 +191,8 @@ bool Context::EnumerateCandidates(VkSurfaceKHR target,
   }
   return true;
 }
-bool Context::OpenDevice(VkSurfaceKHR owned, std::string_view uuid, Error &e) {
+bool Context::OpenDevice(VkSurfaceKHR owned, std::string_view uuid, Error &e,
+                         const VkPhysicalDeviceFeatures *requested_features) {
   if (device || surface) {
     e = {"OpenDevice", VK_ERROR_INITIALIZATION_FAILED,
          "Device already initialized"};
@@ -229,6 +230,8 @@ bool Context::OpenDevice(VkSurfaceKHR owned, std::string_view uuid, Error &e) {
   ci.pQueueCreateInfos = queues.data();
   ci.enabledExtensionCount = 1;
   ci.ppEnabledExtensionNames = &extension;
+  ci.pEnabledFeatures = requested_features;
+
   if (!Check(f.vkCreateDevice(physical, &ci, nullptr, &device), "CreateDevice",
              e))
     return false;
@@ -246,8 +249,10 @@ bool Context::OpenDevice(VkSurfaceKHR owned, std::string_view uuid, Error &e) {
       std::to_string(VK_VERSION_MINOR(properties.apiVersion)) +
       " driver=" + std::to_string(properties.driverVersion));
   Log("Features: Vulkan 1.1, swapchain, graphics=" +
-      std::to_string(graphics_family) + " present=" +
-      std::to_string(present_family) + "; no optional device features enabled");
+      std::to_string(graphics_family) +
+      " present=" + std::to_string(present_family) +
+      (requested_features ? "; explicit optional device features requested"
+                          : "; no optional device features enabled"));
   return true;
 }
 } // namespace superman_returns::graphics::vulkan

@@ -128,10 +128,12 @@ static VkResult VKAPI_CALL DevicePresent(VkPhysicalDevice, uint32_t,
   *p = VK_TRUE;
   return VK_SUCCESS;
 }
+static const VkPhysicalDeviceFeatures *requested_features_seen;
 static VkResult VKAPI_CALL FailedDevice(VkPhysicalDevice,
-                                        const VkDeviceCreateInfo *,
+                                        const VkDeviceCreateInfo *ci,
                                         const VkAllocationCallbacks *,
                                         VkDevice *) {
+  requested_features_seen = ci->pEnabledFeatures;
   events.push_back("create-device-failed");
   return VK_ERROR_OUT_OF_DEVICE_MEMORY;
 }
@@ -151,6 +153,7 @@ SR_TEST(partial_device_failure_cleans_surface_and_instance) {
     SR_CHECK(!c.OpenDevice(reinterpret_cast<VkSurfaceKHR>(2), "", e));
     SR_CHECK(e.operation == "CreateDevice");
     SR_CHECK_EQ(e.result, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+    SR_CHECK(requested_features_seen == nullptr);
   }
   SR_CHECK(events == std::vector<std::string>({"create", "create-device-failed",
                                                "surface", "destroy"}));
@@ -214,4 +217,21 @@ SR_TEST(validation_callback_contains_logger_exceptions) {
   }
   SR_CHECK(!escaped);
   SR_CHECK_EQ(c.validation_errors.load(), 1);
+}
+
+SR_TEST(optional_device_features_are_explicit) {
+  auto f = Fake();
+  f.vkEnumeratePhysicalDevices = OneDevice;
+  f.vkGetPhysicalDeviceProperties2 = DeviceProperties;
+  f.vkEnumerateDeviceExtensionProperties = DeviceExtensions;
+  f.vkGetPhysicalDeviceQueueFamilyProperties = DeviceFamilies;
+  f.vkGetPhysicalDeviceSurfaceSupportKHR = DevicePresent;
+  f.vkCreateDevice = FailedDevice;
+  Context c(f);
+  Error e;
+  SR_CHECK(c.CreateInstance({}, false, e));
+  VkPhysicalDeviceFeatures features{};
+  features.shaderStorageBufferArrayDynamicIndexing = VK_TRUE;
+  SR_CHECK(!c.OpenDevice(reinterpret_cast<VkSurfaceKHR>(2), "", e, &features));
+  SR_CHECK(requested_features_seen == &features);
 }

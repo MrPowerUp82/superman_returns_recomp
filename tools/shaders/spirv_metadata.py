@@ -21,7 +21,7 @@ def inspect_spirv(data):
   first=words[offset];count=first>>16;op=first&65535
   if not count or offset+count>len(words):raise ValueError('Invalid instruction length')
   a=words[offset+1:offset+count];offset+=count
-  minimum={17:1,10:1,15:3,21:3,22:2,23:3,24:3,25:8,26:1,27:2,28:3,29:2,30:1,32:3,43:3,59:3,71:2}.get(op)
+  minimum={17:1,10:1,15:3,21:3,22:2,23:3,24:3,25:8,26:1,27:2,28:3,29:2,30:1,32:3,43:3,50:3,59:3,71:2}.get(op)
   if minimum is not None and len(a)<minimum:raise ValueError('Truncated instruction operands')
   if op==17:caps.append(a[0])
   elif op==10:extensions.append(_string(a)[0])

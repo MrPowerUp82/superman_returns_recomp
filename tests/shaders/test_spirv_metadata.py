@@ -2,6 +2,7 @@ import struct,sys,unittest
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'tools/shaders'))
 from spirv_metadata import inspect_spirv,validate_pair,contract_errors
+from validate_vulkan_corpus import requirements
 
 def module(*instructions):
  words=[0x07230203,0x10300,0,100,0]
@@ -26,4 +27,13 @@ class MetadataTests(unittest.TestCase):
   self.assertTrue(m['descriptors'][0]['dynamic_indexing'])
  def test_type_without_id_is_rejected(self):
   with self.assertRaises(ValueError):inspect_spirv(module((19,[])))
+ def test_truncated_specialization_constant_is_rejected(self):
+  with self.assertRaises(ValueError):inspect_spirv(module((50,[1])))
+ def test_interface_and_sampler_requirements(self):
+  m={'descriptors':[dict(type='sampler',count=32,set=2,dynamic_indexing=True)],'capabilities':[],
+     'inputs':[dict(location=0,type='float32x3')],
+     'outputs':[dict(location=i,type='float32x4') for i in range(20)]}
+  self.assertEqual(requirements(m,'vs')['vertex_output_components'],80)
+  self.assertEqual(requirements(m,'ps')['fragment_input_components'],3)
+  self.assertTrue(requirements(m,'ps')['sampled_image_dynamic_indexing'])
 if __name__=='__main__':unittest.main()

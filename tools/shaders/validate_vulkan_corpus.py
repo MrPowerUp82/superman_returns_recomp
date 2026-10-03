@@ -1,16 +1,32 @@
 """Compile and inspect the local corpus; generated game data remains untracked."""
-import argparse,concurrent.futures,json,shutil,subprocess,sys
+import argparse,concurrent.futures,json,re,shutil,subprocess,sys
 from pathlib import Path
 from compile_vulkan import Toolchain,compile_shader
 from spirv_metadata import inspect_spirv,contract_errors
 ROOT=Path(__file__).resolve().parents[2]
+
+def interface_components(rows):
+ """Conservative location span, including holes and array/matrix slots."""
+ maximum=0
+ for row in rows:
+  if 'location' not in row:continue
+  match=re.fullmatch(r'(?:float|int|uint)(\d+)(?:x(\d+))?(?:m(\d+))?((?:\[\d+\])*)|bool',row['type'])
+  if not match:raise ValueError('Unsupported interface component type '+row['type'])
+  width,lanes,columns,arrays=match.groups()
+  lanes=int(lanes or 1)*(2 if int(width or 32)==64 else 1)
+  slots=int(columns or 1)
+  for size in re.findall(r'\[(\d+)\]',arrays or ''):slots*=int(size)
+  maximum=max(maximum,row['location']*4+(slots-1)*((lanes+3)//4)*4+lanes)
+ return maximum
 
 def requirements(m,stage):
  rows=m['descriptors'];caps=m['capabilities']
  r={kind:sum(x['count'] for x in rows if x['type'].startswith(prefix)) for kind,prefix in [('storage_buffers','storage_buffer'),('uniform_buffers','uniform_buffer'),('sampled_images','sampled_image'),('samplers','sampler')]}
  r['descriptor_sets']=max((x['set']+1 for x in rows),default=0)
  r['vertex_attributes']=max((x['location']+1 for x in m['inputs'] if 'location' in x),default=0) if stage=='vs' else 0
- r.update(sampled_image_dynamic_indexing=29 in caps or any(x.get('dynamic_indexing') and x['type'].startswith('sampled_image') for x in rows),storage_buffer_dynamic_indexing=30 in caps or any(x.get('dynamic_indexing') and x['type']=='storage_buffer' for x in rows),clip_distance=32 in caps,cull_distance=33 in caps)
+ r['vertex_output_components']=interface_components(m['outputs']) if stage=='vs' else 0
+ r['fragment_input_components']=interface_components(m['inputs']) if stage=='ps' else 0
+ r.update(sampled_image_dynamic_indexing=29 in caps or any(x.get('dynamic_indexing') and (x['type'].startswith('sampled_image') or x['type']=='sampler') for x in rows),storage_buffer_dynamic_indexing=30 in caps or any(x.get('dynamic_indexing') and x['type']=='storage_buffer' for x in rows),clip_distance=32 in caps,cull_distance=33 in caps)
  return r
 
 def inspect_one(raw,root,tools,validator):

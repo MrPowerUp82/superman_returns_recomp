@@ -9,9 +9,7 @@ cbuffer SharedConstants : register(b2,space4) { DEFINE_SHARED_CONSTANTS() };
 uint g_SpecConstants() { return g_SpecConstantsRuntime; }
 #endif
 float4 VSMain(uint vertex : SV_VertexID) : SV_Position {
- uint4 meta=g_VertexFetch(0);
- uint packed=g_VertexBufferHeap[meta.x].Load(meta.y+vertex*meta.z);
- float2 position=float2(packed&65535,packed>>16);
+ float2 position=srVertexFetch(0,float(vertex),false).xy;
  float4 constants=SR_LOAD_FLOAT4(Vertex,0);
  return float4(position.x/32-1,1-position.y/32,constants.z,1);
 }

@@ -15,7 +15,8 @@ public:
                       bool validation, Error &);
   bool EnumerateCandidates(VkSurfaceKHR, std::vector<DeviceCandidate> &,
                            Error &);
-  bool OpenDevice(VkSurfaceKHR owned_surface, std::string_view uuid, Error &);
+  bool OpenDevice(VkSurfaceKHR owned_surface, std::string_view uuid, Error &,
+                  const VkPhysicalDeviceFeatures *requested_features = nullptr);
   PFN_vkGetInstanceProcAddr Proc() const {
     return loader_.GetInstanceProcAddr();
   }
