@@ -199,6 +199,7 @@ class Renderer {
   struct BufferPlan {
     uint64_t key = 0;
     uint32_t address = 0, size = 0, decl = 0, stride = 0, format = 0, phase = 0;
+    uint32_t reset_index = UINT32_MAX;
     uint8_t action = 0;  // 0 = use as is, 1 = upload [begin, end), 2 = create + upload all
     uint32_t begin = 0, end = 0;
   };
@@ -245,7 +246,7 @@ class Renderer {
   void CaptureRing(uint8_t* base, uint32_t dev);
   BufferPlan PlanBuffer(uint8_t* base, uint32_t address, uint32_t size, uint32_t decl,
                         uint32_t stride, uint32_t format, uint32_t phase, uint32_t need_begin,
-                        uint32_t need_end, bool& ok);
+                        uint32_t need_end, bool& ok, uint32_t reset_index = UINT32_MAX);
   struct VertexRange;
   bool PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRange* range);
   void FlushBatch();
@@ -447,6 +448,7 @@ class Renderer {
     bool index32 = false;
     void Resolve();
     uint32_t index_endian = 0;
+    uint32_t reset_index = UINT32_MAX;
   };
   bool DynamicVertexFetch(uint8_t* base, uint32_t dev);
   bool RefreshTrackedBuffer(TrackedBuffer& t);
@@ -703,6 +705,7 @@ class Renderer {
     uint64_t raw_srv_fence = 0;
     uint32_t address = 0, size = 0;
     uint32_t decl = 0, stride = 0, index_format = 0, phase = 0;
+    uint32_t reset_index = UINT32_MAX;
     // Dirty tracking lives on the guest side (TrackedBuffer / BufferPlan).
     D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
   };

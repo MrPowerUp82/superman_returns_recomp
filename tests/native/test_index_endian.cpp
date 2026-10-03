@@ -3,6 +3,17 @@
 
 using superman_returns::native::IndexByteXor;
 using superman_returns::native::LoadIndex;
+using superman_returns::native::HostStripIndex;
+
+SR_TEST(warworld_custom_strip_reset_is_a_cut_not_a_vertex) {
+  const uint8_t bytes[] = {0,0,0,27, 0,0,0,25, 0,0x7F,0xFF,0xFF, 0,0,0,3};
+  SR_CHECK_EQ(HostStripIndex(LoadIndex(bytes, 2, true, 2), true, 0x7FFFFF), 0xFFFFFFFFu);
+  SR_CHECK_EQ(HostStripIndex(LoadIndex(bytes, 0, true, 2), true, 0x7FFFFF), 27u);
+  SR_CHECK_EQ(HostStripIndex(0x7FFFFF, true, 0xFFFFFFFF), 0x7FFFFFu);
+  SR_CHECK_EQ(HostStripIndex(7, false, 7), 0xFFFFu);
+  SR_CHECK_EQ(HostStripIndex(8, false, 7), 8u);
+  SR_CHECK_EQ(HostStripIndex(0xAB7FFFFF, true, 0x7FFFFF), 0xFFFFFFFFu);
+}
 
 SR_TEST(index16_dword_swap_preserves_triangle_order) {
   const uint8_t bytes[] = {0, 2, 0, 1, 0, 4, 0, 3, 0xFF, 0xFF, 0, 5};

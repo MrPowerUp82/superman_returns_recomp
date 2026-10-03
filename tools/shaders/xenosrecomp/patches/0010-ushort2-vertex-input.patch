@@ -1,0 +1,60 @@
+--- a/XenosRecomp/shader_common.h
++++ b/XenosRecomp/shader_common.h
+@@ -331,6 +331,15 @@
+ }
+ 
+ #ifdef CONAN_RECOMP
++// D3D12 has no unsigned scaled 16-bit IA format. Bind USHORT2 as UNORM
++// and restore its original integer values before the guest VS uses them.
++#define srVertexInput(semantic, value) srVertexInputImpl(g_VertexFetch(semantic).w, value)
++float4 srVertexInputImpl(uint type, float4 value)
++{
++    if (type == 0x2C2259)
++        return float4(round(value.xy * 65535.0f), 0.0f, 1.0f);
++    return value;
++}
+ // Dynamically indexed Xenos fetches (instancing): host-order, interleaved
+ // vertex streams. Descriptor metadata comes from the actual D3D declaration.
+ ByteAddressBuffer g_VertexBufferHeap[] : register(t0, space5);
+@@ -347,10 +356,10 @@
+                   type == 0x1A205A || type == 0x1A2360) ? 4u :
+                  (type == 0x2A23B9 ? 3u :
+                  (type == 0x2C23A5 || type == 0x2C2359 || type == 0x2C2159 ||
+-                  type == 0x2C2059 || type == 0x2C235F) ? 2u : 1u);
++                  type == 0x2C2059 || type == 0x2C2259 || type == 0x2C235F) ? 2u : 1u);
+     bool half = type == 0x1A235A || type == 0x1A215A || type == 0x1A205A ||
+                 type == 0x1A2360 || type == 0x2C2359 || type == 0x2C2159 ||
+-                type == 0x2C2059 || type == 0x2C235F;
++                type == 0x2C2059 || type == 0x2C2259 || type == 0x2C235F;
+     uint required = count * (half ? 2u : 4u);
+     if (address > bytes || required > bytes - address) return 0.0f;
+     float4 value = float4(0.0f, 0.0f, 0.0f, 1.0f);
+@@ -364,6 +373,7 @@
+             int signedH = int(h << 16u) >> 16;
+             if (type == 0x2C235F || type == 0x1A2360) value[c] = f16tof32(h);
+             else if (type == 0x2C2059 || type == 0x1A205A) value[c] = float(h) / 65535.0f;
++            else if (type == 0x2C2259) value[c] = float(h);
+             else if (type == 0x2C2359) value[c] = float(signedH);
+             else value[c] = max(float(signedH) / 32767.0f, -1.0f);
+         }
+--- a/XenosRecomp/shader_recompiler.cpp
++++ b/XenosRecomp/shader_recompiler.cpp
+@@ -275,8 +275,17 @@
+         if (packed) out += ')';
+     }
+     else
+-#endif
++    {
++        const uint32_t usage = uint32_t(findResult->second.usage);
++        const uint32_t index = uint32_t(findResult->second.usageIndex);
++        if (std::strcmp(USAGE_TYPES[usage], "float4") == 0)
++            print("srVertexInput({}, i{}{})", usage * 16 + index, USAGE_VARIABLES[usage], index);
++        else
++            print("i{}{}", USAGE_VARIABLES[usage], index);
++    }
++#else
+     print("i{}{}", USAGE_VARIABLES[uint32_t(findResult->second.usage)], uint32_t(findResult->second.usageIndex));
++#endif
+ 
+ #ifdef REBLUE_RECOMP
+     switch (findResult->second.usage)

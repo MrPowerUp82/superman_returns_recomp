@@ -78,5 +78,12 @@ int main() {
     fetch.srcSwizzle = 2;
     fetching.recompile(fetch, 8);
     ok &= contains(fetching.out, "srVertexIndex = floor(r2.z + 0.5f);");
+    // Static IA fetches must recover unnormalized USHORT2 coordinates from
+    // an UNORM host input. The declaration may change without rebinding VS.
+    ShaderRecompiler static_fetch;
+    static_fetch.vertexElements[7] = VertexElement{7, DeclUsage::Position, 0};
+    fetch.isMiniFetch = 0;
+    static_fetch.recompile(fetch, 7);
+    ok &= contains(static_fetch.out, "srVertexInput(0, iPosition0)");
     return ok ? 0 : 1;
 }

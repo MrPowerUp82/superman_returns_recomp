@@ -47,6 +47,7 @@
 #include "shader_translator.h"
 #include "vertex_signature.h"
 #include "texture_decode.h"
+#include "texture_binding.h"
 
 REXCVAR_DEFINE_INT32(sr_native_debug_spin_us, 0, "Superman Returns Native",
                      "Debug: busy-wait this many microseconds in every native draw entry (timing bisection)");
@@ -296,7 +297,6 @@ constexpr uint32_t kDevShaderA = kDev.shader_a;
 constexpr uint32_t kDevShaderB = kDev.shader_b;
 constexpr uint32_t kDevVertexDecl = kDev.vertex_decl;
 constexpr uint32_t kDevViewport = kDev.viewport;  // X, Y, W, H, MinZ, MaxZ (f32)
-constexpr uint32_t kDevTextures = kDev.textures;  // [26] texture objects
 constexpr uint32_t kDevRenderTargets = kDev.render_targets;  // [4] surfaces
 constexpr uint32_t kDevDepthStencil = kDev.depth_stencil;
 // Vertex stream s uses the 8-byte vertex fetch constant at 0x778 - 8 * s
@@ -395,6 +395,9 @@ DeclFormat MapDeclType(uint32_t type) {
     case 0x1A2086:
     case 0x1A2186: return {DXGI_FORMAT_R8G8B8A8_UNORM, 4, 4};
     case 0x2C2359: return {DXGI_FORMAT_R16G16_SINT, 4, 2};
+    // USHORT2 is unnormalized. The VS restores integer coordinates from the
+    // float-compatible UNORM input via srVertexInput and declaration metadata.
+    case 0x2C2259: return {DXGI_FORMAT_R16G16_UNORM, 4, 2};
     case 0x1A235A: return {DXGI_FORMAT_R16G16B16A16_SNORM, 8, 2};
     case 0x2C2159: return {DXGI_FORMAT_R16G16_SNORM, 4, 2};
     case 0x1A215A: return {DXGI_FORMAT_R16G16B16A16_SNORM, 8, 2};
@@ -3449,6 +3452,17 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
   }
   uint32_t* s = reinterpret_cast<uint32_t*>(shared.cpu);
   std::memset(s, 0, 512);
+  // Also describe IA inputs for inline draws: they don't pass through
+  // BindVertexStreams. The shader needs the type to undo USHORT2 UNORM.
+  for (auto& meta : vertex_fetch_) meta[3] = 0;
+  uint32_t input_decl = Load32(base, dev + kDevVertexDecl);
+  uint32_t input_count = input_decl ? std::min(Load32(base, input_decl + 0x18), 64u) : 0;
+  for (uint32_t i = 0; i < input_count; ++i) {
+    uint32_t e = input_decl + 0x34 + 12 * i;
+    if (Load16(base, e) == 0xFF) break;
+    uint32_t usage = Load8(base, e + 9), index = Load8(base, e + 10);
+    if (usage < 14 && index < 16) vertex_fetch_[usage * 16 + index][3] = Load32(base, e + 4);
+  }
   std::memcpy(s + 128, vertex_fetch_, sizeof(vertex_fetch_));
   for (uint32_t slot = 0; slot < 16; ++slot) {
     uint32_t fetch[6];
@@ -3457,8 +3471,7 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
                              kDevFetchConstants + 24 * slot + 4 * d);
     }
     uint32_t srv = 0, sampler = 0;
-    if ((fetch[0] & 3) == uint32_t(xenos::FetchConstantType::kTexture) &&
-        Load32(base, dev + kDevTextures + 4 * slot)) {
+    if (IsTextureBound(fetch[0])) {
       SlotCache& sc = slot_cache_[slot];
       // Same fetch as the previous draw in this frame: the SRV cannot have
       // changed (resolves invalidate the cache below).
@@ -4140,6 +4153,14 @@ void Renderer::SwapBufferRange(uint8_t* base, const BufferEntry& entry, uint32_t
   if (entry.index_format & 3) {
     uint32_t mask = IndexByteXor(entry.index_format >> 2);
     for (uint32_t i = 0; i < size; ++i) data[i] = src[i ^ mask];
+    const bool index32 = (entry.index_format & 3) == 2;
+    const uint32_t width = index32 ? 4 : 2;
+    for (uint32_t i = 0; i + width <= size; i += width) {
+      uint32_t value = 0;
+      std::memcpy(&value, data + i, width);
+      value = HostStripIndex(value, index32, entry.reset_index);
+      std::memcpy(data + i, &value, width);
+    }
     return;
   }
   // Vertex data: swap each element of the declaration for this stream. `begin`
@@ -4182,7 +4203,7 @@ void Renderer::VertexRange::Resolve() {
   uint32_t isize = index32 ? 4 : 2;
   if (!ib_phys || uint64_t(start_index + index_count) * isize > ib_size) return;
   const uint8_t* idx = REX_KERNEL_MEMORY()->TranslatePhysical<const uint8_t*>(ib_phys);
-  uint32_t reset = index32 ? 0xFFFFFFFFu : 0xFFFFu;
+  uint32_t reset = reset_index;
   uint32_t lo = ~0u, hi = 0;
   // SSE4.1: big-endian indices byte-swapped with pshufb; reset indices are
   // excluded from the maximum (they can only be the minimum if every index is
@@ -4190,7 +4211,7 @@ void Renderer::VertexRange::Resolve() {
   uint32_t i = start_index;
   const uint32_t end_index = start_index + index_count;
   const __m128i ones = _mm_set1_epi32(-1);
-  if (!index32 && index_endian == 1) {
+  if (!index32 && index_endian == 1 && reset == UINT16_MAX) {
     const __m128i swap = _mm_setr_epi8(1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14);
     __m128i vmin = ones, vmax = _mm_setzero_si128();
     for (; i + 8 <= end_index; i += 8) {
@@ -4202,12 +4223,14 @@ void Renderer::VertexRange::Resolve() {
     lo = uint32_t(_mm_cvtsi128_si32(_mm_minpos_epu16(vmin))) & 0xFFFF;
     hi = ~uint32_t(_mm_cvtsi128_si32(_mm_minpos_epu16(_mm_xor_si128(vmax, ones)))) & 0xFFFF;
     if (lo == 0xFFFF) lo = ~0u;
-  } else if (index32 && index_endian == 2) {
+  } else if (index32 && index_endian == 2 && reset == 0xFFFFFFu) {
     const __m128i swap = _mm_setr_epi8(3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12);
     __m128i vmin = ones, vmax = _mm_setzero_si128();
     for (; i + 4 <= end_index; i += 4) {
       __m128i v = _mm_shuffle_epi8(
           _mm_loadu_si128(reinterpret_cast<const __m128i*>(idx + 4 * size_t(i))), swap);
+      v = _mm_and_si128(v, _mm_set1_epi32(0xFFFFFF));
+      v = _mm_or_si128(v, _mm_cmpeq_epi32(v, _mm_set1_epi32(0xFFFFFF)));
       vmin = _mm_min_epu32(vmin, v);
       vmax = _mm_max_epu32(vmax, _mm_andnot_si128(_mm_cmpeq_epi32(v, ones), v));
     }
@@ -4220,6 +4243,7 @@ void Renderer::VertexRange::Resolve() {
   }
   for (; i < end_index; ++i) {
     uint32_t x = LoadIndex(idx, i, index32, index_endian);
+    if (index32) x &= 0xFFFFFFu;
     if (x == reset) continue;
     lo = std::min(lo, x);
     hi = std::max(hi, x);
@@ -4277,6 +4301,7 @@ const Renderer::BufferEntry* Renderer::ApplyBuffer(uint8_t* base, const BufferPl
   entry.stride = plan.stride;
   entry.index_format = plan.format;
   entry.phase = plan.phase;
+  entry.reset_index = plan.reset_index;
   uint32_t index_format = plan.format, stride = plan.stride, phase = plan.phase;
   // Byte-swap in cached CPU memory: the upload heap is write-combined, and
   // reading it back (as an in-place swap does) is extremely slow.
@@ -4360,11 +4385,11 @@ bool Renderer::RefreshTrackedBuffer(TrackedBuffer& t) {
 Renderer::BufferPlan Renderer::PlanBuffer(uint8_t* base, uint32_t address, uint32_t size,
                                           uint32_t decl, uint32_t stride, uint32_t index_format,
                                           uint32_t phase, uint32_t need_begin, uint32_t need_end,
-                                          bool& ok) {
+                                          bool& ok, uint32_t reset_index) {
   BufferPlan plan;
   ok = size && size <= (64u << 20);
   if (!ok) return plan;
-  uint64_t key_parts[] = {address, size, decl, stride, index_format, phase};
+  uint64_t key_parts[] = {address, size, decl, stride, index_format, phase, reset_index};
   plan.key = XXH3_64bits(key_parts, sizeof(key_parts));
   plan.address = address;
   plan.size = size;
@@ -4372,6 +4397,7 @@ Renderer::BufferPlan Renderer::PlanBuffer(uint8_t* base, uint32_t address, uint3
   plan.stride = stride;
   plan.format = index_format;
   plan.phase = phase;
+  plan.reset_index = reset_index;
   // Vertex data is swapped per vertex: the swap range must start on a vertex.
   auto align_range = [&](uint32_t& b, uint32_t& e) {
     e = std::min(e, size);
@@ -4721,9 +4747,9 @@ void Renderer::ExecDrawIndexedVertices(uint8_t* base, const WorkBatch& batch,
   uint32_t dev = GuestDevice(base);
   D3D12_PRIMITIVE_TOPOLOGY topology;
   bool quads;
-  // Xenos strips restart at the all-ones index (the XDK enables reset for
-  // indexed strips; D3D12 needs the cut value baked into the PSO).
-  D3D12_INDEX_BUFFER_STRIP_CUT_VALUE cut = cmd.index32
+  // Uploads normalize the guest's programmable restart value to the host cut.
+  D3D12_INDEX_BUFFER_STRIP_CUT_VALUE cut = cmd.index.reset_index == UINT32_MAX
+      ? D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED : cmd.index32
                                                ? D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF
                                                : D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF;
   // Buffers first (planned uploads must happen even for skipped draws).
@@ -6237,10 +6263,18 @@ void Renderer::DrawIndexedVertices(uint8_t* base, uint32_t prim, int32_t base_ve
     draw_range.base_vertex = base_vertex;
     draw_range.index32 = index32;
     draw_range.index_endian = endian;
+    const bool strip = prim == uint32_t(xenos::PrimitiveType::kTriangleStrip) ||
+                       prim == uint32_t(xenos::PrimitiveType::kLineStrip);
+    uint32_t reset_index = UINT32_MAX;
+    if (strip && (LoadReg(base, dev, rex::graphics::XE_GPU_REG_PA_SU_SC_MODE_CNTL) & (1u << 21))) {
+      const uint32_t reset = LoadReg(base, dev, rex::graphics::XE_GPU_REG_VGT_MULTI_PRIM_IB_RESET_INDX) & 0xFFFFFFu;
+      if (index32 || reset <= UINT16_MAX) reset_index = reset;
+    }
+    draw_range.reset_index = reset_index;
     uint32_t isize = index32 ? 4 : 2;
     bool ok = false;
     cur_.index = PlanBuffer(base, address, size, 0, 0, (index32 ? 2u : 1u) | (endian << 2), 0, start_index * isize,
-                            (start_index + index_count) * isize, ok);
+                            (start_index + index_count) * isize, ok, reset_index);
     cur_.has_index = ok;
     cur_.index32 = index32;
     cur_.index_size = size;

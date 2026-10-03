@@ -11,6 +11,18 @@
 
 #include "test_main.h"
 #include "xenos_tiling.h"
+#include "texture_binding.h"
+
+SR_TEST(texture_fetch_can_be_bound_without_an_xdk_texture_object) {
+  using superman_returns::native::IsTextureBound;
+  // The movie player writes Y/U/V fetch constants directly into PM4, while
+  // the device's texture-object slots remain null.
+  SR_CHECK(IsTextureBound(0x0A020002));
+  SR_CHECK(IsTextureBound(0x06000002));
+  SR_CHECK(IsTextureBound(0x8A024802));
+  SR_CHECK(!IsTextureBound(0));
+  SR_CHECK(!IsTextureBound(3));
+}
 
 namespace {
 
