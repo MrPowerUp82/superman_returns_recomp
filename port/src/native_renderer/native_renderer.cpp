@@ -5,6 +5,7 @@
 // docs/native-port-plan.md section 2.
 //
 #include "native_renderer.h"
+#include "checked_guest_memory.h"
 #include "../graphics/guest/render_state.h"
 #include "../graphics/guest/edram_alias.h"
 #include "../graphics/guest/render_packet.h"
@@ -294,7 +295,14 @@ void NoteGuestDevice(uint32_t dev) {
 
 namespace {
 
+struct CaptureTimings {
+  uint64_t reads=0,bytes=0,queries=0,pm4_us=0,textures_us=0;
+  uint64_t watch_us=0,read_us=0,hash_us=0,copy_us=0;
+};
+thread_local CaptureTimings capture_timings;
+thread_local CheckedGuestReads checked_guest_reads;
 std::span<const uint8_t> ReadCommittedGuest(uint8_t* base, uint32_t address, uint32_t length) {
+  ++capture_timings.reads;capture_timings.bytes+=length;
   if(uint64_t(address)+length>(uint64_t{1}<<32)) return {};
   const uint8_t* source=base+address;
   if(address>=0xa0000000u && address<0xc0000000u) {
@@ -304,15 +312,7 @@ std::span<const uint8_t> ReadCommittedGuest(uint8_t* base, uint32_t address, uin
     // PAGE_NOACCESS while the SDK's physical mapping remains committed.
     source=REX_KERNEL_MEMORY()->TranslatePhysical<const uint8_t*>(physical);
   }
-  const uint8_t* p=source;
-  const uint8_t* end=p+length;
-  while(p<end) {
-    MEMORY_BASIC_INFORMATION region{};
-    if(!VirtualQuery(p,&region,sizeof(region)) || region.State!=MEM_COMMIT ||
-       (region.Protect&(PAGE_NOACCESS|PAGE_GUARD)) || !region.Protect) return {};
-    p=static_cast<const uint8_t*>(region.BaseAddress)+region.RegionSize;
-  }
-  return {source,length};
+  return checked_guest_reads.Read(source,length);
 }
 
 // D3DDevice layout and the device pointer come from game_profile.h (Conan's
@@ -5908,13 +5908,16 @@ void Renderer::BeginCmd(Op op) {
 
 void Renderer::EndCmd(uint8_t* base) {
   if(worker_stop_) return;
+  checked_guest_reads.Reset();
   const auto capture_copies_before=capture_mirror_.copy_draws;
   if (cur_.packet_check && cur_.ring_bytes) {
+    const auto started=std::chrono::steady_clock::now();
     std::string capture_error;
     cur_.pm4_capture_ok = graphics::guest::CapturePm4Dependencies(*batch_, cur_,
         [base](uint32_t address, uint32_t length) {
           return ReadCommittedGuest(base,address,length);
         }, capture_error, &capture_mirror_);
+    capture_timings.pm4_us+=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-started).count();
     if (!cur_.pm4_capture_ok)
       REXLOG_WARN("native PM4 capture: {}", capture_error);
   }
@@ -5925,8 +5928,11 @@ void Renderer::EndCmd(uint8_t* base) {
         [base](uint32_t address,uint32_t length) {return ReadCommittedGuest(base,address,length);});
   }
   if (cur_.packet_check && cur_.device &&
-      (cur_.op==Op::kDraw || cur_.op==Op::kDrawIndexed || cur_.op==Op::kDrawInline))
+      (cur_.op==Op::kDraw || cur_.op==Op::kDrawIndexed || cur_.op==Op::kDrawInline)) {
+    const auto started=std::chrono::steady_clock::now();
     CaptureTextures(base);
+    capture_timings.textures_us+=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-started).count();
+  }
   if(cur_.op==Op::kResolve && cur_.packet_check) {
     cur_.resolve_copy_draw=capture_mirror_.copy_draws!=capture_copies_before;
     cur_.resolve_copy_dest_info=capture_mirror_.last_copy_dest_info;
@@ -5988,13 +5994,20 @@ void Renderer::CaptureTextures(uint8_t* base) {
       uint64_t hash=0xcbf29ce484222325ull;
       entry.watch_seq=write_seq_.load(std::memory_order_acquire);
       for(const auto& range:ranges) {
+        auto started=std::chrono::steady_clock::now();
         if(texture_watch_) ArmTextureWatch(range.address,range.length);
+        capture_timings.watch_us+=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-started).count();
+        started=std::chrono::steady_clock::now();
         auto bytes=ReadCommittedGuest(base,0xa0000000u+range.address,range.length);
+        capture_timings.read_us+=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-started).count();
         if(bytes.size()!=range.length) {error="Texture memory is not readable";break;}
+        started=std::chrono::steady_clock::now();
         hash=XXH3_64bits_withSeed(bytes.data(),bytes.size(),hash);
+        capture_timings.hash_us+=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-started).count();
       }
       if(!error.empty()) {cur_.texture_errors.emplace_back(slot,std::move(error));continue;}
       if(!entry.snapshot || hash!=entry.content_hash) {
+        const auto started=std::chrono::steady_clock::now();
         if(!graphics::guest::CaptureTexture(fetch,cur_.command_serial,
             [base](uint32_t address,uint32_t length){
               return ReadCommittedGuest(base,address,length);
@@ -6010,6 +6023,7 @@ void Renderer::CaptureTextures(uint8_t* base) {
           hash=XXH3_64bits_withSeed(bytes.data(),bytes.size(),hash);
         }
         entry.content_hash=hash;
+        capture_timings.copy_us+=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-started).count();
       }
     }
     cur_.textures[slot]=entry.snapshot;
@@ -6554,6 +6568,9 @@ void Renderer::OnSwap(uint8_t* base, uint32_t front_buffer_texture, uint64_t swa
     cur_.gamma=std::move(gamma);
   }
   EndCmd(base);
+  if(packet_sink_ && (capture_timings.pm4_us+capture_timings.textures_us>100000 || front_frame_%120==0))
+    REXLOG_INFO("native Vulkan capture frame={} pm4_ms={} textures_ms={} reads={} bytes={} virtual_queries={} watch_ms={} read_ms={} hash_ms={} copy_ms={}",front_frame_,capture_timings.pm4_us/1000,capture_timings.textures_us/1000,capture_timings.reads,capture_timings.bytes,capture_timings.queries,capture_timings.watch_us/1000,capture_timings.read_us/1000,capture_timings.hash_us/1000,capture_timings.copy_us/1000);
+  capture_timings={};
   if (worker_mode_) {
     FlushBatch();
     // sr_native_worker_lag 0: the frame is recorded before the guest continues.
