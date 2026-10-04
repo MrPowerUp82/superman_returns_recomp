@@ -85,7 +85,7 @@ bool GameRenderer::Record(const guest::RenderPacket& packet,VkCommandBuffer comm
         clear.flags=(pass->clear_color?1u:0u)|(pass->depth_surface.id?0x30u:0u);
         clear.color=pass->color;clear.depth=std::clamp(pass->depth,0.0f,1.0f);clear.stencil=pass->stencil;
         if(tiling_.width && tiling_.height) {
-          for(auto* surface:{&clear.colors[0],&clear.depth_surface}) if(surface->id) {surface->geometry.width=tiling_.width;surface->geometry.height=tiling_.height;}
+          for(auto* surface:{&clear.colors[0],&clear.depth_surface}) if(surface->id) {surface->geometry.width=std::max(surface->geometry.width,tiling_.width);surface->geometry.height=std::max(surface->geometry.height,tiling_.height);}
         }
         if(clear.flags && !targets_.Clear(clear,e)) return false;
       }

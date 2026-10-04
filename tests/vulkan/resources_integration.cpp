@@ -284,7 +284,9 @@ void CheckGameFrame(Context& c) {
   if(!guest::CapturedMemory::Capture(batch,command,memory,reason)) throw std::runtime_error(reason);
   std::shared_ptr<TextureResource> first,second,unused;
   auto record=[&](bool green,std::shared_ptr<TextureResource>& output) {
-    guest::PassPacket tiling{};tiling.operation=guest::Op::kBeginTiling;tiling.rects={{0,0,16,16}};tiling.clear_color=true;tiling.color_surface=source;tiling.color=green?std::array<float,4>{0,1,0,1}:std::array<float,4>{1,0,0,1};
+    // A tile rectangle smaller than the surface must not select a separate,
+    // undersized target for the full-surface clear and subsequent resolve.
+    guest::PassPacket tiling{};tiling.operation=guest::Op::kBeginTiling;tiling.rects={{0,0,8,8}};tiling.clear_color=true;tiling.color_surface=source;tiling.color=green?std::array<float,4>{0,1,0,1}:std::array<float,4>{1,0,0,1};
     Require(frame.Enqueue(guest::RenderPacket(tiling),unused,e),e);
     guest::ResolvePacket resolve{};resolve.source_surface=source;resolve.destination=1002;resolve.destination_fetch={2,0x100006,15u|(15u<<13),0,0,1u<<9};Require(frame.Enqueue(guest::RenderPacket(resolve),unused,e),e);
     Require(frame.Enqueue(guest::RenderPacket(guest::SwapPacket{0x500000,1,memory}),output,e),e);Require(bool(output),e);
