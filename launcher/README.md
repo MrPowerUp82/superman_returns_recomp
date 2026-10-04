@@ -24,6 +24,7 @@ powershell -File tools/build_launcher.ps1
 dotnet run --project tests/launcher/LauncherChecks.csproj -c Release
 ```
 
-A publicação em `artifacts/launcher` inclui o runtime e funciona sem instalar .NET.
+O launcher é gerado na mesma pasta do executável do jogo (`port/out/build/win-amd64-release/SupermanReturnsLauncher.exe`, ou `%SR_BUILD_DIR%`), e espelhado em `artifacts/launcher`. O executável inclui o runtime .NET integrado.
 `tools/package_release.ps1` inclui esse executável e os avisos do runtime no ZIP.
 Com `-NoBuild`, compile o launcher previamente. Os scripts `.cmd` continuam funcionando.
+

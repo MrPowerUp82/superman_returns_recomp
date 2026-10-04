@@ -40,4 +40,15 @@ if not defined SR_EMBED_SHADERS set "SR_EMBED_SHADERS=ON"
 cmake -S "%ROOT%port" -B "%SR_BUILD_DIR%" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_PREFIX_PATH="%SDK%" -DSR_NATIVE=%SR_NATIVE% -DSR_LSFG=%SR_LSFG% -DSR_NATIVE_EMBED_SHADERS=%SR_EMBED_SHADERS% -DCMAKE_RUNTIME_OUTPUT_DIRECTORY="%SR_RUNTIME_OUTPUT_DIR%"
 if errorlevel 1 exit /b 1
 cmake --build "%SR_BUILD_DIR%" --parallel 4
-exit /b %errorlevel%
+if errorlevel 1 exit /b 1
+
+rem Generate the launcher in the same folder as the game executable
+if not defined SR_BUILD_LAUNCHER set "SR_BUILD_LAUNCHER=ON"
+if /i not "%SR_BUILD_LAUNCHER%"=="OFF" (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%tools\build_launcher.ps1" -OutDir "%SR_BUILD_DIR%"
+  if errorlevel 1 (
+    echo Warning: Launcher build failed.
+  )
+)
+exit /b 0
+

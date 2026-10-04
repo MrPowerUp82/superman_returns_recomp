@@ -39,7 +39,7 @@ function Need($path, $hint) {
 }
 
 $exe = Need (Join-Path $BuildDir 'superman_returns.exe') 'Run without -NoBuild.'
-$launcherDir = Join-Path $root 'artifacts\launcher'
+$launcherDir = if (Test-Path (Join-Path $BuildDir 'SupermanReturnsLauncher.exe')) { $BuildDir } else { Join-Path $root 'artifacts\launcher' }
 $launcher = Need (Join-Path $launcherDir 'SupermanReturnsLauncher.exe') 'Run tools\build_launcher.ps1 first.'
 foreach ($leftover in 'superman_returns_shaders.srsl', 'superman_returns_shaders.pak') {
   if (Test-Path (Join-Path $BuildDir $leftover)) {
