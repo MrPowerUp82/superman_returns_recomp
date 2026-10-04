@@ -82,6 +82,9 @@ private:
   uint64_t serial_=0,completed_=0;
   SubmissionResources submissions_;
   std::map<guest::ResourceId,std::shared_ptr<BufferResource>> buffers_;
+  struct HostPool {std::vector<std::shared_ptr<BufferResource>> buffers;size_t cursor=0;};
+  std::map<VkDeviceSize,HostPool> host_pool_;
+  VkDeviceSize host_pool_bytes_=0;
   std::map<guest::ResourceId,std::shared_ptr<TextureResource>> textures_;
 };
 } // namespace superman_returns::graphics::vulkan

@@ -85,3 +85,28 @@ SR_TEST(buffer_upload_flushes_staging_and_retains_replaced_version) {
   }
   SR_CHECK(allocations.empty());SR_CHECK_EQ(destroyed,4);
 }
+SR_TEST(host_upload_reuses_only_completed_unreferenced_buffers) {
+  allocations.clear();copies=flushes=destroyed=0;
+  Context c(ResourceFake());c.device=reinterpret_cast<VkDevice>(1);
+  c.memory.memoryTypeCount=1;c.memory.memoryTypes[0].propertyFlags=VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+  c.properties.limits.maxStorageBufferRange=4096;c.properties.limits.nonCoherentAtomSize=64;
+  {
+    ResourceStore store(c);Error e;std::array<std::byte,4> a{std::byte{1}},b{std::byte{2}};
+    SR_CHECK(store.BeginSubmission(reinterpret_cast<VkCommandBuffer>(1),1,e));
+    SR_CHECK(store.UploadHostBuffer(100,a,1,e));auto old=store.Buffer(100,e);store.ForgetBuffer(100);
+    const auto old_handle=old->handle;
+    const auto old_memory=old->memory;
+    SR_CHECK(store.UploadHostBuffer(101,b,1,e));auto pending=store.Buffer(101,e);store.ForgetBuffer(101);
+    SR_CHECK(pending->handle!=old_handle);SR_CHECK_EQ(allocations[old_memory][0],1u);
+    pending.reset();store.Retire(1);
+    SR_CHECK(store.BeginSubmission(reinterpret_cast<VkCommandBuffer>(1),2,e));
+    SR_CHECK(store.UploadHostBuffer(102,b,1,e));auto next=store.Buffer(102,e);store.ForgetBuffer(102);
+    SR_CHECK(next->handle!=old_handle);SR_CHECK_EQ(allocations[old_memory][0],1u);
+    next.reset();old.reset();store.Retire(2);
+    SR_CHECK(store.BeginSubmission(reinterpret_cast<VkCommandBuffer>(1),3,e));
+    SR_CHECK(store.UploadHostBuffer(103,b,1,e));auto reused=store.Buffer(103,e);
+    SR_CHECK_EQ(reused->handle,old_handle);SR_CHECK_EQ(allocations[reused->memory][0],2u);
+    SR_CHECK_EQ(allocations.size(),2u); // No allocations after the two initial leases.
+  }
+  SR_CHECK(allocations.empty());SR_CHECK_EQ(copies,0);SR_CHECK_EQ(flushes,4);
+}

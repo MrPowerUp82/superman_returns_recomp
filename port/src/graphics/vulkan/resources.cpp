@@ -117,6 +117,7 @@ ResourceStore::~ResourceStore() {
 }
 bool ResourceStore::BeginSubmission(VkCommandBuffer cmd,uint64_t serial,Error& e) {
   if(!cmd || serial<=completed_ || serial<serial_) return Fail(e,"Resource submission","Missing command buffer or invalid submission serial");
+  if(serial!=serial_) for(auto& [size,pool]:host_pool_) pool.cursor=0;
   command_=cmd;serial_=serial;e={};return true;
 }
 void ResourceStore::Retire(uint64_t completed) {completed_=std::max(completed_,completed);submissions_.Retire(completed_);}
@@ -255,7 +256,21 @@ std::shared_ptr<BufferResource> ResourceStore::ResolveScratch(VkDeviceSize size,
 bool ResourceStore::UploadHostBuffer(guest::ResourceId id,std::span<const std::byte> bytes,uint64_t version,Error& e) {
   if(!Ready(e)) return false;
   if(!id || bytes.empty() || bytes.size()>c_.properties.limits.maxStorageBufferRange) return Fail(e,"Upload constants","Invalid storage buffer range");
-  auto buffer=NewBuffer(bytes.size(),VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_VERTEX_BUFFER_BIT|VK_BUFFER_USAGE_INDEX_BUFFER_BIT,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,e);
+  auto& pool=host_pool_[bytes.size()];
+  std::shared_ptr<BufferResource> buffer;
+  // Pending submissions, descriptor leases and cached IDs retain ownership.
+  // Only a buffer held exclusively by this pool can be written again.
+  while(pool.cursor<pool.buffers.size()) {
+    auto& candidate=pool.buffers[pool.cursor++];
+    if(candidate.use_count()==1) {buffer=candidate;break;}
+  }
+  if(!buffer) {
+    buffer=NewBuffer(bytes.size(),VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_VERTEX_BUFFER_BIT|VK_BUFFER_USAGE_INDEX_BUFFER_BIT,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,e);
+    constexpr VkDeviceSize budget=64ull*1024*1024;
+    if(buffer && buffer->allocation<=budget-host_pool_bytes_) {
+      host_pool_bytes_+=buffer->allocation;pool.buffers.push_back(buffer);pool.cursor=pool.buffers.size();
+    }
+  }
   if(!buffer || !Write(buffer,bytes,e)) return false;
   buffer->version=version;submissions_.Keep(serial_,buffer);buffers_[id]=std::move(buffer);e={};return true;
 }
