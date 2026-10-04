@@ -1,5 +1,12 @@
 #include "sr_settings.h"
 
+REXCVAR_DEFINE_STRING(sr_native_api, "d3d12", "Superman Returns",
+                     "Native rendering API: d3d12 or vulkan; Vulkan requires SR_VULKAN_GAME=ON")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_STRING(sr_native_vulkan_gpu_uuid, "", "Superman Returns",
+                     "Vulkan GPU UUID (32 hexadecimal digits); empty selects a suitable GPU")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
 REXCVAR_DEFINE_BOOL(sr_skip_intro, false, "Superman Returns",
                     "Skip the publisher logo and legal videos at boot");
 

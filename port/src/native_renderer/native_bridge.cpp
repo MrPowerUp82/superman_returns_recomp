@@ -284,6 +284,26 @@ void OnFrameStatsSwap(uint8_t* base, uint32_t dev, uint32_t front_buffer) {
 
 std::unique_ptr<rex::system::IGraphicsSystem> CreateNativeGraphicsSystem(
     GraphicsSystemFactory create_xenos, GraphicsSystemFactory create_xenos_ab) {
+  graphics::NativeApi api;std::string api_error;
+  graphics::NativeVulkanOptions options;
+  options.fxaa=rex::cvar::Query<bool>("sr_native_fxaa");
+  options.ssao=rex::cvar::Query<bool>("sr_native_ambient_occlusion");
+  options.lsfg=rex::cvar::Query<bool>("sr_lsfg");
+  options.ab_mode=REXCVAR_GET(sr_native_ab_mode);
+  options.render_scale=rex::cvar::Query<double>("sr_native_render_scale");
+  options.msaa_samples=rex::cvar::Query<int32_t>("sr_native_msaa_samples");
+  options.shadow_quality=rex::cvar::Query<int32_t>("sr_native_shadow_quality");
+  options.bloom_quality=rex::cvar::Query<int32_t>("sr_native_bloom_quality");
+  options.anisotropic_filtering=rex::cvar::Query<int32_t>("sr_native_anisotropic_filtering");
+  options.foliage_antialiasing=rex::cvar::Query<bool>("sr_native_foliage_antialiasing");
+  if(!graphics::ParseNativeApi(rex::cvar::Query<std::string>("sr_native_api"),api,api_error) ||
+     !graphics::ValidateNativeApi(api,SR_VULKAN_GAME && SR_NATIVE_RENDERER_BUILD,options,api_error)) {
+    rex::FatalError(api_error);return nullptr;
+  }
+  if(api==graphics::NativeApi::kVulkan) {
+    REXLOG_INFO("sr_renderer=native: Vulkan game renderer, no D3D12/Xenos fallback");
+    g_mode.store(int(Mode::kNative));return std::make_unique<NativeGraphicsSystem>(api);
+  }
 #if !SR_NATIVE_RENDERER_BUILD
   (void)create_xenos;
   (void)create_xenos_ab;
@@ -295,12 +315,6 @@ std::unique_ptr<rex::system::IGraphicsSystem> CreateNativeGraphicsSystem(
     return nullptr;
   }
   std::string where;
-#if SR_VULKAN_GAME_TEST
-  if(REXCVAR_GET(sr_native_ab_mode)) {rex::FatalError("Vulkan native rendering cannot use the Xenos A/B presenter");return nullptr;}
-  REXLOG_INFO("sr_renderer=native: development Vulkan game renderer, no D3D12/Xenos fallback");
-  g_mode.store(int(Mode::kNative));
-  return std::make_unique<NativeGraphicsSystem>();
-#endif
   if (!ShaderCorpusAvailable(&where)) {
     LogFallbackOnce(("no offline shader corpus (embedded pack or " + where +
                      "; tools/shaders, docs/native-port-plan.md section 6)")

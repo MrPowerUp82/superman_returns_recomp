@@ -11,10 +11,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(generated/rexglue.cmake)
 
 option(SR_VULKAN_FOUNDATION "Build standalone Vulkan foundation smoke test" OFF)
-option(SR_VULKAN_GAME_TEST "Development build: route native game packets to the Vulkan presenter" OFF)
-if(SR_VULKAN_GAME_TEST AND NOT SR_VULKAN_FOUNDATION)
-    message(FATAL_ERROR "SR_VULKAN_GAME_TEST requires SR_VULKAN_FOUNDATION")
-endif()
+option(SR_VULKAN_GAME "Build the native Vulkan game renderer (explicit runtime selection)" OFF)
 option(SR_GUEST_TEXTURE_TESTS "Build texture layout tests using SDK Xenos helpers" OFF)
 if(SR_GUEST_TEXTURE_TESTS)
     add_executable(sr_guest_texture_tests ../tests/native/main.cpp ../tests/native/test_texture_layout.cpp
@@ -37,6 +34,7 @@ set(SUPERMANRETURNS_SOURCES
     src/frame_stats.cpp
     src/xma_fixes.cpp
     src/sr_settings.cpp
+    src/graphics/backend_selection.cpp
     src/sr_preset.cpp
     src/skip_intro.cpp
     src/renderdoc_capture.cpp
@@ -70,6 +68,9 @@ endif()
 #   RENDERER --sr_renderer=native works; needs every address confirmed
 #            (static_assert) and the in-process GPU sources below.
 set(SR_NATIVE "OFF" CACHE STRING "Native renderer build level: OFF, CAPTURE or RENDERER")
+if(SR_VULKAN_GAME AND (NOT SR_VULKAN_FOUNDATION OR NOT SR_NATIVE STREQUAL "RENDERER"))
+    message(FATAL_ERROR "SR_VULKAN_GAME requires SR_VULKAN_FOUNDATION=ON and SR_NATIVE=RENDERER")
+endif()
 set_property(CACHE SR_NATIVE PROPERTY STRINGS OFF CAPTURE RENDERER)
 if(NOT SR_NATIVE MATCHES "^(OFF|CAPTURE|RENDERER)$")
     message(FATAL_ERROR "SR_NATIVE must be OFF, CAPTURE or RENDERER (got '${SR_NATIVE}')")
@@ -187,7 +188,7 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
         endif()
         target_compile_definitions(sr_native PUBLIC ${SR_NATIVE_DEFINITIONS})
         target_compile_definitions(sr_native PRIVATE SR_HAS_LSFG=$<BOOL:${SR_LSFG}>)
-        target_compile_definitions(sr_native PRIVATE SR_VULKAN_GAME_TEST=$<BOOL:${SR_VULKAN_GAME_TEST}>)
+        target_compile_definitions(sr_native PRIVATE SR_VULKAN_GAME=$<BOOL:${SR_VULKAN_GAME}>)
         target_include_directories(sr_native PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src/lsfg
             ${SR_NATIVE_ROOT}
@@ -198,7 +199,7 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
             target_compile_options(sr_native PRIVATE -Wno-unused-variable -mssse3 -msse4.1)
         endif()
         target_link_libraries(sr_native PRIVATE rex::runtime rex::xxhash)
-        if(SR_VULKAN_FOUNDATION AND SR_NATIVE STREQUAL "RENDERER")
+        if(SR_VULKAN_GAME)
             target_sources(sr_native PRIVATE src/graphics/vulkan/platform/native_provider.cpp src/graphics/vulkan/platform/shader_process.cpp)
             target_link_libraries(sr_native PRIVATE sr_vulkan_core)
             target_compile_definitions(sr_native PRIVATE VK_USE_PLATFORM_WIN32_KHR NOMINMAX)

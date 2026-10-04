@@ -38,7 +38,7 @@
 #include <rex/ui/d3d12/d3d12_provider.h>
 #include <rex/ui/presenter.h>
 #include <rex/ui/graphics_provider.h>
-#if SR_VULKAN_GAME_TEST
+#if SR_VULKAN_GAME
 #include "../graphics/vulkan/platform/native_provider.h"
 #endif
 #include <rex/ui/windowed_app_context.h>
@@ -167,8 +167,8 @@ struct NativeGraphicsSystem::Reader {
   }
 };
 
-NativeGraphicsSystem::NativeGraphicsSystem()
-    : registers_(std::make_unique<std::atomic<uint32_t>[]>(kRegisterCount)) {
+NativeGraphicsSystem::NativeGraphicsSystem(graphics::NativeApi api)
+    : native_api_(api),registers_(std::make_unique<std::atomic<uint32_t>[]>(kRegisterCount)) {
   for (uint32_t i = 0; i < kRegisterCount; ++i) registers_[i].store(0);
   write_event_ = rex::thread::Event::CreateAutoResetEvent(false);
   cp_wake_ = rex::thread::Event::CreateAutoResetEvent(false);
@@ -180,31 +180,38 @@ rex::ui::GraphicsProvider* NativeGraphicsSystem::provider() const { return provi
 
 rex::X_STATUS NativeGraphicsSystem::SetupPresentation(rex::ui::WindowedAppContext* app_context) {
   if (presenter_) return X_STATUS_SUCCESS;
-#if SR_VULKAN_GAME_TEST
+  const bool vulkan=native_api_==graphics::NativeApi::kVulkan;
+  if(vulkan) {
+#if SR_VULKAN_GAME
   const std::filesystem::path root=SR_VULKAN_PROJECT_ROOT;
   wchar_t python[MAX_PATH]{};if(!SearchPathW(nullptr,L"python.exe",nullptr,MAX_PATH,python,nullptr)) {REXLOG_ERROR("native Vulkan: python.exe not found on PATH");return X_STATUS_UNSUCCESSFUL;}
   graphics::vulkan::NativeProviderConfig config;
   config.shaders={python,root/"tools/shaders/runtime_vulkan_shader.py",root/"build/vulkan-m3-runtime",root/"build/vulkan-m2/emitter-build/XenosRecompCorpus.exe",root/"build/vulkan-m2/emitter-tree/src/XenosRecomp/shader_common.h",root/".tools/dxc/bin/x64/dxc.exe"};
   config.driver_cache=root/"build/vulkan-m3-runtime/driver.cache";
+  config.gpu_uuid=rex::cvar::Query<std::string>("sr_native_vulkan_gpu_uuid");
   provider_=graphics::vulkan::CreateNativeVulkanProvider(std::move(config));
 #else
+    REXLOG_ERROR("Native Vulkan unavailable: build with SR_VULKAN_GAME=ON");return X_STATUS_UNSUCCESSFUL;
+#endif
+  } else {
   if (!ResolveLauncherGpu()) return X_STATUS_UNSUCCESSFUL;
   provider_ = rex::ui::d3d12::D3D12Provider::Create();
-#endif
+  }
   if (!provider_) {
-    REXLOG_ERROR("native graphics: unable to create the D3D12 provider");
+    REXLOG_ERROR("native graphics: unable to create the {} provider",vulkan?"Vulkan":"D3D12");
     return X_STATUS_UNSUCCESSFUL;
   }
   app_context_ = app_context;
   auto loss = [](bool, bool) {
     rex::FatalError("Graphics device lost (probably due to an internal error)");
   };
-  auto create_presenter = [this, loss]() {
-#if SR_HAS_LSFG && !SR_VULKAN_GAME_TEST
-    presenter_ = sr::lsfg::CreateProjectPresenter(*static_cast<rex::ui::d3d12::D3D12Provider*>(provider_.get()), loss);
-#else
-    presenter_ = provider_->CreatePresenter(loss);
+  auto create_presenter = [this, loss, vulkan]() {
+#if SR_HAS_LSFG
+    if(!vulkan) {
+      presenter_ = sr::lsfg::CreateProjectPresenter(*static_cast<rex::ui::d3d12::D3D12Provider*>(provider_.get()), loss);return;
+    }
 #endif
+    presenter_ = provider_->CreatePresenter(loss);
   };
   if (app_context_) {
     app_context_->CallInUIThreadSynchronous(create_presenter);
@@ -215,7 +222,7 @@ rex::X_STATUS NativeGraphicsSystem::SetupPresentation(rex::ui::WindowedAppContex
     REXLOG_ERROR("native graphics: unable to create the presenter");
     return X_STATUS_UNSUCCESSFUL;
   }
-  REXLOG_INFO("native graphics: {} presentation ready (no GPU plugin)",SR_VULKAN_GAME_TEST?"Vulkan":"D3D12");
+  REXLOG_INFO("native graphics: {} presentation ready (no GPU plugin)",vulkan?"Vulkan":"D3D12");
   return X_STATUS_SUCCESS;
 }
 
@@ -225,14 +232,13 @@ rex::X_STATUS NativeGraphicsSystem::SetupGuestGpu(rex::runtime::FunctionDispatch
   function_dispatcher_ = function_dispatcher;
   kernel_state_ = kernel_state;
   if (!provider_) {
-#if SR_VULKAN_GAME_TEST
+    if(native_api_==graphics::NativeApi::kVulkan) {
     REXLOG_ERROR("native Vulkan: presentation must be initialized before guest GPU setup");
     return X_STATUS_UNSUCCESSFUL;
-#else
+    }
     if (!ResolveLauncherGpu()) return X_STATUS_UNSUCCESSFUL;
     provider_ = rex::ui::d3d12::D3D12Provider::Create();
     if (!provider_) return X_STATUS_UNSUCCESSFUL;
-#endif
   }
   // GPU registers: 0x7FC80000-0x7FC8FFFF.
   memory_->AddVirtualMappedRange(0x7FC80000, 0xFFFF0000, 0x0000FFFF, this, &ReadRegisterThunk,

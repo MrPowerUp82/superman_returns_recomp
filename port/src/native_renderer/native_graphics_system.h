@@ -26,6 +26,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include "../graphics/backend_selection.h"
 
 #include <rex/system/interfaces/graphics.h>
 #include <rex/system/xobject.h>
@@ -62,7 +63,7 @@ void WaitForGpuCondition(const std::function<bool()>& done, uint32_t timeout_us)
 
 class NativeGraphicsSystem : public rex::system::IGraphicsSystem {
  public:
-  NativeGraphicsSystem();
+  explicit NativeGraphicsSystem(graphics::NativeApi api=graphics::NativeApi::kD3D12);
   ~NativeGraphicsSystem() override;
 
   rex::X_STATUS SetupPresentation(rex::ui::WindowedAppContext* app_context) override;
@@ -107,6 +108,7 @@ class NativeGraphicsSystem : public rex::system::IGraphicsSystem {
   bool Compare(uint32_t func, uint32_t value, uint32_t ref) const;
 
   std::unique_ptr<rex::ui::GraphicsProvider> provider_;
+  graphics::NativeApi native_api_;
   std::unique_ptr<rex::ui::Presenter> presenter_;
   rex::ui::WindowedAppContext* app_context_ = nullptr;
   rex::memory::Memory* memory_ = nullptr;

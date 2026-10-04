@@ -13,6 +13,7 @@
 
 #include "frame_stats.h"
 #include "sr_settings.h"
+#include "graphics/backend_selection.h"
 #include "native_renderer/native_bridge.h"
 #if SR_HAS_TRACE_GPU
 #include "native_renderer/sr_graphics_system.h"
@@ -48,6 +49,18 @@ class SupermanReturnsApp : public rex::ReXApp {
     const std::string renderer = rex::cvar::Query<std::string>("sr_renderer");
     const bool trace = renderer == "trace";
     const bool native = renderer == "native";
+    superman_returns::graphics::NativeApi native_api;std::string api_error;
+    if(!superman_returns::graphics::ParseNativeApi(rex::cvar::Query<std::string>("sr_native_api"),native_api,api_error)) {
+      rex::FatalError(api_error);return;
+    }
+    if(native_api==superman_returns::graphics::NativeApi::kVulkan && !native) {
+      rex::FatalError("sr_native_api=vulkan requires sr_renderer=native");return;
+    }
+#if !SR_HAS_NATIVE || !SR_HAS_TRACE_GPU
+    if(native_api==superman_returns::graphics::NativeApi::kVulkan) {
+      rex::FatalError("Native Vulkan requires a build with SR_NATIVE=RENDERER and SR_VULKAN_GAME=ON");return;
+    }
+#endif
 #if SR_HAS_TRACE_GPU
     // GPU defaults measured on Intel UHD (open world, paired runs); an explicit
     // command-line or config value always wins.
