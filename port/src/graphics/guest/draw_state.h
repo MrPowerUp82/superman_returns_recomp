@@ -41,6 +41,7 @@ inline uint32_t LoadIndex(const uint8_t *bytes, uint32_t index, bool index32,
     value |= uint32_t(bytes[(offset + b) ^ IndexByteXor(endian)]) << (8 * b);
   return value;
 }
+// Produces uint32 indices with UINT32_MAX as the enabled strip restart cut.
 bool NormalizeIndices(std::span<const uint8_t>, uint32_t first, uint32_t count,
                       IndexEncoding, Primitive, std::vector<uint32_t> &,
                       std::string &);

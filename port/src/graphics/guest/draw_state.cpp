@@ -32,7 +32,11 @@ bool NormalizeIndices(std::span<const uint8_t> source, uint32_t first,
         }
         value |= uint32_t(source[size_t(address)]) << (b * 8);
       }
-      values.push_back(HostStripIndex(value, encoding.index32, reset));
+      value &= encoding.index32 ? 0xffffffu : 0xffffu;
+      // The owned packet stores uint32_t indices, including ushort inputs.
+      // Promote the cut to that output width without confusing a legitimate
+      // ushort 0xFFFF with a different programmable restart value.
+      values.push_back(reset!=UINT32_MAX && value==reset ? UINT32_MAX : value);
     }
     if (primitive == Primitive::kQuads) {
       std::vector<uint32_t> triangles;

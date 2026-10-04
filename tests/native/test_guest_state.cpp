@@ -3,6 +3,17 @@
 #include "test_main.h"
 #include <cstring>
 using namespace superman_returns::graphics::guest;
+SR_TEST(normalized_ushort_strip_promotes_restart_to_32_bit_cut) {
+  const uint8_t bytes[]{1,0,0xff,0x7f,2,0,0xff,0xff};
+  std::vector<uint32_t> values;std::string error;
+  SR_CHECK(NormalizeIndices(bytes,0,4,{false,0,0x7fff},Primitive::kTriangleStrip,values,error));
+  SR_CHECK_EQ(values[0],1u);SR_CHECK_EQ(values[1],UINT32_MAX);
+  SR_CHECK_EQ(values[2],2u);SR_CHECK_EQ(values[3],0xffffu);
+  SR_CHECK(NormalizeIndices(bytes,0,4,{false,0,UINT32_MAX},Primitive::kTriangleStrip,values,error));
+  SR_CHECK_EQ(values[1],0x7fffu);SR_CHECK_EQ(values[3],0xffffu);
+  SR_CHECK(NormalizeIndices(bytes,0,4,{false,0,0x7fff},Primitive::kTriangles,values,error));
+  SR_CHECK_EQ(values[1],0x7fffu);
+}
 SR_TEST(guest_snapshot_owns_data) {
   std::array<uint32_t, 1024> source{};
   source[0] = 0x3f800000;
