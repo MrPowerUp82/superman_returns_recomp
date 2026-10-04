@@ -52,8 +52,13 @@ bool GameFrame::Enqueue(guest::RenderPacket&& packet,std::shared_ptr<TextureReso
     if(packets_.size()>=262144) {failed_=true;e={"Game frame",VK_ERROR_OUT_OF_HOST_MEMORY,"Frame packet limit exceeded"};return false;}
     packets_.push_back(std::move(packet));return true;
   }
-  if(!WaitShaders(e) || !WaitFence(e)) {failed_=true;return false;}
+  const auto started=std::chrono::steady_clock::now();
+  if(!WaitShaders(e)) {failed_=true;return false;}
+  const auto shaders_ready=std::chrono::steady_clock::now();
+  if(!WaitFence(e)) {failed_=true;return false;}
+  const auto fence_ready=std::chrono::steady_clock::now();
   std::lock_guard lock(queue_mutex_);
+  const auto queue_ready=std::chrono::steady_clock::now();
   auto fail=[&] {failed_=true;return false;};
   if(!Check(c_.f.vkResetCommandPool(c_.device,pool_,0),"Reset game pool",e)) return fail();
   VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -72,6 +77,17 @@ bool GameFrame::Enqueue(guest::RenderPacket&& packet,std::shared_ptr<TextureReso
   if(!Check(c_.f.vkEndCommandBuffer(command_),"End game frame",e) || !Check(c_.f.vkResetFences(c_.device,1,&fence_),"Reset game fence",e)) return fail();
   VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};submit.commandBufferCount=1;submit.pCommandBuffers=&command_;
   if(!Check(c_.f.vkQueueSubmit(c_.graphics_queue,1,&submit,fence_),"Submit game frame",e)) return fail();
-  submitted_=true;packets_.clear();return true;
+  submitted_=true;
+  if(serial_==1 || std::chrono::steady_clock::now()-cache_checkpoint_>=std::chrono::seconds(5)) {
+    Error cache_error;
+    if(!renderer_.CheckpointCache(cache_error)) c_.Log(cache_error.operation+": "+cache_error.message);
+    cache_checkpoint_=std::chrono::steady_clock::now();
+  }
+  const auto finished=std::chrono::steady_clock::now();
+  auto ms=[](auto a,auto b) {return std::chrono::duration_cast<std::chrono::milliseconds>(b-a).count();};
+  if(serial_==1 || serial_%120==0 || ms(started,finished)>100) {
+    auto stats=renderer_.Stats();c_.Log("Submitted native Vulkan frame="+std::to_string(serial_)+", draws="+std::to_string(stats.draws)+", pending="+std::to_string(stats.pending)+", failed="+std::to_string(stats.failed)+", shaders_ms="+std::to_string(ms(started,shaders_ready))+", fence_ms="+std::to_string(ms(shaders_ready,fence_ready))+", queue_ms="+std::to_string(ms(fence_ready,queue_ready))+", record_submit_ms="+std::to_string(ms(queue_ready,finished))+", packets="+std::to_string(packets_.size()));
+  }
+  packets_.clear();return true;
 }
 }

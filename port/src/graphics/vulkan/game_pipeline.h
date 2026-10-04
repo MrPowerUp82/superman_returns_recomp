@@ -30,9 +30,12 @@ public:
   std::shared_ptr<GamePipeline> Acquire(const guest::DrawPacket&,const TargetPass&,
     const shaders::CompiledShader&,const shaders::CompiledShader*,uint64_t submission,Error&);
   VkPipelineLayout Layout() const {return layout_;}
+  // Call on the recording thread, serialized with Acquire on the same store.
+  bool CheckpointCache(Error&);
   void Retire(uint64_t serial) {pending_.Retire(serial);}
 private:
   Context& c_;VkPipelineLayout layout_=VK_NULL_HANDLE;VkPipelineCache driver_cache_=VK_NULL_HANDLE;
   std::filesystem::path cache_path_;std::map<GamePipelineKey,std::shared_ptr<GamePipeline>> pipelines_;SubmissionResources pending_;
+  bool cache_dirty_=false;
 };
 }

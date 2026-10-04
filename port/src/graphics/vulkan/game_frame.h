@@ -2,6 +2,7 @@
 #include "game_renderer.h"
 #include <atomic>
 #include <mutex>
+#include <chrono>
 namespace superman_returns::graphics::vulkan {
 // Shares queue and image-state ordering with host presentation. Shader waits
 // happen before locking this mutex, allowing the window to keep responding.
@@ -22,5 +23,6 @@ private:
   VkCommandPool pool_=VK_NULL_HANDLE;VkCommandBuffer command_=VK_NULL_HANDLE;
   VkFence fence_=VK_NULL_HANDLE;uint64_t serial_=0;bool submitted_=false,failed_=false;
   std::atomic<bool> cancelled_{false};
+  std::chrono::steady_clock::time_point cache_checkpoint_{};
 };
 }

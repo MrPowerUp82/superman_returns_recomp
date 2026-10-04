@@ -19,6 +19,7 @@ public:
   ImageState& Images() {return state_;}
   ResourceStore& Resources() {return resources_;}
   const GameRenderStats& Stats() const {return stats_;}
+  bool CheckpointCache(Error& e) {return pipelines_.CheckpointCache(e);}
 private:
   bool Draw(const guest::DrawPacket&,VkCommandBuffer,Error&);
   bool Upload(const guest::BufferUpdate&,bool indices,uint64_t version,Error&);

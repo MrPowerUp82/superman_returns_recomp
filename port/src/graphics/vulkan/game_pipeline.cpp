@@ -7,6 +7,12 @@
 #include <cstring>
 #include <fstream>
 #include <optional>
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 namespace superman_returns::graphics::vulkan {
 namespace {
 bool Fail(Error& e,const char* text) {e={"Game pipeline",VK_ERROR_INITIALIZATION_FAILED,text};return false;}
@@ -139,10 +145,36 @@ bool ValidateGamePipelineFeatures(const GamePipelinePlan& plan,uint32_t colors,c
 GamePipelineStore::~GamePipelineStore() {
   if(!c_.device) return;auto waited=c_.f.vkDeviceWaitIdle(c_.device);pending_.Retire(UINT64_MAX);pipelines_.clear();
   if(driver_cache_) {
-    if(waited==VK_SUCCESS && !cache_path_.empty()) {size_t size=0;if(c_.f.vkGetPipelineCacheData(c_.device,driver_cache_,&size,nullptr)==VK_SUCCESS && size<=64*1024*1024) {std::vector<uint8_t> bytes(size);if(c_.f.vkGetPipelineCacheData(c_.device,driver_cache_,&size,bytes.data())==VK_SUCCESS) {auto h=CacheHeader(c_);std::ofstream file(cache_path_,std::ios::binary|std::ios::trunc);file.write(reinterpret_cast<char*>(h.data()),h.size()*4);file.write(reinterpret_cast<char*>(bytes.data()),size);}}}
+    if(waited==VK_SUCCESS) {Error e;if(!CheckpointCache(e)) c_.Log(e.operation+": "+e.message);}
     c_.f.vkDestroyPipelineCache(c_.device,driver_cache_,nullptr);
   }
   if(layout_) c_.f.vkDestroyPipelineLayout(c_.device,layout_,nullptr);
+}
+bool GamePipelineStore::CheckpointCache(Error& e) {
+  e={};if(cache_path_.empty() || !cache_dirty_) return true;
+  if(!driver_cache_) return Fail(e,"Driver cache is not initialized");
+  size_t size=0;
+  if(!Check(c_.f.vkGetPipelineCacheData(c_.device,driver_cache_,&size,nullptr),"Read driver cache size",e)) return false;
+  if(size<32 || size>64*1024*1024-36) return Fail(e,"Driver cache size is outside the bounded file format");
+  std::vector<uint8_t> bytes(size);
+  if(!Check(c_.f.vkGetPipelineCacheData(c_.device,driver_cache_,&size,bytes.data()),"Read driver cache data",e)) return false;
+  if(size>bytes.size() || size<32) return Fail(e,"Driver returned an invalid cache length");
+  auto temporary=cache_path_;temporary+=".tmp";
+  std::error_code ec;
+  if(!cache_path_.parent_path().empty()) {std::filesystem::create_directories(cache_path_.parent_path(),ec);if(ec) return Fail(e,"Cannot create driver cache directory");}
+  const auto header=CacheHeader(c_);
+  std::ofstream file(temporary,std::ios::binary|std::ios::trunc);
+  file.write(reinterpret_cast<const char*>(header.data()),header.size()*4);
+  file.write(reinterpret_cast<const char*>(bytes.data()),size);file.flush();
+  const bool written=bool(file);file.close();
+  if(!written || file.fail()) {std::filesystem::remove(temporary,ec);return Fail(e,"Cannot write driver cache checkpoint");}
+#if defined(_WIN32)
+  const bool replaced=MoveFileExW(temporary.c_str(),cache_path_.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0;
+#else
+  std::filesystem::rename(temporary,cache_path_,ec);const bool replaced=!ec;
+#endif
+  if(!replaced) {std::filesystem::remove(temporary,ec);return Fail(e,"Cannot replace driver cache checkpoint");}
+  cache_dirty_=false;return true;
 }
 bool GamePipelineStore::Initialize(std::span<const VkDescriptorSetLayout> layouts,const std::filesystem::path& path,Error& e) {
   if(layout_ || layouts.size()!=4) return Fail(e,"Invalid/already initialized pipeline layout");
@@ -177,6 +209,6 @@ std::shared_ptr<GamePipeline> GamePipelineStore::Acquire(const guest::DrawPacket
   VkDynamicState dynamic[]{VK_DYNAMIC_STATE_VIEWPORT,VK_DYNAMIC_STATE_SCISSOR,VK_DYNAMIC_STATE_BLEND_CONSTANTS,VK_DYNAMIC_STATE_STENCIL_REFERENCE};VkPipelineDynamicStateCreateInfo dyn{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};dyn.dynamicStateCount=4;dyn.pDynamicStates=dynamic;
   VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};info.stageCount=stage_count;info.pStages=stages;info.pVertexInputState=&vertex;info.pInputAssemblyState=&assembly;info.pViewportState=&viewport;info.pRasterizationState=&plan.raster;info.pMultisampleState=&samples;info.pDepthStencilState=&plan.depth;info.pColorBlendState=&blend;info.pDynamicState=&dyn;info.layout=layout_;info.renderPass=pass.render_pass;
   auto p=std::make_shared<GamePipeline>();p->context=&c_;p->bindings=plan.bindings;auto status=c_.f.vkCreateGraphicsPipelines(c_.device,driver_cache_,1,&info,nullptr,&p->handle);release();if(!Check(status,"Create game graphics pipeline",e)) return {};
-  pipelines_[plan.key]=p;pending_.Keep(serial,p);e={};return p;
+  pipelines_[plan.key]=p;cache_dirty_=true;pending_.Keep(serial,p);e={};return p;
 }
 }

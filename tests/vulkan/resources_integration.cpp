@@ -14,6 +14,8 @@
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
+#include <fstream>
+#include <chrono>
 using namespace superman_returns::graphics::vulkan;
 namespace guest=superman_returns::graphics::guest;
 namespace shaders=superman_returns::graphics::shaders;
@@ -328,6 +330,27 @@ void CheckStackedResolve(Context& c) {
   for(uint32_t layer=0;layer<4;++layer) for(uint32_t pixel=0;pixel<256;++pixel) {uint8_t expected[]{uint8_t(layer==3?255:0),0,0,uint8_t(layer==3?255:0)};if(std::memcmp(bytes.data()+layer*1024+pixel*4,expected,4)) throw std::runtime_error("Stacked resolve changed an untouched slice");}
   std::cout<<"Stacked resolve preserves four layers with a valid single-layer 2D fetch view\n";
 }
+void CheckPipelineCheckpoint(Context& c) {
+  const auto path=std::filesystem::temp_directory_path()/(
+    "sr-vulkan-cache-"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+  struct Cleanup {std::filesystem::path path;~Cleanup(){std::error_code ec;std::filesystem::remove(path,ec);std::filesystem::remove(path.string()+".tmp",ec);}} cleanup{path};
+  Error e;DescriptorStore descriptors(c);Require(descriptors.Initialize(e),e);
+  GamePipelineStore pipelines(c);Require(pipelines.Initialize(descriptors.Layouts(),path,e),e);
+  shaders::CompiledShader vertex,pixel;pixel.stage=shaders::ShaderStage::kPixel;
+  Require(ReadSpirv(std::filesystem::path(SR_TARGET_SHADER_DIR)/"vs.spv",vertex.words,e),e);
+  Require(ReadSpirv(std::filesystem::path(SR_TARGET_SHADER_DIR)/"ps.spv",pixel.words,e),e);
+  guest::DrawPacket draw;draw.registers[0x104]=15;draw.registers[0x201]=1|(1<<16);
+  UploadFixture fixture(c);ImageState state(c.f);TargetStore targets(c,state);Require(targets.BeginSubmission(fixture.command,1,e),e);
+  draw.colors[0]={4001,false,{16,16,0,0,0,1}};auto plan=PlanAttachments(draw,e);Require(e.message.empty(),e);auto pass=targets.PreparePass(plan,e);Require(bool(pass),e);
+  Require(bool(pipelines.Acquire(draw,*pass,vertex,&pixel,1,e)),e);
+  Require(pipelines.CheckpointCache(e),e);
+  if(!std::filesystem::exists(path) || std::filesystem::file_size(path)<68) throw std::runtime_error("Driver cache not persisted before pipeline store destruction");
+  draw.registers[0x201]=0;Require(bool(pipelines.Acquire(draw,*pass,vertex,&pixel,1,e)),e);Require(pipelines.CheckpointCache(e),e);
+  if(std::filesystem::exists(path.string()+".tmp")) throw std::runtime_error("Driver cache temporary file was not replaced");
+  GamePipelineStore reopened(c);Require(reopened.Initialize(descriptors.Layouts(),path,e),e);Require(bool(reopened.Acquire(draw,*pass,vertex,&pixel,1,e)),e);
+  fixture.Finish();pipelines.Retire(1);reopened.Retire(1);targets.Retire(1);
+  std::cout<<"Driver pipeline cache checkpoints before shutdown, replaces and reloads successfully\n";
+}
 int main(int argc,char** argv) {
   try {
     Win32Window window;Context c;Error e;
@@ -336,6 +359,7 @@ int main(int argc,char** argv) {
     Require(c.CreateInstance(extensions,true,e),e);Require(window.Open(64,64,e,false),e);
     auto surface=window.CreateSurface(c,e);Require(bool(surface),e);Require(c.OpenDevice(surface,"",e),e);
     if(argc==2 && std::string(argv[1])=="--targets") {CheckTargetClears(c);return c.validation_errors.load()?1:0;}
+    if(argc==2 && std::string(argv[1])=="--pipeline-cache") {CheckPipelineCheckpoint(c);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--target-draws") {CheckTargetDraws(c);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--game-record") {CheckTargetDraws(c,true);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--resolve-record") {CheckResolveCopy(c,true);return c.validation_errors.load()?1:0;}
@@ -348,6 +372,7 @@ int main(int argc,char** argv) {
     if(argc==2 && std::string(argv[1])=="--stacked-resolve") {CheckStackedResolve(c);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--composition") {CheckComposition(c);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--resolve-copy") {CheckResolveCopy(c);return c.validation_errors.load()?1:0;}
+    if(argc!=1) throw std::runtime_error("Unknown GPU fixture argument; refusing a different test");
     UploadFixture fixture(c);ResourceStore store(c);Require(store.BeginSubmission(fixture.command,1,e),e);
     std::array<uint32_t,4> vertex{0x12345678,0x0017000B,0x001D0013,0x001F0007};
     Require(store.UploadBuffer(7,std::as_bytes(std::span(vertex)),1,e),e);
