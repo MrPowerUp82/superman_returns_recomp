@@ -17,8 +17,8 @@
      <Button Content="Restaurar qualidade original" Margin="0,10,0,0" Background="Transparent" FontSize="11" Padding="4,10" Click="Defaults_Click"/>
      <TextBlock x:Name="StatusText" Text="Pronto." Foreground="{StaticResource Muted}" Margin="0,18,0,0" TextWrapping="Wrap"/>
     </StackPanel>
-    <StackPanel Grid.Row="2"><TextBlock Text="DIRECT3D 12" FontSize="11" FontWeight="Bold" Foreground="{StaticResource Accent}"/>
-     <TextBlock Text="Vulkan ainda não está disponível." TextWrapping="Wrap" Foreground="{StaticResource Muted}" Margin="0,6,0,0" FontSize="12"/></StackPanel>
+    <StackPanel Grid.Row="2"><TextBlock Text="MOTOR E API" FontSize="11" FontWeight="Bold" Foreground="{StaticResource Accent}"/>
+     <TextBlock Text="Nativo + Direct3D 12 é a combinação validada." TextWrapping="Wrap" Foreground="{StaticResource Muted}" Margin="0,6,0,0" FontSize="12"/></StackPanel>
    </Grid>
   </Border>
   <ScrollViewer Grid.Column="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="0,0,10,0">
@@ -27,7 +27,9 @@
     <TextBlock x:Name="SummaryText" Foreground="{StaticResource Muted}" Margin="0,7,0,20"/>
     <UniformGrid Columns="2">
      <StackPanel Margin="0,0,12,0">
-      <TextBlock Text="Resolução da janela"/><ComboBox x:Name="ResolutionBox" AutomationProperties.Name="Resolução"/>
+      <TextBlock Text="Motor de renderização"/><ComboBox x:Name="RendererBox" AutomationProperties.Name="Motor de renderização"/>
+       <TextBlock Text="API gráfica"/><ComboBox x:Name="ApiBox" AutomationProperties.Name="API gráfica"/>
+       <TextBlock Text="Resolução da janela"/><ComboBox x:Name="ResolutionBox" AutomationProperties.Name="Resolução"/>
       <TextBlock Text="Modo de exibição"/><ComboBox x:Name="DisplayModeBox" AutomationProperties.Name="Modo de exibição"/>
       <TextBlock Text="Placa de vídeo"/><ComboBox x:Name="GpuBox" AutomationProperties.Name="Placa de vídeo"/>
       <TextBlock Text="Como você vai jogar"/><ComboBox x:Name="InputBox" AutomationProperties.Name="Controles"/>
@@ -41,10 +43,11 @@
     </UniformGrid>
     <TextBlock x:Name="FpsNote" Foreground="{StaticResource Muted}" TextWrapping="Wrap" FontSize="12" Margin="0,0,0,10"/>
     <Expander Header="Mais opções gráficas" Foreground="{StaticResource Text}" Margin="0,0,0,16">
-     <StackPanel Margin="0,10,0,0"><UniformGrid Columns="2">
+     <StackPanel Margin="0,10,0,0"><TextBlock x:Name="EngineNote" Foreground="{StaticResource Muted}" TextWrapping="Wrap" FontSize="12" Margin="0,0,0,10"/><UniformGrid Columns="2">
       <StackPanel Margin="0,0,12,0"><TextBlock Text="Resolução das sombras"/><ComboBox x:Name="ShadowBox"/></StackPanel>
       <StackPanel Margin="12,0,0,0"><TextBlock Text="MSAA das sombras"/><ComboBox x:Name="MsaaBox"/></StackPanel>
      </UniformGrid><CheckBox x:Name="VSyncBox" Content="Sincronização vertical (VSync)"/>
+       <CheckBox x:Name="SkipIntroBox" Content="Pular logos e vídeos legais da abertura"/>
       <TextBlock Text="Sombras maiores e MSAA podem aumentar bastante o custo de renderização." Foreground="{StaticResource Muted}" TextWrapping="Wrap" FontSize="12"/>
      </StackPanel>
     </Expander>

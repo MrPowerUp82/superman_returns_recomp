@@ -35,5 +35,15 @@ var ini = Path.Combine(fixture, "launcher.ini");
 settings.Save(ini);
 var loaded = LauncherSettings.Load(ini);
 Check(loaded.GameData == settings.GameData && loaded.Gpu == settings.Gpu && loaded.GpuLuid == settings.GpuLuid && loaded.InputMode == "Controller", "preferences round trip preserves paths and GPU identity");
+var weak = new LauncherSettings { Renderer = "xenos", SkipIntro = true, RenderScale = "75" };
+var weakArgs = weak.BuildArgumentList();
+Check(weakArgs.Contains("--sr_renderer=xenos") && weakArgs.Contains("--sr_skip_intro=true"), "engine and intro skip are forwarded");
+Check(weakArgs.Contains("--sr_render_scale=75") && weakArgs.Contains("--sr_native_render_scale=1"), "reduced scale uses guest render scale");
+Check(settings.BuildArgumentList().Contains("--sr_render_scale=100") && settings.BuildArgumentList().Contains("--sr_skip_intro=false"), "defaults keep full quality");
+var vk = new LauncherSettings { GraphicsApi = "vulkan", GameExe = settings.GameExe, GameData = settings.GameData };
+bool vkRejected = false;
+try { vk.CreateLaunch(fixture); } catch (InvalidOperationException) { vkRejected = true; }
+Check(vkRejected, "Vulkan is refused until it renders the game");
+Check(LauncherSettings.Load(ini).Renderer == "native", "renderer default survives round trip");
 Console.WriteLine($"{failed} failed checks");
 return failed == 0 ? 0 : 1;

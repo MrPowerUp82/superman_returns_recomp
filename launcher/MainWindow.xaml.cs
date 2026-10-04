@@ -26,9 +26,11 @@ public partial class MainWindow : Window
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { loadWarning = "Não foi possível ler as preferências salvas. Usando os padrões."; }
         PopulateChoices();
         ApplySettingsToUi();
-        foreach (var box in new[] { ResolutionBox, DisplayModeBox, InputBox, GpuBox, RenderScaleBox, AaBox, FilterBox, FpsBox, ShadowBox, MsaaBox })
+        foreach (var box in new[] { RendererBox, ApiBox, ResolutionBox, DisplayModeBox, InputBox, GpuBox, RenderScaleBox, AaBox, FilterBox, FpsBox, ShadowBox, MsaaBox })
             box.SelectionChanged += (_, _) => UpdateSummary();
         VSyncBox.Checked += (_, _) => UpdateSummary();
+        SkipIntroBox.Checked += (_, _) => UpdateSummary();
+        SkipIntroBox.Unchecked += (_, _) => UpdateSummary();
         VSyncBox.Unchecked += (_, _) => UpdateSummary();
         GameExeBox.TextChanged += (_, _) => UpdateSummary();
         GameDataBox.TextChanged += (_, _) => UpdateSummary();
@@ -40,10 +42,12 @@ public partial class MainWindow : Window
     private static void SetChoices(ComboBox box, params Choice[] choices) => box.ItemsSource = choices;
     private void PopulateChoices()
     {
-        SetChoices(ResolutionBox, new("1280x720", "1280 × 720"), new("1600x900", "1600 × 900"), new("1920x1080", "1920 × 1080"), new("2560x1440", "2560 × 1440"), new("3840x2160", "3840 × 2160"));
+        SetChoices(RendererBox, new("native", "Nativo (recomendado)"), new("xenos", "Xenos (compatibilidade)"));
+        SetChoices(ApiBox, new("d3d12", "Direct3D 12"), new("vulkan", "Vulkan (em desenvolvimento)"));
+        SetChoices(ResolutionBox, new("960x540", "960 × 540 (PC fraco)"), new("1280x720", "1280 × 720"), new("1600x900", "1600 × 900"), new("1920x1080", "1920 × 1080"), new("2560x1440", "2560 × 1440"), new("3840x2160", "3840 × 2160"));
         SetChoices(DisplayModeBox, new("Fullscreen", "Tela cheia sem bordas"), new("Windowed", "Janela"));
         SetChoices(InputBox, new("KeyboardMouse", "Teclado e mouse"), new("Controller", "Controle Xbox / XInput"));
-        SetChoices(RenderScaleBox, new("100", "100% — 720p original"), new("125", "125% — 900p"), new("150", "150% — 1080p"), new("200", "200% — 1440p"), new("300", "300% — 2160p"), new("400", "400% — 2880p"));
+        SetChoices(RenderScaleBox, new("50", "50% — 360p (PC fraco, experimental)"), new("75", "75% — 540p (PC fraco, experimental)"), new("100", "100% — 720p original"), new("125", "125% — 900p"), new("150", "150% — 1080p"), new("200", "200% — 1440p"), new("300", "300% — 2160p"), new("400", "400% — 2880p"));
         SetChoices(AaBox, new("Off", "Desativado"), new("FXAA", "FXAA"));
         SetChoices(FilterBox, new("Original", "Original do jogo"), new("Anisotropic2x", "Anisotrópico 2×"), new("Anisotropic4x", "Anisotrópico 4×"), new("Anisotropic8x", "Anisotrópico 8×"), new("Anisotropic16x", "Anisotrópico 16×"));
         SetChoices(FpsBox, new("30", "30 FPS — original"), new("60", "60 FPS — experimental"), new("120", "120 FPS — experimental"), new("0", "Sem limite — experimental"));
@@ -54,6 +58,7 @@ public partial class MainWindow : Window
     private static void Select(ComboBox box, string value) => box.SelectedItem = box.Items.Cast<Choice>().FirstOrDefault(x => x.Value == value) ?? box.Items[0];
     private void ApplySettingsToUi()
     {
+        Select(RendererBox, _settings.Renderer); Select(ApiBox, _settings.GraphicsApi); SkipIntroBox.IsChecked = _settings.SkipIntro;
         Select(ResolutionBox, _settings.Resolution); Select(DisplayModeBox, _settings.DisplayMode);
         Select(InputBox, _settings.InputMode); Select(RenderScaleBox, _settings.RenderScale);
         Select(AaBox, _settings.Antialiasing); Select(FilterBox, _settings.TextureFilter);
@@ -67,6 +72,7 @@ public partial class MainWindow : Window
     private static string Value(ComboBox box) => ((Choice)box.SelectedItem).Value;
     private void ReadSettings()
     {
+        _settings.Renderer = Value(RendererBox); _settings.GraphicsApi = Value(ApiBox); _settings.SkipIntro = SkipIntroBox.IsChecked == true;
         _settings.Resolution = Value(ResolutionBox); _settings.DisplayMode = Value(DisplayModeBox);
         _settings.InputMode = Value(InputBox); _settings.RenderScale = Value(RenderScaleBox);
         _settings.Antialiasing = Value(AaBox); _settings.TextureFilter = Value(FilterBox);
@@ -79,8 +85,9 @@ public partial class MainWindow : Window
     {
         if (!_ready) return;
         ReadSettings();
-        SummaryText.Text = $"Direct3D 12 · {_settings.Resolution.Replace("x", " × ")} · {_settings.RenderScale}% interno";
+        SummaryText.Text = $"{(_settings.GraphicsApi == "vulkan" ? "Vulkan" : "Direct3D 12")} · {(_settings.Renderer == "xenos" ? "Xenos" : "Nativo")} · {_settings.Resolution.Replace("x", " × ")} · {_settings.RenderScale}% interno";
         FpsNote.Text = _settings.FpsLimit == "30" ? "30 FPS preserva o ritmo original do jogo." : "FPS acima de 30 é experimental e pode alterar o ritmo do jogo.";
+        EngineNote.Text = _settings.GraphicsApi == "vulkan" ? "Vulkan ainda não renderiza o jogo; o botão Jogar exigirá Direct3D 12." : _settings.Renderer == "xenos" ? "Xenos é o motor alternativo, mais lento e menos corrigido; use apenas se o nativo falhar." : _settings.RenderScale is "50" or "75" ? "Escalas abaixo de 100% são experimentais e podem causar áreas pretas." : "Nativo: renderizador atual, com as correções de cutscenes, HUD e War World.";
         ArgumentsPreview.Text = _settings.BuildArguments();
     }
     private void Save_Click(object sender, RoutedEventArgs e)

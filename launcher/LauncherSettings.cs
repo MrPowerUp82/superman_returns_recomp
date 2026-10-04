@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.IO;
 using System.Globalization;
 using System.Text;
@@ -22,6 +22,9 @@ public sealed class LauncherSettings
     public string ShadowQuality { get; set; } = "1";
     public string Msaa { get; set; } = "1";
     public string InputMode { get; set; } = "KeyboardMouse";
+    public string Renderer { get; set; } = "native";
+    public string GraphicsApi { get; set; } = "d3d12";
+    public bool SkipIntro { get; set; }
 
     public static LauncherSettings Load(string path)
     {
@@ -50,6 +53,9 @@ public sealed class LauncherSettings
                 case "shadow_quality": s.ShadowQuality = value; break;
                 case "msaa": s.Msaa = value; break;
                 case "input": s.InputMode = value; break;
+                case "renderer": s.Renderer = value; break;
+                case "graphics_api": s.GraphicsApi = value; break;
+                case "skip_intro": if (bool.TryParse(value, out var si)) s.SkipIntro = si; break;
             }
         }
         return s;
@@ -62,7 +68,8 @@ public sealed class LauncherSettings
             $"resolution={Resolution}", $"display_mode={DisplayMode}", $"gpu={Gpu}", $"gpu_luid={GpuLuid}",
             $"vsync={VSync.ToString().ToLowerInvariant()}", $"fps_limit={FpsLimit}", $"render_scale={RenderScale}",
             $"texture_filter={TextureFilter}", $"antialiasing={Antialiasing}", $"shadow_quality={ShadowQuality}",
-            $"msaa={Msaa}", $"input={InputMode}" };
+            $"msaa={Msaa}", $"input={InputMode}", $"renderer={Renderer}", $"graphics_api={GraphicsApi}",
+            $"skip_intro={SkipIntro.ToString().ToLowerInvariant()}" };
         var temporary = path + ".tmp";
         File.WriteAllLines(temporary, lines, new UTF8Encoding(false));
         File.Move(temporary, path, true);
@@ -79,9 +86,13 @@ public sealed class LauncherSettings
             && w >= 640 && w <= 8192 && h >= 480 && h <= 8192) { width = w; height = h; }
         int filter = TextureFilter switch { "Anisotropic2x" => 2, "Anisotropic4x" => 4,
             "Anisotropic8x" => 8, "Anisotropic16x" => 16, _ => -1 };
-        var scale = ValidChoice(RenderScale, 100, 100, 125, 150, 200, 300, 400) / 100.0;
+        var percent = ValidChoice(RenderScale, 100, 50, 75, 100, 125, 150, 200, 300, 400);
+        var lowScale = percent < 100;
+        var scale = (lowScale ? 100 : percent) / 100.0;
         var result = new List<string> {
-            "--sr_renderer=native", "--sr_preset=custom",
+            $"--sr_renderer={(Renderer == "xenos" ? "xenos" : "native")}", "--sr_preset=custom",
+            $"--sr_skip_intro={SkipIntro.ToString().ToLowerInvariant()}",
+            $"--sr_render_scale={(lowScale ? percent : 100)}",
             $"--window_width={width}", $"--window_height={height}",
             $"--fullscreen={(DisplayMode != "Windowed").ToString().ToLowerInvariant()}",
             $"--vsync={VSync.ToString().ToLowerInvariant()}",
@@ -103,6 +114,8 @@ public sealed class LauncherSettings
 
     public ProcessStartInfo CreateLaunch(string baseDirectory)
     {
+        if (GraphicsApi != "d3d12")
+            throw new InvalidOperationException("Vulkan ainda não renderiza o jogo. Selecione Direct3D 12.");
         var exe = Path.GetFullPath(GameExe, baseDirectory);
         if (!File.Exists(exe) || !Path.GetFileName(exe).Equals("superman_returns.exe", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Selecione o executável superman_returns.exe da build do jogo.");
