@@ -1,0 +1,40 @@
+--- a/XenosRecomp/shader_recompiler.cpp
++++ b/XenosRecomp/shader_recompiler.cpp
+@@ -1,5 +1,6 @@
+ #include "shader_recompiler.h"
+ #include "shader_common.h"
++#include <set>
+ 
+ static constexpr char SWIZZLES[] = 
+ { 
+@@ -1692,6 +1693,7 @@
+     else
+     {
+         auto vertexShader = reinterpret_cast<const VertexShader*>(shader);
++        std::set<std::pair<DeclUsage, uint32_t>> declaredInputs;
+         for (uint32_t i = 0; i < vertexShader->vertexElementCount; i++)
+         {
+             union
+@@ -1714,6 +1716,13 @@
+                 continue;
+             }
+ #endif
++            vertexElements.emplace(uint32_t(vertexElement.address), vertexElement);
++
++            const DeclUsage usage = vertexElement.usage;
++            const uint32_t usageIndex = uint32_t(vertexElement.usageIndex);
++            if (!declaredInputs.insert({usage, usageIndex}).second)
++                continue;
++
+             const char* usageType = USAGE_TYPES[uint32_t(vertexElement.usage)];
+ 
+         #ifdef UNLEASHED_RECOMP
+@@ -1788,8 +1797,6 @@
+ 
+             println("in {0} i{1}{2} : {3}{2},", usageType, USAGE_VARIABLES[uint32_t(vertexElement.usage)],
+                 uint32_t(vertexElement.usageIndex), USAGE_SEMANTICS[uint32_t(vertexElement.usage)]);
+-
+-            vertexElements.emplace(uint32_t(vertexElement.address), vertexElement);
+         }
+ 
+     #ifdef CONAN_RECOMP
