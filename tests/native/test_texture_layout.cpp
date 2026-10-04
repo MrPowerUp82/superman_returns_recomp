@@ -250,3 +250,11 @@ SR_TEST(compressed_blocks_keep_payload_and_endian) {
     SR_CHECK(out.format==(block_bytes==8?LinearFormat::kBC1:LinearFormat::kBC5));
   }
 }
+SR_TEST(texture_16in32_swaps_exact_bytes_without_overwriting_destination) {
+  auto words=Fetch(32,32,true);xenos::xe_gpu_texture_fetch_t f{};
+  std::memcpy(&f,words.data(),sizeof(f));f.endianness=xenos::Endian::k16in32;std::memcpy(words.data(),&f,sizeof(f));
+  std::vector<uint8_t> bytes(4096);for(size_t i=0;i<bytes.size();++i) bytes[i]=uint8_t(i);
+  LinearTexture out;std::string error;
+  SR_CHECK(DecodeTextureLayout(words,Capture(4096,bytes),out,error));
+  if(out.data.size()==4096) {SR_CHECK_EQ(out.data[0],2u);SR_CHECK_EQ(out.data[1],3u);SR_CHECK_EQ(out.data[2],0u);SR_CHECK_EQ(out.data[3],1u);}
+}

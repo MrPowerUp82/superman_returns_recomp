@@ -17,6 +17,7 @@
 #include <rex/graphics/pipeline/texture/info.h>
 #include <rex/graphics/pipeline/texture/util.h>
 #include <rex/graphics/xenos.h>
+#include <rex/memory/utils.h>
 
 namespace superman_returns::graphics::guest {
 using native::EncodeSwizzleMapping;
@@ -183,7 +184,11 @@ bool DecodeTextureLayoutUsing(std::span<const uint32_t, 6> fetch_dwords,
 
     auto copy_swap = [endian = info.endianness](void *o, const void *i,
                                                 size_t len) {
-      rex::graphics::texture_conversion::CopySwapBlock(endian, o, i, len);
+      if(endian==xenos::Endian::k16in32) {
+        // SDK CopySwapBlock passes a byte length to this word-count API.
+        if(len%4) throw std::invalid_argument("16-in-32 block must contain whole words");
+        rex::memory::copy_and_swap_16_in_32_unaligned(o,i,len/4);
+      } else rex::graphics::texture_conversion::CopySwapBlock(endian, o, i, len);
     };
 
     for (uint32_t mip = 0; mip < levels; ++mip) {
