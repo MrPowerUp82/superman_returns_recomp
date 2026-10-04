@@ -11,6 +11,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(generated/rexglue.cmake)
 
 option(SR_VULKAN_FOUNDATION "Build standalone Vulkan foundation smoke test" OFF)
+option(SR_VULKAN_GAME_TEST "Development build: route native game packets to the Vulkan presenter" OFF)
+if(SR_VULKAN_GAME_TEST AND NOT SR_VULKAN_FOUNDATION)
+    message(FATAL_ERROR "SR_VULKAN_GAME_TEST requires SR_VULKAN_FOUNDATION")
+endif()
 option(SR_GUEST_TEXTURE_TESTS "Build texture layout tests using SDK Xenos helpers" OFF)
 if(SR_GUEST_TEXTURE_TESTS)
     add_executable(sr_guest_texture_tests ../tests/native/main.cpp ../tests/native/test_texture_layout.cpp
@@ -168,6 +172,7 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
             ${SR_NATIVE_ROOT}/../graphics/guest/render_state.cpp
             ${SR_NATIVE_ROOT}/../graphics/guest/edram_alias.cpp
             ${SR_NATIVE_ROOT}/../graphics/guest/vertex_layout.cpp
+            ${SR_NATIVE_ROOT}/../graphics/guest/primitive_expansion.cpp
             ${SR_NATIVE_ROOT}/../graphics/guest/render_packet.cpp
             ${SR_NATIVE_ROOT}/../graphics/guest/constant_snapshot.cpp
             ${SR_NATIVE_ROOT}/texture_decode.cpp
@@ -182,6 +187,7 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
         endif()
         target_compile_definitions(sr_native PUBLIC ${SR_NATIVE_DEFINITIONS})
         target_compile_definitions(sr_native PRIVATE SR_HAS_LSFG=$<BOOL:${SR_LSFG}>)
+        target_compile_definitions(sr_native PRIVATE SR_VULKAN_GAME_TEST=$<BOOL:${SR_VULKAN_GAME_TEST}>)
         target_include_directories(sr_native PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src/lsfg
             ${SR_NATIVE_ROOT}
@@ -192,6 +198,13 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
             target_compile_options(sr_native PRIVATE -Wno-unused-variable -mssse3 -msse4.1)
         endif()
         target_link_libraries(sr_native PRIVATE rex::runtime rex::xxhash)
+        if(SR_VULKAN_FOUNDATION AND SR_NATIVE STREQUAL "RENDERER")
+            target_sources(sr_native PRIVATE src/graphics/vulkan/platform/native_provider.cpp src/graphics/vulkan/platform/shader_process.cpp)
+            target_link_libraries(sr_native PRIVATE sr_vulkan_core)
+            target_compile_definitions(sr_native PRIVATE VK_USE_PLATFORM_WIN32_KHR NOMINMAX)
+            target_compile_definitions(sr_native PRIVATE SR_VULKAN_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")
+            target_link_libraries(superman_returns PRIVATE sr_vulkan_core)
+        endif()
         target_link_libraries(superman_returns PRIVATE sr_native d3d12 dxgi dbghelp)
         target_compile_definitions(superman_returns PRIVATE ${SR_NATIVE_DEFINITIONS})
 

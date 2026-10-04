@@ -180,7 +180,8 @@ SR_TEST(strip_and_ushort2_metadata_survive_packet) {
   const auto &draw = std::get<DrawPacket>(packet);
   SR_CHECK(draw.indices.normalized ==
            std::vector<uint32_t>({1, UINT32_MAX, 2}));
-  SR_CHECK(draw.primitive == Primitive::kTriangleStrip);
+    SR_CHECK(draw.primitive == Primitive::kTriangleStrip);
+    SR_CHECK(draw.primitive_restart);
   SR_CHECK_EQ(draw.vertex_fetch[0].type, 0x2c2259);
   SR_CHECK_EQ(draw.vertex_fetch[0].stride, 4);
   VertexFetchMeta metadata;
@@ -271,4 +272,23 @@ SR_TEST(resolve_packet_keeps_mip_slice_and_owned_regions) {
   const auto& resolve=std::get<ResolvePacket>(out);
   SR_CHECK_EQ(resolve.level,2u);SR_CHECK_EQ(resolve.slice,5u);
   SR_CHECK_EQ(resolve.source.left,1);SR_CHECK_EQ(resolve.source.bottom,10);
+}
+SR_TEST(captured_replay_rejects_unreadable_indirect_and_failed_capture) {
+  WorkBatch batch;batch.bytes={0xc0,0x01,0x3f,0,0,0,2,0,0,0,0,4};WorkCmd cmd;cmd.op=Op::kRing;cmd.ring_bytes=12;
+  superman_returns::native::Pm4Mirror mirror;RenderPacket packet;std::string error;
+  SR_CHECK(!ReplayCapturedRenderPacket(batch,cmd,mirror,packet,error));SR_CHECK(!error.empty());
+  cmd.pm4_capture_ok=false;SR_CHECK(!ReplayCapturedRenderPacket(batch,cmd,mirror,packet,error));SR_CHECK(error.find("capture")!=std::string::npos);
+}
+SR_TEST(captured_replay_checks_primary_bounds_and_decodes_without_live_memory) {
+  WorkBatch batch;WorkCmd cmd;cmd.op=Op::kRing;cmd.pass=7;superman_returns::native::Pm4Mirror mirror;RenderPacket packet;std::string error;
+  SR_CHECK(ReplayCapturedRenderPacket(batch,cmd,mirror,packet,error));SR_CHECK_EQ(std::get<PassPacket>(packet).pass,7);
+  cmd.ring_offset=UINT32_MAX;cmd.ring_bytes=8;SR_CHECK(!ReplayCapturedRenderPacket(batch,cmd,mirror,packet,error));
+}
+SR_TEST(shader_roles_follow_owned_container_stage_when_device_slots_are_reversed) {
+  WorkBatch batch;WorkCmd cmd;cmd.op=Op::kDraw;cmd.u[0]=4;
+  auto vs=std::make_shared<ShaderCapture>(),ps=std::make_shared<ShaderCapture>();vs->vertex=true;vs->hash=17;ps->hash=29;
+  cmd.vertex_shader=ps;cmd.pixel_shader=vs;
+  superman_returns::native::Pm4Mirror mirror;RenderPacket packet;std::string error;
+  SR_CHECK(DecodeRenderPacket(batch,cmd,mirror,packet,error));const auto& draw=std::get<DrawPacket>(packet);
+  SR_CHECK(draw.vertex_shader==vs);SR_CHECK(draw.pixel_shader==ps);
 }

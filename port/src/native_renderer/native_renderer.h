@@ -41,6 +41,7 @@
 #include "game_profile.h"
 #include "../graphics/guest/captured_batch.h"
 #include "../graphics/guest/texture_capture.h"
+#include "../graphics/guest/render_packet.h"
 #include "pipeline_cache.h"
 #include "pm4_mirror.h"
 
@@ -104,6 +105,12 @@ using graphics::guest::CaptureRange;
 class Renderer {
  public:
   static Renderer& Get();
+  using PacketSink=std::function<bool(graphics::guest::RenderPacket&&,std::string&)>;
+  // Installed once before guest execution. The sink owns the native API path;
+  // every dependency is captured and no D3D executor is called for this mode.
+  bool InstallPacketSink(PacketSink,std::function<void()> cancel);
+  void ShutdownWorker();
+  ~Renderer();
 
   // --- Guest D3D entry points -------------------------------------------
   void OnSwap(uint8_t* base, uint32_t front_buffer_texture, uint64_t swap_number = 0);
@@ -201,6 +208,9 @@ class Renderer {
   void WaitWorkerIdle(uint64_t batches);
   bool worker_mode_ = false;
   bool worker_mode_checked_ = false;
+  PacketSink packet_sink_;std::function<void()> cancel_packet_sink_;
+  bool packet_sink_failed_=false;
+  std::atomic<bool> worker_stop_{false};
   std::mutex front_mutex_;
   std::unique_ptr<WorkBatch> batch_;
   WorkCmd cur_;

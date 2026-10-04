@@ -3,10 +3,25 @@
 #include "../../native_renderer/pm4_mirror.h"
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <cstring>
 #include <exception>
 #include <stdexcept>
 namespace superman_returns::graphics::guest {
+bool ReplayCapturedRenderPacket(const WorkBatch& batch,const WorkCmd& cmd,native::Pm4Mirror& mirror,RenderPacket& packet,std::string& error) {
+  error.clear();
+  if(!cmd.pm4_capture_ok) {error="PM4 dependency capture failed";return false;}
+  if(uint64_t(cmd.ring_offset)+cmd.ring_bytes>batch.bytes.size()) {error="Captured primary PM4 range exceeds batch";return false;}
+  CapturedMemory memory;if(!CapturedMemory::Capture(batch,cmd,memory,error)) return false;
+  if(cmd.ring_bytes) {
+    auto alu=mirror.unreadable_alu_loads,indirect=mirror.unreadable_indirect_buffers;std::string missing;
+    mirror.ScanCopyUsing(batch.bytes.data()+cmd.ring_offset,cmd.ring_bytes,[&](uint32_t address,uint32_t length)->std::span<const uint8_t> {
+      try {return memory.Read(address,length);} catch(const std::out_of_range& ex) {missing=ex.what();return {};}
+    });
+    if(!missing.empty() || mirror.unreadable_alu_loads!=alu || mirror.unreadable_indirect_buffers!=indirect) {error=missing.empty()?"Captured PM4 dependency could not be read":missing;return false;}
+  }
+  return DecodeRenderPacket(batch,cmd,mirror,packet,error);
+}
 namespace {
 uint32_t Address(uint32_t base, uint64_t offset) {
   if (uint64_t(base) + offset > UINT32_MAX)
@@ -103,6 +118,17 @@ void DeviceState(DrawPacket &d, uint32_t device,
 }
 } // namespace
 void FinalizeDrawConstants(DrawPacket &d) {
+  uint32_t mode=d.registers[0x205];float scale=0,offset=0;
+  bool polygonal=d.primitive==Primitive::kTriangles || d.primitive==Primitive::kTriangleStrip || d.primitive==Primitive::kQuads || d.primitive==Primitive::kRectangles;
+  auto read_offset=[&](uint32_t first) {scale=std::bit_cast<float>(d.mirrored_registers[first]);offset=std::bit_cast<float>(d.mirrored_registers[first+1]);};
+  if(polygonal) {
+    if((mode&(1<<11)) && !(mode&1)) read_offset(0x380);
+    if((mode&(1<<12)) && !(mode&2) && !scale && !offset) read_offset(0x382);
+  } else if(mode&(1<<13)) read_offset(0x380);
+  if(!std::isfinite(scale)) scale=0;if(!std::isfinite(offset)) offset=0;
+  // Same D24 conversion used by the reference GetD3D10IntegerPolygonOffset.
+  auto magnitude=std::min(double(std::ceil(std::abs(offset)*16777215.0f)),double(INT32_MAX));
+  d.depth_bias=offset<0?-int32_t(magnitude):int32_t(magnitude);d.slope_bias=scale/16;
   auto put = [&](uint32_t word, uint32_t v) {
     std::memcpy(d.constants.shared.data() + word * 4, &v, 4);
   };
@@ -177,8 +203,9 @@ bool DecodeRenderPacket(const WorkBatch &batch, const WorkCmd &cmd,
       DrawPacket d;
       d.memory = memory;
       d.pass = cmd.pass;
-      d.vertex_shader = cmd.vertex_shader;
-      d.pixel_shader = cmd.pixel_shader;
+      // The XDK device slots can be reversed during internal passes. Match
+      // the reference renderer: the owned container determines the stage.
+      for(auto& shader:{cmd.vertex_shader,cmd.pixel_shader}) if(shader) (shader->vertex?d.vertex_shader:d.pixel_shader)=shader;
       d.textures = cmd.textures;
       d.texture_errors = cmd.texture_errors;
       d.command_serial = cmd.command_serial;
@@ -304,6 +331,7 @@ bool DecodeRenderPacket(const WorkBatch &batch, const WorkCmd &cmd,
         SwapVertexElements(d.inline_data,d.inline_stride,0,UINT32_MAX,d.attributes);
       }
       if (d.indexed) {
+        d.primitive_restart=cmd.index.reset_index!=UINT32_MAX;
         if (!cmd.has_index)
           throw std::out_of_range("Guest index capture failed");
         d.indices = Buffer(memory, cmd.index);
@@ -330,10 +358,9 @@ bool DecodeRenderPacket(const WorkBatch &batch, const WorkCmd &cmd,
         if (d.primitive == Primitive::kQuads && cmd.u[5]) {
           if (uint64_t(cmd.u[4]) + uint64_t(cmd.u[5]) * 4 > batch.bytes.size())
             throw std::out_of_range("Captured expanded quads exceed batch");
-          d.indices.normalized.resize(cmd.u[5]);
-          std::memcpy(d.indices.normalized.data(),
+          d.expanded_indices.resize(cmd.u[5]);
+          std::memcpy(d.expanded_indices.data(),
                       batch.bytes.data() + cmd.u[4], size_t(cmd.u[5]) * 4);
-          d.indices.plan.begin = 0;
           d.first = 0;
           d.count = cmd.u[5];
           d.primitive = Primitive::kTriangles;
@@ -360,7 +387,9 @@ bool DecodeRenderPacket(const WorkBatch &batch, const WorkCmd &cmd,
       ResolvePacket r{};
       r.command_serial = cmd.command_serial;
       r.flags = cmd.u[0];
+      r.has_source_rect=cmd.u[1]!=0;r.has_destination_point=cmd.u[3]!=0;r.tiling_active=cmd.tiling_active;
       r.destination = cmd.u[2];
+      r.has_copy_draw=cmd.resolve_copy_draw;r.copy_dest_swap=bool((cmd.resolve_copy_dest_info>>24)&1);
       r.memory = memory;
       if (cmd.u[1])
         r.source = Rects(memory, cmd.u[1], 1).front();
@@ -377,6 +406,8 @@ bool DecodeRenderPacket(const WorkBatch &batch, const WorkCmd &cmd,
         if(source>4) {error="Unsupported resolve source slot";return false;}
         uint32_t offset=source==4?layout.depth_stencil:layout.render_targets+source*4;
         r.source_surface=Surface(memory,U32(memory,Address(cmd.device,offset)),source==4);
+        if(r.flags&0x100) r.clear_color_surface=Surface(memory,U32(memory,Address(cmd.device,layout.render_targets)),false);
+        if(r.flags&0x200) r.clear_depth_surface=Surface(memory,U32(memory,Address(cmd.device,layout.depth_stencil)),true);
       }
       if(r.destination)
         for(uint32_t i=0;i<6;++i) r.destination_fetch[i]=U32(memory,Address(r.destination,0x1c+i*4));
@@ -384,16 +415,23 @@ bool DecodeRenderPacket(const WorkBatch &batch, const WorkCmd &cmd,
       return true;
     }
     case Op::kSwap:
-      out = SwapPacket{cmd.u[0], cmd.u64, memory};
+      out = SwapPacket{cmd.u[0], cmd.u64, memory,cmd.gamma,cmd.gamma_enabled};
       return true;
-    case Op::kBeginTiling:
-      out = PassPacket{cmd.op,
+    case Op::kBeginTiling: {
+      PassPacket packet{cmd.op,
                        cmd.pass,
                        Rects(memory, cmd.u[1], cmd.u[0]),
                        Color(memory, cmd.u[2]),
                        cmd.f,
                        cmd.u[3]};
+      packet.clear_color=cmd.u[2]!=0;
+      if(cmd.device) {
+        packet.color_surface=Surface(memory,U32(memory,Address(cmd.device,native::profile::kDevice.render_targets)),false);
+        packet.depth_surface=Surface(memory,U32(memory,Address(cmd.device,native::profile::kDevice.depth_stencil)),true);
+      }
+      out=std::move(packet);
       return true;
+    }
     case Op::kEndTiling:
     case Op::kPassEnd:
     case Op::kRing:

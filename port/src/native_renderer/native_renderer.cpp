@@ -8,6 +8,7 @@
 #include "../graphics/guest/render_state.h"
 #include "../graphics/guest/edram_alias.h"
 #include "../graphics/guest/render_packet.h"
+#include "../graphics/guest/primitive_expansion.h"
 #include "../graphics/guest/pm4_capture.h"
 
 #include <dxgi1_4.h>
@@ -684,6 +685,25 @@ bool LogUnsupportedOnce(const char* category, uint64_t key, const char* detail) 
 Renderer& Renderer::Get() {
   static Renderer renderer;
   return renderer;
+}
+Renderer::~Renderer() {ShutdownWorker();}
+bool Renderer::InstallPacketSink(PacketSink sink,std::function<void()> cancel) {
+  std::lock_guard<std::mutex> lock(front_mutex_);
+  if(!sink || worker_stop_ || worker_mode_checked_ || packet_sink_) return false;
+  packet_sink_=std::move(sink);cancel_packet_sink_=std::move(cancel);return true;
+}
+void Renderer::ShutdownWorker() {
+  if(worker_stop_.exchange(true)) return;
+  if(cancel_packet_sink_) cancel_packet_sink_();
+  queue_cv_.notify_all();done_cv_.notify_all();
+  {
+    std::lock_guard<std::mutex> lock(front_mutex_);
+    // OnSwap can now leave its wait and release this lock. Unsubmitted CPU
+    // commands are discarded on shutdown; queued GPU work retires before UI.
+    if(batch_) batch_->Clear();
+  }
+  if(worker_.joinable()) worker_.join();
+  packet_sink_={};cancel_packet_sink_={};
 }
 
 bool PackShaderLookup(uint64_t hash, bool vertex, const void** data, size_t* size);
@@ -4777,67 +4797,9 @@ void Renderer::ExecDrawIndexedVertices(uint8_t* base, const WorkBatch& batch,
 // already byte-swapped vertices into a triangle list (6 vertices per rectangle).
 static std::vector<uint8_t> ExpandRectList(uint8_t* base, uint32_t decl, const uint8_t* vertices,
                                            uint32_t vertex_count, uint32_t stride) {
-  uint32_t rects = vertex_count / 3;
-  std::vector<uint8_t> out(size_t(rects) * 6 * stride);
-  uint32_t decl_count = Load32(base, decl + 0x18);
-  struct Element {
-    uint32_t offset, size;
-  };
-  std::vector<Element> floats;
-  int32_t position = -1;  // offset of the position element (x, y floats)
-  for (uint32_t i = 0; i < decl_count; ++i) {
-    uint32_t e = decl + 0x34 + 12 * i;
-    if (Load16(base, e) == 0xFF) break;
-    uint32_t offset = Load16(base, e + 2);
-    DeclFormat fmt = MapDeclType(Load32(base, e + 4));
-    bool is_float = fmt.format == DXGI_FORMAT_R32_FLOAT || fmt.format == DXGI_FORMAT_R32G32_FLOAT ||
-                    fmt.format == DXGI_FORMAT_R32G32B32_FLOAT ||
-                    fmt.format == DXGI_FORMAT_R32G32B32A32_FLOAT;
-    if (!is_float || offset + fmt.size > stride) continue;
-    floats.push_back({offset, fmt.size});
-    // Usage 0 = POSITION; otherwise the first float element with x and y.
-    if (fmt.size >= 8 && (position < 0 || Load8(base, e + 9) == 0)) {
-      if (position < 0 || Load8(base, e + 9) == 0) position = int32_t(offset);
-    }
-  }
-  for (uint32_t r = 0; r < rects; ++r) {
-    const uint8_t* v[3];
-    for (int k = 0; k < 3; ++k) v[k] = vertices + (size_t(r) * 3 + k) * stride;
-    // Longest edge = diagonal; `corner` is the vertex opposite to it.
-    int corner = 0;
-    if (position >= 0) {
-      float p[3][2];
-      for (int k = 0; k < 3; ++k) std::memcpy(p[k], v[k] + position, 8);
-      auto len2 = [&](int i, int j) {
-        float dx = p[i][0] - p[j][0], dy = p[i][1] - p[j][1];
-        return dx * dx + dy * dy;
-      };
-      float e12 = len2(1, 2), e20 = len2(2, 0), e01 = len2(0, 1);
-      if (e12 > e20 && e12 > e01) {
-        corner = 0;
-      } else {
-        corner = e20 > e01 ? 1 : 2;
-      }
-    }
-    const uint8_t* c = v[corner];
-    const uint8_t* d1 = v[(corner + 1) % 3];
-    const uint8_t* d2 = v[(corner + 2) % 3];
-    std::vector<uint8_t> v3(c, c + stride);
-    for (const Element& el : floats) {
-      for (uint32_t k = 0; k < el.size; k += 4) {
-        float a, b, o;
-        std::memcpy(&a, d1 + el.offset + k, 4);
-        std::memcpy(&b, d2 + el.offset + k, 4);
-        std::memcpy(&o, c + el.offset + k, 4);
-        float d = a + b - o;
-        std::memcpy(v3.data() + el.offset + k, &d, 4);
-      }
-    }
-    // Strip (corner, d1, d2, v3) as a list.
-    uint8_t* dst = out.data() + size_t(r) * 6 * stride;
-    const uint8_t* order[6] = {c, d1, d2, d2, d1, v3.data()};
-    for (int k = 0; k < 6; ++k) std::memcpy(dst + size_t(k) * stride, order[k], stride);
-  }
+  std::vector<uint8_t> out;std::string error;
+  graphics::guest::ExpandRectangles(std::as_bytes(std::span(vertices,size_t(vertex_count)*stride)),
+      vertex_count,stride,ReadVertexDeclaration(base,decl),out,error);
   return out;
 }
 
@@ -5921,11 +5883,11 @@ void Renderer::DumpFrameResources(const std::string& prefix, bool surfaces_only,
 // ---------------------------------------------------------------------------
 
 void Renderer::BeginCmd(Op op) {
-  if (!worker_mode_checked_) {
+  if (!worker_mode_checked_ && !worker_stop_) {
     worker_mode_checked_ = true;
-    worker_mode_ = REXCVAR_GET(sr_native_worker) && REXCVAR_GET(sr_native_pm4_mirror);
+    worker_mode_ = bool(packet_sink_) || (REXCVAR_GET(sr_native_worker) && REXCVAR_GET(sr_native_pm4_mirror));
     if (worker_mode_) {
-      std::thread(&Renderer::WorkerMain, this).detach();
+      worker_=std::thread(&Renderer::WorkerMain, this);
       REXLOG_INFO("native: recording worker enabled");
     }
   }
@@ -5934,14 +5896,16 @@ void Renderer::BeginCmd(Op op) {
   cur_.op = op;
   cur_.command_serial = ++capture_serial_;
   cur_.tiling_active = capture_tiling_active_;
-  cur_.packet_check = REXCVAR_GET(sr_native_packet_check) && graphics::guest::IsCaptureFrame(
-      front_frame_, uint32_t(std::max(1,REXCVAR_GET(sr_native_packet_check_every))));
+  cur_.packet_check = (!worker_stop_ && bool(packet_sink_)) || (REXCVAR_GET(sr_native_packet_check) && graphics::guest::IsCaptureFrame(
+      front_frame_, uint32_t(std::max(1,REXCVAR_GET(sr_native_packet_check_every)))));
   cur_.pass = g_guest_pass;
   cur_.range_first = uint32_t(batch_->ranges.size());
   cur_.stream_first = uint32_t(batch_->streams.size());
 }
 
 void Renderer::EndCmd(uint8_t* base) {
+  if(worker_stop_) return;
+  const auto capture_copies_before=capture_mirror_.copy_draws;
   if (cur_.packet_check && cur_.ring_bytes) {
     std::string capture_error;
     cur_.pm4_capture_ok = graphics::guest::CapturePm4Dependencies(*batch_, cur_,
@@ -5960,6 +5924,10 @@ void Renderer::EndCmd(uint8_t* base) {
   if (cur_.packet_check && cur_.device &&
       (cur_.op==Op::kDraw || cur_.op==Op::kDrawIndexed || cur_.op==Op::kDrawInline))
     CaptureTextures(base);
+  if(cur_.op==Op::kResolve && cur_.packet_check) {
+    cur_.resolve_copy_draw=capture_mirror_.copy_draws!=capture_copies_before;
+    cur_.resolve_copy_dest_info=capture_mirror_.last_copy_dest_info;
+  }
   cur_.range_count = uint32_t(batch_->ranges.size()) - cur_.range_first;
   cur_.stream_count = uint32_t(batch_->streams.size()) - cur_.stream_first;
   batch_->cmds.push_back(cur_);
@@ -6123,7 +6091,7 @@ void Renderer::FlushBatch() {
 // Waits until the worker executed the first `batches` batches.
 void Renderer::WaitWorkerIdle(uint64_t batches) {
   std::unique_lock<std::mutex> lock(queue_mutex_);
-  done_cv_.wait(lock, [this, batches] { return batches_done_ >= batches; });
+  done_cv_.wait(lock, [this, batches] { return worker_stop_ || batches_done_ >= batches; });
 }
 
 void Renderer::WorkerMain() {
@@ -6132,7 +6100,8 @@ void Renderer::WorkerMain() {
     std::unique_ptr<WorkBatch> batch;
     {
       std::unique_lock<std::mutex> lock(queue_mutex_);
-      queue_cv_.wait(lock, [this] { return !work_queue_.empty(); });
+      queue_cv_.wait(lock, [this] { return worker_stop_ || !work_queue_.empty(); });
+      if(work_queue_.empty() && worker_stop_) return;
       batch = std::move(work_queue_.front());
       work_queue_.pop_front();
     }
@@ -6151,6 +6120,15 @@ void Renderer::WorkerMain() {
 }
 
 void Renderer::Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd) {
+  if(packet_sink_) {
+    if(worker_stop_ || packet_sink_failed_) return;
+    graphics::guest::RenderPacket packet;std::string error;
+    if(!graphics::guest::ReplayCapturedRenderPacket(batch,cmd,mirror_,packet,error) || !packet_sink_(std::move(packet),error)) {
+      packet_sink_failed_=true;
+      if(!worker_stop_) {REXLOG_ERROR("native API packet failed: {}",error);rex::FatalError("Native renderer failed: "+error);}
+    }
+    return;
+  }
   t_capture_ranges = batch.ranges.data() + cmd.range_first;
   t_capture_count = cmd.range_count;
   t_capture_bytes = batch.bytes.data();
@@ -6566,6 +6544,12 @@ void Renderer::OnSwap(uint8_t* base, uint32_t front_buffer_texture, uint64_t swa
   if (front_buffer_texture) CaptureBytes(base, front_buffer_texture, 0x40);
   cur_.u[0] = front_buffer_texture;
   cur_.u64 = swap_number;
+  if(packet_sink_ && !worker_stop_) {
+    auto gamma=std::make_shared<std::array<uint32_t,256>>();
+    bool available=GuestGammaRamp256(gamma->data());
+    cur_.gamma_enabled=available && REXCVAR_GET(sr_native_gamma_ramp) && std::any_of(gamma->begin(),gamma->end(),[](uint32_t entry){return entry!=0;});
+    cur_.gamma=std::move(gamma);
+  }
   EndCmd(base);
   if (worker_mode_) {
     FlushBatch();

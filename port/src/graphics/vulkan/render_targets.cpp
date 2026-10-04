@@ -66,6 +66,7 @@ TargetResource::~TargetResource() {
   if(memory) context->f.vkFreeMemory(context->device,memory,nullptr);
 }
 TargetPass::~TargetPass() {
+  if(!owns_handles) return;
   if(framebuffer) context->f.vkDestroyFramebuffer(context->device,framebuffer,nullptr);
   if(render_pass) context->f.vkDestroyRenderPass(context->device,render_pass,nullptr);
 }
@@ -78,7 +79,7 @@ TargetId TargetStore::Acquire(const guest::SurfaceDesc& guest_desc,Error& e) {
   auto d=Canonical(guest_desc);auto& g=d.geometry;
   if(!d.id || !g.width || !g.height || g.width>8192 || g.height>8192) {Fail(e,"Render target","Invalid surface description");return 0;}
   Key key{g.edram_base,d.depth?0x8000u:g.format,g.width,g.height,1};
-  if(auto found=keys_.find(key);found!=keys_.end()) {e={};return found->second;}
+  if(auto found=keys_.find(key);found!=keys_.end()) {guest_targets_[d.id]=found->second;e={};return found->second;}
   auto target=std::make_shared<TargetResource>();target->context=&c_;target->state=&state_;target->description=d;
   target->format=d.depth?VK_FORMAT_D24_UNORM_S8_UINT:ColorFormat(g.format);
   target->aspects=d.depth?(VK_IMAGE_ASPECT_DEPTH_BIT|VK_IMAGE_ASPECT_STENCIL_BIT):VK_IMAGE_ASPECT_COLOR_BIT;
@@ -102,7 +103,17 @@ TargetId TargetStore::Acquire(const guest::SurfaceDesc& guest_desc,Error& e) {
   if(!Check(c_.f.vkCreateImageView(c_.device,&view,nullptr,&target->attachment),"Attachment view",e)) return 0;
   view.subresourceRange.aspectMask=d.depth?VK_IMAGE_ASPECT_DEPTH_BIT:VK_IMAGE_ASPECT_COLOR_BIT;
   if(!Check(c_.f.vkCreateImageView(c_.device,&view,nullptr,&target->sampled),"Attachment sample view",e) || !state_.Register(target->image,1,1,target->aspects,e)) return 0;
-  target->id=++next_id_;targets_[target->id]=target;keys_[key]=target->id;e={};return target->id;
+  target->id=++next_id_;targets_[target->id]=target;keys_[key]=target->id;guest_targets_[d.id]=target->id;e={};return target->id;
+}
+std::shared_ptr<const TargetResource> TargetStore::Find(const guest::SurfaceDesc& surface) const {
+  auto canonical=Canonical(surface);
+  if(auto assigned=guest_targets_.find(surface.id);assigned!=guest_targets_.end()) {
+    auto target=targets_.at(assigned->second);auto& d=target->description;
+    if(d.depth==canonical.depth && d.geometry.edram_base==canonical.geometry.edram_base && d.geometry.format==canonical.geometry.format) return target;
+  }
+  auto& g=canonical.geometry;Key key{g.edram_base,canonical.depth?0x8000u:g.format,g.width,g.height,1};
+  if(auto found=keys_.find(key);found!=keys_.end()) return targets_.at(found->second);
+  return {};
 }
 std::shared_ptr<TargetResource> TargetStore::Get(TargetId id,Error& e) {
   auto found=targets_.find(id);if(found==targets_.end()) {Fail(e,"Target lookup","Unknown render target");return {};}

@@ -3,6 +3,11 @@
 #include <array>
 namespace superman_returns::graphics::vulkan {
 enum class FrameOutcome { kPresented, kSuspended, kRecreate, kFailed };
+struct FrameWork {
+  std::function<bool(VkCommandBuffer,uint64_t,Error&)> prepare;
+  std::function<void(VkCommandBuffer,uint32_t)> paint;
+  std::function<void(uint64_t)> retire;
+};
 class FrameLoop {
 public:
   FrameLoop() = default;
@@ -14,6 +19,7 @@ public:
   FrameOutcome Draw(Context &, Swapchain &,
                     const std::function<void(VkCommandBuffer, uint32_t)> &,
                     Error &);
+  FrameOutcome DrawGame(Context&,Swapchain&,const FrameWork&,Error&);
   uint64_t presented = 0;
 
 private:
@@ -22,12 +28,15 @@ private:
     VkCommandBuffer command = VK_NULL_HANDLE;
     VkSemaphore acquire = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
+    uint64_t serial=0;
+    std::function<void(uint64_t)> retire;
   };
   std::array<Slot, 2> slots_{};
   std::vector<VkSemaphore> finished_;
   std::vector<VkFence> images_in_flight_;
   uint32_t cursor_ = 0;
   bool failed_ = false;
+  uint64_t next_serial_=0;
   Context *context_ = nullptr;
   void Destroy();
 };

@@ -7,6 +7,7 @@ ImageUsage ImageUsage::Sampled(bool depth) {return {depth?VK_IMAGE_LAYOUT_DEPTH_
 ImageUsage ImageUsage::TransferSource() {return {VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_READ_BIT};}
 ImageUsage ImageUsage::TransferDestination() {return {VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_ACCESS_TRANSFER_WRITE_BIT};}
 bool ImageState::Register(VkImage image,uint32_t mips,uint32_t layers,VkImageAspectFlags aspects,Error& e) {
+  std::lock_guard lock(mutex_);
   if(!image || !mips || !layers || uint64_t(mips)*layers>65536 || !aspects ||
      (aspects&~(VK_IMAGE_ASPECT_COLOR_BIT|VK_IMAGE_ASPECT_DEPTH_BIT|VK_IMAGE_ASPECT_STENCIL_BIT)) || images_.contains(image)) {
     e={"Image state",VK_ERROR_INITIALIZATION_FAILED,"Invalid or duplicate tracked image"};return false;
@@ -14,11 +15,13 @@ bool ImageState::Register(VkImage image,uint32_t mips,uint32_t layers,VkImageAsp
   images_.emplace(image,Image{mips,layers,aspects,std::vector<ImageUsage>(size_t(mips)*layers)});e={};return true;
 }
 ImageUsage ImageState::Usage(VkImage image,VkImageAspectFlagBits aspect,uint32_t mip,uint32_t layer) const {
+  std::lock_guard lock(mutex_);
   auto found=images_.find(image);
   if(found==images_.end() || !(found->second.aspects&aspect) || mip>=found->second.mips || layer>=found->second.layers) throw std::out_of_range("Untracked image subresource");
   return found->second.usage[layer*found->second.mips+mip];
 }
 bool ImageState::Transition(VkCommandBuffer command,VkImage image,VkImageSubresourceRange range,ImageUsage next,Error& e) {
+  std::lock_guard lock(mutex_);
   auto found=images_.find(image);
   if(!command || !f_.vkCmdPipelineBarrier || found==images_.end()) {e={"Image transition",VK_ERROR_INITIALIZATION_FAILED,"Missing recording command or tracked image"};return false;}
   auto& tracked=found->second;
@@ -43,7 +46,7 @@ bool ImageState::Transition(VkCommandBuffer command,VkImage image,VkImageSubreso
     }
   if(!barriers.empty()) f_.vkCmdPipelineBarrier(command,sources,next.stages,0,0,nullptr,0,nullptr,uint32_t(barriers.size()),barriers.data());
   // vkCmd calls have no result code. State changes after recording, so a fake
-  // dispatch exception or validation rejection before recording cannot advance it.
+  // dispatch exception before recording cannot advance it.
   for(uint32_t layer=range.baseArrayLayer;layer<range.baseArrayLayer+range.layerCount;++layer)
     for(uint32_t mip=range.baseMipLevel;mip<range.baseMipLevel+range.levelCount;++mip) tracked.usage[layer*tracked.mips+mip]=next;
   e={};return true;

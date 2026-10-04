@@ -2,6 +2,7 @@
 #include "loader.h"
 #include <map>
 #include <vector>
+#include <mutex>
 namespace superman_returns::graphics::vulkan {
 struct ImageUsage {
   VkImageLayout layout=VK_IMAGE_LAYOUT_UNDEFINED;
@@ -17,12 +18,13 @@ class ImageState {
 public:
   explicit ImageState(Dispatch& f):f_(f) {}
   bool Register(VkImage,uint32_t mips,uint32_t layers,VkImageAspectFlags,Error&);
-  void Forget(VkImage image) {images_.erase(image);}
+  void Forget(VkImage image) {std::lock_guard lock(mutex_);images_.erase(image);}
   bool Transition(VkCommandBuffer,VkImage,VkImageSubresourceRange,ImageUsage,Error&);
   ImageUsage Usage(VkImage,VkImageAspectFlagBits,uint32_t mip,uint32_t layer) const;
 private:
   struct Image {uint32_t mips,layers;VkImageAspectFlags aspects;std::vector<ImageUsage> usage;};
   Dispatch& f_;
+  mutable std::mutex mutex_;
   std::map<VkImage,Image> images_;
 };
 } // namespace superman_returns::graphics::vulkan

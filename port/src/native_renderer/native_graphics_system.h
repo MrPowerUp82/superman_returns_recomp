@@ -106,7 +106,7 @@ class NativeGraphicsSystem : public rex::system::IGraphicsSystem {
   void StoreBigEndian(uint32_t address, uint32_t value);  // write-back/scratch
   bool Compare(uint32_t func, uint32_t value, uint32_t ref) const;
 
-  std::unique_ptr<rex::ui::d3d12::D3D12Provider> provider_;
+  std::unique_ptr<rex::ui::GraphicsProvider> provider_;
   std::unique_ptr<rex::ui::Presenter> presenter_;
   rex::ui::WindowedAppContext* app_context_ = nullptr;
   rex::memory::Memory* memory_ = nullptr;

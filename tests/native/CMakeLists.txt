@@ -15,6 +15,8 @@ add_executable(sr_native_tests
     test_render_packets.cpp
     test_render_state.cpp
     test_vertex_layout.cpp
+    test_primitive_expansion.cpp
+    "${SR_NATIVE_DIR}/../graphics/guest/primitive_expansion.cpp"
     "${SR_NATIVE_DIR}/../graphics/guest/vertex_layout.cpp"
     "${SR_NATIVE_DIR}/../graphics/guest/render_state.cpp"
     "${SR_NATIVE_DIR}/../graphics/guest/edram_alias.cpp"

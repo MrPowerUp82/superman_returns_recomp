@@ -1,4 +1,5 @@
 #include "frame_loop.h"
+#include <exception>
 namespace superman_returns::graphics::vulkan {
 FrameLoop::~FrameLoop() {
   if (context_) {
@@ -29,6 +30,7 @@ void FrameLoop::Destroy() {
 }
 bool FrameLoop::Retire(Context &c, Error &e) {
   auto ok = Check(c.f.vkDeviceWaitIdle(c.device), "Frame retirement", e);
+  if(ok) for(auto& slot:slots_) if(slot.serial && slot.retire) {slot.retire(slot.serial);slot.serial=0;slot.retire={};}
   Destroy();
   return ok;
 }
@@ -76,6 +78,9 @@ FrameOutcome
 FrameLoop::Draw(Context &c, Swapchain &s,
                 const std::function<void(VkCommandBuffer, uint32_t)> &record,
                 Error &e) {
+  return DrawGame(c,s,FrameWork{{},record,{}},e);
+}
+FrameOutcome FrameLoop::DrawGame(Context& c,Swapchain& s,const FrameWork& work,Error& e) {
   if (failed_)
     return FrameOutcome::kFailed;
   if (!s.handle || !s.choice.extent.width || !s.choice.extent.height)
@@ -92,6 +97,7 @@ FrameLoop::Draw(Context &c, Swapchain &s,
     return FrameOutcome::kSuspended;
   if (r != VK_SUCCESS)
     return fail(r, "WaitForFences");
+  if(slot.serial && slot.retire) {slot.retire(slot.serial);slot.serial=0;slot.retire={};}
   uint32_t index = 0;
   r = f.vkAcquireNextImageKHR(c.device, s.handle, 100000000, slot.acquire,
                               VK_NULL_HANDLE, &index);
@@ -116,6 +122,14 @@ FrameLoop::Draw(Context &c, Swapchain &s,
   bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
   if ((r = f.vkBeginCommandBuffer(slot.command, &bi)) != VK_SUCCESS)
     return fail(r, "BeginCommandBuffer");
+  const uint64_t serial=++next_serial_;
+  bool prepared=true;Error preparation_error;
+  if(work.prepare) {
+    try {prepared=work.prepare(slot.command,serial,preparation_error);}
+    catch(const std::exception& ex) {prepared=false;preparation_error={"Game preparation",VK_ERROR_INITIALIZATION_FAILED,ex.what()};}
+    catch(...) {prepared=false;preparation_error={"Game preparation",VK_ERROR_INITIALIZATION_FAILED,"Unknown frame callback exception"};}
+    if(!prepared && preparation_error.message.empty()) preparation_error={"Game preparation",VK_ERROR_INITIALIZATION_FAILED,"Frame callback failed without a diagnostic"};
+  }
   VkClearValue clear{};
   clear.color = {{0.015f, 0.025f, 0.07f, 1.0f}};
   VkRenderPassBeginInfo pass{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
@@ -125,7 +139,11 @@ FrameLoop::Draw(Context &c, Swapchain &s,
   pass.clearValueCount = 1;
   pass.pClearValues = &clear;
   f.vkCmdBeginRenderPass(slot.command, &pass, VK_SUBPASS_CONTENTS_INLINE);
-  record(slot.command, index);
+  if(prepared && work.paint) {
+    try {work.paint(slot.command,index);}
+    catch(const std::exception& ex) {prepared=false;preparation_error={"Game painting",VK_ERROR_INITIALIZATION_FAILED,ex.what()};}
+    catch(...) {prepared=false;preparation_error={"Game painting",VK_ERROR_INITIALIZATION_FAILED,"Unknown frame callback exception"};}
+  }
   f.vkCmdEndRenderPass(slot.command);
   if ((r = f.vkEndCommandBuffer(slot.command)) != VK_SUCCESS)
     return fail(r, "EndCommandBuffer");
@@ -144,6 +162,7 @@ FrameLoop::Draw(Context &c, Swapchain &s,
       VK_SUCCESS)
     return fail(r, "QueueSubmit");
   images_in_flight_[index] = slot.fence;
+  slot.serial=serial;slot.retire=work.retire;
   VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
   present.waitSemaphoreCount = 1;
   present.pWaitSemaphores = &finished_[index];
@@ -156,6 +175,7 @@ FrameLoop::Draw(Context &c, Swapchain &s,
     ++presented;
   if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR && r != VK_ERROR_OUT_OF_DATE_KHR)
     return fail(r, "QueuePresent");
+  if(!prepared) {failed_=true;e=std::move(preparation_error);return FrameOutcome::kFailed;}
   if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR || suboptimal)
     return FrameOutcome::kRecreate;
   return FrameOutcome::kPresented;

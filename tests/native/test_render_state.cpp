@@ -1,6 +1,14 @@
 #include "../../port/src/graphics/guest/render_state.h"
 #include "test_main.h"
+#include "../../port/src/graphics/guest/render_packet.h"
+#include <bit>
 using namespace superman_returns::graphics::guest;
+SR_TEST(polygon_offset_matches_reference_float_rounding) {
+  DrawPacket d;d.registers[0x205]=1<<11;
+  d.mirrored_registers[0x380]=std::bit_cast<uint32_t>(32.0f);
+  d.mirrored_registers[0x381]=std::bit_cast<uint32_t>(1.0f/16777215.0f);
+  FinalizeDrawConstants(d);SR_CHECK_EQ(d.depth_bias,1);SR_CHECK_EQ(d.slope_bias,2.0f);
+}
 SR_TEST(viewport_normalization_preserves_reference_policy) {
   auto viewport =
       NormalizeViewport({4, 5, 0, 9000, -1, 2}, {1280, 720}, std::nullopt, 1);

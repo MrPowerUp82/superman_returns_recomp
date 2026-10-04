@@ -534,6 +534,7 @@ int Run(const std::filesystem::path &shaders_dir, const std::string &uuid,
     throw std::runtime_error(e.operation + ": " + e.message);
   VkPhysicalDeviceFeatures features{};
   features.shaderStorageBufferArrayDynamicIndexing = VK_TRUE;
+  features.shaderSampledImageArrayDynamicIndexing = VK_TRUE;
   if (!context.OpenDevice(surface, uuid, e, &features,production))
     throw std::runtime_error(
         e.operation + ": " + e.message +
@@ -544,13 +545,15 @@ int Run(const std::filesystem::path &shaders_dir, const std::string &uuid,
   needs.samplers = 32;
   needs.descriptor_sets = 4;
   needs.storage_buffer_dynamic_indexing = true;
+  needs.sampled_image_dynamic_indexing = true;
   auto &limits = context.properties.limits;
   shaders::ShaderCapabilities available;
   available.storage_buffers = limits.maxPerStageDescriptorStorageBuffers;
   available.sampled_images = limits.maxPerStageDescriptorSampledImages;
   available.samplers = limits.maxPerStageDescriptorSamplers;
   available.descriptor_sets = limits.maxBoundDescriptorSets;
-  available.storage_buffer_dynamic_indexing = true;
+  available.storage_buffer_dynamic_indexing = context.enabled_features.shaderStorageBufferArrayDynamicIndexing;
+  available.sampled_image_dynamic_indexing = context.enabled_features.shaderSampledImageArrayDynamicIndexing;
   auto missing = shaders::CheckRequirements(needs, available);
   if (!missing.empty())
     throw std::runtime_error(missing[0]);
@@ -634,9 +637,9 @@ int Run(const std::filesystem::path &shaders_dir, const std::string &uuid,
              !resources.UploadBuffer(7,std::as_bytes(std::span(vertices)),1,e)) throw std::runtime_error(e.operation+": "+e.message);
           guest::DrawPacket packet;packet.constants=state;packet.vertex_fetch[0]={7,0,4,0x2C2259};
           guest::VertexStream stream{};stream.stream=7;stream.size=sizeof(vertices);stream.stride=4;stream.update.plan.key=7;packet.streams.push_back(stream);
-          packet.texture_fetch[0][0]=2|(3<<10)|(3<<13);packet.texture_fetch[0][1]=0x1006;packet.texture_fetch[0][5]=1<<9;
+          packet.texture_fetch[7][0]=2|(3<<10)|(3<<13);packet.texture_fetch[7][1]=0x1006;packet.texture_fetch[7][5]=1<<9;
           guest::LinearTexture linear;linear.width=linear.height=1;linear.format=guest::LinearFormat::kRGBA8Unorm;linear.levels={{1,1,4,1,0}};linear.data={255,255,255,255};
-          if(!resources.UploadTexture(TextureResourceId(packet.texture_fetch[0]),linear,1,e)) throw std::runtime_error(e.operation+": "+e.message);
+          if(!resources.UploadTexture(TextureResourceId(packet.texture_fetch[7]),linear,1,e)) throw std::runtime_error(e.operation+": "+e.message);
           auto bindings=BuildBindings(packet,e);if(!e.message.empty()) throw std::runtime_error(e.message);
           auto sets=descriptors.Prepare(bindings,packet.texture_fetch,resources,uint64_t(variant)+1,e);
           if(!sets) throw std::runtime_error(e.operation+": "+e.message);

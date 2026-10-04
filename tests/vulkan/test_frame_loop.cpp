@@ -1,10 +1,12 @@
 #include "frame_loop.h"
+#include <stdexcept>
 #include "test_main.h"
 using namespace superman_returns::graphics::vulkan;
 namespace {
 std::vector<std::string> calls;
 std::vector<VkSemaphore> present_semaphores;
 int image = 0;
+bool pass_open=false;
 VkResult acquire_result = VK_SUCCESS, submit_result = VK_SUCCESS, present_result = VK_SUCCESS;
 uintptr_t next = 10;
 template <class T> T Handle() { return reinterpret_cast<T>(next++); }
@@ -62,8 +64,8 @@ VkResult VKAPI_CALL Begin(VkCommandBuffer, const VkCommandBufferBeginInfo *) {
 }
 VkResult VKAPI_CALL End(VkCommandBuffer) { return VK_SUCCESS; }
 void VKAPI_CALL BeginPass(VkCommandBuffer, const VkRenderPassBeginInfo *,
-                          VkSubpassContents) {}
-void VKAPI_CALL EndPass(VkCommandBuffer) {}
+                          VkSubpassContents) {pass_open=true;}
+void VKAPI_CALL EndPass(VkCommandBuffer) {pass_open=false;}
 VkResult VKAPI_CALL Submit(VkQueue, uint32_t, const VkSubmitInfo *, VkFence) {
   calls.push_back("submit");
   return submit_result;
@@ -163,4 +165,34 @@ SR_TEST(device_lost_present_is_not_masked_by_suboptimal_acquire) {
   calls.clear();
   SR_CHECK(f.Draw()==FrameOutcome::kFailed);
   SR_CHECK(calls.empty());
+}
+SR_TEST(game_prepare_precedes_present_pass_and_resources_retire_after_fence) {
+  Fixture f;std::vector<uint64_t> prepared,retired;
+  FrameWork work;
+  work.prepare=[&](VkCommandBuffer,uint64_t serial,Error&) {SR_CHECK(!pass_open);prepared.push_back(serial);return true;};
+  work.paint=[&](VkCommandBuffer,uint32_t) {SR_CHECK(pass_open);};
+  work.retire=[&](uint64_t serial) {retired.push_back(serial);};
+  image=0;SR_CHECK(f.loop.DrawGame(f.c,f.s,work,f.e)==FrameOutcome::kPresented);
+  image=1;SR_CHECK(f.loop.DrawGame(f.c,f.s,work,f.e)==FrameOutcome::kPresented);SR_CHECK(retired.empty());
+  image=2;SR_CHECK(f.loop.DrawGame(f.c,f.s,work,f.e)==FrameOutcome::kPresented);
+  SR_CHECK(prepared==std::vector<uint64_t>({1,2,3}));SR_CHECK(retired==std::vector<uint64_t>({1}));
+  SR_CHECK(f.loop.Retire(f.c,f.e));SR_CHECK(retired==std::vector<uint64_t>({1,3,2}));
+}
+SR_TEST(game_prepare_failure_submits_owned_partial_commands_and_stops) {
+  Fixture f;FrameWork work;bool painted=false;
+  work.prepare=[](VkCommandBuffer,uint64_t,Error& e) {e={"game prepare",VK_ERROR_FORMAT_NOT_SUPPORTED,"Unsupported guest format"};return false;};
+  work.paint=[&](VkCommandBuffer,uint32_t) {painted=true;};
+  SR_CHECK(f.loop.DrawGame(f.c,f.s,work,f.e)==FrameOutcome::kFailed);SR_CHECK(!painted);
+  SR_CHECK(f.e.operation=="game prepare");SR_CHECK(std::find(calls.begin(),calls.end(),"submit")!=calls.end());
+  calls.clear();SR_CHECK(f.loop.DrawGame(f.c,f.s,work,f.e)==FrameOutcome::kFailed);SR_CHECK(calls.empty());
+}
+SR_TEST(game_callback_exception_finishes_submission_and_stops) {
+  for(bool during_paint:{false,true}) {
+    Fixture f;FrameWork work;
+    if(during_paint) work.paint=[](VkCommandBuffer,uint32_t){throw std::runtime_error("UI paint failed");};
+    else work.prepare=[](VkCommandBuffer,uint64_t,Error&)->bool{throw std::runtime_error("Guest prepare failed");};
+    SR_CHECK(f.loop.DrawGame(f.c,f.s,work,f.e)==FrameOutcome::kFailed);
+    SR_CHECK(!pass_open);SR_CHECK(!f.e.message.empty());SR_CHECK(std::find(calls.begin(),calls.end(),"submit")!=calls.end());
+    calls.clear();SR_CHECK(f.loop.DrawGame(f.c,f.s,work,f.e)==FrameOutcome::kFailed);SR_CHECK(calls.empty());
+  }
 }

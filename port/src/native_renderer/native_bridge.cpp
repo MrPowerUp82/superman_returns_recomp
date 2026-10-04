@@ -295,6 +295,12 @@ std::unique_ptr<rex::system::IGraphicsSystem> CreateNativeGraphicsSystem(
     return nullptr;
   }
   std::string where;
+#if SR_VULKAN_GAME_TEST
+  if(REXCVAR_GET(sr_native_ab_mode)) {rex::FatalError("Vulkan native rendering cannot use the Xenos A/B presenter");return nullptr;}
+  REXLOG_INFO("sr_renderer=native: development Vulkan game renderer, no D3D12/Xenos fallback");
+  g_mode.store(int(Mode::kNative));
+  return std::make_unique<NativeGraphicsSystem>();
+#endif
   if (!ShaderCorpusAvailable(&where)) {
     LogFallbackOnce(("no offline shader corpus (embedded pack or " + where +
                      "; tools/shaders, docs/native-port-plan.md section 6)")

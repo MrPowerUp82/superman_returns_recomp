@@ -68,11 +68,15 @@ struct WorkCmd {
   uint32_t u[8] = {};
   float f = 0.0f;
   uint64_t u64 = 0;
+  std::shared_ptr<const std::array<uint32_t,256>> gamma;
+  bool gamma_enabled=false;
   uint32_t ring_offset = 0, ring_bytes = 0;
   uint32_t range_first = 0, range_count = 0;
   uint32_t stream_first = 0, stream_count = 0;
   bool streams_ok = true;
   bool pm4_capture_ok = true;
+  bool resolve_copy_draw=false;
+  uint32_t resolve_copy_dest_info=0;
   bool tiling_active = false;
   bool packet_check = false;
   bool has_index = false;

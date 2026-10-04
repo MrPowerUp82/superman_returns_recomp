@@ -37,6 +37,10 @@
 #include <rex/thread.h>
 #include <rex/ui/d3d12/d3d12_provider.h>
 #include <rex/ui/presenter.h>
+#include <rex/ui/graphics_provider.h>
+#if SR_VULKAN_GAME_TEST
+#include "../graphics/vulkan/platform/native_provider.h"
+#endif
 #include <rex/ui/windowed_app_context.h>
 #include <dxgi1_2.h>
 #include <wrl/client.h>
@@ -44,6 +48,9 @@
 #include "game_profile.h"
 #include "hang_watchdog.h"
 #include "sdk_compat.h"
+#if SR_NATIVE_RENDERER_BUILD
+#include "native_renderer.h"
+#endif
 #if SR_HAS_LSFG
 #include "presenter_factory.h"
 #endif
@@ -173,8 +180,17 @@ rex::ui::GraphicsProvider* NativeGraphicsSystem::provider() const { return provi
 
 rex::X_STATUS NativeGraphicsSystem::SetupPresentation(rex::ui::WindowedAppContext* app_context) {
   if (presenter_) return X_STATUS_SUCCESS;
+#if SR_VULKAN_GAME_TEST
+  const std::filesystem::path root=SR_VULKAN_PROJECT_ROOT;
+  wchar_t python[MAX_PATH]{};if(!SearchPathW(nullptr,L"python.exe",nullptr,MAX_PATH,python,nullptr)) {REXLOG_ERROR("native Vulkan: python.exe not found on PATH");return X_STATUS_UNSUCCESSFUL;}
+  graphics::vulkan::NativeProviderConfig config;
+  config.shaders={python,root/"tools/shaders/runtime_vulkan_shader.py",root/"build/vulkan-m3-runtime",root/"build/vulkan-m2/emitter-build/XenosRecompCorpus.exe",root/"build/vulkan-m2/emitter-tree/src/XenosRecomp/shader_common.h",root/".tools/dxc/bin/x64/dxc.exe"};
+  config.driver_cache=root/"build/vulkan-m3-runtime/driver.cache";
+  provider_=graphics::vulkan::CreateNativeVulkanProvider(std::move(config));
+#else
   if (!ResolveLauncherGpu()) return X_STATUS_UNSUCCESSFUL;
   provider_ = rex::ui::d3d12::D3D12Provider::Create();
+#endif
   if (!provider_) {
     REXLOG_ERROR("native graphics: unable to create the D3D12 provider");
     return X_STATUS_UNSUCCESSFUL;
@@ -184,8 +200,8 @@ rex::X_STATUS NativeGraphicsSystem::SetupPresentation(rex::ui::WindowedAppContex
     rex::FatalError("Graphics device lost (probably due to an internal error)");
   };
   auto create_presenter = [this, loss]() {
-#if SR_HAS_LSFG
-    presenter_ = sr::lsfg::CreateProjectPresenter(*provider_, loss);
+#if SR_HAS_LSFG && !SR_VULKAN_GAME_TEST
+    presenter_ = sr::lsfg::CreateProjectPresenter(*static_cast<rex::ui::d3d12::D3D12Provider*>(provider_.get()), loss);
 #else
     presenter_ = provider_->CreatePresenter(loss);
 #endif
@@ -199,7 +215,7 @@ rex::X_STATUS NativeGraphicsSystem::SetupPresentation(rex::ui::WindowedAppContex
     REXLOG_ERROR("native graphics: unable to create the presenter");
     return X_STATUS_UNSUCCESSFUL;
   }
-  REXLOG_INFO("native graphics: D3D12 presentation ready (no GPU plugin)");
+  REXLOG_INFO("native graphics: {} presentation ready (no GPU plugin)",SR_VULKAN_GAME_TEST?"Vulkan":"D3D12");
   return X_STATUS_SUCCESS;
 }
 
@@ -209,9 +225,14 @@ rex::X_STATUS NativeGraphicsSystem::SetupGuestGpu(rex::runtime::FunctionDispatch
   function_dispatcher_ = function_dispatcher;
   kernel_state_ = kernel_state;
   if (!provider_) {
+#if SR_VULKAN_GAME_TEST
+    REXLOG_ERROR("native Vulkan: presentation must be initialized before guest GPU setup");
+    return X_STATUS_UNSUCCESSFUL;
+#else
     if (!ResolveLauncherGpu()) return X_STATUS_UNSUCCESSFUL;
     provider_ = rex::ui::d3d12::D3D12Provider::Create();
     if (!provider_) return X_STATUS_UNSUCCESSFUL;
+#endif
   }
   // GPU registers: 0x7FC80000-0x7FC8FFFF.
   memory_->AddVirtualMappedRange(0x7FC80000, 0xFFFF0000, 0x0000FFFF, this, &ReadRegisterThunk,
@@ -250,6 +271,9 @@ void NativeGraphicsSystem::Shutdown() {
     vsync_thread_->Wait(0, 0, 0, nullptr);
     vsync_thread_.reset();
   }
+#if SR_NATIVE_RENDERER_BUILD
+  Renderer::Get().ShutdownWorker();
+#endif
   if (presenter_) {
     if (app_context_) {
       app_context_->CallInUIThreadSynchronous([this]() { presenter_.reset(); });

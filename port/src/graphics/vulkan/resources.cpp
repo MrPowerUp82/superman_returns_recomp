@@ -1,5 +1,6 @@
 #include "resources.h"
 #include "descriptors.h"
+#include "image_state.h"
 #include <algorithm>
 #include <cstring>
 #include <numeric>
@@ -105,6 +106,8 @@ BufferResource::~BufferResource() {
 TextureResource::~TextureResource() {
   if(!context || !context->device) return;
   if(view) context->f.vkDestroyImageView(context->device,view,nullptr);
+  if(image_owner) return;
+  if(state && handle) state->Forget(handle);
   if(handle) context->f.vkDestroyImage(context->device,handle,nullptr);
   if(memory) context->f.vkFreeMemory(context->device,memory,nullptr);
 }
@@ -200,12 +203,72 @@ bool ResourceStore::UploadTexture(guest::ResourceId id,const guest::LinearTextur
   c_.f.vkCmdPipelineBarrier(command_,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_VERTEX_SHADER_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,0,0,nullptr,0,nullptr,1,&barrier);
   submissions_.Keep(serial_,upload);submissions_.Keep(serial_,gpu);textures_[id]=std::move(gpu);e={};return true;
 }
+std::shared_ptr<TextureResource> ResourceStore::ResolveTexture(guest::ResourceId id,VkFormat format,VkExtent3D extent,uint32_t mips,uint32_t layers,bool cube,ImageState& state,Error& e) {
+  if(!Ready(e)) return {};
+  if(!id || format==VK_FORMAT_UNDEFINED || !extent.width || !extent.height || extent.depth!=1 || !mips || !layers || (cube&&(layers!=6 || extent.width!=extent.height))) {
+    e={"Resolve texture",VK_ERROR_INITIALIZATION_FAILED,"Invalid dimensions/view: "+std::to_string(extent.width)+"x"+std::to_string(extent.height)+"x"+std::to_string(extent.depth)+", mips="+std::to_string(mips)+", layers="+std::to_string(layers)+", cube="+std::to_string(cube)+", format="+std::to_string(format)+", id="+std::to_string(id)};return {};
+  }
+  auto view_type=cube?VK_IMAGE_VIEW_TYPE_CUBE:VK_IMAGE_VIEW_TYPE_2D;
+  auto old=textures_.find(id);
+  if(old!=textures_.end()) {
+    auto t=old->second;
+    if(t->state==&state && t->format==format && t->extent.width==extent.width && t->extent.height==extent.height && t->mips==mips && t->layers==layers && t->view_type==view_type) {submissions_.Keep(serial_,t);e={};return t;}
+  }
+  auto flags=cube?VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT:0u;
+  constexpr VkImageUsageFlags usage=VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  VkImageFormatProperties caps{};
+  if(!Check(c_.f.vkGetPhysicalDeviceImageFormatProperties(c_.physical,format,VK_IMAGE_TYPE_2D,VK_IMAGE_TILING_OPTIMAL,usage,flags,&caps),"Resolve image support",e)) return {};
+  if(extent.width>caps.maxExtent.width || extent.height>caps.maxExtent.height || mips>caps.maxMipLevels || layers>caps.maxArrayLayers) {Fail(e,"Resolve texture","Image exceeds device limits");return {};}
+  auto t=std::make_shared<TextureResource>();t->context=&c_;t->format=format;t->extent=extent;t->mips=mips;t->layers=layers;t->view_type=view_type;
+  VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};ci.flags=flags;ci.imageType=VK_IMAGE_TYPE_2D;ci.format=format;ci.extent=extent;ci.mipLevels=mips;ci.arrayLayers=layers;ci.samples=VK_SAMPLE_COUNT_1_BIT;ci.tiling=VK_IMAGE_TILING_OPTIMAL;ci.usage=usage;ci.sharingMode=VK_SHARING_MODE_EXCLUSIVE;
+  if(!Check(c_.f.vkCreateImage(c_.device,&ci,nullptr,&t->handle),"Create resolve texture",e)) return {};
+  VkMemoryRequirements mr{};c_.f.vkGetImageMemoryRequirements(c_.device,t->handle,&mr);
+  auto type=MemoryType(c_,mr.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+  if(!type) {Fail(e,"Resolve memory","Device-local memory unavailable");return {};}
+  VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};allocation.allocationSize=mr.size;allocation.memoryTypeIndex=*type;
+  if(!Check(c_.f.vkAllocateMemory(c_.device,&allocation,nullptr,&t->memory),"Allocate resolve texture",e) || !Check(c_.f.vkBindImageMemory(c_.device,t->handle,t->memory,0),"Bind resolve texture",e)) return {};
+  VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};view.image=t->handle;view.viewType=view_type;view.format=format;view.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,mips,0,cube?layers:1};
+  if(!Check(c_.f.vkCreateImageView(c_.device,&view,nullptr,&t->view),"Create resolve view",e) || !state.Register(t->handle,mips,layers,VK_IMAGE_ASPECT_COLOR_BIT,e)) return {};
+  t->state=&state;
+  VkImageSubresourceRange allocation_range{VK_IMAGE_ASPECT_COLOR_BIT,0,mips,0,layers};
+  if(!state.Transition(command_,t->handle,allocation_range,ImageUsage::TransferDestination(),e)) return {};
+  VkClearColorValue zero{};c_.f.vkCmdClearColorImage(command_,t->handle,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,&zero,1,&allocation_range);
+  if(!state.Transition(command_,t->handle,allocation_range,ImageUsage::Sampled(),e)) return {};
+  submissions_.Keep(serial_,t);textures_[id]=t;e={};return t;
+}
+bool ResourceStore::BindTextureView(guest::ResourceId id,std::shared_ptr<TextureResource> owner,VkComponentMapping mapping,Error& e) {
+  if(!Ready(e)) return false;
+  if(!id || !owner || !owner->handle || !owner->state) return Fail(e,"Resolve texture view","Missing tracked image");
+  // Always refer directly to the allocation, never build a chain of view aliases.
+  while(owner->image_owner) owner=owner->image_owner;
+  auto t=std::make_shared<TextureResource>();t->context=&c_;t->image_owner=owner;t->handle=owner->handle;t->state=owner->state;t->format=owner->format;t->extent=owner->extent;t->layers=owner->layers;t->mips=owner->mips;t->view_type=owner->view_type;
+  VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};view.image=t->handle;view.viewType=t->view_type;view.format=t->format;view.components=mapping;view.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,t->mips,0,t->view_type==VK_IMAGE_VIEW_TYPE_2D?1:t->layers};
+  if(!Check(c_.f.vkCreateImageView(c_.device,&view,nullptr,&t->view),"Resolved fetch view",e)) return false;
+  submissions_.Keep(serial_,t);textures_[id]=t;e={};return true;
+}
+std::shared_ptr<BufferResource> ResourceStore::ResolveScratch(VkDeviceSize size,Error& e) {
+  if(!Ready(e)) return {};
+  if(!size || size>c_.properties.limits.maxStorageBufferRange) {Fail(e,"Resolve scratch","Invalid storage buffer size");return {};}
+  auto buffer=NewBuffer(size,VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,e);
+  if(buffer) {submissions_.Keep(serial_,buffer);e={};}return buffer;
+}
 bool ResourceStore::UploadHostBuffer(guest::ResourceId id,std::span<const std::byte> bytes,uint64_t version,Error& e) {
   if(!Ready(e)) return false;
   if(!id || bytes.empty() || bytes.size()>c_.properties.limits.maxStorageBufferRange) return Fail(e,"Upload constants","Invalid storage buffer range");
-  auto buffer=NewBuffer(bytes.size(),VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,e);
+  auto buffer=NewBuffer(bytes.size(),VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_VERTEX_BUFFER_BIT|VK_BUFFER_USAGE_INDEX_BUFFER_BIT,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,e);
   if(!buffer || !Write(buffer,bytes,e)) return false;
   buffer->version=version;submissions_.Keep(serial_,buffer);buffers_[id]=std::move(buffer);e={};return true;
+}
+std::shared_ptr<BufferResource> ResourceStore::ReadbackBuffer(VkDeviceSize size,Error& e) {
+  if(!Ready(e)) return {};
+  if(!size || size>256*1024*1024) {Fail(e,"Readback buffer","Image readback size exceeds limit");return {};}
+  auto buffer=NewBuffer(size,VK_BUFFER_USAGE_TRANSFER_DST_BIT,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,e);if(buffer) submissions_.Keep(serial_,buffer);return buffer;
+}
+bool ResourceStore::Readback(const std::shared_ptr<BufferResource>& buffer,std::vector<uint8_t>& bytes,Error& e) {
+  if(!buffer || buffer->context!=&c_) return Fail(e,"Readback buffer","Buffer is absent or belongs to another device");
+  void* data=nullptr;if(!Check(c_.f.vkMapMemory(c_.device,buffer->memory,0,VK_WHOLE_SIZE,0,&data),"Map readback",e)) return false;
+  if(!buffer->coherent) {VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};range.memory=buffer->memory;range.offset=0;range.size=VK_WHOLE_SIZE;if(!Check(c_.f.vkInvalidateMappedMemoryRanges(c_.device,1,&range),"Invalidate readback",e)) {c_.f.vkUnmapMemory(c_.device,buffer->memory);return false;}}
+  bytes.assign(static_cast<uint8_t*>(data),static_cast<uint8_t*>(data)+buffer->size);c_.f.vkUnmapMemory(c_.device,buffer->memory);e={};return true;
 }
 std::shared_ptr<BufferResource> ResourceStore::Buffer(guest::ResourceId id,Error& e) {
   if(!Ready(e)) return {};

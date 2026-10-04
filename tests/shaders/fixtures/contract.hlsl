@@ -16,5 +16,11 @@ float4 VSMain(uint vertex : SV_VertexID) : SV_Position {
 float4 PSMain() : SV_Target0 {
  float4 color=SR_LOAD_FLOAT4(Pixel,0);
  if(BOOL_BIT(0) && LOOP_COUNT(g_LoopConstant(0))==1)color=float4(1,0,0,1);
+#ifdef SR_VULKAN_BUFFERS
+ uint texture=SR_SHARED_UINT(7*4)&0x7fffu;
+ uint sampler=SR_SHARED_UINT(128+7*4)&0x7fffu;
+ return color*g_Texture2DDescriptorHeap[texture].Sample(g_SamplerDescriptorHeap[sampler],float2(0.5,0.5));
+#else
  return color*g_Texture2DDescriptorHeap[0].Sample(g_SamplerDescriptorHeap[0],float2(0.5,0.5));
+#endif
 }

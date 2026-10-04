@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 namespace superman_returns::graphics::vulkan {
+class ImageState;
 class SubmissionResources {
 public:
   void Keep(uint64_t serial,std::shared_ptr<void> resource);
@@ -35,6 +36,8 @@ struct BufferResource {
 };
 struct TextureResource {
   Context* context=nullptr;
+  ImageState* state=nullptr;
+  std::shared_ptr<TextureResource> image_owner;
   VkImage handle=VK_NULL_HANDLE;
   VkDeviceMemory memory=VK_NULL_HANDLE;
   VkImageView view=VK_NULL_HANDLE;
@@ -56,12 +59,20 @@ public:
   void Retire(uint64_t completed_serial);
   bool UploadBuffer(guest::ResourceId,std::span<const std::byte>,uint64_t version,Error&);
   bool UploadTexture(guest::ResourceId,const guest::LinearTexture&,uint64_t version,Error&);
+  // Tracked resolve images remain GPU-authoritative and preserve partial writes.
+  // The supplied ImageState must outlive this store and descriptor leases.
+  std::shared_ptr<TextureResource> ResolveTexture(guest::ResourceId,VkFormat,VkExtent3D,uint32_t mips,uint32_t layers,bool cube,ImageState&,Error&);
+  std::shared_ptr<BufferResource> ResolveScratch(VkDeviceSize,Error&);
+  std::shared_ptr<BufferResource> ReadbackBuffer(VkDeviceSize,Error&);
+  bool Readback(const std::shared_ptr<BufferResource>&,std::vector<uint8_t>&,Error&);
+  bool BindTextureView(guest::ResourceId,std::shared_ptr<TextureResource>,VkComponentMapping,Error&);
   std::shared_ptr<BufferResource> Buffer(guest::ResourceId,Error&);
   std::shared_ptr<TextureResource> Texture(guest::ResourceId,Error&);
   bool CreateDummies(Error&);
   bool UploadHostBuffer(guest::ResourceId,std::span<const std::byte>,uint64_t version,Error&);
   uint64_t CurrentSerial() const {return serial_;}
   void ForgetBuffer(guest::ResourceId id) {buffers_.erase(id);}
+  void ForgetTexture(guest::ResourceId id) {textures_.erase(id);}
 private:
   std::shared_ptr<BufferResource> NewBuffer(VkDeviceSize,VkBufferUsageFlags,VkMemoryPropertyFlags,Error&);
   bool Write(const std::shared_ptr<BufferResource>&,std::span<const std::byte>,Error&);
