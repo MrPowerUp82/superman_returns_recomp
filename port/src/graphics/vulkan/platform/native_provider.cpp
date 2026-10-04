@@ -20,6 +20,7 @@ struct HostTexture {
 };
 struct Host {
   Context context;std::mutex gpu_mutex;
+  Error initialization_error;
   NativeProviderConfig config;
   std::unique_ptr<shaders::VulkanShaderService> shaders;
   std::unique_ptr<GameFrame> game;
@@ -111,8 +112,14 @@ public:
   bool Submit(guest::RenderPacket&& packet,std::string& diagnostic) {
     auto* swap=std::get_if<guest::SwapPacket>(&packet);auto gamma=swap?swap->gamma:nullptr;bool gamma_enabled=swap && swap->gamma_enabled;
     Error e;std::shared_ptr<TextureResource> image;
-    if(!host_->game) {diagnostic="Vulkan window/device has not been initialized";return false;}
-    if(!host_->game->Enqueue(std::move(packet),image,e)) {diagnostic=e.operation+": "+e.message;return false;}
+    GameFrame* game;
+    {
+      std::lock_guard lock(host_->gpu_mutex);
+      if(!host_->initialization_error.message.empty()) {diagnostic=host_->initialization_error.operation+": "+host_->initialization_error.message;return false;}
+      game=host_->game.get();
+      if(!game) {diagnostic="Vulkan window/device has not been initialized";return false;}
+    }
+    if(!game->Enqueue(std::move(packet),image,e)) {diagnostic=e.operation+": "+e.message;return false;}
     if(!image) return true;
     bool refreshed=RefreshGuestOutput(image->extent.width,image->extent.height,1280,720,[&](GuestOutputRefreshContext& base) {
       auto& context=static_cast<RefreshContext&>(base);context.output.image=image;if(gamma) context.output.gamma=*gamma;context.output.gamma_enabled=gamma_enabled;context.SetIs8bpc(image->format==VK_FORMAT_R8G8B8A8_UNORM);return true;
@@ -124,7 +131,10 @@ protected:
   SurfacePaintConnectResult ConnectOrReconnectPaintingToSurfaceFromUIThread(rex::ui::Surface& surface,uint32_t width,uint32_t height,bool was_paintable,bool& implicit_vsync) override {
     implicit_vsync=false;std::lock_guard lock(host_->gpu_mutex);Error e;
     auto& window=static_cast<rex::ui::Win32HwndSurface&>(surface);
-    if(!host_->context.device) {if(!host_->Initialize(window,e)) {Report(e);return SurfacePaintConnectResult::kFailure;}}
+    if(!host_->context.device) {
+      if(!host_->Initialize(window,e)) {host_->initialization_error=e;Report(e);return SurfacePaintConnectResult::kFailure;}
+      host_->initialization_error={};
+    }
     else if(hwnd_ && hwnd_!=window.hwnd()) {
       if(!frames_.Retire(host_->context,e)) {Report(e);return SurfacePaintConnectResult::kFailure;}swapchain_.Destroy();
       auto create=reinterpret_cast<PFN_vkCreateWin32SurfaceKHR>(host_->context.Proc()(host_->context.instance,"vkCreateWin32SurfaceKHR"));
