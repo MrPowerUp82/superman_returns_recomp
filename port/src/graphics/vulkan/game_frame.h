@@ -4,8 +4,8 @@
 #include <mutex>
 #include <chrono>
 namespace superman_returns::graphics::vulkan {
-// Shares queue and image-state ordering with host presentation. Shader waits
-// happen before locking this mutex, allowing the window to keep responding.
+// Shares queue submission ordering with host presentation. Shader waits and
+// CPU recording happen outside this mutex so the window can keep responding.
 class GameFrame {
 public:
   GameFrame(Context&,std::mutex&,ShaderLookup,TextureDecoder);

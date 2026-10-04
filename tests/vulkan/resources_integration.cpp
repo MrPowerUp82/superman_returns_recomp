@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <fstream>
 #include <chrono>
+#include <thread>
 using namespace superman_returns::graphics::vulkan;
 namespace guest=superman_returns::graphics::guest;
 namespace shaders=superman_returns::graphics::shaders;
@@ -279,8 +280,31 @@ void CheckComposition(Context& c) {
   for(uint32_t y=0;y<16;++y) for(uint32_t x=0;x<16;++x) {bool inside=y>=3&&y<12;int expected[]{inside?128:0,inside?64:0,inside?191:0,255};for(uint32_t channel=0;channel<4;++channel) if(std::abs(int(bytes[(y*16+x)*4+channel])-expected[channel])>1) throw std::runtime_error("Frontbuffer composition mismatch x="+std::to_string(x)+" y="+std::to_string(y)+" channel="+std::to_string(channel)+" actual="+std::to_string(bytes[(y*16+x)*4+channel])+" expected="+std::to_string(expected[channel]));}
   std::cout<<"Production frontbuffer composition gamma LUT and letterboxed pixels passed\n";
 }
+namespace {
+std::mutex* checked_game_mutex=nullptr;
+PFN_vkCmdClearAttachments original_game_clear=nullptr;
+PFN_vkQueueSubmit original_game_submit=nullptr;
+bool game_record_locked=false,game_submit_unlocked=false;
+uint32_t observed_game_clears=0,observed_game_submits=0;
+bool CanAcquireFromAnotherThread() {
+  bool acquired=false;
+  std::thread probe([&]{acquired=checked_game_mutex->try_lock();if(acquired) checked_game_mutex->unlock();});probe.join();return acquired;
+}
+void VKAPI_CALL CheckedGameClear(VkCommandBuffer command,uint32_t count,const VkClearAttachment* attachments,uint32_t rect_count,const VkClearRect* rects) {
+  ++observed_game_clears;game_record_locked|=!CanAcquireFromAnotherThread();
+  original_game_clear(command,count,attachments,rect_count,rects);
+}
+VkResult VKAPI_CALL CheckedGameSubmit(VkQueue queue,uint32_t count,const VkSubmitInfo* submissions,VkFence fence) {
+  ++observed_game_submits;game_submit_unlocked|=CanAcquireFromAnotherThread();
+  return original_game_submit(queue,count,submissions,fence);
+}
+}
 void CheckGameFrame(Context& c) {
   Error e;std::mutex queue_mutex;GameFrame frame(c,queue_mutex,{},{});Require(frame.Initialize({},e),e);
+  struct RestoreDispatch {Context& c;~RestoreDispatch(){c.f.vkCmdClearAttachments=original_game_clear;c.f.vkQueueSubmit=original_game_submit;}} restore{c};
+  checked_game_mutex=&queue_mutex;original_game_clear=c.f.vkCmdClearAttachments;original_game_submit=c.f.vkQueueSubmit;
+  game_record_locked=game_submit_unlocked=false;observed_game_clears=observed_game_submits=0;
+  c.f.vkCmdClearAttachments=CheckedGameClear;c.f.vkQueueSubmit=CheckedGameSubmit;
   guest::SurfaceDesc source{1001,false,{16,16,0,0,0,1}};
   guest::WorkBatch batch;batch.bytes={0,0x10,0,6};batch.ranges={{0x500020,4,0}};guest::WorkCmd command;command.range_count=1;guest::CapturedMemory memory;std::string reason;
   if(!guest::CapturedMemory::Capture(batch,command,memory,reason)) throw std::runtime_error(reason);
@@ -294,6 +318,9 @@ void CheckGameFrame(Context& c) {
     Require(frame.Enqueue(guest::RenderPacket(guest::SwapPacket{0x500000,1,memory}),output,e),e);Require(bool(output),e);
   };
   record(false,first);record(true,second);
+  c.f.vkCmdClearAttachments=original_game_clear;c.f.vkQueueSubmit=original_game_submit;
+  if(game_record_locked || game_submit_unlocked || observed_game_clears!=2 || observed_game_submits!=2)
+    throw std::runtime_error("Game frame must record without the queue mutex and serialize both GPU submissions");
   if(first->handle==second->handle) throw std::runtime_error("Mailbox snapshot reuses an image still owned by the consumer");
   auto read=[&](const std::shared_ptr<TextureResource>& image,bool green) {
     UploadFixture fixture(c);Require(frame.Renderer().Images().Transition(fixture.command,image->handle,{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1},ImageUsage::TransferSource(),e),e);

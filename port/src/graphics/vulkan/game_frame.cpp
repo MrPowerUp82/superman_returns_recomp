@@ -57,8 +57,11 @@ bool GameFrame::Enqueue(guest::RenderPacket&& packet,std::shared_ptr<TextureReso
   const auto shaders_ready=std::chrono::steady_clock::now();
   if(!WaitFence(e)) {failed_=true;return false;}
   const auto fence_ready=std::chrono::steady_clock::now();
-  std::lock_guard lock(queue_mutex_);
-  const auto queue_ready=std::chrono::steady_clock::now();
+  // This worker owns its command pool, descriptors, pipelines and mutable game
+  // targets. Presentation reads immutable mailbox snapshots; ImageState also
+  // protects cross-thread snapshot registration/retirement. CPU recording must
+  // not hold the host queue mutex and block the UI's paint/event loop.
+  const auto record_started=std::chrono::steady_clock::now();
   auto fail=[&] {failed_=true;return false;};
   if(!Check(c_.f.vkResetCommandPool(c_.device,pool_,0),"Reset game pool",e)) return fail();
   VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -76,7 +79,13 @@ bool GameFrame::Enqueue(guest::RenderPacket&& packet,std::shared_ptr<TextureReso
   if(!renderer_.Images().Transition(command_,source->handle,range,ImageUsage::Sampled(),e) || !renderer_.Images().Transition(command_,output->handle,range,ImageUsage::Sampled(),e)) return fail();
   if(!Check(c_.f.vkEndCommandBuffer(command_),"End game frame",e) || !Check(c_.f.vkResetFences(c_.device,1,&fence_),"Reset game fence",e)) return fail();
   VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};submit.commandBufferCount=1;submit.pCommandBuffers=&command_;
-  if(!Check(c_.f.vkQueueSubmit(c_.graphics_queue,1,&submit,fence_),"Submit game frame",e)) return fail();
+  const auto submit_started=std::chrono::steady_clock::now();
+  std::chrono::steady_clock::time_point queue_ready;
+  {
+    std::lock_guard lock(queue_mutex_);
+    queue_ready=std::chrono::steady_clock::now();
+    if(!Check(c_.f.vkQueueSubmit(c_.graphics_queue,1,&submit,fence_),"Submit game frame",e)) return fail();
+  }
   submitted_=true;
   if(serial_==1 || std::chrono::steady_clock::now()-cache_checkpoint_>=std::chrono::seconds(5)) {
     Error cache_error;
@@ -86,7 +95,7 @@ bool GameFrame::Enqueue(guest::RenderPacket&& packet,std::shared_ptr<TextureReso
   const auto finished=std::chrono::steady_clock::now();
   auto ms=[](auto a,auto b) {return std::chrono::duration_cast<std::chrono::milliseconds>(b-a).count();};
   if(serial_==1 || serial_%120==0 || ms(started,finished)>100) {
-    auto stats=renderer_.Stats();c_.Log("Submitted native Vulkan frame="+std::to_string(serial_)+", draws="+std::to_string(stats.draws)+", pending="+std::to_string(stats.pending)+", failed="+std::to_string(stats.failed)+", shaders_ms="+std::to_string(ms(started,shaders_ready))+", fence_ms="+std::to_string(ms(shaders_ready,fence_ready))+", queue_ms="+std::to_string(ms(fence_ready,queue_ready))+", record_submit_ms="+std::to_string(ms(queue_ready,finished))+", packets="+std::to_string(packets_.size()));
+    auto stats=renderer_.Stats();c_.Log("Submitted native Vulkan frame="+std::to_string(serial_)+", draws="+std::to_string(stats.draws)+", pending="+std::to_string(stats.pending)+", failed="+std::to_string(stats.failed)+", shaders_ms="+std::to_string(ms(started,shaders_ready))+", fence_ms="+std::to_string(ms(shaders_ready,fence_ready))+", queue_ms="+std::to_string(ms(submit_started,queue_ready))+", record_submit_ms="+std::to_string(ms(record_started,submit_started)+ms(queue_ready,finished))+", packets="+std::to_string(packets_.size()));
   }
   packets_.clear();return true;
 }
