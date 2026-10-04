@@ -46,3 +46,40 @@ SR_TEST(shader_service_owns_source_deduplicates_and_reports_process_failure) {
   }
   auto job=config.cache/"runtime_requests"/std::to_string(key);std::filesystem::remove(job/"shader.vs.bin");std::filesystem::remove(job/"result.bin");std::filesystem::remove(job);std::filesystem::remove(config.cache/"runtime_requests");std::filesystem::remove(config.cache);
 }
+SR_TEST(shader_service_compiles_distinct_requests_concurrently_when_configured) {
+  VulkanShaderConfig config;config.cache=std::filesystem::temp_directory_path()/std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+  config.compiler_workers=2;
+  std::atomic<uint32_t> entered=0;std::atomic<bool> release=false;
+  {
+    VulkanShaderService service(config,[&](auto args,auto,std::stop_token token,std::string&) {
+      ++entered;
+      while(!release && !token.stop_requested()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      auto bytes=Wire();std::ofstream file(args.back(),std::ios::binary);file.write(reinterpret_cast<const char*>(bytes.data()),bytes.size());return true;
+    });
+    uint8_t a=1,b=2;auto first=service.Request({&a,1},ShaderStage::kVertex),second=service.Request({&b,1},ShaderStage::kVertex);
+    auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+    while(entered<2 && std::chrono::steady_clock::now()<deadline) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    const bool concurrent=entered==2;release=true;SR_CHECK(concurrent);
+    deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+    while((service.Poll(first).status==ShaderPoll::pending || service.Poll(second).status==ShaderPoll::pending) && std::chrono::steady_clock::now()<deadline) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    SR_CHECK(service.Poll(first).status==ShaderPoll::ready);SR_CHECK(service.Poll(second).status==ShaderPoll::ready);
+  }
+  std::filesystem::remove_all(config.cache); // Unique temporary test directory.
+}
+SR_TEST(shader_service_cancels_all_inflight_workers_on_shutdown) {
+  VulkanShaderConfig config;config.cache=std::filesystem::temp_directory_path()/std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());config.compiler_workers=2;
+  std::atomic<uint32_t> entered=0,cancelled=0;
+  {
+    VulkanShaderService service(config,[&](auto,auto,std::stop_token token,std::string&) {
+      ++entered;
+      while(!token.stop_requested()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      ++cancelled;return false;
+    });
+    uint8_t a=1,b=2;service.Request({&a,1},ShaderStage::kVertex);service.Request({&b,1},ShaderStage::kVertex);
+    auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+    while(entered<2 && std::chrono::steady_clock::now()<deadline) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    SR_CHECK_EQ(entered.load(),2u);
+  }
+  SR_CHECK_EQ(cancelled.load(),2u);
+  std::filesystem::remove_all(config.cache);
+}

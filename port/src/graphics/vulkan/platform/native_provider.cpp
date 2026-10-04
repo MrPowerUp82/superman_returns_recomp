@@ -40,6 +40,7 @@ struct Host {
     VkPhysicalDeviceFeatures features{};features.shaderSampledImageArrayDynamicIndexing=features.shaderStorageBufferArrayDynamicIndexing=features.independentBlend=features.shaderClipDistance=features.shaderCullDistance=features.robustBufferAccess=VK_TRUE;
     if(!context.OpenDevice(surface,config.gpu_uuid,e,&features,true)) return false;
     if(!(context.selected.queues[context.graphics_family].flags&VK_QUEUE_COMPUTE_BIT)) {e={"Game queue",VK_ERROR_FEATURE_NOT_PRESENT,"Graphics queue must also support compute resolves"};return false;}
+    config.shaders.compiler_workers=2;
     shaders=std::make_unique<shaders::VulkanShaderService>(config.shaders,WindowsShaderProcess());
     ShaderLookup lookup=[this](const guest::ShaderCapture& capture) {auto key=shaders->Request(capture.container,capture.vertex?shaders::ShaderStage::kVertex:shaders::ShaderStage::kPixel);return shaders->Poll(key);};
     TextureDecoder decode=[](const guest::TextureCapture& capture,guest::LinearTexture& result,std::string& error){return guest::DecodeTextureLayout(capture.fetch,capture.memory,result,error);};

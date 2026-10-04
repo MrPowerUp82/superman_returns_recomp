@@ -51,13 +51,16 @@ std::vector<std::string> ValidateShaderPair(const CompiledShader& vs,const Compi
 }
 struct VulkanShaderService::Impl {
   struct Job {ShaderStage stage;std::vector<uint8_t> container;ShaderResult result;};
-  VulkanShaderConfig config;ShaderProcess process;mutable std::mutex mutex;std::condition_variable cv;std::map<ShaderKey,Job> jobs;std::deque<ShaderKey> queue;bool stop=false;std::jthread thread;
-  Impl(VulkanShaderConfig c,ShaderProcess p):config(std::move(c)),process(std::move(p)),thread([this](std::stop_token token){Run(token);}) {}
-  ~Impl() {{std::lock_guard lock(mutex);stop=true;}thread.request_stop();cv.notify_all();thread.join();}
+  VulkanShaderConfig config;ShaderProcess process;mutable std::mutex mutex;std::condition_variable cv;std::map<ShaderKey,Job> jobs;std::deque<ShaderKey> queue;bool stop=false;std::vector<std::jthread> threads;
+  Impl(VulkanShaderConfig c,ShaderProcess p):config(std::move(c)),process(std::move(p)) {
+    for(uint32_t i=0;i<std::clamp(config.compiler_workers,1u,4u);++i) threads.emplace_back([this](std::stop_token token){Run(token);});
+  }
+  ~Impl() {{std::lock_guard lock(mutex);stop=true;}for(auto& thread:threads) thread.request_stop();cv.notify_all();for(auto& thread:threads) thread.join();}
   void Run(std::stop_token token) {
+    std::stop_callback wake(token,[this] {cv.notify_all();});
     for(;;) {
       ShaderKey key;ShaderStage stage;std::vector<uint8_t> container;
-      {std::unique_lock lock(mutex);cv.wait(lock,[&]{return stop || !queue.empty();});if(stop) return;key=queue.front();queue.pop_front();auto& j=jobs.at(key);stage=j.stage;container=j.container;}
+      {std::unique_lock lock(mutex);cv.wait(lock,[&]{return stop || token.stop_requested() || !queue.empty();});if(stop || token.stop_requested()) return;key=queue.front();queue.pop_front();auto& j=jobs.at(key);stage=j.stage;container=j.container;}
       ShaderResult result;result.status=ShaderPoll::failed;
       try {
         auto directory=config.cache/"runtime_requests"/std::to_string(key);std::filesystem::create_directories(directory);
