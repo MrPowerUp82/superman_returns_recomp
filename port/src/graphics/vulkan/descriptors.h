@@ -7,6 +7,8 @@ enum class TextureDimension:uint32_t {k2D,k3D,kCube};
 constexpr guest::ResourceId DummyTexture(TextureDimension d) {return UINT64_MAX-uint32_t(d);}
 inline constexpr guest::ResourceId DummyBuffer=UINT64_MAX-3;
 inline constexpr guest::ResourceId InlineBufferBase=uint64_t(1)<<63;
+inline constexpr guest::ResourceId ExpandedIndexBufferBase=(uint64_t(1)<<63)|(uint64_t(1)<<62);
+inline constexpr guest::ResourceId DescriptorConstantBufferBase=(uint64_t(1)<<63)|(uint64_t(1)<<61);
 struct TextureBindingRequest {
   uint32_t slot;
   guest::ResourceId resource;

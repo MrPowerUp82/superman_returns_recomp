@@ -60,7 +60,16 @@ bool DepthResolver::RecordAlias(VkCommandBuffer command,TargetId destination,con
   auto kind=[](uint32_t f)->int {switch(f) {case 0:case 1:return 0;case 2:case 10:return 1;case 3:case 12:return 2;default:return -1;}};
   int source_kind=kind(src->description.geometry.format),destination_kind=kind(dst->description.geometry.format);
   auto& g=dst->description.geometry;
-  if(src==dst || src->description.depth || dst->description.depth || source_kind<0 || destination_kind<0 || src->description.geometry.width!=g.width || src->description.geometry.height!=g.height) return Fail(e,"Unsupported EDRAM reinterpretation formats or dimensions");
+  if(src==dst || src->description.depth || dst->description.depth || source_kind<0 || destination_kind<0 || src->description.geometry.width!=g.width || src->description.geometry.height!=g.height) {
+    if(plan.newest_other) {
+      VkImageSubresourceRange range{dst->aspects,0,1,0,1};if(!state.Transition(command,dst->image,range,ImageUsage::TransferDestination(),e)) return false;
+      if(dst->description.depth) {VkClearDepthStencilValue value{1,0};c_.f.vkCmdClearDepthStencilImage(command,dst->image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,&value,1,&range);}
+      else {VkClearColorValue value{};value.float32[3]=options.clear_alpha;c_.f.vkCmdClearColorImage(command,dst->image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,&value,1,&range);}
+      if(!state.Transition(command,dst->image,range,dst->description.depth?ImageUsage::DepthAttachment():ImageUsage::ColorAttachment(),e)) return false;
+      targets.MarkWritten(destination);
+    }
+    e={};return true;
+  }
   uint64_t bytes=uint64_t(g.width)*g.height*(destination_kind==2?8:4);
   auto job=std::make_shared<DepthJob>();job->context=&c_;job->source=src;job->destination=dst;job->scratch=resources.ResolveScratch(bytes,e);if(!job->scratch) return false;
   if((g.width+7)/8>c_.properties.limits.maxComputeWorkGroupCount[0] || (g.height+7)/8>c_.properties.limits.maxComputeWorkGroupCount[1]) return Fail(e,"Alias dispatch exceeds device limits");

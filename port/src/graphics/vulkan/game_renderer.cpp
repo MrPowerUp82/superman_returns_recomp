@@ -113,7 +113,7 @@ bool GameRenderer::Draw(const guest::DrawPacket& draw,VkCommandBuffer command,Er
   if(draw.indexed && draw.indices.plan.key && !Upload(draw.indices,true,draw.command_serial,e)) return false;
   if(draw.indexed && !draw.indices.plan.key && draw.expanded_indices.empty() && draw.count) return Fail(e,"Indexed draw has no captured indices");
   auto index_id=draw.indices.plan.key;
-  if(!draw.expanded_indices.empty()) {index_id=InlineBufferBase|(uint64_t(1)<<62)|draw.command_serial;if(!resources_.UploadBuffer(index_id,std::as_bytes(std::span(draw.expanded_indices)),draw.command_serial,e)) return false;transient_buffers_[serial_].push_back(index_id);}
+  if(!draw.expanded_indices.empty()) {index_id=ExpandedIndexBufferBase|draw.command_serial;if(!resources_.UploadBuffer(index_id,std::as_bytes(std::span(draw.expanded_indices)),draw.command_serial,e)) return false;transient_buffers_[serial_].push_back(index_id);}
   if(!draw.count) {e={};return true;}
   if(!draw.vertex_shader || !shaders_) return Fail(e,"Captured vertex shader/lookup absent");
   auto vs=shaders_(*draw.vertex_shader);shaders::ShaderResult ps{shaders::ShaderPoll::ready,{},{}};

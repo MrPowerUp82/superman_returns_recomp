@@ -51,7 +51,7 @@ std::shared_ptr<DescriptorDraw> DescriptorStore::Prepare(const DrawBindings& bin
   std::array<VkDescriptorImageInfo,32> sampler_info{};
   std::array<std::span<const std::byte>,3> bytes{std::as_bytes(std::span(bindings.constants.vs)),std::as_bytes(std::span(bindings.constants.ps)),std::as_bytes(std::span(bindings.constants.shared))};
   for(uint32_t i=0;i<3;++i) {
-    uint64_t id=0xc000000000000000ull|++constant_serial_;
+    uint64_t id=DescriptorConstantBufferBase|++constant_serial_;
     if(!store.UploadHostBuffer(id,bytes[i],1,e)) return {};
     auto buffer=store.Buffer(id,e);store.ForgetBuffer(id);
     if(!buffer) return {};

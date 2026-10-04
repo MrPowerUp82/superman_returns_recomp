@@ -67,3 +67,19 @@ SR_TEST(draw_bindings_gamma_matches_reference_rgb_sign_rule) {
   packet.texture_fetch[0][0]|=(3<<4)|(3<<6);
   bindings=BuildBindings(packet,e);SR_CHECK_EQ(bindings.texture_indices[0]&0x80000000u,0x80000000u);
 }
+SR_TEST(resource_id_bases_do_not_collide) {
+  SR_CHECK(InlineBufferBase != ExpandedIndexBufferBase);
+  SR_CHECK(InlineBufferBase != DescriptorConstantBufferBase);
+  SR_CHECK(ExpandedIndexBufferBase != DescriptorConstantBufferBase);
+  std::array<uint32_t,6> fetch{2,0,0,0,0,1<<9};
+  SR_CHECK_EQ(TextureResourceId(fetch) & InlineBufferBase, 0ull);
+  for(uint64_t serial : {1ull, 39ull, 1000ull, 1000000ull}) {
+    auto inline_id = InlineBufferBase | serial;
+    auto expanded_id = ExpandedIndexBufferBase | serial;
+    auto constant_id = DescriptorConstantBufferBase | serial;
+    SR_CHECK(inline_id != expanded_id);
+    SR_CHECK(inline_id != constant_id);
+    SR_CHECK(expanded_id != constant_id);
+  }
+}
+
