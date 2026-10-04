@@ -2868,11 +2868,14 @@ uint32_t Renderer::GetTextureSrvIndex(uint8_t* base, const uint32_t fetch[6]) {
     TextureEntry& entry = it->second;
     if (entry.checked_frame != frame_count_ && entry.guest_size) {
       entry.checked_frame = frame_count_;
-      // With write watches: only after a guest write to its pages. Otherwise
-      // small textures are revalidated every frame, large ones every 30.
-      bool check = texture_watch_
-                       ? TextureWrittenSince(entry.guest_base, entry.guest_size, entry.watch_seq)
-                       : entry.guest_size <= (256u << 10) || frame_count_ - entry.hashed_frame >= 30;
+      // With write watches: guest physical writes trigger a check immediately.
+      // Dynamic movie and UI textures (up to 4MB) are revalidated each frame
+      // because guest virtual CPU writes (video codecs) bypass physical write watches.
+      // Larger unwatched textures are checked every 30 frames.
+      bool check = entry.guest_size <= (4096u << 10) ||
+                   (texture_watch_
+                        ? TextureWrittenSince(entry.guest_base, entry.guest_size, entry.watch_seq)
+                        : frame_count_ - entry.hashed_frame >= 30);
       if (REXCVAR_GET(sr_native_debug_texture_format) >= 0 &&
           int32_t(fetch[1] & 0x3F) == REXCVAR_GET(sr_native_debug_texture_format)) {
         static int logged = 0;
@@ -5969,9 +5972,9 @@ void Renderer::CaptureTextures(uint8_t* base) {
       if(entry.checked_frame!=front_frame_) {
         uint64_t total=0;
         for(const auto& range:entry.snapshot->ranges) total+=range.length;
-        // Verify small dynamic movie/UI textures each frame. Without access
-        // callbacks, every texture needs verification at its first use.
-        if(total<=256u*1024 || !texture_watch_) dirty=true;
+        // Verify dynamic movie and UI textures (up to 4MB) each frame. Guest virtual
+        // writes (e.g. video decoder YUV planes) bypass physical memory write watches.
+        if(total<=4096u*1024 || !texture_watch_) dirty=true;
       }
     }
     entry.checked_frame=front_frame_;
