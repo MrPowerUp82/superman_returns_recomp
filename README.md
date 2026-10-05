@@ -14,7 +14,7 @@ O jogo compila, carrega os arquivos `.AST`, renderiza via D3D12 (plugin `xenos`)
 
 Em 2026-10-02, o renderer `native` (Direct3D 12) também chegou ao início da gameplay: Superman, rua, prédios, HUD e minimapa aparecem, e o movimento com teclado foi verificado. Foram corrigidos o layout do viewport e o hook de clear com cor float4. Ainda há geometria deformada, iluminação escura e pipelines ausentes; a imagem não está validada contra o Xenos. Detalhes em [validação da gameplay nativa](docs/native-gameplay-validation.md).
 
-Em 2026-10-05 o renderer nativo ganhou um segundo backend, **Vulkan** (`--sr_native_api=vulkan`), que o launcher passou a oferecer como padrão. Ele é experimental: a validação de cenas ainda está em andamento ([`docs/vulkan-m3.md`](docs/vulkan-m3.md)) e, em GPU integrada, o D3D12 nativo é bem mais rápido (números em [Desempenho](#desempenho)). Nesse dia também foram corrigidos dois problemas que afetavam o D3D12: a queda para o backend Xenos (9–11 FPS) quando o launcher mandava uma GPU em branco, e a tela preta com som causada por uma biblioteca de pré-shaders incompleta (veja [Solução de problemas](#solução-de-problemas)).
+Em 2026-10-05 o renderer nativo ganhou um segundo backend, **Vulkan** (`--sr_native_api=vulkan`), que o launcher passou a oferecer como padrão. Ele é experimental: a validação de cenas ainda está em andamento ([`docs/vulkan-m3.md`](docs/vulkan-m3.md)) e, em GPU integrada, o D3D12 nativo ainda é mais rápido (~28–30 FPS contra ~14–16 FPS do Vulkan após as otimizações de sincronização e descritores; números em [Desempenho](#desempenho)). Nesse dia também foram corrigidos dois problemas que afetavam o D3D12: a queda para o backend Xenos (9–11 FPS) quando o launcher mandava uma GPU em branco, e a tela preta com som causada por uma biblioteca de pré-shaders incompleta (veja [Solução de problemas](#solução-de-problemas)).
 
 ### Correções específicas do jogo
 
@@ -60,7 +60,7 @@ O renderer `native` (o padrão) é muito mais leve que a emulação do Xenos. Me
 | Renderer | Parado | Andando | Observação |
 | --- | --- | --- | --- |
 | `native`, Direct3D 12 | ~30 FPS | ~30 FPS | no limite do jogo; GPU a ~60–90% |
-| `native`, Vulkan | ~7,7 FPS | ~8,0 FPS | experimental; GPU a ~35%, o gargalo é a CPU gravando cada quadro |
+| `native`, Vulkan | ~14,3 FPS | ~15,5 FPS | experimental; GPU a ~57–60%, o gargalo é a CPU gravando cada quadro (~60 ms) |
 
 O backend `xenos` é o da tabela acima e só roda quando você o escolhe. Se o D3D12 nativo ficar em 9–11 FPS com a GPU a 100%, o jogo provavelmente está no backend Xenos: confira o log (veja [Solução de problemas](#solução-de-problemas)).
 

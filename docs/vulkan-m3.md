@@ -129,6 +129,23 @@ after a submitted frame; clean teardown also saves pending changes. This is
 necessary because the SDK's normal window-close path hard-exits the process.
 Cache failures are logged and do not substitute missing pipelines.
 
+### FPS parity with D3D12 (2026-10-05, Intel UHD, windowed 1280x720, 30 FPS limit)
+
+Three CPU costs were removed, each measured with `tools/bench_api.ps1` and `SR_VULKAN_PROFILE=1`:
+
+| Step | Idle FPS | Walking FPS | Guest-thread textures_ms | record / fence / queue (ms) |
+| --- | --- | --- | --- | --- |
+| baseline (`par_base`) | 7.7 – 8.3 | 8.0 – 10.1 | 37 – 46 | 38 / 27 – 34 / 22 – 36 |
+| a: texture hash in place (`par_a`) | 10.5 | 10.6 | 22 – 23 | 63 – 67 / 16 – 17 / 6 – 10 |
+| b: waits outside the queue mutex (`par_b`) | 16.3 | 13.7 | 23 – 24 | 60 – 63 / 3.4 – 3.8 / 0.0 |
+| c: dynamic offsets for constants (`par_c`) | 14.3 | 15.5 | 21 – 24 | 57 – 63 / 2.7 – 2.9 / 0.0 |
+| final (`par_final`) | 14.3 | 15.5 | 21 – 24 | 57 – 63 / 2.7 – 2.9 / 0.0 |
+| D3D12 (`par_final_d3d12`) | 28.7 | 28.3 | n/a | n/a |
+
+- Texture revalidation hashes guest memory in place (`HashGuestRange`, SEH-guarded); only a changed texture is copied.
+- `FrameLoop::DrawGame` takes the queue mutex only around retire, recording, submit and present, so a vblank wait no longer blocks the game's submissions.
+- Draw constants (VS, PS, shared: one contiguous 12 KiB block) are bound through `STORAGE_BUFFER_DYNAMIC` descriptors, one set per arena chunk, instead of a descriptor set per draw.
+
 ## Recorded checks
 
 On 2026-10-04, using the RTX 2060, the native suite passed 89 tests, the Vulkan

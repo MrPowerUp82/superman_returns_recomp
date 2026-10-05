@@ -163,3 +163,18 @@ thread do jogo ainda pode passar de 33 ms.
   passo a.
 - O GPU real por quadro, com as esperas removidas, ainda cabe em 33 ms na Intel UHD?
   Só se sabe depois do passo b.
+
+## Resultado
+
+Medições registradas na Intel UHD (modo janela 1280x720, limite de 30 FPS, gameplay):
+
+| Passo | Parado (FPS) | Andando (FPS) | `textures_ms` | `record` / `fence` / `queue` (ms) |
+| --- | --- | --- | --- | --- |
+| Linha de base (`par_base`) | 7,7 – 8,3 | 8,0 – 10,1 | 37 – 46 | 38 / 27 – 34 / 22 – 36 |
+| a: hash no lugar (`par_a3`) | 10,5 | 10,6 | 22 – 23 | 63 – 67 / 16 – 17 / 6 – 10 |
+| b: esperas fora do mutex (`par_b`) | 16,3 | 13,7 | 23 – 24 | 60 – 63 / 3,4 – 3,8 / 0,0 |
+| c: offsets dinâmicos (`par_c`) | 14,3 | 15,5 | 21 – 24 | 57 – 63 / 2,7 – 2,9 / 0,0 |
+| Final (HEAD) | 14,3 | 15,5 | 21 – 24 | 57 – 63 / 2,7 – 2,9 / 0,0 |
+| D3D12 (`par_c_d3d12`) | 28,7 | 28,3 | n/a | n/a |
+
+O FPS do Vulkan dobrou em relação à linha de base (~8 para ~15 FPS, ganho principal no passo b ao eliminar contenção de vblank), mas a meta de paridade com o D3D12 (≥ 29 FPS) ainda não foi atingida. O gargalo remanescente é o tempo de CPU na gravação do quadro (`record` ~60 ms) e na verificação de texturas da thread do jogo (`textures_ms` ~22 ms).

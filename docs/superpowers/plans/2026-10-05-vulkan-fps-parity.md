@@ -56,7 +56,7 @@
 **Interfaces:**
 - Produces: `. .\tools\dev_env.ps1` (dot-source), `tools\bench_api.ps1 -Api vulkan|d3d12 -Name <rótulo> [-Profile] [-Exe <caminho>]` e `tools\vulkan_profile_summary.ps1 -Log <arquivo>`. As tarefas seguintes usam os três.
 
-- [ ] **Step 1: Criar `tools/dev_env.ps1`**
+- [x] **Step 1: Criar `tools/dev_env.ps1`**
 
 ```powershell
 # Dot-source: . .\tools\dev_env.ps1
@@ -72,7 +72,7 @@ foreach ($srEnvLine in (cmd /c "`"$srEnvVs\Common7\Tools\VsDevCmd.bat`" -arch=x6
 $env:PATH = "$srEnvRoot\.tools\clang+llvm-23.1.2-x86_64-pc-windows-msvc\bin;$srEnvVs\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin;$srEnvVs\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;$env:PATH"
 ```
 
-- [ ] **Step 2: Criar `tools/bench_api.ps1`**
+- [x] **Step 2: Criar `tools/bench_api.ps1`**
 
 ```powershell
 <#
@@ -104,7 +104,7 @@ if ($Profile) { $env:SR_VULKAN_PROFILE = '1' }
 if ($Profile) { Copy-Item "$root\logs\game.log" "$root\logs\bench_$Name.log" -Force }
 ```
 
-- [ ] **Step 3: Criar `tools/vulkan_profile_summary.ps1`**
+- [x] **Step 3: Criar `tools/vulkan_profile_summary.ps1`**
 
 ```powershell
 # Resume um log do Vulkan gravado com SR_VULKAN_PROFILE=1: as 3 últimas médias por 120 quadros do
@@ -119,12 +119,12 @@ Select-String -Path $Log -Pattern 'native Vulkan capture frame' | Select-Object 
   ForEach-Object { $_.Line -replace '^.*native Vulkan capture ', '' }
 ```
 
-- [ ] **Step 4: Verificar que o ambiente carrega**
+- [x] **Step 4: Verificar que o ambiente carrega**
 
 Run (PowerShell, na raiz do repositório): `. .\tools\dev_env.ps1; clang++ --version; cmake --version; ninja --version`
 Expected: três versões impressas (clang 23.1.2, cmake e ninja), sem erro.
 
-- [ ] **Step 5: Linha de base do Vulkan e do D3D12**
+- [x] **Step 5: Linha de base do Vulkan e do D3D12**
 
 O jogo abre sozinho e o script manda teclas: não mexer no teclado nem no mouse durante ~3 minutos por execução.
 
@@ -135,7 +135,7 @@ O jogo abre sozinho e o script manda teclas: não mexer no teclado nem no mouse 
 ```
 Expected: Vulkan em torno de 7,7 a 8,3 FPS parado e 8,0 a 10,1 andando (`logs\bench_results.csv`, linhas `par_base`); D3D12 em 29,5 a 30. O resumo mostra `record` ≈ 38, `fence` ≈ 27 a 34, `queue` ≈ 22 a 36 e `textures_ms` ≈ 37 a 46. Se os números forem bem diferentes, parar e investigar antes de seguir.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add tools/dev_env.ps1 tools/bench_api.ps1 tools/vulkan_profile_summary.ps1
@@ -156,7 +156,7 @@ git commit -m "tools: dev environment, per-API bench wrapper and Vulkan profile 
 - Produces: `superman_returns::native::HashGuestRange(const void* source, uint32_t length, uint64_t seed, Hash hash, uint64_t& out) -> bool`, em `guest_hash.h`. `hash` é qualquer chamável `uint64_t(const void*, size_t, uint64_t seed)`. Devolve `false` (sem tocar em `out`) para ponteiro nulo, tamanho 0, tamanho acima de `0x20000000` ou página ilegível.
 - Produces: `GuestSource(uint8_t* base, uint32_t address, uint32_t length) -> const uint8_t*` no namespace anônimo de `native_renderer.cpp` (nullptr se fora do espaço do jogo).
 
-- [ ] **Step 1: Escrever o teste que falha**
+- [x] **Step 1: Escrever o teste que falha**
 
 Criar `tests/native/test_guest_hash.cpp`:
 
@@ -216,7 +216,7 @@ SR_TEST(guest_hash_fails_on_inaccessible_partial_and_empty_ranges_without_touchi
 
 Em `tests/native/CMakeLists.txt`, logo depois da linha `    test_checked_guest_memory.cpp`, acrescentar a linha `    test_guest_hash.cpp`.
 
-- [ ] **Step 2: Rodar e ver falhar**
+- [x] **Step 2: Rodar e ver falhar**
 
 ```powershell
 . .\tools\dev_env.ps1
@@ -225,7 +225,7 @@ cmake --build build/tests-native
 ```
 Expected: FALHA de compilação em `test_guest_hash.cpp` com `'../../port/src/native_renderer/guest_hash.h' file not found`.
 
-- [ ] **Step 3: Implementar o helper**
+- [x] **Step 3: Implementar o helper**
 
 Criar `port/src/native_renderer/guest_hash.h`:
 
@@ -260,7 +260,7 @@ bool HashGuestRange(const void* source, uint32_t length, uint64_t seed, Hash has
 }  // namespace superman_returns::native
 ```
 
-- [ ] **Step 4: Rodar e ver passar**
+- [x] **Step 4: Rodar e ver passar**
 
 ```powershell
 cmake --build build/tests-native
@@ -268,7 +268,7 @@ cmake --build build/tests-native
 ```
 Expected: `PASS guest_hash_in_place_matches_hashing_a_copy`, `PASS guest_hash_chains_the_seed_across_ranges`, `PASS guest_hash_fails_on_inaccessible_partial_and_empty_ranges_without_touching_out` e a linha final `N tests, 0 failed checks`. (Verificado ao escrever o plano: `clang++ -std=c++20 -Wall -Wextra` aceita `__try` sem flags extras e os três testes passam, inclusive o da página `PAGE_NOACCESS`.)
 
-- [ ] **Step 5: Usar o helper na captura**
+- [x] **Step 5: Usar o helper na captura**
 
 Em `port/src/native_renderer/native_renderer.cpp`:
 
@@ -323,7 +323,7 @@ por:
 
 O `read_ms` do log passa a ser sempre 0 (a leitura virou parte do `hash_ms`); a cópia só aparece em `copy_ms`.
 
-- [ ] **Step 6: Compilar o jogo (configuração `dist`)**
+- [x] **Step 6: Compilar o jogo (configuração `dist`)**
 
 ```powershell
 $env:SR_BUILD_DIR = "$PWD\port\out\build\win-amd64-dist"; $env:SR_EMBED_SHADERS = 'OFF'; $env:SR_BUILD_LAUNCHER = 'OFF'
@@ -331,7 +331,7 @@ cmd /c "$PWD\build.cmd"
 ```
 Expected: termina com `Linking CXX executable superman_returns.exe` e exit code 0. O `__try` não precisa de flag extra com o clang do projeto.
 
-- [ ] **Step 7: Medir**
+- [x] **Step 7: Medir**
 
 ```powershell
 .\tools\bench_api.ps1 -Api vulkan -Name par_a -Profile
@@ -339,11 +339,11 @@ Expected: termina com `Linking CXX executable superman_returns.exe` e exit code 
 ```
 Expected: `textures_ms` cai de 37 a 46 para cerca de 10 a 15; `read_ms=0`; `hash_ms` sobe para a faixa de 8 a 14; `changed` e `new` continuam em 0 ou 1; o FPS sobe em relação a `par_base`. Registrar os números (`logs\bench_results.csv`, linhas `par_a`). Se os dois FPS passarem de 29, pular para a Task 5.
 
-- [ ] **Step 8: Conferir a imagem**
+- [x] **Step 8: Conferir a imagem**
 
 Abrir `logs\bench_par_base_idle.png` e `logs\bench_par_a_idle.png` (ferramenta Read). Expected: a mesma cena de gameplay (Superman, rua, HUD), sem texturas corrompidas, pretas ou trocadas. Qualquer diferença visível = parar e investigar.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 graphify update .
@@ -364,7 +364,7 @@ git commit -m "perf(native): hash textures in place instead of copying them for 
 **Interfaces:**
 - Produces: `FrameWork::queue_mutex` (`std::mutex*`, padrão `nullptr`). Com mutex, `DrawGame` o segura só em `retire`, `prepare`/gravação, `vkQueueSubmit` e `vkQueuePresentKHR`, nunca em `vkWaitForFences` nem `vkAcquireNextImageKHR`. Sem mutex o comportamento é o de hoje.
 
-- [ ] **Step 1: Escrever o teste que falha**
+- [x] **Step 1: Escrever o teste que falha**
 
 Em `tests/vulkan/test_frame_loop.cpp`:
 
@@ -424,7 +424,7 @@ SR_TEST(game_draw_waits_and_acquires_outside_the_queue_mutex_and_submits_under_i
 }
 ```
 
-- [ ] **Step 2: Rodar e ver falhar**
+- [x] **Step 2: Rodar e ver falhar**
 
 ```powershell
 . .\tools\dev_env.ps1
@@ -432,7 +432,7 @@ cmake --build build/tests-vulkan
 ```
 Expected: FALHA de compilação: `no member named 'queue_mutex' in 'superman_returns::graphics::vulkan::FrameWork'`.
 
-- [ ] **Step 3: Implementar**
+- [x] **Step 3: Implementar**
 
 Em `port/src/graphics/vulkan/frame_loop.h`:
 - depois de `#include <array>` acrescentar `#include <mutex>`;
@@ -502,7 +502,7 @@ Em `port/src/graphics/vulkan/platform/native_provider.cpp`, em `PaintAndPresentI
 ```
 (Conferir antes com `grep -c "FrameWork work;" port/src/graphics/vulkan/platform/native_provider.cpp`: tem que dar 1.)
 
-- [ ] **Step 4: Rodar e ver passar**
+- [x] **Step 4: Rodar e ver passar**
 
 ```powershell
 cmake --build build/tests-vulkan
@@ -510,7 +510,7 @@ cmake --build build/tests-vulkan
 ```
 Expected: `PASS game_draw_waits_and_acquires_outside_the_queue_mutex_and_submits_under_it` e todos os testes antigos de frame loop continuam `PASS`; a linha final `0 failed checks`.
 
-- [ ] **Step 5: Regressão de GPU**
+- [x] **Step 5: Regressão de GPU**
 
 ```powershell
 $gpu = '.\build\tests-vulkan\sr_vulkan_resources_test.exe'
@@ -520,7 +520,7 @@ foreach ($fixture in 'targets','pipeline-cache','game-record','game-record-merge
 ```
 Expected: nenhuma linha `FALHOU`. (O `sr_vulkan_resources_test.exe` precisa ser recompilado antes com `cmake --build build/tests-vulkan`, já feito no Step 4.)
 
-- [ ] **Step 6: Compilar o jogo e medir**
+- [x] **Step 6: Compilar o jogo e medir**
 
 ```powershell
 $env:SR_BUILD_DIR = "$PWD\port\out\build\win-amd64-dist"; $env:SR_EMBED_SHADERS = 'OFF'; $env:SR_BUILD_LAUNCHER = 'OFF'
@@ -530,7 +530,7 @@ cmd /c "$PWD\build.cmd"
 ```
 Expected: `queue` e `fence` caem de ~25 a 35 ms para poucos ms; `swap_enqueue` no perfil do worker cai; o FPS sobe em relação a `par_a`. Registrar os números (`par_b`). Conferir a imagem como no Task 1 Step 8, com `logs\bench_par_b_idle.png`. Se os dois FPS passarem de 29, pular para a Task 5. Rodar também `.\tools\bench_api.ps1 -Api d3d12 -Name par_b_d3d12` e confirmar que continua em ~30.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 graphify update .
@@ -554,7 +554,7 @@ git commit -m "perf(vulkan): wait for fences and swapchain images outside the qu
 - Alinhamento: `UploadTransient` alinha o bloco a `lcm(max(16, minStorageBufferOffsetAlignment), nonCoherentAtomSize)`, então o offset dinâmico é válido; os offsets estáticos dos três bindings (0, 4096 e 8192 bytes) são múltiplos de qualquer alinhamento permitido (no máximo 256).
 - Produces: `DescriptorDraw::dynamic_offsets` (`std::array<uint32_t,3>`, os três iguais ao offset do bloco). Todo `vkCmdBindDescriptorSets` com `DescriptorDraw::sets` passa a usar `uint32_t(draw->dynamic_offsets.size())` e `draw->dynamic_offsets.data()`. O set 0 do layout do jogo passa a ser `VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC` (3 bindings; o Vulkan garante pelo menos 4 por set).
 
-- [ ] **Step 1: Escrever o teste que falha**
+- [x] **Step 1: Escrever o teste que falha**
 
 Acrescentar no fim de `tests/vulkan/test_device_requirements.cpp`:
 
@@ -580,7 +580,7 @@ SR_TEST(game_layout_binds_the_constants_with_dynamic_offsets_inside_the_guarante
 }
 ```
 
-- [ ] **Step 2: Rodar e ver falhar**
+- [x] **Step 2: Rodar e ver falhar**
 
 ```powershell
 . .\tools\dev_env.ps1
@@ -589,7 +589,7 @@ cmake --build build/tests-vulkan
 ```
 Expected: `FAIL game_layout_binds_the_constants_with_dynamic_offsets_inside_the_guaranteed_limits` (o tipo do set 0 ainda é `STORAGE_BUFFER`).
 
-- [ ] **Step 3: Mudar o layout**
+- [x] **Step 3: Mudar o layout**
 
 Em `port/src/graphics/vulkan/device_requirements.cpp`:
 
@@ -617,7 +617,7 @@ por
     case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:c.storage+=b.count;break;
 ```
 
-- [ ] **Step 4: Trocar o set de constantes por draw**
+- [x] **Step 4: Trocar o set de constantes por draw**
 
 Em `port/src/graphics/vulkan/descriptor_sets.h`:
 
@@ -748,7 +748,7 @@ Em `tests/vulkan/shader_contract_integration.cpp`:
 - `                              pipeline_layout, 0, 4, sets.data(), 0, nullptr);` vira `                              pipeline_layout, 0, 4, sets.data(), dynamic_count, dynamic_offsets.data());`
 - depois de `          fixture.sets=sets->sets;` acrescentar `          fixture.dynamic_offsets=sets->dynamic_offsets;fixture.dynamic_count=uint32_t(sets->dynamic_offsets.size());`
 
-- [ ] **Step 5: Rodar e ver passar**
+- [x] **Step 5: Rodar e ver passar**
 
 ```powershell
 cmake --build build/tests-vulkan
@@ -757,12 +757,12 @@ cmake --build build/tests-vulkan
 ```
 Expected: `PASS game_layout_binds_the_constants_with_dynamic_offsets_inside_the_guaranteed_limits`, `0 failed checks`, e o contrato de produção sai com código 0, sem erro de validação do Vulkan.
 
-- [ ] **Step 6: Regressão de GPU**
+- [x] **Step 6: Regressão de GPU**
 
 Rodar o mesmo laço do Task 2 Step 5 (os 15 fixtures de `sr_vulkan_resources_test.exe`).
 Expected: nenhuma linha `FALHOU` e nenhum erro de validação impresso (`validation_errors` = 0 em cada fixture).
 
-- [ ] **Step 7: Compilar o jogo e medir**
+- [x] **Step 7: Compilar o jogo e medir**
 
 ```powershell
 $env:SR_BUILD_DIR = "$PWD\port\out\build\win-amd64-dist"; $env:SR_EMBED_SHADERS = 'OFF'; $env:SR_BUILD_LAUNCHER = 'OFF'
@@ -772,7 +772,7 @@ cmd /c "$PWD\build.cmd"
 ```
 Expected: `descriptors` cai de 13 a 18 ms para algo perto de 5 ms; `record` cai de ~38 para ~28 ou menos; o FPS sobe em relação a `par_b`. Registrar (`par_c`) e conferir `logs\bench_par_c_idle.png` contra `par_base`. Se os dois FPS passarem de 29, pular para a Task 5.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 graphify update .
@@ -971,7 +971,7 @@ git commit -m "perf(vulkan): reuse the shared descriptor sets of the previous dr
 **Interfaces:**
 - Consumes: as linhas `par_base`, `par_a`, `par_b`, `par_c` (e `par_memo`, se existir) de `logs\bench_results.csv`.
 
-- [ ] **Step 1: Medição final nas duas APIs**
+- [x] **Step 1: Medição final nas duas APIs**
 
 ```powershell
 .\tools\bench_api.ps1 -Api vulkan -Name par_final -Profile
@@ -980,7 +980,7 @@ git commit -m "perf(vulkan): reuse the shared descriptor sets of the previous dr
 ```
 Expected: Vulkan com média ≥ 29 FPS parado e andando; D3D12 em ~30. Se o Vulkan ainda estiver abaixo, **parar e relatar os números ao autor** antes de qualquer outra mudança (ver Global Constraints).
 
-- [ ] **Step 2: Rodar a suíte inteira**
+- [x] **Step 2: Rodar a suíte inteira**
 
 ```powershell
 . .\tools\dev_env.ps1
@@ -990,7 +990,7 @@ cmake --build build/tests-vulkan; .\build\tests-vulkan\sr_vulkan_tests.exe
 ```
 e o laço de 15 fixtures do Task 2 Step 5. Expected: tudo passa.
 
-- [ ] **Step 3: Registrar os resultados**
+- [x] **Step 3: Registrar os resultados**
 
 Em `docs/vulkan-m3.md`, depois da seção "Optimizations and fixes from 2026-10-05 (Intel UHD)" (antes de `## Recorded checks`), acrescentar a seção abaixo, trocando cada número pelo `avg_fps` das linhas correspondentes de `logs\bench_results.csv` (parado e andando) e pelos `record`, `fence`, `queue` e `textures_ms` do resumo de cada etapa:
 
@@ -1025,7 +1025,7 @@ por uma linha com os valores de `par_final` (parado e andando) e a GPU medida, e
 
 No fim do spec `docs/superpowers/specs/2026-10-05-vulkan-fps-parity-design.md`, acrescentar a seção `## Resultado` com a mesma tabela e uma linha dizendo qual meta foi atingida e em qual passo.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add docs/vulkan-m3.md README.md docs/superpowers/specs/2026-10-05-vulkan-fps-parity-design.md
