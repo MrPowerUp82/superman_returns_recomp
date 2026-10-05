@@ -68,9 +68,10 @@ public:
   bool BeginSubmission(VkCommandBuffer,uint64_t serial,Error&,VkCommandBuffer upload=VK_NULL_HANDLE);
   void FinishUploads();
   void Retire(uint64_t completed_serial);
+  struct TransientBuffer { VkBuffer handle; VkDeviceSize offset; explicit operator bool() const { return handle != VK_NULL_HANDLE; } };
   // Host-visible per-submission suballocation; the returned view binds at
   // its offset and stays valid until this submission retires.
-  std::shared_ptr<BufferResource> UploadTransient(guest::ResourceId,std::span<const std::byte>,VkDeviceSize reserve,Error&);
+  TransientBuffer UploadTransient(guest::ResourceId,std::span<const std::byte>,VkDeviceSize reserve,Error&);
   bool UploadBuffer(guest::ResourceId,std::span<const std::byte>,uint64_t version,Error&);
   bool UploadTexture(guest::ResourceId,const guest::LinearTexture&,uint64_t version,Error&);
   // Tracked resolve images remain GPU-authoritative and preserve partial writes.

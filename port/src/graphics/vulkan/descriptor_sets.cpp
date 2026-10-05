@@ -153,38 +153,49 @@ void DescriptorStore::Evict(uint64_t serial) {
     it=list.empty()?cache_.erase(it):std::next(it);
   }
 }
-std::shared_ptr<DescriptorDraw> DescriptorStore::Prepare(const DrawBindings& bindings,
+DescriptorDraw* DescriptorStore::Prepare(const DrawBindings& bindings,
     const std::array<std::array<uint32_t,6>,32>& fetch,ResourceStore& store,uint64_t serial,Error& e) {
   if(!layouts_[0] || serial<=completed_ || store.CurrentSerial()!=serial) {
-    e={"Draw descriptors",VK_ERROR_INITIALIZATION_FAILED,"Missing layouts or recording submission"};return {};
+    e={"Draw descriptors",VK_ERROR_INITIALIZATION_FAILED,"Missing layouts or recording submission"};return nullptr;
   }
   for(uint32_t slot=0;slot<32;++slot) if((bindings.texture_indices[slot]&0x7fffu)>=32 || bindings.sampler_indices[slot]!=slot) {
-    e={"Draw descriptors",VK_ERROR_INITIALIZATION_FAILED,"Descriptor index was not remapped into the draw arrays"};return {};
+    e={"Draw descriptors",VK_ERROR_INITIALIZATION_FAILED,"Descriptor index was not remapped into the draw arrays"};return nullptr;
   }
-  auto draw=std::make_shared<DescriptorDraw>();
-  draw->shared=Shared(bindings,fetch,store,serial,draw->resources,e);if(!draw->shared) return {};
+  if (draw_pool_.empty() || draw_pool_[draw_pool_current_].serial != serial) {
+    bool found = false;
+    for (size_t i = 0; i < draw_pool_.size(); ++i) {
+      if (draw_pool_[i].serial <= completed_) {
+        draw_pool_[i].serial = serial;
+        draw_pool_[i].draws.clear();
+        draw_pool_current_ = i;
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      draw_pool_.push_back({{}, serial});
+      draw_pool_current_ = draw_pool_.size() - 1;
+    }
+  }
+  auto& chunk = draw_pool_[draw_pool_current_];
+  chunk.draws.emplace_back();
+  DescriptorDraw* draw = &chunk.draws.back();
+
+  std::vector<std::shared_ptr<void>> temp_bound;
+  draw->shared=Shared(bindings,fetch,store,serial,temp_bound,e);if(!draw->shared) return nullptr;
   // VS, PS and shared constants are contiguous in ConstantSnapshot: one upload per draw.
   auto constants=store.UploadTransient(0,std::as_bytes(std::span(&bindings.constants,1)),sizeof(guest::ConstantSnapshot),e);
-  if(!constants) return {};
-  if(constants->offset>UINT32_MAX) {e={"Draw descriptors",VK_ERROR_OUT_OF_DEVICE_MEMORY,"Constant block offset exceeds the dynamic offset range"};return {};}
-  draw->resources.push_back(constants);
-  draw->sets[0]=ConstantSet(*constants,e);if(!draw->sets[0]) return {};
-  draw->dynamic_offsets.fill(uint32_t(constants->offset));
+  if(!constants.handle) return nullptr;
+  if(constants.offset>UINT32_MAX) {e={"Draw descriptors",VK_ERROR_OUT_OF_DEVICE_MEMORY,"Constant block offset exceeds the dynamic offset range"};return nullptr;}
+  draw->sets[0]=ConstantSet(constants.handle,e);if(!draw->sets[0]) return nullptr;
+  draw->dynamic_offsets.fill(uint32_t(constants.offset));
   for(uint32_t i=0;i<3;++i) draw->sets[1+i]=draw->shared->sets[i];
-  pending_.Keep(serial,draw);e={};return draw;
+  return draw;
 }
-VkDescriptorSet DescriptorStore::ConstantSet(const BufferResource& block,Error& e) {
-  // Blocks are suballocations: every block of one arena chunk shares its handle and its set.
-  const auto& chunk=block.owner;
-  if(!chunk) {e={"Constant descriptors",VK_ERROR_INITIALIZATION_FAILED,"Constants were not suballocated from an arena"};return VK_NULL_HANDLE;}
-  if(auto found=constant_sets_.find(block.handle);found!=constant_sets_.end()) {
-    if(found->second.owner.lock()==chunk) return found->second.set;
-    FreeConstantSet(found->second.set);constant_sets_.erase(found);  // the driver reused the handle of a destroyed chunk
-  }
-  // Sets of destroyed chunks are dead weight: free them before adding another.
-  for(auto it=constant_sets_.begin();it!=constant_sets_.end();) {
-    if(it->second.owner.expired()) {FreeConstantSet(it->second.set);it=constant_sets_.erase(it);}
-    else ++it;
+VkDescriptorSet DescriptorStore::ConstantSet(VkBuffer chunk_handle,Error& e) {
+  if(!chunk_handle) {e={"Constant descriptors",VK_ERROR_INITIALIZATION_FAILED,"Constants were not suballocated from an arena"};return VK_NULL_HANDLE;}
+  if(auto found=constant_sets_.find(chunk_handle);found!=constant_sets_.end()) {
+    return found->second.set;
   }
   constexpr uint32_t max_sets=256;
   if(!constant_pool_) {
@@ -200,11 +211,11 @@ VkDescriptorSet DescriptorStore::ConstantSet(const BufferResource& block,Error& 
   constexpr VkDeviceSize block_bytes=4096;
   std::array<VkDescriptorBufferInfo,3> info{};std::array<VkWriteDescriptorSet,3> writes{};
   for(uint32_t i=0;i<3;++i) {
-    info[i]={chunk->handle,i*block_bytes,block_bytes};
+    info[i]={chunk_handle,i*block_bytes,block_bytes};
     auto& w=writes[i];w={VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};w.dstSet=set;w.dstBinding=i;w.descriptorCount=1;w.descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;w.pBufferInfo=&info[i];
   }
   c_.f.vkUpdateDescriptorSets(c_.device,uint32_t(writes.size()),writes.data(),0,nullptr);
-  constant_sets_.emplace(block.handle,ConstantSetEntry{chunk,set});
+  constant_sets_.emplace(chunk_handle,ConstantSetEntry{set});
   return set;
 }
 void DescriptorStore::FreeConstantSet(VkDescriptorSet set) {
