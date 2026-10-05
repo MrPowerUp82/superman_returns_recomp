@@ -298,6 +298,7 @@ namespace {
 struct CaptureTimings {
   uint64_t reads=0,bytes=0,queries=0,pm4_us=0,textures_us=0;
   uint64_t watch_us=0,read_us=0,hash_us=0,copy_us=0;
+  uint64_t new_entries=0,watch_dirty=0,revalidated=0,changed=0;
 };
 thread_local CaptureTimings capture_timings;
 thread_local CheckedGuestReads checked_guest_reads;
@@ -5971,16 +5972,23 @@ void Renderer::CaptureTextures(uint8_t* base) {
     }
     if(!IsTextureBound(fetch[0])) continue;
     auto& entry=captured_textures_[fetch];
+    if(!entry.snapshot && entry.failed_frame!=~0ull && front_frame_<entry.failed_frame+16) {cur_.texture_errors.emplace_back(slot,entry.failure);continue;}
     bool dirty=!entry.snapshot;
+    if(dirty) ++capture_timings.new_entries;
     if(entry.snapshot) {
       for(const auto& range:entry.snapshot->ranges)
         if(texture_watch_ && TextureWrittenSince(range.address,range.length,entry.watch_seq)) dirty=true;
+      if(dirty) ++capture_timings.watch_dirty;
       if(entry.checked_frame!=front_frame_) {
         uint64_t total=0;
         for(const auto& range:entry.snapshot->ranges) total+=range.length;
-        // Verify dynamic movie and UI textures (up to 4MB) each frame. Guest virtual
-        // writes (e.g. video decoder YUV planes) bypass physical memory write watches.
-        if(total<=4096u*1024 || !texture_watch_) dirty=true;
+        // Verify dynamic movie and UI textures (up to 4MB). Guest virtual writes
+        // (e.g. video decoder YUV planes) bypass physical memory write watches.
+        // Re-reading every texture every frame cost ~180 MB/57 ms per frame, so
+        // with the watch active, textures found unchanged are checked with an
+        // exponential backoff (2..16 frames); changing ones stay per frame.
+        if(!texture_watch_) dirty=true;
+        else if(total<=4096u*1024 && front_frame_>=entry.next_check_frame) {if(!dirty) ++capture_timings.revalidated;dirty=true;}
       }
     }
     entry.checked_frame=front_frame_;
@@ -5988,6 +5996,7 @@ void Renderer::CaptureTextures(uint8_t* base) {
       std::string error;
       std::vector<graphics::guest::TextureRange> ranges;
       if(!graphics::guest::DescribeTextureRanges(fetch,ranges,error)) {
+        entry.failed_frame=front_frame_;entry.failure=error;
         cur_.texture_errors.emplace_back(slot,std::move(error));
         continue;
       }
@@ -6005,13 +6014,18 @@ void Renderer::CaptureTextures(uint8_t* base) {
         hash=XXH3_64bits_withSeed(bytes.data(),bytes.size(),hash);
         capture_timings.hash_us+=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-started).count();
       }
-      if(!error.empty()) {cur_.texture_errors.emplace_back(slot,std::move(error));continue;}
-      if(!entry.snapshot || hash!=entry.content_hash) {
+      if(!error.empty()) {entry.failed_frame=front_frame_;entry.failure=error;cur_.texture_errors.emplace_back(slot,std::move(error));continue;}
+      const bool unchanged=entry.snapshot && hash==entry.content_hash;
+      entry.stable_checks=unchanged?std::min(entry.stable_checks+1,4u):0;
+      entry.next_check_frame=front_frame_+(uint64_t(1)<<entry.stable_checks);
+      if(!unchanged) ++capture_timings.changed;
+      if(!unchanged) {
         const auto started=std::chrono::steady_clock::now();
         if(!graphics::guest::CaptureTexture(fetch,cur_.command_serial,
             [base](uint32_t address,uint32_t length){
               return ReadCommittedGuest(base,address,length);
             },entry.snapshot,error)) {
+          entry.failed_frame=front_frame_;entry.failure=error;
           cur_.texture_errors.emplace_back(slot,std::move(error));
           continue;
         }
@@ -6111,13 +6125,23 @@ void Renderer::WaitWorkerIdle(uint64_t batches) {
   done_cv_.wait(lock, [this, batches] { return worker_stop_ || batches_done_ >= batches; });
 }
 
+namespace {
+// SR_VULKAN_PROFILE=1: worker-side split of the packet sink path, per 120 swaps.
+struct SinkProfile {uint64_t swaps=0,packets=0,replay_us=0,sink_us=0,swap_us=0,idle_us=0;};
+SinkProfile g_sink_profile;
+bool SinkProfiling() {static const bool on=[]{const char* v=std::getenv("SR_VULKAN_PROFILE");return v && *v && *v!='0';}();return on;}
+uint64_t ElapsedUs(std::chrono::steady_clock::time_point since) {return uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-since).count());}
+}
+
 void Renderer::WorkerMain() {
   compat::RegisterSampledThread(4, "sr_native_worker");
   for (;;) {
     std::unique_ptr<WorkBatch> batch;
     {
       std::unique_lock<std::mutex> lock(queue_mutex_);
+      const auto idle_started=std::chrono::steady_clock::now();
       queue_cv_.wait(lock, [this] { return worker_stop_ || !work_queue_.empty(); });
+      if(SinkProfiling()) g_sink_profile.idle_us+=ElapsedUs(idle_started);
       if(work_queue_.empty() && worker_stop_) return;
       batch = std::move(work_queue_.front());
       work_queue_.pop_front();
@@ -6140,7 +6164,20 @@ void Renderer::Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd
   if(packet_sink_) {
     if(worker_stop_ || packet_sink_failed_) return;
     graphics::guest::RenderPacket packet;std::string error;
-    if(!graphics::guest::ReplayCapturedRenderPacket(batch,cmd,mirror_,packet,error) || !packet_sink_(std::move(packet),error)) {
+    const bool profile=SinkProfiling();const auto started=profile?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
+    bool ok=graphics::guest::ReplayCapturedRenderPacket(batch,cmd,mirror_,packet,error);
+    const bool swap=std::holds_alternative<graphics::guest::SwapPacket>(packet);
+    const auto replayed=profile?std::chrono::steady_clock::now():started;
+    if(ok) ok=packet_sink_(std::move(packet),error);
+    if(profile) {
+      auto& p=g_sink_profile;++p.packets;p.replay_us+=uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(replayed-started).count());
+      (swap?p.swap_us:p.sink_us)+=ElapsedUs(replayed);
+      if(swap && ++p.swaps==120) {
+        REXLOG_INFO("Vulkan worker profile (ms/frame over 120): replay={:.1f} sink={:.1f} swap_enqueue={:.1f} idle={:.1f} packets={}",p.replay_us/120000.0,p.sink_us/120000.0,p.swap_us/120000.0,p.idle_us/120000.0,p.packets/120);
+        p={};
+      }
+    }
+    if(!ok) {
       packet_sink_failed_=true;
       if(!worker_stop_) {REXLOG_ERROR("native API packet failed: {}",error);rex::FatalError("Native renderer failed: "+error);}
     }
@@ -6569,7 +6606,7 @@ void Renderer::OnSwap(uint8_t* base, uint32_t front_buffer_texture, uint64_t swa
   }
   EndCmd(base);
   if(packet_sink_ && (capture_timings.pm4_us+capture_timings.textures_us>100000 || front_frame_%120==0))
-    REXLOG_INFO("native Vulkan capture frame={} pm4_ms={} textures_ms={} reads={} bytes={} virtual_queries={} watch_ms={} read_ms={} hash_ms={} copy_ms={}",front_frame_,capture_timings.pm4_us/1000,capture_timings.textures_us/1000,capture_timings.reads,capture_timings.bytes,capture_timings.queries,capture_timings.watch_us/1000,capture_timings.read_us/1000,capture_timings.hash_us/1000,capture_timings.copy_us/1000);
+    REXLOG_INFO("native Vulkan capture frame={} pm4_ms={} textures_ms={} reads={} bytes={} virtual_queries={} watch_ms={} read_ms={} hash_ms={} copy_ms={} new={} watch_dirty={} revalidated={} changed={} entries={}",front_frame_,capture_timings.pm4_us/1000,capture_timings.textures_us/1000,capture_timings.reads,capture_timings.bytes,capture_timings.queries,capture_timings.watch_us/1000,capture_timings.read_us/1000,capture_timings.hash_us/1000,capture_timings.copy_us/1000,capture_timings.new_entries,capture_timings.watch_dirty,capture_timings.revalidated,capture_timings.changed,captured_textures_.size());
   capture_timings={};
   if (worker_mode_) {
     FlushBatch();

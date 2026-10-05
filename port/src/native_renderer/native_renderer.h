@@ -654,6 +654,13 @@ class Renderer {
     std::shared_ptr<const graphics::guest::TextureCapture> snapshot;
     uint64_t content_hash=0, checked_frame=~0ull;
     uint32_t watch_seq=0;
+    // Revalidation backoff for textures the write watch cannot see changing
+    // (guest-virtual writes): unchanged checks double the interval up to 16.
+    uint64_t next_check_frame=0;
+    uint32_t stable_checks=0;
+    // Frame of the last failed capture: an unreadable texture (often a resolve
+    // destination the backend never needs) is retried every 16 frames, not per draw.
+    uint64_t failed_frame=~0ull;std::string failure;
   };
   std::map<std::array<uint32_t,6>,CapturedTextureEntry> captured_textures_;
   std::vector<uint32_t> mirror_snapshot_;  // mirror at sr_native_dump_swap (A/B check)
