@@ -1,5 +1,9 @@
 #include "frame_loop.h"
 #include <stdexcept>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
 #include "test_main.h"
 using namespace superman_returns::graphics::vulkan;
 namespace {
@@ -7,6 +11,16 @@ std::vector<std::string> calls;
 std::vector<VkSemaphore> present_semaphores;
 int image = 0;
 bool pass_open=false;
+std::mutex* probed = nullptr;
+std::vector<std::string> lock_states;
+// Outra thread só consegue travar o mutex quando a thread do teste não o segura.
+bool Held() {
+  if (!probed) return false;
+  bool acquired = false;
+  std::thread([&] { acquired = probed->try_lock(); if (acquired) probed->unlock(); }).join();
+  return !acquired;
+}
+void NoteLock(const char* where) { if (probed) lock_states.push_back(std::string(where) + (Held() ? ":held" : ":free")); }
 VkResult acquire_result = VK_SUCCESS, submit_result = VK_SUCCESS, present_result = VK_SUCCESS;
 uintptr_t next = 10;
 template <class T> T Handle() { return reinterpret_cast<T>(next++); }
@@ -41,12 +55,12 @@ void VKAPI_CALL FreeSemaphore(VkDevice, VkSemaphore,
 void VKAPI_CALL FreeFence(VkDevice, VkFence, const VkAllocationCallbacks *) {}
 VkResult VKAPI_CALL Wait(VkDevice, uint32_t, const VkFence *, VkBool32,
                          uint64_t) {
-  calls.push_back("wait");
+  calls.push_back("wait");NoteLock("wait");
   return VK_SUCCESS;
 }
 VkResult VKAPI_CALL Acquire(VkDevice, VkSwapchainKHR, uint64_t, VkSemaphore,
                             VkFence, uint32_t *i) {
-  calls.push_back("acquire");
+  calls.push_back("acquire");NoteLock("acquire");
   *i = image;
   return acquire_result;
 }
@@ -67,11 +81,11 @@ void VKAPI_CALL BeginPass(VkCommandBuffer, const VkRenderPassBeginInfo *,
                           VkSubpassContents) {pass_open=true;}
 void VKAPI_CALL EndPass(VkCommandBuffer) {pass_open=false;}
 VkResult VKAPI_CALL Submit(VkQueue, uint32_t, const VkSubmitInfo *, VkFence) {
-  calls.push_back("submit");
+  calls.push_back("submit");NoteLock("submit");
   return submit_result;
 }
 VkResult VKAPI_CALL Present(VkQueue, const VkPresentInfoKHR *p) {
-  calls.push_back("present");
+  calls.push_back("present");NoteLock("present");
   present_semaphores.push_back(*p->pWaitSemaphores);
   return present_result;
 }
@@ -111,6 +125,7 @@ struct Fixture {
     calls.clear();
     present_semaphores.clear();
     acquire_result = submit_result = present_result = VK_SUCCESS;
+    probed = nullptr;lock_states.clear();
     SR_CHECK(loop.Initialize(c, s, e));
     calls.clear();
   }
@@ -195,4 +210,24 @@ SR_TEST(game_callback_exception_finishes_submission_and_stops) {
     SR_CHECK(!pass_open);SR_CHECK(!f.e.message.empty());SR_CHECK(std::find(calls.begin(),calls.end(),"submit")!=calls.end());
     calls.clear();SR_CHECK(f.loop.DrawGame(f.c,f.s,work,f.e)==FrameOutcome::kFailed);SR_CHECK(calls.empty());
   }
+}
+
+SR_TEST(game_draw_waits_and_acquires_outside_the_queue_mutex_and_submits_under_it) {
+  Fixture f;
+  std::mutex queue;
+  probed = &queue;
+  FrameWork work;
+  work.queue_mutex = &queue;
+  work.prepare = [&](VkCommandBuffer, uint64_t, Error&) { NoteLock("prepare"); return true; };
+  work.retire = [&](uint64_t) { NoteLock("retire"); };
+  for (int i = 0; i < 3; ++i) {
+    image = i;
+    SR_CHECK(f.loop.DrawGame(f.c, f.s, work, f.e) == FrameOutcome::kPresented);
+  }
+  // O terceiro quadro reusa o slot 0: espera o fence, faz o retire do serial 1 sob lock e só então faz o acquire.
+  SR_CHECK(lock_states == std::vector<std::string>({
+      "wait:free", "acquire:free", "prepare:held", "submit:held", "present:held",
+      "wait:free", "acquire:free", "prepare:held", "submit:held", "present:held",
+      "wait:free", "retire:held", "acquire:free", "prepare:held", "submit:held", "present:held"}));
+  probed = nullptr;
 }

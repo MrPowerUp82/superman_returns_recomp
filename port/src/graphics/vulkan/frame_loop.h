@@ -1,12 +1,17 @@
 #pragma once
 #include "swapchain.h"
 #include <array>
+#include <mutex>
 namespace superman_returns::graphics::vulkan {
 enum class FrameOutcome { kPresented, kSuspended, kRecreate, kFailed };
 struct FrameWork {
   std::function<bool(VkCommandBuffer,uint64_t,Error&)> prepare;
   std::function<void(VkCommandBuffer,uint32_t)> paint;
   std::function<void(uint64_t)> retire;
+  // Mutex que serializa a fila e os recursos compartilhados com a thread de gravação do jogo. DrawGame
+  // só o segura em retire, prepare/paint, submit e present; nunca durante uma espera de fence ou de
+  // imagem do swapchain (um vblank, com FIFO). Nulo = sem lock.
+  std::mutex* queue_mutex = nullptr;
 };
 class FrameLoop {
 public:

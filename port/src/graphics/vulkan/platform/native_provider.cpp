@@ -174,10 +174,11 @@ protected:
   }
   PaintResult PaintAndPresentImpl(bool ui) override {
     uint32_t index;GuestOutputProperties properties;auto consumer=ConsumeGuestOutput(index,&properties,nullptr);Mailbox source;if(index!=UINT32_MAX) source=mailbox_[index];consumer.unlock();
-    std::lock_guard lock(host_->gpu_mutex);if(!swapchain_.handle) return PaintResult::kNotPresented;
+    if(!swapchain_.handle) return PaintResult::kNotPresented;
     Error e;TargetPass pass;pass.owns_handles=false;pass.render_pass=swapchain_.render_pass;pass.extent=swapchain_.choice.extent;pass.color_count=1;pass.formats[0]=swapchain_.choice.format.format;
     std::shared_ptr<CompositionDraw> composition;
     FrameWork work;
+    work.queue_mutex=&host_->gpu_mutex;  // DrawGame locks it only around recording, submit, present and retire
     work.prepare=[&](VkCommandBuffer command,uint64_t serial,Error& error) {
       if(!host_->Prepare(command,serial,error)) return false;
       if(source.image) {composition=host_->compositor->Prepare(command,pass,source.image,*host_->resources,host_->game->Renderer().Images(),source.gamma,source.gamma_enabled,properties.display_aspect_ratio_x,properties.display_aspect_ratio_y,error);if(!composition) return false;}

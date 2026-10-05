@@ -92,12 +92,22 @@ FrameOutcome FrameLoop::DrawGame(Context& c,Swapchain& s,const FrameWork& work,E
   };
   auto &slot = slots_[cursor_];
   auto &f = c.f;
+  // The queue mutex is shared with the guest frame thread. Waiting for a fence or for a swapchain
+  // image (a vblank under FIFO) must not hold it, or that thread cannot submit meanwhile: it is
+  // taken only for work that touches the queue or shared resources.
+  std::unique_lock<std::mutex> queue_lock;
+  if (work.queue_mutex) queue_lock = std::unique_lock<std::mutex>(*work.queue_mutex, std::defer_lock);
+  auto lock_queue = [&] { if (queue_lock.mutex() && !queue_lock.owns_lock()) queue_lock.lock(); };
   VkResult r = f.vkWaitForFences(c.device, 1, &slot.fence, VK_TRUE, 100000000);
   if (r == VK_TIMEOUT)
     return FrameOutcome::kSuspended;
   if (r != VK_SUCCESS)
     return fail(r, "WaitForFences");
-  if(slot.serial && slot.retire) {slot.retire(slot.serial);slot.serial=0;slot.retire={};}
+  if(slot.serial && slot.retire) {
+    lock_queue();
+    slot.retire(slot.serial);slot.serial=0;slot.retire={};
+    if (queue_lock.owns_lock()) queue_lock.unlock();
+  }
   uint32_t index = 0;
   r = f.vkAcquireNextImageKHR(c.device, s.handle, 100000000, slot.acquire,
                               VK_NULL_HANDLE, &index);
@@ -122,6 +132,7 @@ FrameOutcome FrameLoop::DrawGame(Context& c,Swapchain& s,const FrameWork& work,E
   bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
   if ((r = f.vkBeginCommandBuffer(slot.command, &bi)) != VK_SUCCESS)
     return fail(r, "BeginCommandBuffer");
+  lock_queue();  // from here on: prepare, record, submit and present
   const uint64_t serial=++next_serial_;
   bool prepared=true;Error preparation_error;
   if(work.prepare) {
