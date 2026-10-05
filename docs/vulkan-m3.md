@@ -59,6 +59,68 @@ are serialized with host presentation, so recording guest draws does not hold
 up the window's paint/event loop. The GPU frame fixture verifies both recording
 without that lock and submissions with the lock, while checking snapshot pixels.
 
+### Optimizations and fixes from 2026-10-05 (Intel UHD)
+
+**Presentation lock (largest gain).** `NativePresenter::Submit` took
+`Host::gpu_mutex` for every packet (77+ per frame). Painting holds that mutex
+across present. On Intel UHD, about 95% of the frame went to waiting
+(title screen ~0.5 FPS). The `GameFrame` pointer is now published in an atomic
+after initialization. `RefreshGuestOutputImpl` writes its mailbox slot without
+the mutex, because the SDK guarantees that slot is exclusive to the refresher.
+The title screen went from ~0.5 to ~10 FPS (frame ~2,500 ms to 50-160 ms).
+
+**Black speckles in the image (XenosRecomp patch 0013).** The edge-AA post-process
+filter (PS `B397B05F4CE5D5BB`) divides by the sum of its weights, which is 0 on
+uniform 3x3 areas. The translator emitted `clamp(rcp(x), -FLT_MAX, FLT_MAX)`.
+The clamp is still present in the SPIR-V, but the Intel driver removes it, so
+`0 * inf` became NaN and those pixels turned black (100% of the speckles were
+uniform areas). `0013-no-infinity-scalar-ops.patch` makes `rcp`/`rsq`/`log`
+return +/-FLT_MAX for |x| below the smallest normal float, without ever forming
+an infinity. That is also closer to Xenos, where `0 * inf = 0`. The D3D12 DXIL
+corpus uses the same translator but has not been regenerated yet.
+
+**Frame dump.** `SR_VULKAN_DUMP_FRAME=N` or `SR_VULKAN_DUMP_TRIGGER=<file>`
+(dumps the next frame and deletes the file), with `SR_VULKAN_DUMP_DIR`. It writes
+`packets.txt` (each draw with VS/PS, targets, depth/blend and textures), a
+readback of every resolve destination right after the resolve
+(`p<packet>_resolve_<base>.raw`), and the targets at the end of the frame. The .raw
+header is u32 width, height, VkFormat and texel size. Use it to locate which pass
+breaks the image.
+
+CPU recording costs reduced on the same date:
+
+- Host-visible buffers stay mapped for their lifetime; there is no
+  map/unmap per write.
+- Upload staging and per-draw constants (3 x 4 KiB per draw) are carved from
+  8 MiB mapped chunks per submission. Chunks are reused once the fence retires
+  (64 MiB pool per arena). This replaces one `vkAllocateMemory` per upload or
+  constant block.
+- Inline vertices and expanded indices are written straight into transient
+  mapped memory, with no device-local copy. `BufferResource::offset` must be
+  honored wherever the buffer is bound.
+- `GameFrame` records uploads into a second command buffer submitted ahead of
+  the frame. A single barrier at the end replaces one barrier per upload.
+  Every upload creates a new version, so moving it earlier is safe.
+- Consecutive draws on the same targets share one render pass. Any barrier
+  on the recording command buffer (`ImageState::before_barrier`), alias, clear,
+  resolve or tiling packet closes it first. Without an upload command buffer
+  (`BeginSubmission` without `upload`), the per-draw pass is kept.
+- The pipeline store caches the SPIR-V digest and the VS/PS pair validation
+  per artifact instead of hashing every draw. Descriptor pools are reset and
+  reused. Presentation snapshots are recycled when no mailbox or submission
+  holds them anymore.
+
+The `--game-record-merged` fixture covers two draws in the same pass with
+uploads moved to the upload command buffer.
+
+Gameplay measurement (work laptop, Intel UHD, New Game, `bench.ps1` with
+the Vulkan executable): **5.8 FPS idle / 6.3 FPS walking** (min 5.2 / 3.9),
+GPU ~30% busy, so the frame is CPU-bound. In the log (frames >100 ms or every
+120th, ~3,100 draws), `record_submit_ms` dropped from ~210 ms (lock fix only)
+to an average of 88 ms with the recording optimizations; `fence_ms` averages 35 ms.
+On this machine the native D3D12 renderer holds 28-30 FPS, so Vulkan still
+spends most of its CPU time recording each frame.
+
 Driver pipeline cache files are separate from D3D12 PSOs and include ABI,
 vendor/device/driver and pipeline-cache UUID checks. Checkpoints are written to
 a temporary file and replaced during execution, at most once every five seconds

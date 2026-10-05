@@ -188,14 +188,32 @@ bool GamePipelineStore::Initialize(std::span<const VkDescriptorSetLayout> layout
   if(!Check(c_.f.vkCreatePipelineCache(c_.device,&cache,nullptr,&driver_cache_),"Vulkan driver pipeline cache",e)) return false;
   cache_path_=path;e={};return true;
 }
-std::shared_ptr<GamePipeline> GamePipelineStore::Acquire(const guest::DrawPacket& d,const TargetPass& pass,const shaders::CompiledShader& vs,const shaders::CompiledShader* ps,uint64_t serial,Error& e) {
-  if(!layout_ || !serial || !ValidSpirv(vs.words) || (ps && !ValidSpirv(ps->words))) {Fail(e,"Pipeline layout/serial/shaders invalid");return {};}
+bool GamePipelineStore::Validate(const shaders::CompiledShader& vs,const shaders::CompiledShader* ps,Error& e) const {
+  if(!layout_ || !ValidSpirv(vs.words) || (ps && !ValidSpirv(ps->words))) return Fail(e,"Pipeline layout/serial/shaders invalid");
   shaders::ShaderRequirements empty;auto errors=CheckDeviceRequirements(vs.requirements,ps?ps->requirements:empty,GameBindingLayout(),GetDeviceCaps(c_.properties.limits,c_.enabled_features));
   if(ps) {auto pair=shaders::ValidateShaderPair(vs,*ps);errors.insert(errors.end(),pair.begin(),pair.end());}
-  if(!errors.empty()) {e={"Game pipeline requirements",VK_ERROR_FEATURE_NOT_PRESENT,errors.front()};return {};}
+  if(!errors.empty()) {e={"Game pipeline requirements",VK_ERROR_FEATURE_NOT_PRESENT,errors.front()};return false;}
+  return true;
+}
+std::shared_ptr<GamePipeline> GamePipelineStore::Acquire(const guest::DrawPacket& d,const TargetPass& pass,const shaders::CompiledShader& vs,const shaders::CompiledShader* ps,uint64_t serial,Error& e) {
+  if(!serial) {Fail(e,"Pipeline layout/serial/shaders invalid");return {};}
+  if(!Validate(vs,ps,e)) return {};
+  return AcquireValidated(d,pass,vs,ps,ShaderDigest(vs),ps?ShaderDigest(*ps):0,serial,e);
+}
+std::shared_ptr<GamePipeline> GamePipelineStore::Acquire(const guest::DrawPacket& d,const TargetPass& pass,const std::shared_ptr<const shaders::CompiledShader>& vs,const std::shared_ptr<const shaders::CompiledShader>& ps,uint64_t serial,Error& e) {
+  if(!vs || !serial) {Fail(e,"Pipeline layout/serial/shaders invalid");return {};}
+  // Retained artifacts keep their addresses unique for the cache lifetime.
+  auto key=std::pair{vs.get(),ps.get()};auto found=validated_.find(key);
+  if(found==validated_.end()) {
+    if(!Validate(*vs,ps.get(),e)) return {};
+    found=validated_.emplace(key,ShaderPair{vs,ps,ShaderDigest(*vs),ps?ShaderDigest(*ps):0}).first;
+  }
+  return AcquireValidated(d,pass,*vs,ps.get(),found->second.vs_digest,found->second.ps_digest,serial,e);
+}
+std::shared_ptr<GamePipeline> GamePipelineStore::AcquireValidated(const guest::DrawPacket& d,const TargetPass& pass,const shaders::CompiledShader& vs,const shaders::CompiledShader* ps,uint64_t vs_digest,uint64_t ps_digest,uint64_t serial,Error& e) {
   GamePipelinePlan plan;if(!PlanGamePipeline(d,pass,vs,plan,e)) return {};
   if(!ValidateGamePipelineFeatures(plan,pass.color_count,c_.properties.limits,c_.enabled_features,e)) return {};
-  plan.key.push_back(ShaderDigest(vs));plan.key.push_back(ps?ShaderDigest(*ps):0);
+  plan.key.push_back(vs_digest);plan.key.push_back(ps_digest);
   if(auto found=pipelines_.find(plan.key);found!=pipelines_.end()) {pending_.Keep(serial,found->second);return found->second;}
   for(auto& a:plan.attributes) {VkFormatProperties props{};c_.f.vkGetPhysicalDeviceFormatProperties(c_.physical,a.format,&props);if(!(props.bufferFeatures&VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT)) {Fail(e,"Vertex format unsupported by device");return {};}}
   VkShaderModule modules[2]{};auto release=[&]{for(auto m:modules) if(m) c_.f.vkDestroyShaderModule(c_.device,m,nullptr);};

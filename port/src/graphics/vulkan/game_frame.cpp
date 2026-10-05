@@ -1,10 +1,11 @@
 #include "game_frame.h"
 #include <chrono>
+#include <cstdlib>
 #include <thread>
 namespace superman_returns::graphics::vulkan {
 GameFrame::GameFrame(Context& c,std::mutex& mutex,ShaderLookup shaders,TextureDecoder decoder):c_(c),queue_mutex_(mutex),shaders_(std::move(shaders)),renderer_(c,shaders_,std::move(decoder)) {}
 GameFrame::~GameFrame() {
-  std::lock_guard lock(queue_mutex_);
+  std::lock_guard lock(queue_mutex_);snapshots_.clear();
   if(submitted_) {c_.f.vkDeviceWaitIdle(c_.device);renderer_.Retire(serial_);}
   if(fence_) c_.f.vkDestroyFence(c_.device,fence_,nullptr);
   if(pool_) c_.f.vkDestroyCommandPool(c_.device,pool_,nullptr);
@@ -13,9 +14,12 @@ bool GameFrame::Initialize(const std::filesystem::path& cache,Error& e) {
   if(!renderer_.Initialize(cache,e)) return false;
   VkCommandPoolCreateInfo pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};pool.queueFamilyIndex=c_.graphics_family;
   if(!Check(c_.f.vkCreateCommandPool(c_.device,&pool,nullptr,&pool_),"Game command pool",e)) return false;
-  VkCommandBufferAllocateInfo command{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};command.commandPool=pool_;command.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;command.commandBufferCount=1;
+  VkCommandBufferAllocateInfo command{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};command.commandPool=pool_;command.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;command.commandBufferCount=2;
   VkFenceCreateInfo fence{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};fence.flags=VK_FENCE_CREATE_SIGNALED_BIT;
-  return Check(c_.f.vkAllocateCommandBuffers(c_.device,&command,&command_),"Game command buffer",e) && Check(c_.f.vkCreateFence(c_.device,&fence,nullptr,&fence_),"Game fence",e);
+  std::array<VkCommandBuffer,2> commands{};
+  if(!Check(c_.f.vkAllocateCommandBuffers(c_.device,&command,commands.data()),"Game command buffer",e)) return false;
+  upload_=commands[0];command_=commands[1];
+  return Check(c_.f.vkCreateFence(c_.device,&fence,nullptr,&fence_),"Game fence",e);
 }
 bool GameFrame::WaitFence(Error& e) {
   if(!submitted_) return true;
@@ -65,20 +69,38 @@ bool GameFrame::Enqueue(guest::RenderPacket&& packet,std::shared_ptr<TextureReso
   auto fail=[&] {failed_=true;return false;};
   if(!Check(c_.f.vkResetCommandPool(c_.device,pool_,0),"Reset game pool",e)) return fail();
   VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-  if(!Check(c_.f.vkBeginCommandBuffer(command_,&begin),"Begin game frame",e) || !renderer_.BeginSubmission(command_,++serial_,e)) return fail();
+  // Uploads record into upload_, submitted ahead of command_ in one batch.
+  if(!Check(c_.f.vkBeginCommandBuffer(upload_,&begin),"Begin game uploads",e) || !Check(c_.f.vkBeginCommandBuffer(command_,&begin),"Begin game frame",e) || !renderer_.BeginSubmission(command_,++serial_,e,upload_)) return fail();
+  // Diagnostics: SR_VULKAN_DUMP_FRAME=N [SR_VULKAN_DUMP_DIR=dir] dumps frame N.
+  static const uint64_t dump_frame=[] {const char* v=std::getenv("SR_VULKAN_DUMP_FRAME");return v?std::strtoull(v,nullptr,10):0ull;}();
+  static const char* dump_trigger=std::getenv("SR_VULKAN_DUMP_TRIGGER");
+  std::error_code trigger_error;
+  const bool dump=(dump_frame && serial_==dump_frame) || (dump_trigger && std::filesystem::remove(dump_trigger,trigger_error));
+  if(dump) renderer_.BeginDump();
   for(size_t i=0;i<packets_.size();++i) if(!renderer_.Record(packets_[i],command_,e)) {e.message+=" (frame packet "+std::to_string(i)+", kind="+std::to_string(packets_[i].index())+")";return fail();}
+  if(dump && !renderer_.DumpTargets(command_,e)) return fail();
+  renderer_.FinishSubmission();
   auto source=renderer_.SelectFrontbuffer(std::get<guest::SwapPacket>(packet),e);if(!source) return fail();
   // A mailbox owns a snapshot, never an image that the next guest frame mutates.
+  // The previous submission has retired, so a snapshot held only here is free.
   constexpr guest::ResourceId snapshot_id=UINT64_MAX-16;
-  auto& resources=renderer_.Resources();resources.ForgetTexture(snapshot_id);
-  output=resources.ResolveTexture(snapshot_id,source->format,source->extent,1,1,false,renderer_.Images(),e);if(!output) return fail();
+  auto& resources=renderer_.Resources();
+  for(auto& snapshot:snapshots_) if(snapshot.use_count()==1 && snapshot->format==source->format && snapshot->extent.width==source->extent.width && snapshot->extent.height==source->extent.height) {output=snapshot;break;}
+  if(!output) {
+    resources.ForgetTexture(snapshot_id);
+    output=resources.ResolveTexture(snapshot_id,source->format,source->extent,1,1,false,renderer_.Images(),e);if(!output) return fail();
+    resources.ForgetTexture(snapshot_id);
+    std::erase_if(snapshots_,[](auto& s){return s.use_count()==1;});
+    if(snapshots_.size()<4) snapshots_.push_back(output);
+  }
   VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
   if(!renderer_.Images().Transition(command_,source->handle,range,ImageUsage::TransferSource(),e) || !renderer_.Images().Transition(command_,output->handle,range,ImageUsage::TransferDestination(),e)) return fail();
   VkImageCopy copy{};copy.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.dstSubresource=copy.srcSubresource;copy.extent=source->extent;
   c_.f.vkCmdCopyImage(command_,source->handle,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,output->handle,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&copy);
   if(!renderer_.Images().Transition(command_,source->handle,range,ImageUsage::Sampled(),e) || !renderer_.Images().Transition(command_,output->handle,range,ImageUsage::Sampled(),e)) return fail();
-  if(!Check(c_.f.vkEndCommandBuffer(command_),"End game frame",e) || !Check(c_.f.vkResetFences(c_.device,1,&fence_),"Reset game fence",e)) return fail();
-  VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};submit.commandBufferCount=1;submit.pCommandBuffers=&command_;
+  if(!Check(c_.f.vkEndCommandBuffer(upload_),"End game uploads",e) || !Check(c_.f.vkEndCommandBuffer(command_),"End game frame",e) || !Check(c_.f.vkResetFences(c_.device,1,&fence_),"Reset game fence",e)) return fail();
+  const std::array<VkCommandBuffer,2> commands{upload_,command_};
+  VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};submit.commandBufferCount=2;submit.pCommandBuffers=commands.data();
   const auto submit_started=std::chrono::steady_clock::now();
   std::chrono::steady_clock::time_point queue_ready;
   {
@@ -87,6 +109,11 @@ bool GameFrame::Enqueue(guest::RenderPacket&& packet,std::shared_ptr<TextureReso
     if(!Check(c_.f.vkQueueSubmit(c_.graphics_queue,1,&submit,fence_),"Submit game frame",e)) return fail();
   }
   submitted_=true;
+  if(dump) {
+    const char* dir=std::getenv("SR_VULKAN_DUMP_DIR");
+    if(!WaitFence(e) || !renderer_.WriteDump(dir?dir:"vk_dump",e)) return fail();
+    c_.Log("Dumped native Vulkan frame "+std::to_string(serial_)+" to "+std::string(dir?dir:"vk_dump"));
+  }
   if(serial_==1 || std::chrono::steady_clock::now()-cache_checkpoint_>=std::chrono::seconds(5)) {
     Error cache_error;
     if(!renderer_.CheckpointCache(cache_error)) c_.Log(cache_error.operation+": "+cache_error.message);

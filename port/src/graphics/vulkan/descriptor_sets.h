@@ -34,6 +34,8 @@ private:
   std::array<VkDescriptorSetLayout,4> layouts_{};
   std::map<std::array<uint32_t,2>,std::shared_ptr<SamplerResource>> samplers_;
   std::map<uint64_t,std::vector<std::shared_ptr<DescriptorPage>>> pages_;
+  std::vector<std::shared_ptr<DescriptorPage>> free_pages_;
+  std::map<VkFormat,VkFormatFeatureFlags> filter_features_;
   SubmissionResources pending_;
   uint64_t constant_serial_=0,completed_=0;
 };

@@ -27,11 +27,14 @@ struct TextureUploadPlan {
 bool PlanTextureUpload(const guest::LinearTexture&,VkDeviceSize alignment,TextureUploadPlan&,Error&);
 struct BufferResource {
   Context* context=nullptr;
+  // A suballocation shares owner's handle; bind it at offset, never destroy it.
+  std::shared_ptr<BufferResource> owner;
   VkBuffer handle=VK_NULL_HANDLE;
   VkDeviceMemory memory=VK_NULL_HANDLE;
-  VkDeviceSize size=0,allocation=0;
+  VkDeviceSize size=0,allocation=0,offset=0;
   uint64_t version=0;
   bool coherent=false;
+  void* mapped=nullptr;  // persistent mapping of host-visible allocations
   ~BufferResource();
 };
 struct TextureResource {
@@ -55,8 +58,15 @@ class ResourceStore {
 public:
   explicit ResourceStore(Context& c):c_(c) {}
   ~ResourceStore();
-  bool BeginSubmission(VkCommandBuffer,uint64_t serial,Error&);
+  // With a separate upload command buffer (submitted before the main one),
+  // buffer/texture uploads record there and share one barrier written by
+  // FinishUploads. Every upload creates a new version, so hoisting is safe.
+  bool BeginSubmission(VkCommandBuffer,uint64_t serial,Error&,VkCommandBuffer upload=VK_NULL_HANDLE);
+  void FinishUploads();
   void Retire(uint64_t completed_serial);
+  // Host-visible per-submission suballocation; the returned view binds at
+  // its offset and stays valid until this submission retires.
+  std::shared_ptr<BufferResource> UploadTransient(guest::ResourceId,std::span<const std::byte>,VkDeviceSize reserve,Error&);
   bool UploadBuffer(guest::ResourceId,std::span<const std::byte>,uint64_t version,Error&);
   bool UploadTexture(guest::ResourceId,const guest::LinearTexture&,uint64_t version,Error&);
   // Tracked resolve images remain GPU-authoritative and preserve partial writes.
@@ -75,10 +85,15 @@ public:
   void ForgetTexture(guest::ResourceId id) {textures_.erase(id);}
 private:
   std::shared_ptr<BufferResource> NewBuffer(VkDeviceSize,VkBufferUsageFlags,VkMemoryPropertyFlags,Error&);
-  bool Write(const std::shared_ptr<BufferResource>&,std::span<const std::byte>,Error&);
+  bool Write(const std::shared_ptr<BufferResource>&,std::span<const std::byte>,Error&,VkDeviceSize offset=0);
   bool Ready(Error&);
+  struct ArenaChunk {std::shared_ptr<BufferResource> buffer;VkDeviceSize used=0;uint64_t serial=0;};
+  struct Arena {VkBufferUsageFlags usage=0;std::vector<ArenaChunk> chunks;size_t current=SIZE_MAX;VkDeviceSize bytes=0;};
+  std::shared_ptr<BufferResource> Suballocate(Arena&,VkDeviceSize size,VkDeviceSize alignment,Error&);
   Context& c_;
-  VkCommandBuffer command_=VK_NULL_HANDLE;
+  VkCommandBuffer command_=VK_NULL_HANDLE,upload_=VK_NULL_HANDLE;
+  bool upload_barrier_=false;std::vector<VkImageMemoryBarrier> texture_barriers_;
+  Arena staging_{VK_BUFFER_USAGE_TRANSFER_SRC_BIT},transient_{VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_VERTEX_BUFFER_BIT|VK_BUFFER_USAGE_INDEX_BUFFER_BIT};
   uint64_t serial_=0,completed_=0;
   SubmissionResources submissions_;
   std::map<guest::ResourceId,std::shared_ptr<BufferResource>> buffers_;

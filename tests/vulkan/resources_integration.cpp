@@ -25,7 +25,7 @@ void Require(VkResult r,const char* operation) {if(r!=VK_SUCCESS) throw std::run
 class UploadFixture {
 public:
   Context& c;
-  VkCommandPool pool{};VkCommandBuffer command{};VkFence fence{};
+  VkCommandPool pool{};VkCommandBuffer command{},uploads{};VkFence fence{};
   VkBuffer readback{};VkDeviceMemory memory{};VkDeviceSize allocation=0;bool coherent=false;
   UploadFixture(Context& context):c(context) {
     VkCommandPoolCreateInfo p{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};p.queueFamilyIndex=c.graphics_family;
@@ -61,11 +61,20 @@ public:
     b.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;b.newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;b.srcAccessMask=VK_ACCESS_TRANSFER_READ_BIT;b.dstAccessMask=VK_ACCESS_SHADER_READ_BIT;
     c.f.vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_VERTEX_SHADER_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,0,0,nullptr,0,nullptr,1,&b);
   }
+  // A second command buffer submitted ahead of `command`, as GameFrame does.
+  VkCommandBuffer BeginUploads() {
+    VkCommandBufferAllocateInfo a{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};a.commandPool=pool;a.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;a.commandBufferCount=1;
+    Require(c.f.vkAllocateCommandBuffers(c.device,&a,&uploads),"Upload command allocation");
+    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    Require(c.f.vkBeginCommandBuffer(uploads,&begin),"Begin uploads");return uploads;
+  }
   std::vector<uint8_t> Finish() {
     VkBufferMemoryBarrier b{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};b.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;b.dstAccessMask=VK_ACCESS_HOST_READ_BIT;b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;b.buffer=readback;b.size=VK_WHOLE_SIZE;
     c.f.vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,0,nullptr,1,&b,0,nullptr);
     Require(c.f.vkEndCommandBuffer(command),"End upload");
-    VkSubmitInfo s{VK_STRUCTURE_TYPE_SUBMIT_INFO};s.commandBufferCount=1;s.pCommandBuffers=&command;
+    if(uploads) Require(c.f.vkEndCommandBuffer(uploads),"End uploads");
+    const VkCommandBuffer commands[]{uploads,command};
+    VkSubmitInfo s{VK_STRUCTURE_TYPE_SUBMIT_INFO};s.commandBufferCount=uploads?2:1;s.pCommandBuffers=uploads?commands:&command;
     Require(c.f.vkQueueSubmit(c.graphics_queue,1,&s,fence),"Submit upload");
     Require(c.f.vkWaitForFences(c.device,1,&fence,VK_TRUE,10'000'000'000ull),"Upload completion");
     void* mapped=nullptr;Require(c.f.vkMapMemory(c.device,memory,0,VK_WHOLE_SIZE,0,&mapped),"Map readback");
@@ -101,7 +110,7 @@ void CheckTargetClears(Context& c) {
   }
   std::cout<<"Vulkan production TargetStore regional color/D24/stencil clears passed\n";
 }
-void CheckTargetDraws(Context& c,bool record=false) {
+void CheckTargetDraws(Context& c,bool record=false,bool merged=false) {
   
   Error e;UploadFixture fixture(c);ImageState direct_state(c.f);TargetStore direct_targets(c,direct_state);DescriptorStore descriptors(c);GamePipelineStore pipelines(c);
   auto vertex=std::make_shared<shaders::CompiledShader>(),pixel=std::make_shared<shaders::CompiledShader>();pixel->stage=shaders::ShaderStage::kPixel;
@@ -109,7 +118,7 @@ void CheckTargetDraws(Context& c,bool record=false) {
   bool shader_pending=record;
   GameRenderer renderer(c,[&](const guest::ShaderCapture& capture){return shader_pending?shaders::ShaderResult{}:shaders::ShaderResult{shaders::ShaderPoll::ready,capture.vertex?vertex:pixel,{}};});
   auto& targets=record?renderer.Targets():direct_targets;auto& state=record?renderer.Images():direct_state;
-  if(record) {Require(renderer.Initialize({},e),e);Require(renderer.BeginSubmission(fixture.command,1,e),e);}
+  if(record) {Require(renderer.Initialize({},e),e);Require(renderer.BeginSubmission(fixture.command,1,e,merged?fixture.BeginUploads():VK_NULL_HANDLE),e);}
   else {Require(descriptors.Initialize(e),e);Require(pipelines.Initialize(descriptors.Layouts(),{},e),e);Require(targets.BeginSubmission(fixture.command,1,e),e);}
   guest::DrawPacket draw;draw.colors[0]={601,false,{16,16,0,0,0,1}};draw.colors[1]={602,false,{16,16,32,0,0,1}};draw.depth={603,true,{16,16,64,0,0,1}};
   draw.registers[0x104]=0xff;draw.registers[0x201]=1|(1<<16);draw.registers[0x200]=1|2|4|(1<<4)|(2<<8);draw.registers[0x10d]=7|(255<<8)|(255<<16);
@@ -125,6 +134,13 @@ void CheckTargetDraws(Context& c,bool record=false) {
     shader_pending=false;draw.streams[0].update.plan.action=0;draw.streams[0].update.bytes.clear();draw.command_serial=2;
     Require(renderer.Record(guest::RenderPacket(draw),fixture.command,e),e);
     if(renderer.Stats().draws!=1 || renderer.Stats().failed || renderer.Stats().pending!=1) throw std::runtime_error("GameRenderer failed to preserve uploads across shader pending state");
+    if(merged) {
+      // Same targets: shares the open render pass. Depth LESS rejects every
+      // pixel the first draw wrote, so the expected readback is unchanged.
+      draw.command_serial=3;Require(renderer.Record(guest::RenderPacket(draw),fixture.command,e),e);
+      if(renderer.Stats().draws!=2 || renderer.Stats().failed) throw std::runtime_error("Merged GameRenderer draw failed");
+    }
+    renderer.FinishSubmission();
   } else {
   auto pipeline=pipelines.Acquire(draw,*pass,*vertex,pixel.get(),1,e);Require(bool(pipeline),e);
   VkRenderPassBeginInfo begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};begin.renderPass=pass->render_pass;begin.framebuffer=pass->framebuffer;begin.renderArea={{0,0},pass->extent};
@@ -148,7 +164,7 @@ void CheckTargetDraws(Context& c,bool record=false) {
     if(depth>expected+1 || depth+1<expected) throw std::runtime_error("Game pipeline depth write mismatch");
     if(bytes[3072+pixel]!=(blocked?8:7)) throw std::runtime_error("Game pipeline stencil preservation mismatch");
   }
-  std::cout<<(record?"GameRenderer Record":"Vulkan production game pipeline")<<" depth rejection, stencil rejection, depth writes and MRT pixels passed\n";
+  std::cout<<(merged?"GameRenderer merged-pass Record with hoisted uploads":record?"GameRenderer Record":"Vulkan production game pipeline")<<" depth rejection, stencil rejection, depth writes and MRT pixels passed\n";
 }
 void CheckResolveCopy(Context& c,bool record=false) {
   Error e;UploadFixture fixture(c);ImageState direct_state(c.f);TargetStore direct_targets(c,direct_state);ResourceStore direct_resources(c);GameRenderer renderer(c,{});
@@ -389,6 +405,7 @@ int main(int argc,char** argv) {
     if(argc==2 && std::string(argv[1])=="--pipeline-cache") {CheckPipelineCheckpoint(c);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--target-draws") {CheckTargetDraws(c);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--game-record") {CheckTargetDraws(c,true);return c.validation_errors.load()?1:0;}
+    if(argc==2 && std::string(argv[1])=="--game-record-merged") {CheckTargetDraws(c,true,true);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--resolve-record") {CheckResolveCopy(c,true);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--depth-resolve") {CheckDepthResolve(c);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--edram-alias") {CheckEdramAlias(c);return c.validation_errors.load()?1:0;}

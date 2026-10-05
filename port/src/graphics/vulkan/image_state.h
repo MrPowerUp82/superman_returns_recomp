@@ -3,6 +3,7 @@
 #include <map>
 #include <vector>
 #include <mutex>
+#include <functional>
 namespace superman_returns::graphics::vulkan {
 struct ImageUsage {
   VkImageLayout layout=VK_IMAGE_LAYOUT_UNDEFINED;
@@ -21,6 +22,8 @@ public:
   void Forget(VkImage image) {std::lock_guard lock(mutex_);images_.erase(image);}
   bool Transition(VkCommandBuffer,VkImage,VkImageSubresourceRange,ImageUsage,Error&);
   ImageUsage Usage(VkImage,VkImageAspectFlagBits,uint32_t mip,uint32_t layer) const;
+  // Runs before a barrier is recorded, so a caller can end an open render pass.
+  std::function<void(VkCommandBuffer)> before_barrier;
 private:
   struct Image {uint32_t mips,layers;VkImageAspectFlags aspects;std::vector<ImageUsage> usage;};
   Dispatch& f_;

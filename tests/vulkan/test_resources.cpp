@@ -81,9 +81,15 @@ SR_TEST(buffer_upload_flushes_staging_and_retains_replaced_version) {
     SR_CHECK(store.UploadBuffer(1500,bytes,2,e));SR_CHECK_EQ(copies,2);
     SR_CHECK(!store.UploadBuffer(1500,bytes,1,e));
     store.Retire(3);SR_CHECK(!old.expired());SR_CHECK_EQ(destroyed,0);
-    store.Retire(4);SR_CHECK(old.expired());SR_CHECK_EQ(destroyed,2);
+    // The replaced version is freed; its staging chunk stays pooled for reuse.
+    store.Retire(4);SR_CHECK(old.expired());SR_CHECK_EQ(destroyed,1);
+    store.Retire(7);const auto before=allocations.size();
+    SR_CHECK(store.BeginSubmission(reinterpret_cast<VkCommandBuffer>(1),8,e));
+    SR_CHECK(store.UploadBuffer(1500,bytes,3,e));SR_CHECK_EQ(copies,3);
+    // v3 replaces the retired v2 and reuses a staging chunk: no net allocation.
+    SR_CHECK_EQ(allocations.size(),before);
   }
-  SR_CHECK(allocations.empty());SR_CHECK_EQ(destroyed,4);
+  SR_CHECK(allocations.empty());SR_CHECK_EQ(destroyed,5);
 }
 SR_TEST(host_upload_reuses_only_completed_unreferenced_buffers) {
   allocations.clear();copies=flushes=destroyed=0;

@@ -99,7 +99,7 @@ bool PlanTextureUpload(const guest::LinearTexture& texture,VkDeviceSize alignmen
   result=std::move(out);e={};return true;
 }
 BufferResource::~BufferResource() {
-  if(!context || !context->device) return;
+  if(!context || !context->device || owner) return;
   if(handle) context->f.vkDestroyBuffer(context->device,handle,nullptr);
   if(memory) context->f.vkFreeMemory(context->device,memory,nullptr);
 }
@@ -115,10 +115,19 @@ ResourceStore::~ResourceStore() {
   if(c_.device) c_.f.vkDeviceWaitIdle(c_.device);
   submissions_.Retire(UINT64_MAX);
 }
-bool ResourceStore::BeginSubmission(VkCommandBuffer cmd,uint64_t serial,Error& e) {
+bool ResourceStore::BeginSubmission(VkCommandBuffer cmd,uint64_t serial,Error& e,VkCommandBuffer upload) {
   if(!cmd || serial<=completed_ || serial<serial_) return Fail(e,"Resource submission","Missing command buffer or invalid submission serial");
   if(serial!=serial_) for(auto& [size,pool]:host_pool_) pool.cursor=0;
-  command_=cmd;serial_=serial;e={};return true;
+  command_=cmd;upload_=upload;upload_barrier_=false;texture_barriers_.clear();serial_=serial;e={};return true;
+}
+void ResourceStore::FinishUploads() {
+  if(!upload_) return;
+  VkMemoryBarrier memory{VK_STRUCTURE_TYPE_MEMORY_BARRIER};memory.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;
+  memory.dstAccessMask=VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT|VK_ACCESS_INDEX_READ_BIT|VK_ACCESS_TRANSFER_READ_BIT;
+  if(upload_barrier_ || !texture_barriers_.empty())
+    c_.f.vkCmdPipelineBarrier(upload_,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_VERTEX_INPUT_BIT|VK_PIPELINE_STAGE_VERTEX_SHADER_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_TRANSFER_BIT,0,
+      upload_barrier_?1:0,&memory,0,nullptr,uint32_t(texture_barriers_.size()),texture_barriers_.data());
+  upload_barrier_=false;texture_barriers_.clear();
 }
 void ResourceStore::Retire(uint64_t completed) {completed_=std::max(completed_,completed);submissions_.Retire(completed_);}
 bool ResourceStore::Ready(Error& e) {
@@ -135,21 +144,54 @@ std::shared_ptr<BufferResource> ResourceStore::NewBuffer(VkDeviceSize size,VkBuf
   VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};alloc.allocationSize=mr.size;alloc.memoryTypeIndex=*type;
   if(!Check(c_.f.vkAllocateMemory(c_.device,&alloc,nullptr,&b->memory),"Allocate resource buffer",e) ||
      !Check(c_.f.vkBindBufferMemory(c_.device,b->handle,b->memory,0),"Bind resource buffer",e)) return {};
+  // Host-visible memory stays mapped for its lifetime; freeing it unmaps.
+  if((required&VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && !Check(c_.f.vkMapMemory(c_.device,b->memory,0,VK_WHOLE_SIZE,0,&b->mapped),"Map resource buffer",e)) return {};
   return b;
 }
-bool ResourceStore::Write(const std::shared_ptr<BufferResource>& b,std::span<const std::byte> bytes,Error& e) {
-  void* mapped=nullptr;
-  if(!Check(c_.f.vkMapMemory(c_.device,b->memory,0,VK_WHOLE_SIZE,0,&mapped),"Map staging",e)) return false;
-  std::memcpy(mapped,bytes.data(),bytes.size());
-  VkResult flush=VK_SUCCESS;
-  if(!b->coherent) {
-    auto aligned=AlignFlushRange(0,bytes.size(),b->allocation,std::max<VkDeviceSize>(1,c_.properties.limits.nonCoherentAtomSize));
-    if(!aligned.valid) {c_.f.vkUnmapMemory(c_.device,b->memory);return Fail(e,"Flush staging","Invalid flush range");}
-    VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};range.memory=b->memory;range.offset=aligned.offset;range.size=aligned.size;
-    flush=c_.f.vkFlushMappedMemoryRanges(c_.device,1,&range);
+bool ResourceStore::Write(const std::shared_ptr<BufferResource>& b,std::span<const std::byte> bytes,Error& e,VkDeviceSize offset) {
+  // Suballocations carry their own mapped pointer and memory offset.
+  auto* owner=b->owner?b->owner.get():b.get();
+  if(!b->mapped || offset+bytes.size()>b->allocation) return Fail(e,"Write staging","Buffer is not host mapped or range exceeds allocation");
+  std::memcpy(static_cast<std::byte*>(b->mapped)+offset,bytes.data(),bytes.size());
+  if(b->coherent || bytes.empty()) {e={};return true;}
+  auto aligned=AlignFlushRange(b->offset+offset,bytes.size(),owner->allocation,std::max<VkDeviceSize>(1,c_.properties.limits.nonCoherentAtomSize));
+  if(!aligned.valid) return Fail(e,"Flush staging","Invalid flush range");
+  VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};range.memory=b->memory;range.offset=aligned.offset;range.size=aligned.size;
+  return Check(c_.f.vkFlushMappedMemoryRanges(c_.device,1,&range),"Flush staging",e);
+}
+std::shared_ptr<BufferResource> ResourceStore::Suballocate(Arena& arena,VkDeviceSize size,VkDeviceSize alignment,Error& e) {
+  constexpr VkDeviceSize chunk_size=8ull*1024*1024,budget=64ull*1024*1024;
+  auto view=[&](ArenaChunk& chunk) {
+    VkDeviceSize offset=(chunk.used+alignment-1)/alignment*alignment;
+    if(offset+size>chunk.buffer->size) return std::shared_ptr<BufferResource>{};
+    if(chunk.serial!=serial_) {chunk.serial=serial_;submissions_.Keep(serial_,chunk.buffer);}
+    chunk.used=offset+size;
+    auto v=std::make_shared<BufferResource>();v->context=&c_;v->owner=chunk.buffer;v->handle=chunk.buffer->handle;v->memory=chunk.buffer->memory;
+    v->size=size;v->allocation=size;v->offset=offset;v->coherent=chunk.buffer->coherent;v->mapped=static_cast<std::byte*>(chunk.buffer->mapped)+offset;
+    return v;
+  };
+  if(arena.current<arena.chunks.size() && arena.chunks[arena.current].serial==serial_) if(auto v=view(arena.chunks[arena.current])) return v;
+  // A chunk referenced only by the arena has no pending submission or view.
+  for(size_t i=0;i<arena.chunks.size();++i) {
+    auto& chunk=arena.chunks[i];
+    if(chunk.buffer.use_count()!=1 || chunk.buffer->size<size) continue;
+    chunk.used=0;chunk.serial=0;arena.current=i;if(auto v=view(chunk)) return v;
   }
-  c_.f.vkUnmapMemory(c_.device,b->memory);
-  return Check(flush,"Flush staging",e);
+  auto buffer=NewBuffer(std::max(chunk_size,size),arena.usage,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,e);if(!buffer) return {};
+  if(buffer->size==chunk_size && arena.bytes+buffer->allocation<=budget) {
+    arena.bytes+=buffer->allocation;arena.chunks.push_back({buffer,0,0});arena.current=arena.chunks.size()-1;return view(arena.chunks.back());
+  }
+  ArenaChunk single{buffer,0,0};return view(single);  // oversized or over budget: this submission only
+}
+std::shared_ptr<BufferResource> ResourceStore::UploadTransient(guest::ResourceId id,std::span<const std::byte> bytes,VkDeviceSize reserve,Error& e) {
+  if(!Ready(e)) return {};
+  VkDeviceSize size=std::max<VkDeviceSize>(bytes.size(),reserve);
+  if(!size || size>c_.properties.limits.maxStorageBufferRange) {Fail(e,"Upload transient","Invalid storage buffer range");return {};}
+  auto alignment=std::lcm<VkDeviceSize>(std::max<VkDeviceSize>(16,c_.properties.limits.minStorageBufferOffsetAlignment),std::max<VkDeviceSize>(1,c_.properties.limits.nonCoherentAtomSize));
+  auto buffer=Suballocate(transient_,size,alignment,e);
+  if(!buffer || !Write(buffer,bytes,e)) return {};
+  if(id) {buffer->version=serial_;buffers_[id]=buffer;}
+  e={};return buffer;
 }
 bool ResourceStore::UploadBuffer(guest::ResourceId id,std::span<const std::byte> bytes,uint64_t version,Error& e) {
   if(!Ready(e)) return false;
@@ -157,12 +199,14 @@ bool ResourceStore::UploadBuffer(guest::ResourceId id,std::span<const std::byte>
   auto found=buffers_.find(id);
   if(found!=buffers_.end() && found->second->version==version) {submissions_.Keep(serial_,found->second);e={};return true;}
   if(found!=buffers_.end() && version<found->second->version) return Fail(e,"Upload buffer","Stale buffer version");
-  auto upload=NewBuffer(bytes.size(),VK_BUFFER_USAGE_TRANSFER_SRC_BIT,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,e);
+  auto staging_alignment=std::lcm<VkDeviceSize>(16,std::max<VkDeviceSize>(1,c_.properties.limits.nonCoherentAtomSize));
+  auto upload=Suballocate(staging_,bytes.size(),staging_alignment,e);
   if(!upload || !Write(upload,bytes,e)) return false;
   auto gpu=NewBuffer(bytes.size(),VK_BUFFER_USAGE_TRANSFER_DST_BIT|VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_VERTEX_BUFFER_BIT|VK_BUFFER_USAGE_INDEX_BUFFER_BIT,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,e);
   if(!gpu) return false;
   gpu->version=version;
-  VkBufferCopy copy{0,0,bytes.size()};c_.f.vkCmdCopyBuffer(command_,upload->handle,gpu->handle,1,&copy);
+  VkBufferCopy copy{upload->offset,0,bytes.size()};c_.f.vkCmdCopyBuffer(upload_?upload_:command_,upload->handle,gpu->handle,1,&copy);
+  if(upload_) {upload_barrier_=true;submissions_.Keep(serial_,gpu);buffers_[id]=std::move(gpu);e={};return true;}
   VkBufferMemoryBarrier barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
   barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT|VK_ACCESS_INDEX_READ_BIT;
   barrier.srcQueueFamilyIndex=barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;barrier.buffer=gpu->handle;barrier.size=VK_WHOLE_SIZE;
@@ -184,8 +228,10 @@ bool ResourceStore::UploadTexture(guest::ResourceId id,const guest::LinearTextur
   if(!Check(c_.f.vkGetPhysicalDeviceImageFormatProperties(c_.physical,plan.format,plan.image_type,VK_IMAGE_TILING_OPTIMAL,usage,plan.flags,&image_caps),"Texture image support",e)) return false;
   if(plan.extent.width>image_caps.maxExtent.width || plan.extent.height>image_caps.maxExtent.height || plan.extent.depth>image_caps.maxExtent.depth || plan.mips>image_caps.maxMipLevels || plan.layers>image_caps.maxArrayLayers)
     return Fail(e,"Texture image limits","Texture exceeds format dimensions");
-  auto upload=NewBuffer(plan.bytes.size(),VK_BUFFER_USAGE_TRANSFER_SRC_BIT,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,e);
+  auto staging_alignment=std::lcm<VkDeviceSize>(std::max<VkDeviceSize>(16,c_.properties.limits.optimalBufferCopyOffsetAlignment),std::max<VkDeviceSize>(1,c_.properties.limits.nonCoherentAtomSize));
+  auto upload=Suballocate(staging_,plan.bytes.size(),staging_alignment,e);
   if(!upload || !Write(upload,std::as_bytes(std::span(plan.bytes)),e)) return false;
+  for(auto& region:plan.regions) region.bufferOffset+=upload->offset;
   auto gpu=std::make_shared<TextureResource>();gpu->context=&c_;gpu->format=plan.format;gpu->extent=plan.extent;gpu->layers=plan.layers;gpu->mips=plan.mips;gpu->view_type=plan.view_type;gpu->version=version;
   VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};ci.flags=plan.flags;ci.imageType=plan.image_type;ci.format=plan.format;ci.extent=plan.extent;ci.mipLevels=plan.mips;ci.arrayLayers=plan.layers;ci.samples=VK_SAMPLE_COUNT_1_BIT;ci.tiling=VK_IMAGE_TILING_OPTIMAL;ci.usage=usage;ci.sharingMode=VK_SHARING_MODE_EXCLUSIVE;ci.initialLayout=VK_IMAGE_LAYOUT_UNDEFINED;
   if(!Check(c_.f.vkCreateImage(c_.device,&ci,nullptr,&gpu->handle),"Create texture image",e)) return false;
@@ -198,10 +244,12 @@ bool ResourceStore::UploadTexture(guest::ResourceId id,const guest::LinearTextur
   view.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,plan.mips,0,plan.view_type==VK_IMAGE_VIEW_TYPE_CUBE?6u:1u};
   if(!Check(c_.f.vkCreateImageView(c_.device,&view,nullptr,&gpu->view),"Create texture view",e)) return false;
   VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};barrier.srcQueueFamilyIndex=barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;barrier.image=gpu->handle;barrier.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,plan.mips,0,plan.layers};barrier.oldLayout=VK_IMAGE_LAYOUT_UNDEFINED;barrier.newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;barrier.dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;
-  c_.f.vkCmdPipelineBarrier(command_,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,0,nullptr,1,&barrier);
-  c_.f.vkCmdCopyBufferToImage(command_,upload->handle,gpu->handle,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,uint32_t(plan.regions.size()),plan.regions.data());
+  auto command=upload_?upload_:command_;
+  c_.f.vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,0,nullptr,1,&barrier);
+  c_.f.vkCmdCopyBufferToImage(command,upload->handle,gpu->handle,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,uint32_t(plan.regions.size()),plan.regions.data());
   barrier.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;barrier.newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_SHADER_READ_BIT;
-  c_.f.vkCmdPipelineBarrier(command_,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_VERTEX_SHADER_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,0,0,nullptr,0,nullptr,1,&barrier);
+  if(upload_) texture_barriers_.push_back(barrier);
+  else c_.f.vkCmdPipelineBarrier(command_,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_VERTEX_SHADER_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,0,0,nullptr,0,nullptr,1,&barrier);
   submissions_.Keep(serial_,upload);submissions_.Keep(serial_,gpu);textures_[id]=std::move(gpu);e={};return true;
 }
 std::shared_ptr<TextureResource> ResourceStore::ResolveTexture(guest::ResourceId id,VkFormat format,VkExtent3D extent,uint32_t mips,uint32_t layers,bool cube,ImageState& state,Error& e) {
@@ -281,9 +329,9 @@ std::shared_ptr<BufferResource> ResourceStore::ReadbackBuffer(VkDeviceSize size,
 }
 bool ResourceStore::Readback(const std::shared_ptr<BufferResource>& buffer,std::vector<uint8_t>& bytes,Error& e) {
   if(!buffer || buffer->context!=&c_) return Fail(e,"Readback buffer","Buffer is absent or belongs to another device");
-  void* data=nullptr;if(!Check(c_.f.vkMapMemory(c_.device,buffer->memory,0,VK_WHOLE_SIZE,0,&data),"Map readback",e)) return false;
-  if(!buffer->coherent) {VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};range.memory=buffer->memory;range.offset=0;range.size=VK_WHOLE_SIZE;if(!Check(c_.f.vkInvalidateMappedMemoryRanges(c_.device,1,&range),"Invalidate readback",e)) {c_.f.vkUnmapMemory(c_.device,buffer->memory);return false;}}
-  bytes.assign(static_cast<uint8_t*>(data),static_cast<uint8_t*>(data)+buffer->size);c_.f.vkUnmapMemory(c_.device,buffer->memory);e={};return true;
+  if(!buffer->mapped) return Fail(e,"Readback buffer","Buffer is not host mapped");
+  if(!buffer->coherent) {VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};range.memory=buffer->memory;range.offset=0;range.size=VK_WHOLE_SIZE;if(!Check(c_.f.vkInvalidateMappedMemoryRanges(c_.device,1,&range),"Invalidate readback",e)) return false;}
+  auto* data=static_cast<uint8_t*>(buffer->mapped);bytes.assign(data,data+buffer->size);e={};return true;
 }
 std::shared_ptr<BufferResource> ResourceStore::Buffer(guest::ResourceId id,Error& e) {
   if(!Ready(e)) return {};

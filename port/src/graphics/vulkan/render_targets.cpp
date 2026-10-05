@@ -127,13 +127,14 @@ bool TargetStore::Initialize(const std::shared_ptr<TargetResource>& target,Error
   else {VkClearColorValue value{};c_.f.vkCmdClearColorImage(command_,target->image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,&value,1,&range);}
   target->initialized=true;return true;
 }
-std::shared_ptr<TargetPass> TargetStore::PreparePass(const PassPlan& plan,Error& e) {
+std::shared_ptr<TargetPass> TargetStore::PreparePass(const PassPlan& plan,Error& e,const TargetPass* open) {
   if(!command_ || !serial_ || serial_<=completed_) {Fail(e,"Render pass","Missing active recording submission");return {};}
   if(!ValidatePassPlan(plan,e)) return {};
   std::array<TargetId,5> key{};
   for(uint32_t i=0;i<4;++i) if(plan.colors[i].id) {key[i]=Acquire(plan.colors[i],e);if(!key[i]) return {};}
   if(plan.depth.id) {key[4]=Acquire(plan.depth,e);if(!key[4]) return {};}
   for(uint32_t i=0;i<5;++i) for(uint32_t j=i+1;j<5;++j) if(key[i] && key[i]==key[j]) {Fail(e,"Render pass","Same target bound to multiple attachments");return {};}
+  if(open) if(auto found=passes_.find(key);found!=passes_.end() && found->second.get()==open) {pending_.Keep(serial_,found->second);e={};return found->second;}
   std::vector<std::shared_ptr<TargetResource>> references;
   for(auto id:key) if(id) {
     auto target=Get(id,e);if(!target || !Initialize(target,e) || !state_.Transition(command_,target->image,{target->aspects,0,1,0,1},target->description.depth?ImageUsage::DepthAttachment():ImageUsage::ColorAttachment(),e)) return {};

@@ -45,7 +45,7 @@ try {
         Invoke-Check (Join-Path $VulkanBuild 'sr_vulkan_contract_test.exe') @('--production-bindings')
         $gpuTests = Join-Path $VulkanBuild 'sr_vulkan_resources_test.exe'
         Invoke-Check $gpuTests @()
-        foreach ($fixture in @('targets', 'pipeline-cache', 'game-record', 'resolve-copy', 'resolve-record', 'depth-resolve', 'edram-alias', 'alias-defaults', 'resolve-sample', 'game-frame', 'immediate', 'stacked-resolve', 'composition')) {
+        foreach ($fixture in @('targets', 'pipeline-cache', 'game-record', 'game-record-merged', 'resolve-copy', 'resolve-record', 'depth-resolve', 'edram-alias', 'alias-defaults', 'resolve-sample', 'game-frame', 'immediate', 'stacked-resolve', 'composition')) {
             Invoke-Check $gpuTests @("--$fixture")
         }
     }

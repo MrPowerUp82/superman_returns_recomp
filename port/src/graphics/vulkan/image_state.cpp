@@ -44,6 +44,7 @@ bool ImageState::Transition(VkCommandBuffer command,VkImage image,VkImageSubreso
       b.oldLayout=old.layout;b.newLayout=next.layout;b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
       b.image=image;b.subresourceRange={range.aspectMask,mip,1,layer,1};barriers.push_back(b);sources|=old.stages;
     }
+  if(!barriers.empty() && before_barrier) before_barrier(command);
   if(!barriers.empty()) f_.vkCmdPipelineBarrier(command,sources,next.stages,0,0,nullptr,0,nullptr,uint32_t(barriers.size()),barriers.data());
   // vkCmd calls have no result code. State changes after recording, so a fake
   // dispatch exception before recording cannot advance it.

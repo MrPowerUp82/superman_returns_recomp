@@ -36,12 +36,16 @@ public:
   TargetId Acquire(const guest::SurfaceDesc&,Error&);
   std::shared_ptr<TargetResource> Get(TargetId,Error&);
   std::shared_ptr<const TargetResource> Find(const guest::SurfaceDesc&) const;
-  std::shared_ptr<TargetPass> PreparePass(const PassPlan&,Error&);
+  // When `open` is the pass this plan maps to, its attachments are already
+  // initialized and in attachment layout: no transition is recorded.
+  std::shared_ptr<TargetPass> PreparePass(const PassPlan&,Error&,const TargetPass* open=nullptr);
   bool Clear(const guest::ClearPacket&,Error&);
   void MarkWritten(const TargetPass&);
   void MarkWritten(TargetId id) {targets_.at(id)->last_write=++write_serial_;}
   std::vector<std::pair<TargetId,AliasPlan>> Aliases(const TargetPass&) const;
   void Retire(uint64_t serial) {completed_=std::max(completed_,serial);pending_.Retire(serial);}
+  // Diagnostics: every live target, in creation order.
+  std::vector<std::shared_ptr<TargetResource>> All() const {std::vector<std::shared_ptr<TargetResource>> out;for(auto& [id,t]:targets_) out.push_back(t);return out;}
 private:
   bool Initialize(const std::shared_ptr<TargetResource>&,Error&);
   Context& c_;ImageState& state_;VkCommandBuffer command_=VK_NULL_HANDLE;uint64_t serial_=0,completed_=0,write_serial_=0,next_id_=0;

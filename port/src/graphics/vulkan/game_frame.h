@@ -20,7 +20,9 @@ private:
   bool WaitFence(Error&);
   Context& c_;std::mutex& queue_mutex_;ShaderLookup shaders_;GameRenderer renderer_;
   std::vector<guest::RenderPacket> packets_;
-  VkCommandPool pool_=VK_NULL_HANDLE;VkCommandBuffer command_=VK_NULL_HANDLE;
+  VkCommandPool pool_=VK_NULL_HANDLE;VkCommandBuffer command_=VK_NULL_HANDLE,upload_=VK_NULL_HANDLE;
+  // Presentation snapshots, reused once neither a mailbox nor a submission holds them.
+  std::vector<std::shared_ptr<TextureResource>> snapshots_;
   VkFence fence_=VK_NULL_HANDLE;uint64_t serial_=0;bool submitted_=false,failed_=false;
   std::atomic<bool> cancelled_{false};
   std::chrono::steady_clock::time_point cache_checkpoint_{};

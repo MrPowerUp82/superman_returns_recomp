@@ -6,7 +6,7 @@ DescriptorPage::~DescriptorPage() {if(pool) context->f.vkDestroyDescriptorPool(c
 SamplerResource::~SamplerResource() {if(handle) context->f.vkDestroySampler(context->device,handle,nullptr);}
 DescriptorStore::~DescriptorStore() {
   if(c_.device) c_.f.vkDeviceWaitIdle(c_.device);
-  pending_.Retire(UINT64_MAX);pages_.clear();samplers_.clear();
+  pending_.Retire(UINT64_MAX);pages_.clear();free_pages_.clear();samplers_.clear();
   for(auto layout:layouts_) if(layout) c_.f.vkDestroyDescriptorSetLayout(c_.device,layout,nullptr);
 }
 bool DescriptorStore::Initialize(Error& e) {
@@ -51,18 +51,17 @@ std::shared_ptr<DescriptorDraw> DescriptorStore::Prepare(const DrawBindings& bin
   std::array<VkDescriptorImageInfo,32> sampler_info{};
   std::array<std::span<const std::byte>,3> bytes{std::as_bytes(std::span(bindings.constants.vs)),std::as_bytes(std::span(bindings.constants.ps)),std::as_bytes(std::span(bindings.constants.shared))};
   for(uint32_t i=0;i<3;++i) {
-    uint64_t id=DescriptorConstantBufferBase|++constant_serial_;
-    if(!store.UploadHostBuffer(id,bytes[i],1,e)) return {};
-    auto buffer=store.Buffer(id,e);store.ForgetBuffer(id);
+    // Suballocated from the store's mapped per-submission arena.
+    ++constant_serial_;auto buffer=store.UploadTransient(0,bytes[i],4096,e);
     if(!buffer) return {};
-    constant_info[i]={buffer->handle,0,4096};draw->resources.push_back(buffer);
+    constant_info[i]={buffer->handle,buffer->offset,4096};draw->resources.push_back(buffer);
   }
   for(uint32_t slot=0;slot<32;++slot) {
     if((bindings.texture_indices[slot]&0x7fffu)>=32 || bindings.sampler_indices[slot]!=slot) {
       e={"Draw descriptors",VK_ERROR_INITIALIZATION_FAILED,"Descriptor index was not remapped into the draw arrays"};return {};
     }
     auto buffer=store.Buffer(bindings.vertex_buffers[slot],e);if(!buffer) return {};
-    vertex_info[slot]={buffer->handle,0,buffer->size};draw->resources.push_back(buffer);
+    vertex_info[slot]={buffer->handle,buffer->offset,buffer->size};draw->resources.push_back(buffer);
     for(uint32_t dimension=0;dimension<3;++dimension) {
       auto texture=store.Texture(bindings.textures[dimension][slot],e);if(!texture) return {};
       auto expected=dimension==0?VK_IMAGE_VIEW_TYPE_2D:(dimension==1?VK_IMAGE_VIEW_TYPE_3D:VK_IMAGE_VIEW_TYPE_CUBE);
@@ -74,14 +73,18 @@ std::shared_ptr<DescriptorDraw> DescriptorStore::Prepare(const DrawBindings& bin
     if((fetch[slot][0]&3)==2 && (((fetch[slot][3]>>19)&3)==1 || ((fetch[slot][3]>>21)&3)==1 || ((fetch[slot][3]>>25)&7)>1)) {
       uint32_t dimension=(fetch[slot][5]>>9)&3;dimension=dimension?dimension-1:0;
       auto texture=store.Texture(bindings.textures[dimension][bindings.texture_indices[slot]&0x7fffu],e);if(!texture) return {};
-      VkFormatProperties properties{};c_.f.vkGetPhysicalDeviceFormatProperties(c_.physical,texture->format,&properties);
-      if(!(properties.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)) {
+      auto features=filter_features_.find(texture->format);
+      if(features==filter_features_.end()) {VkFormatProperties properties{};c_.f.vkGetPhysicalDeviceFormatProperties(c_.physical,texture->format,&properties);features=filter_features_.emplace(texture->format,properties.optimalTilingFeatures).first;}
+      if(!(features->second&VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)) {
         e={"Texture filtering",VK_ERROR_FORMAT_NOT_SUPPORTED,"Guest sampler requests linear filtering of an unsupported format"};return {};
       }
     }
   }
   constexpr uint32_t draws_per_page=128;
   auto& pages=pages_[serial];
+  if((pages.empty() || pages.back()->draws>=draws_per_page) && !free_pages_.empty()) {
+    pages.push_back(std::move(free_pages_.back()));free_pages_.pop_back();
+  }
   if(pages.empty() || pages.back()->draws>=draws_per_page) {
     auto page=std::make_shared<DescriptorPage>();page->context=&c_;
     VkDescriptorPoolSize sizes[]{{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,35*draws_per_page},{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,96*draws_per_page},{VK_DESCRIPTOR_TYPE_SAMPLER,32*draws_per_page}};
@@ -104,5 +107,10 @@ std::shared_ptr<DescriptorDraw> DescriptorStore::Prepare(const DrawBindings& bin
   c_.f.vkUpdateDescriptorSets(c_.device,uint32_t(writes.size()),writes.data(),0,nullptr);
   pending_.Keep(serial,draw);e={};return draw;
 }
-void DescriptorStore::Retire(uint64_t serial) {completed_=std::max(completed_,serial);pending_.Retire(completed_);pages_.erase(pages_.begin(),pages_.upper_bound(completed_));}
+void DescriptorStore::Retire(uint64_t serial) {
+  completed_=std::max(completed_,serial);pending_.Retire(completed_);
+  // Reset retired pools for reuse instead of destroying and recreating them.
+  for(auto it=pages_.begin();it!=pages_.upper_bound(completed_);it=pages_.erase(it))
+    for(auto& page:it->second) if(page.use_count()==1 && free_pages_.size()<64 && c_.f.vkResetDescriptorPool(c_.device,page->pool,0)==VK_SUCCESS) {page->draws=0;free_pages_.push_back(std::move(page));}
+}
 } // namespace superman_returns::graphics::vulkan
