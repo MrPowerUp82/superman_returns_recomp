@@ -16,10 +16,10 @@ alternates Space (A) and Enter (Start) at most -MaxSkips times to confirm a late
 dialog or skip the opening cinematic. -Exe selects the executable (default: the
 win-amd64-release build).
 
-The HUD is checked (bench_hud.ps1) before the idle window and right after the forward
-window, while W is held: the game fades the HUD after ~20 s without input, so it is
-not checked after idle. A run that is not on gameplay (menu, title) throws and leaves
-logs/bench_<name>_not_gameplay.png.
+The HUD is detected (bench_hud.ps1) by the wait loop before the run and checked again
+right after the forward window, while W is held, with a short poll: the game fades
+the HUD after ~20 s without input, so it is not checked after idle. A run that is not
+on gameplay (menu, title) throws and leaves logs/bench_<name>_not_gameplay.png.
 
 Usage: tools\bench.ps1 -Name baseline [-ExtraArgs "--native_2x_msaa=false"]
 #>
@@ -116,13 +116,16 @@ function Has-Gameplay-Frame($proc) {
   }
 }
 
-# Throws (leaving a screenshot) unless the HUD is on screen, so a run on a menu or the
-# title screen can never produce a CSV row.
+# Throws (leaving a screenshot) unless the HUD is seen in one of up to 4 samples, one
+# second apart (a single sample can miss it on D3D12), so a run on a menu or the
+# title screen cannot go unnoticed.
 function Assert-Gameplay($proc) {
-  if (-not (Has-Gameplay-Frame $proc)) {
-    Screenshot "$root\logs\bench_${Name}_not_gameplay.png"
-    throw "scene is not gameplay during measurement (menu or title?)"
+  for ($i = 0; $i -lt 4; $i++) {
+    if ($i -gt 0) { Start-Sleep 1 }
+    if (Has-Gameplay-Frame $proc) { return }
   }
+  Screenshot "$root\logs\bench_${Name}_not_gameplay.png"
+  throw "scene is not gameplay during measurement (menu or title?)"
 }
 
 # True when the whole screen capture is black. A fullscreen game window (notably a
@@ -233,11 +236,11 @@ try {
   Step "visible frame detected"
   Start-Sleep 5
 
-  # The game fades the HUD after ~20 s without input, so it is asserted only where
-  # it is expected: just before the idle window (it was just detected) and right
-  # after the forward window while W is still held (input keeps it visible). A menu
-  # or title therefore still fails the run: no HUD before idle or after forward.
-  Assert-Gameplay $proc
+  # The wait loop above detected the HUD seconds ago, so it is not checked again
+  # before idle. The game fades the HUD after ~20 s without input, so it is not
+  # checked after idle either; it is asserted right after the forward window while W
+  # is still held (input keeps it visible). A menu or title cannot produce a clean
+  # run: the HUD must still be visible after the forward window.
   Measure-Window $proc 'idle'
   Focus $proc; Key 0x57 -Down
   try {
