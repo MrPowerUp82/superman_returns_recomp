@@ -81,9 +81,10 @@ class SupermanReturnsApp : public rex::ReXApp {
 #if SR_HAS_NATIVE
       config.graphics = superman_returns::native::CreateNativeGraphicsSystem(
           &CreateSrXenosGraphicsSystem, &CreateSrAbGraphicsSystem);
+      if (!config.graphics) rex::FatalError("sr_renderer=native: the native renderer could not be created");
 #else
-      REXLOG_WARN("sr_renderer=native: this build has no native renderer (CMake "
-                  "SR_NATIVE=RENDERER); using the xenos backend");
+      rex::FatalError("sr_renderer=native: this build has no native renderer (CMake "
+                      "SR_NATIVE=RENDERER); select Xenos explicitly (sr_renderer=xenos)");
 #endif
     }
     if (!config.graphics) {
@@ -94,8 +95,8 @@ class SupermanReturnsApp : public rex::ReXApp {
       REXLOG_ERROR("sr_renderer=trace requires the ReXGlue v0.10.0 GPU sources");
     }
     if (native) {
-      REXLOG_WARN("sr_renderer=native requires the ReXGlue v0.10.0 GPU sources and CMake "
-                  "SR_NATIVE=RENDERER; using the xenos backend");
+      rex::FatalError("sr_renderer=native requires the ReXGlue v0.10.0 GPU sources and CMake "
+                      "SR_NATIVE=RENDERER; select Xenos explicitly (sr_renderer=xenos)");
     }
     if (rex::cvar::GetFlagByName("sr_post_effects") == "false") {
       REXLOG_WARN("sr_post_effects=false requires the ReXGlue v0.10.0 GPU sources "

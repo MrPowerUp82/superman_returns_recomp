@@ -31,12 +31,12 @@ using GraphicsSystemFactory = std::unique_ptr<rex::system::IGraphicsSystem> (*)(
 
 #if SR_HAS_NATIVE
 
-// Graphics system for --sr_renderer=native. Returns nullptr when the native
-// renderer cannot run (not built, profile unconfirmed, no shader corpus);
-// the reason is logged once and the caller uses the Xenos backend.
-// `create_xenos` builds the stock backend: the native graphics system falls
-// back to it if D3D12 presentation cannot be set up. In sr_native_ab_mode the
-// result is the Xenos backend with the A/B swap observer installed.
+// Graphics system for --sr_renderer=native. When the native renderer cannot
+// run (not built, profile unconfirmed, no shader corpus, presentation or guest
+// GPU setup failed) the game stops with the reason: it never switches to the
+// Xenos backend by itself; the user selects Xenos explicitly (sr_renderer=xenos).
+// In sr_native_ab_mode the result is the Xenos backend with the A/B swap
+// observer installed (`create_xenos_ab`).
 std::unique_ptr<rex::system::IGraphicsSystem> CreateNativeGraphicsSystem(
     GraphicsSystemFactory create_xenos, GraphicsSystemFactory create_xenos_ab);
 

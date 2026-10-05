@@ -103,7 +103,6 @@ public sealed class LauncherSettings
             $"--fullscreen={(DisplayMode != "Windowed").ToString().ToLowerInvariant()}",
             $"--vsync={VSync.ToString().ToLowerInvariant()}",
             "--d3d12_adapter=-1",
-            $"--sr_native_gpu_luid={GpuLuid}",
             $"--sr_native_fps_limit={ValidChoice(FpsLimit, 30, 0, 30, 60, 120)}",
             $"--sr_native_render_scale={scale.ToString("0.##", CultureInfo.InvariantCulture)}",
             $"--sr_native_anisotropic_filtering={filter}",
@@ -111,6 +110,9 @@ public sealed class LauncherSettings
             $"--sr_native_shadow_quality={(vulkan ? 1 : ValidChoice(ShadowQuality, 1, 1, 2, 4))}",
             $"--sr_native_msaa_samples={(vulkan ? 1 : ValidChoice(Msaa, 1, 1, 4, 8))}"
         };
+        // An empty "--flag=" makes the engine's argument parser take the next argument
+        // as its value, so the LUID is passed only when a GPU was chosen.
+        if (!string.IsNullOrWhiteSpace(GpuLuid)) result.Add($"--sr_native_gpu_luid={GpuLuid.Trim()}");
         if (InputMode == "KeyboardMouse") { result.Add("--mnk_mode=true"); result.Add("--mnk_mouse=true"); }
         else { result.Add("--mnk_mode=false"); result.Add("--mnk_mouse=false"); }
         return result;

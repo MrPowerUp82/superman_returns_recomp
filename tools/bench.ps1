@@ -16,6 +16,7 @@ Usage: tools\bench.ps1 -Name baseline [-ExtraArgs "--native_2x_msaa=false"]
 param(
   [Parameter(Mandatory)] [string]$Name,
   [string]$ExtraArgs = "",
+  [string]$Exe = "",
   [int]$TitleTimeout = 60,
   [int]$Settle = 25,
   [int]$Window = 20,
@@ -23,7 +24,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
-$exe = "$root\port\out\build\win-amd64-release\superman_returns.exe"
+$exe = if ($Exe) { $Exe } else { "$root\port\out\build\win-amd64-release\superman_returns.exe" }
 $log = "$root\logs\game.log"
 $progress = "$root\logs\bench_progress.txt"
 $results = "$root\logs\bench_results.csv"

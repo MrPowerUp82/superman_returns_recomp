@@ -83,6 +83,12 @@ std::atomic<NativeGraphicsSystem*> g_active_system{nullptr};
 bool ResolveLauncherGpu() {
   const auto text = rex::cvar::GetFlagByName("sr_native_gpu_luid");
   if (text.empty()) return true;
+  // "--sr_native_gpu_luid=" with no value makes the argument parser take the next
+  // argument as the value. That is no GPU identity: use the automatic adapter.
+  if (text.starts_with("--")) {
+    REXLOG_WARN("native graphics: sr_native_gpu_luid has no value (read '{}'); using the automatic GPU", text);
+    return true;
+  }
   uint64_t luid = 0;
   const auto parsed = std::from_chars(text.data(), text.data() + text.size(), luid, 16);
   if (text.size() != 16 || parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size()) {

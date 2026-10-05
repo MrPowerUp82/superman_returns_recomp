@@ -52,40 +52,32 @@ namespace {
 enum class Mode : int { kOff, kNative, kAb };
 std::atomic<int> g_mode{int(Mode::kOff)};
 
-void LogFallbackOnce(const char* reason) {
-  static std::mutex mutex;
-  static std::set<std::string> logged;
-  std::lock_guard<std::mutex> lock(mutex);
-  if (logged.insert(reason).second) {
-    REXLOG_WARN("sr_renderer=native: {}; using the xenos backend", reason);
-  }
+// sr_renderer=native never switches to the Xenos backend on its own: the user
+// picks Xenos explicitly (sr_renderer=xenos, the launcher's Xenos engine).
+[[noreturn]] void NativeUnavailable(const std::string& reason) {
+  REXLOG_ERROR("sr_renderer=native: {}", reason);
+  rex::FatalError("Native renderer unavailable: " + reason +
+                  ". The game does not fall back to the Xenos backend; select Xenos in the "
+                  "launcher (sr_renderer=xenos) if you want it.");
 }
 
-// Owns the native graphics system and swaps in the Xenos backend when the
-// native one cannot set up D3D12 presentation or the guest GPU. Nothing has
-// reached the guest at that point, so the switch is transparent to the game.
-class FallbackGraphicsSystem final : public rex::system::IGraphicsSystem {
+// Owns the native graphics system. A failure to set up D3D12 presentation or
+// the guest GPU stops the game with the reason instead of changing backend.
+class StrictNativeGraphicsSystem final : public rex::system::IGraphicsSystem {
  public:
-  FallbackGraphicsSystem(std::unique_ptr<rex::system::IGraphicsSystem> native,
-                         GraphicsSystemFactory create_xenos)
-      : active_(std::move(native)), create_xenos_(create_xenos) {}
+  explicit StrictNativeGraphicsSystem(std::unique_ptr<rex::system::IGraphicsSystem> native)
+      : active_(std::move(native)) {}
 
   rex::X_STATUS SetupPresentation(rex::ui::WindowedAppContext* app_context) override {
-    app_context_ = app_context;
-    rex::X_STATUS status = active_->SetupPresentation(app_context);
-    if (XFAILED(status) && FallBack("D3D12 presentation of the native graphics system failed")) {
-      status = active_->SetupPresentation(app_context);
-    }
+    const rex::X_STATUS status = active_->SetupPresentation(app_context);
+    if (XFAILED(status)) NativeUnavailable("D3D12 presentation of the native graphics system failed");
     return status;
   }
 
   rex::X_STATUS SetupGuestGpu(rex::runtime::FunctionDispatcher* function_dispatcher,
                               rex::system::KernelState* kernel_state) override {
-    rex::X_STATUS status = active_->SetupGuestGpu(function_dispatcher, kernel_state);
-    if (XFAILED(status) && FallBack("guest GPU setup of the native graphics system failed")) {
-      if (app_context_) active_->SetupPresentation(app_context_);
-      status = active_->SetupGuestGpu(function_dispatcher, kernel_state);
-    }
+    const rex::X_STATUS status = active_->SetupGuestGpu(function_dispatcher, kernel_state);
+    if (XFAILED(status)) NativeUnavailable("guest GPU setup of the native graphics system failed");
     return status;
   }
 
@@ -108,20 +100,7 @@ class FallbackGraphicsSystem final : public rex::system::IGraphicsSystem {
   void Shutdown() override { active_->Shutdown(); }
 
  private:
-  bool FallBack(const char* reason) {
-    if (fell_back_ || !create_xenos_) return false;
-    fell_back_ = true;
-    LogFallbackOnce(reason);
-    g_mode.store(int(Mode::kOff));
-    active_->Shutdown();
-    active_ = create_xenos_();
-    return active_ != nullptr;
-  }
-
   std::unique_ptr<rex::system::IGraphicsSystem> active_;
-  GraphicsSystemFactory create_xenos_ = nullptr;
-  rex::ui::WindowedAppContext* app_context_ = nullptr;
-  bool fell_back_ = false;
 };
 
 // ---- Capture mode -----------------------------------------------------------
@@ -307,24 +286,19 @@ std::unique_ptr<rex::system::IGraphicsSystem> CreateNativeGraphicsSystem(
 #if !SR_NATIVE_RENDERER_BUILD
   (void)create_xenos;
   (void)create_xenos_ab;
-  LogFallbackOnce("this build only has the capture hooks (CMake SR_NATIVE=CAPTURE)");
-  return nullptr;
+  NativeUnavailable("this build only has the capture hooks (CMake SR_NATIVE=CAPTURE)");
 #else
   if constexpr (!profile::kProfileConfirmed) {
-    LogFallbackOnce("game_profile.h has unconfirmed addresses");
-    return nullptr;
+    NativeUnavailable("game_profile.h has unconfirmed addresses");
   }
   std::string where;
   if (!ShaderCorpusAvailable(&where)) {
-    LogFallbackOnce(("no offline shader corpus (embedded pack or " + where +
-                     "; tools/shaders, docs/native-port-plan.md section 6)")
-                        .c_str());
-    return nullptr;
+    NativeUnavailable("no offline shader corpus (embedded pack or " + where +
+                      "; tools/shaders, docs/native-port-plan.md section 6)");
   }
   if (REXCVAR_GET(sr_native_ab_mode)) {
     if (!create_xenos_ab) {
-      LogFallbackOnce("sr_native_ab_mode needs the in-process Xenos backend");
-      return nullptr;
+      NativeUnavailable("sr_native_ab_mode needs the in-process Xenos backend");
     }
     REXLOG_INFO("sr_renderer=native: A/B mode, Xenos renders and presents, native renders "
                 "offscreen ({})", where);
@@ -333,8 +307,8 @@ std::unique_ptr<rex::system::IGraphicsSystem> CreateNativeGraphicsSystem(
   }
   REXLOG_INFO("sr_renderer=native: native graphics system, no Xenos emulation ({})", where);
   g_mode.store(int(Mode::kNative));
-  return std::make_unique<FallbackGraphicsSystem>(std::make_unique<NativeGraphicsSystem>(),
-                                                  create_xenos);
+  (void)create_xenos;
+  return std::make_unique<StrictNativeGraphicsSystem>(std::make_unique<NativeGraphicsSystem>());
 #endif
 }
 
