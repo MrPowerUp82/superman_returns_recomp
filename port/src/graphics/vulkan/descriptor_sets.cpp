@@ -52,30 +52,34 @@ std::shared_ptr<DescriptorCacheEntry> DescriptorStore::Shared(const DrawBindings
   // Key: identity of every bound resource plus the sampler/filter state that
   // decides which sampler and which format checks apply. Consecutive slots
   // mostly bind the same dummy IDs, so repeated lookups are memoized.
-  std::vector<uint64_t> key;key.reserve(32*7);
+  std::array<uint64_t, 32*7> key_storage;
+  size_t key_len = 0;
   guest::ResourceId last_buffer=~0ull,last_texture=~0ull;const void* buffer_ptr=nullptr;const void* texture_ptr=nullptr;
   auto texture_key=[&](guest::ResourceId id) -> const void* {
     if(id!=last_texture) {auto* t=store.FindTexture(id);texture_ptr=t?t->get():nullptr;last_texture=id;}
     return texture_ptr;
   };
-  // Draws binding per-submission transient buffers (inline geometry) never
-  // repeat: they are written but not cached, so they cannot pin arena chunks.
   bool complete=true,cacheable=true;
+  uint64_t hash=14695981039346656037ull;
+  auto add_key=[&](uint64_t v) {
+    key_storage[key_len++] = v;
+    hash^=v;hash*=1099511628211ull;
+  };
+
   for(uint32_t slot=0;slot<32;++slot) {
     if(bindings.vertex_buffers[slot]!=last_buffer) {auto* b=store.FindBuffer(bindings.vertex_buffers[slot]);buffer_ptr=b?b->get():nullptr;last_buffer=bindings.vertex_buffers[slot];if(b && (*b)->owner) cacheable=false;}
-    key.push_back(uint64_t(reinterpret_cast<uintptr_t>(buffer_ptr)));complete&=buffer_ptr!=nullptr;
-    for(uint32_t dimension=0;dimension<3;++dimension) {auto* t=texture_key(bindings.textures[dimension][slot]);key.push_back(uint64_t(reinterpret_cast<uintptr_t>(t)));complete&=t!=nullptr;}
-    // Only the sampler/filter bits of texture slots matter. Other slots hold
-    // vertex fetch constants whose addresses change every frame.
+    add_key(uint64_t(reinterpret_cast<uintptr_t>(buffer_ptr)));complete&=buffer_ptr!=nullptr;
+    for(uint32_t dimension=0;dimension<3;++dimension) {auto* t=texture_key(bindings.textures[dimension][slot]);add_key(uint64_t(reinterpret_cast<uintptr_t>(t)));complete&=t!=nullptr;}
     if((fetch[slot][0]&3)==2) {
-      key.push_back((uint64_t(fetch[slot][0]&0x7fc00u)<<32)|(fetch[slot][3]&0xff80000u));
-      key.push_back((uint64_t(1)<<63)|(uint64_t((fetch[slot][5]>>9)&3)<<32)|bindings.texture_indices[slot]);
-    } else key.push_back(bindings.texture_indices[slot]);
+      add_key((uint64_t(fetch[slot][0]&0x7fc00u)<<32)|(fetch[slot][3]&0xff80000u));
+      add_key((uint64_t(1)<<63)|(uint64_t((fetch[slot][5]>>9)&3)<<32)|bindings.texture_indices[slot]);
+    } else add_key(bindings.texture_indices[slot]);
   }
-  uint64_t hash=14695981039346656037ull;for(auto v:key) {hash^=v;hash*=1099511628211ull;}
+  std::span<const uint64_t> key_span{key_storage.data(), key_len};
+
   if(complete && cacheable) if(auto found=cache_.find(hash);found!=cache_.end()) {
     auto& list=found->second;
-    for(auto it=list.begin();it!=list.end();++it) if((*it)->key==key) {
+    for(auto it=list.begin();it!=list.end();++it) if((*it)->key.size() == key_span.size() && std::equal(key_span.begin(), key_span.end(), (*it)->key.begin())) {
       auto entry=*it;bound.clear();
       for(auto& weak:entry->watched) {auto strong=weak.lock();if(!strong) {bound.clear();break;}bound.push_back(std::move(strong));}
       if(bound.size()!=entry->watched.size()) {list.erase(it);--cache_entries_;break;}  // a resource died: rebuild
@@ -83,6 +87,7 @@ std::shared_ptr<DescriptorCacheEntry> DescriptorStore::Shared(const DrawBindings
     }
   }
   ++cache_stats_.misses;bound.clear();
+  std::vector<uint64_t> key(key_span.begin(), key_span.end());
   // Miss: resolve, validate and write the sets exactly as an uncached draw would.
   auto entry=std::make_shared<DescriptorCacheEntry>();entry->key=std::move(key);entry->last_used=serial;entry->context=&c_;
   std::array<VkDescriptorBufferInfo,32> vertex_info{};
@@ -184,11 +189,14 @@ DescriptorDraw* DescriptorStore::Prepare(const DrawBindings& bindings,
   std::vector<std::shared_ptr<void>> temp_bound;
   draw->shared=Shared(bindings,fetch,store,serial,temp_bound,e);if(!draw->shared) return nullptr;
   // VS, PS and shared constants are contiguous in ConstantSnapshot: one upload per draw.
-  auto constants=store.UploadTransient(0,std::as_bytes(std::span(&bindings.constants,1)),sizeof(guest::ConstantSnapshot),e);
-  if(!constants.handle) return nullptr;
-  if(constants.offset>UINT32_MAX) {e={"Draw descriptors",VK_ERROR_OUT_OF_DEVICE_MEMORY,"Constant block offset exceeds the dynamic offset range"};return nullptr;}
-  draw->sets[0]=ConstantSet(constants.handle,e);if(!draw->sets[0]) return nullptr;
-  draw->dynamic_offsets.fill(uint32_t(constants.offset));
+  auto mapped = store.MapTransient(sizeof(guest::ConstantSnapshot),e);
+  if(!mapped) return nullptr;
+  if(mapped.offset>UINT32_MAX) {e={"Draw descriptors",VK_ERROR_OUT_OF_DEVICE_MEMORY,"Constant block offset exceeds the dynamic offset range"};return nullptr;}
+  std::memcpy(mapped.mapped, bindings.original_constants->vs.data(), 4096);
+  std::memcpy(mapped.mapped + 4096, bindings.original_constants->ps.data(), 4096);
+  std::memcpy(mapped.mapped + 8192, bindings.shared_constants.data(), 4096);
+  draw->sets[0]=ConstantSet(mapped.handle,e);if(!draw->sets[0]) return nullptr;
+  draw->dynamic_offsets.fill(uint32_t(mapped.offset));
   for(uint32_t i=0;i<3;++i) draw->sets[1+i]=draw->shared->sets[i];
   return draw;
 }

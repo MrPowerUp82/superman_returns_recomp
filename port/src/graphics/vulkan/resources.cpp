@@ -193,10 +193,9 @@ std::shared_ptr<BufferResource> ResourceStore::Suballocate(Arena& arena,VkDevice
   // it, otherwise every later small allocation would create another chunk.
   arena.overflow={buffer,0,0};return view(arena.overflow);
 }
-ResourceStore::TransientBuffer ResourceStore::UploadTransient(guest::ResourceId id,std::span<const std::byte> bytes,VkDeviceSize reserve,Error& e) {
+ResourceStore::MappedTransient ResourceStore::MapTransient(VkDeviceSize size,Error& e) {
   if(!Ready(e)) return {};
-  VkDeviceSize size=std::max<VkDeviceSize>(bytes.size(),reserve);
-  if(!size || size>c_.properties.limits.maxStorageBufferRange) {Fail(e,"Upload transient","Invalid storage buffer range");return {};}
+  if(!size || size>c_.properties.limits.maxStorageBufferRange) {Fail(e,"Map transient","Invalid storage buffer range");return {};}
   auto alignment=std::lcm<VkDeviceSize>(std::max<VkDeviceSize>(16,c_.properties.limits.minStorageBufferOffsetAlignment),std::max<VkDeviceSize>(1,c_.properties.limits.nonCoherentAtomSize));
 
   Arena& arena = transient_;
@@ -206,22 +205,49 @@ ResourceStore::TransientBuffer ResourceStore::UploadTransient(guest::ResourceId 
     auto& chunk = arena.chunks[arena.current];
     chunk.used = offset + size;
     auto* mapped = static_cast<std::byte*>(chunk.buffer->mapped) + offset;
-    std::memcpy(mapped, bytes.data(), bytes.size());
-    if (!chunk.buffer->coherent && !bytes.empty()) {
-      auto aligned = AlignFlushRange(offset, bytes.size(), chunk.buffer->allocation, std::max<VkDeviceSize>(1, c_.properties.limits.nonCoherentAtomSize));
-      if (aligned.valid) {
-        VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE}; range.memory = chunk.buffer->memory; range.offset = aligned.offset; range.size = aligned.size;
-        c_.f.vkFlushMappedMemoryRanges(c_.device, 1, &range);
-      }
-    }
-    e = {}; return {chunk.buffer->handle, offset};
+    e = {}; return {chunk.buffer->handle, offset, mapped};
   }
 
   // Fallback for new chunks or overflow (uses the existing Suballocate, which handles chunk creation/pooling)
   auto buffer = Suballocate(transient_, size, alignment, e);
-  if (!buffer || !Write(buffer, bytes, e)) return {};
-  if (id) { buffer->version = serial_; buffers_[id] = buffer; }
-  e = {}; return {buffer->handle, buffer->offset};
+  if (!buffer) return {};
+  e = {}; return {buffer->handle, buffer->offset, static_cast<std::byte*>(buffer->mapped)};
+}
+ResourceStore::TransientBuffer ResourceStore::UploadTransient(guest::ResourceId id,std::span<const std::byte> bytes,VkDeviceSize reserve,Error& e) {
+  VkDeviceSize size=std::max<VkDeviceSize>(bytes.size(),reserve);
+  auto mapped = MapTransient(size, e);
+  if (!mapped) return {};
+  std::memcpy(mapped.mapped, bytes.data(), bytes.size());
+  
+  // Find which buffer it was to flush if needed
+  auto* mapped_ptr = static_cast<uint8_t*>(static_cast<void*>(mapped.mapped));
+  BufferResource* chunk_buffer = nullptr;
+  Arena& arena = transient_;
+  if (arena.current < arena.chunks.size() && arena.chunks[arena.current].serial == serial_ && mapped.handle == arena.chunks[arena.current].buffer->handle) {
+      chunk_buffer = arena.chunks[arena.current].buffer.get();
+  } else if (arena.overflow.buffer && arena.overflow.buffer->handle == mapped.handle) {
+      chunk_buffer = arena.overflow.buffer.get();
+  }
+  
+  if (chunk_buffer && !chunk_buffer->coherent && !bytes.empty()) {
+      auto aligned = AlignFlushRange(mapped.offset, bytes.size(), chunk_buffer->allocation, std::max<VkDeviceSize>(1, c_.properties.limits.nonCoherentAtomSize));
+      if (aligned.valid) {
+        VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE}; range.memory = chunk_buffer->memory; range.offset = aligned.offset; range.size = aligned.size;
+        c_.f.vkFlushMappedMemoryRanges(c_.device, 1, &range);
+      }
+  }
+  
+  if (id && chunk_buffer) {
+      // Find the shared_ptr version
+      std::shared_ptr<BufferResource> buffer;
+      if (arena.current < arena.chunks.size() && arena.chunks[arena.current].buffer.get() == chunk_buffer) buffer = arena.chunks[arena.current].buffer;
+      else if (arena.overflow.buffer.get() == chunk_buffer) buffer = arena.overflow.buffer;
+      
+      if (buffer) {
+          buffer->version = serial_; buffers_[id] = buffer;
+      }
+  }
+  return {mapped.handle, mapped.offset};
 }
 bool ResourceStore::UploadBuffer(guest::ResourceId id,std::span<const std::byte> bytes,uint64_t version,Error& e) {
   if(!Ready(e)) return false;

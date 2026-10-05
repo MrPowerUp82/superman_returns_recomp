@@ -27,7 +27,7 @@ bool ImmediateRenderer::Draw(VkCommandBuffer command,const TargetPass& pass,Reso
   auto bindings=BuildBindings(draw,e);if(!e.message.empty()) return false;
   bindings.vertex_buffers.fill(DummyBuffer);
   struct Options {float width,height;uint32_t texture,srgb;} options{width,height,uint32_t(input.texture!=0),uint32_t(pass.formats[0]==VK_FORMAT_R8G8B8A8_SRGB || pass.formats[0]==VK_FORMAT_B8G8R8A8_SRGB)};
-  std::memcpy(bindings.constants.shared.data(),&options,sizeof(options));
+  std::memcpy(bindings.shared_constants.data(),&options,sizeof(options));
   if(input.texture) {bindings.textures[0][0]=input.texture;bindings.texture_indices[0]=0;}
   uint32_t clamp=input.repeated?0:2;draw.texture_fetch[0][0]=(clamp<<10)|(clamp<<13)|(clamp<<16);draw.texture_fetch[0][3]=input.linear?((1u<<19)|(1u<<21)):0;
   DescriptorDraw* descriptor=descriptors_.Prepare(bindings,draw.texture_fetch,resources,resources.CurrentSerial(),e);if(!descriptor) return false;
