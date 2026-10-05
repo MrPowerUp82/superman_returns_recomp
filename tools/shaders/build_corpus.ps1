@@ -20,7 +20,7 @@ output goes to .tools/ or artifacts/ (both ignored by Git). Never commit them.
 A SR_NATIVE=RENDERER build then embeds artifacts/shaders/dxil (port/CMakeLists.txt),
 or run the game with --sr_native_shader_dir=<repo>\artifacts\shaders\dxil.
 
-Usage: powershell -File tools\shaders\build_corpus.ps1 [-DumpDir logs\native_shaders] [-NoSpirv]
+Usage: powershell -File tools\shaders\build_corpus.ps1 [-DumpDir <dir>[,<dir>...]] [-NoSpirv]
 #>
 param(
   [string[]]$DumpDir = @(),
@@ -76,8 +76,19 @@ if ($LASTEXITCODE -ne 0) { throw 'XenosRecompCorpus build failed' }
 # 3-5. Corpus
 $extract = @((Join-Path $PSScriptRoot 'extract_shaders.py'))
 foreach ($d in $DumpDir) { $extract += @('--dump-dir', (Resolve-Path $d).Path) }
-$defaultDump = Join-Path $root 'logs\native_shaders'
-if (-not $DumpDir -and (Test-Path $defaultDump)) { $extract += @('--dump-dir', $defaultDump) }
+# Without -DumpDir every run-time dump folder under logs\ is used. The container
+# extractor reads only the *.bin directly inside a folder, so subfolders such as
+# logs\native_shaders\run_a count on their own. Skipping them drops the shaders the
+# game creates at run time and the native renderer draws nothing for them.
+if (-not $DumpDir) {
+  $logs = Join-Path $root 'logs'
+  if (Test-Path $logs) {
+    Get-ChildItem $logs -Directory -Recurse |
+      Where-Object { $_.FullName -match 'native_shaders|rt_corpus3|rt_shaders' -and
+                     (Get-ChildItem $_.FullName -Filter '*.bin' -File -ErrorAction SilentlyContinue | Select-Object -First 1) } |
+      ForEach-Object { $extract += @('--dump-dir', $_.FullName) }
+  }
+}
 Run $python $extract
 
 $xsh = Get-ChildItem (Join-Path $root 'port\out') -Recurse -Filter '454107ED.xsh' -ErrorAction SilentlyContinue
