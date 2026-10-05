@@ -1,7 +1,7 @@
 <#
-A/B check of sr_post_effects (bloom / light rays) with tools\bench.ps1.
+A/B check of sr_post_effects (bloom / light rays) with tools\bench\bench.ps1.
 
-Runs tools\bench.ps1 in pairs, --sr_post_effects=true and =false, swapping
+Runs tools\bench\bench.ps1 in pairs, --sr_post_effects=true and =false, swapping
 the order in every other pair (on/off, off/on, ...) so warm-up and heat do not
 always favour the same side. For each run it keeps logs\game.log as
 logs\post_effects_<Name>_<on|off>_<i>.log and checks what the filter did:
@@ -19,8 +19,8 @@ the images themselves before calling the option correct: HUD present, scene
 present, no frozen or garbage glow.
 
 -Trace also records a short trace with the option off
-(tools\capture_gpu_trace.ps1) and summarizes it with
-tools\post_effects_trace.py: skipped events per frame, skipped resolves that
+(tools\analysis\capture_gpu_trace.ps1) and summarizes it with
+tools\bench\post_effects_trace.py: skipped events per frame, skipped resolves that
 also clear EDRAM, and the draw order of one frame.
 
 Results: logs\post_effects_<Name>.csv (one row per run and scenario) and
@@ -28,9 +28,9 @@ logs\post_effects_<Name>_summary.txt. Nothing here was run by its author:
 the numbers are whatever this machine measures.
 
 Usage:
-  powershell -File tools\post_effects_check.ps1
-  powershell -File tools\post_effects_check.ps1 -Pairs 3 -Trace
-  powershell -File tools\post_effects_check.ps1 -Name postfx_rov -ExtraArgs "--render_target_path_d3d12=rov"
+  powershell -File tools\bench\post_effects_check.ps1
+  powershell -File tools\bench\post_effects_check.ps1 -Pairs 3 -Trace
+  powershell -File tools\bench\post_effects_check.ps1 -Name postfx_rov -ExtraArgs "--render_target_path_d3d12=rov"
 #>
 param(
   [ValidatePattern('^[A-Za-z0-9_-]+$')] [string]$Name = 'postfx',
@@ -41,7 +41,7 @@ param(
   [ValidateRange(0, 255)] [int]$Threshold = 24
 )
 $ErrorActionPreference = 'Stop'
-$root = Split-Path $PSScriptRoot -Parent
+$root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $logs = Join-Path $root 'logs'
 $exe = Join-Path $root 'port\out\build\win-amd64-release\superman_returns.exe'
 $gameLog = Join-Path $logs 'game.log'
@@ -257,7 +257,7 @@ if ($Trace) {
   Say ''
   Say "trace with the option off ($TraceFrames frames):"
   try {
-    & (Join-Path $PSScriptRoot 'capture_gpu_trace.ps1') -Name $traceName -Gameplay `
+    & (Join-Path $PSScriptRoot '..\analysis\capture_gpu_trace.ps1') -Name $traceName -Gameplay `
       -Frames $TraceFrames -ExtraArgs $traceArgs | Out-Null
     $report = Join-Path $logs "post_effects_${Name}_trace.txt"
     & python (Join-Path $PSScriptRoot 'post_effects_trace.py') `

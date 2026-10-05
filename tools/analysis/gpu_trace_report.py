@@ -1,7 +1,7 @@
 """Summarize draws captured by --sr_renderer=trace.
 
 Usage:
-    python tools/gpu_trace_report.py logs/gpu_trace.csv logs/gpu_passes.csv
+    python tools/analysis/gpu_trace_report.py logs/gpu_trace.csv logs/gpu_passes.csv
 """
 
 from __future__ import annotations

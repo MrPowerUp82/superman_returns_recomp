@@ -8,7 +8,7 @@ the generated sources and lists:
   * pointers stored in data sections that land in code no function covers
   * uncovered, non-zero regions of the code section (undecoded code)
 
-Usage: python tools/find_missing_funcs.py logs/image.bin [--gaps] [--toml]
+Usage: python tools/analysis/find_missing_funcs.py logs/image.bin [--gaps] [--toml]
 """
 
 import re
@@ -18,7 +18,7 @@ from bisect import bisect_right
 from pathlib import Path
 
 IMAGE_BASE = 0x82000000
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 GEN = ROOT / "port" / "generated" / "default"
 
 INSN_COMMENT = re.compile(r"^\t+// [a-z]")

@@ -1,4 +1,4 @@
-"""tools/native_ab_compare.py on synthetic A/B dumps."""
+"""tools/analysis/native_ab_compare.py on synthetic A/B dumps."""
 import math
 import struct
 

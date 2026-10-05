@@ -26,7 +26,7 @@ suporte do driver, qualidade da imagem nem funcionamento em tempo real.
 ## Verificação reproduzível
 
 ```powershell
-python tools/inspect_lsfg_dll.py "C:\Program Files (x86)\Steam\steamapps\common\Lossless Scaling\Lossless.dll" --output logs/lsfg_dll_inspection.json
+python tools/analysis/inspect_lsfg_dll.py "C:\Program Files (x86)\Steam\steamapps\common\Lossless Scaling\Lossless.dll" --output logs/lsfg_dll_inspection.json
 ```
 
 O script usa apenas a biblioteca padrão Python e lê o arquivo como bytes.

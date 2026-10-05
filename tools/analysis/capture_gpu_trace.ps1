@@ -3,7 +3,7 @@ Capture draw/copy/swap calls from the project's trace renderer.
 The game window is opened and this script closes only the process it started.
 
 Example:
-  powershell -File tools\capture_gpu_trace.ps1 -Name title -StartFrame 180 -Frames 120
+  powershell -File tools\analysis\capture_gpu_trace.ps1 -Name title -StartFrame 180 -Frames 120
 #>
 param(
   [ValidatePattern('^[A-Za-z0-9_-]+$')] [string]$Name = 'title',
@@ -14,7 +14,7 @@ param(
   [string]$ExtraArgs = ''
 )
 $ErrorActionPreference = 'Stop'
-$root = Split-Path $PSScriptRoot -Parent
+$root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $exe = Join-Path $root 'port\out\build\win-amd64-release\superman_returns.exe'
 $game = Join-Path $root 'game'
 if (-not (Test-Path -LiteralPath $exe)) { throw 'Run build.cmd first' }

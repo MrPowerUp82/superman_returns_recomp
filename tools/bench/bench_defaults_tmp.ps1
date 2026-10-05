@@ -11,7 +11,7 @@ Screenshots of each scenario go to logs/bench_<name>_<scenario>.png.
 
 Any running instance of the game is closed first.
 
-Usage: tools\bench.ps1 -Name baseline [-ExtraArgs "--native_2x_msaa=false"]
+Usage: tools\bench\bench.ps1 -Name baseline [-ExtraArgs "--native_2x_msaa=false"]
 #>
 param(
   [Parameter(Mandatory)] [string]$Name,
@@ -22,7 +22,7 @@ param(
   [int]$WorldTimeout = 90
 )
 $ErrorActionPreference = 'Stop'
-$root = Split-Path $PSScriptRoot -Parent
+$root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $exe = "$root\port\out\build\win-amd64-release\superman_returns.exe"
 $log = "$root\logs\game.log"
 $progress = "$root\logs\bench_progress.txt"

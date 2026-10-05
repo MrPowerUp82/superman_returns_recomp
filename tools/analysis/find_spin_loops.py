@@ -29,7 +29,7 @@ iterations). Loops that already hold a mid-asm hook of the manifest are
 marked "hooked" (e.g. the XMA wait at 0x826595B8).
 
 usage:
-  python tools/find_spin_loops.py [port/generated/default] [--csv logs/spin_loops.csv]
+  python tools/analysis/find_spin_loops.py [port/generated/default] [--csv logs/spin_loops.csv]
          [--max-len 16] [--calls] [--atomics] [--toml]
 """
 from __future__ import annotations
@@ -41,7 +41,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DIR = ROOT / "port" / "generated" / "default"
 MANIFEST = ROOT / "port" / "superman_returns_manifest.toml"
 

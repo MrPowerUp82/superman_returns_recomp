@@ -147,7 +147,7 @@ podem ser marcados confirmados. Se algum diferir, corrigir o valor em `game_prof
 
 ## 4. Revisão do XDK
 
-Conan usa o XDK 2.0.5632. A revisão de SR é desconhecida. `tools/xex_libraries.py
+Conan usa o XDK 2.0.5632. A revisão de SR é desconhecida. `tools/analysis/xex_libraries.py
 game/default.xex` lista as bibliotecas estáticas declaradas no cabeçalho do XEX (nome e
 versão, por exemplo `D3D9 2.0.xxxx.x`); o cabeçalho é lido sem descriptografar o executável.
 Se a versão do `D3D9`/`D3DX9` for igual à de Conan, os offsets da seção 3.2 tendem a bater;
@@ -274,7 +274,7 @@ espaços (o `bench.ps1` separa `-ExtraArgs` por espaço).
    critério da tabela 3.1, corrigir o endereço se preciso, pôr `SR_CONFIRMED_<PAPEL> 1` (ou
    `SR_ABSENT_<PAPEL> 1` se o jogo não usa a função) e trocar `// UNCONFIRMED` pela evidência.
    Conferir os offsets da tabela 3.2 e então `kDeviceLayoutConfirmed = true`.
-6. ▶ `-Step xex`: `tools/xex_libraries.py game/default.xex` (revisão do XDK, seção 4).
+6. ▶ `-Step xex`: `tools/analysis/xex_libraries.py game/default.xex` (revisão do XDK, seção 4).
 7. ▶ `-Step build -Native CAPTURE`: `build.cmd` com `SR_NATIVE=CAPTURE`. Um endereço que não é
    início de função no codegen falha no link (`__imp__sub_XXXXXXXX` indefinido): também é
    evidência de endereço errado.
@@ -290,7 +290,7 @@ espaços (o `bench.ps1` separa `-ExtraArgs` por espaço).
     (`static_assert`). Com `artifacts/shaders/dxil` presente, o DXIL é embutido.
 11. ▶ `-Step ab`: uma execução com `--sr_renderer=native --sr_native_ab_mode=true` (Xenos
     desenha e apresenta, o nativo desenha fora da tela) grava as duas saídas nos swaps de
-    `-AbSwaps` e roda `tools/native_ab_compare.py` (PSNR por swap, imagens PPM). Critério do
+    `-AbSwaps` e roda `tools/analysis/native_ab_compare.py` (PSNR por swap, imagens PPM). Critério do
     kit: ≥ 40 dB. Abaixo disso, investigar com `--sr_native_trace_frame_at_s`,
     `--sr_native_dump_frame_at_s` e `--sr_native_dump_dir`.
 12. ▶ `-Step bench`: `bench.ps1` em `xenos` e em `--sr_renderer=native`; avisa se a execução

@@ -35,7 +35,7 @@ struct PresetValue {
 // preset is the current look (docs/performance-design.md, decision 7).
 constexpr PresetValue kPresetValues[] = {
     // Kept on in both presets: validated 2026-09-29 on i5-13420H + Intel UHD
-    // (tools/post_effects_check.ps1, 2 pairs), sr_post_effects=false gave no
+    // (tools/bench/post_effects_check.ps1, 2 pairs), sr_post_effects=false gave no
     // FPS gain (-1% idle, -6% forward, within noise) and corrupted the image
     // (skipped resolves leave the textures the final composite reads with
     // stale data). Re-enable here once the option works.

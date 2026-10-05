@@ -1,4 +1,4 @@
-"""tools/find_spin_loops.py on a synthetic generated directory shaped like
+"""tools/analysis/find_spin_loops.py on a synthetic generated directory shaped like
 ReXGlue v0.10.0 output (DEFINE_REX_FUNC, loc_ labels, // disassembly)."""
 import find_spin_loops as fsl
 

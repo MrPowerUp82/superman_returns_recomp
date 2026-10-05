@@ -21,7 +21,7 @@ right after the forward window, while W is held, with a short poll: the game fad
 the HUD after ~20 s without input, so it is not checked after idle. A run that is not
 on gameplay (menu, title) throws and leaves logs/bench_<name>_not_gameplay.png.
 
-Usage: tools\bench.ps1 -Name baseline [-ExtraArgs "--native_2x_msaa=false"]
+Usage: tools\bench\bench.ps1 -Name baseline [-ExtraArgs "--native_2x_msaa=false"]
 #>
 param(
   [Parameter(Mandatory)] [string]$Name,
@@ -34,7 +34,7 @@ param(
   [int]$WorldTimeout = 90
 )
 $ErrorActionPreference = 'Stop'
-$root = Split-Path $PSScriptRoot -Parent
+$root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $exe = if ($Exe) { $Exe } else { "$root\port\out\build\win-amd64-release\superman_returns.exe" }
 $log = "$root\logs\game.log"
 $progress = "$root\logs\bench_progress.txt"

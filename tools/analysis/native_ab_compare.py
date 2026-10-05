@@ -15,7 +15,7 @@ For every pair this prints the PSNR over 8-bit RGB (the kit reported
 47-58 dB for Conan; its acceptance bar was >= 40 dB) and, with --ppm, writes
 both images and an amplified difference as PPM files next to them.
 
-usage: python tools/native_ab_compare.py <dir> [--ppm] [--min-psnr 40]
+usage: python tools/analysis/native_ab_compare.py <dir> [--ppm] [--min-psnr 40]
 Exit code 1 when a pair is below --min-psnr or a file cannot be read.
 """
 import argparse

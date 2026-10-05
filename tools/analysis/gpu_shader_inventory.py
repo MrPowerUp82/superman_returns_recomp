@@ -1,7 +1,7 @@
 """Inventory Xenos shader dumps without copying game data into the repository.
 
 Generate dumps with --dump_shaders=<logs/shaders>, then run:
-    python tools/gpu_shader_inventory.py logs/shaders logs/shader_inventory.csv
+    python tools/analysis/gpu_shader_inventory.py logs/shaders logs/shader_inventory.csv
 """
 
 from __future__ import annotations

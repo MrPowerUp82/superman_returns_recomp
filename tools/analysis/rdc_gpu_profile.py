@@ -1,7 +1,7 @@
 """GPU time breakdown of a RenderDoc capture.
 
 Run inside RenderDoc's embedded Python (qrenderdoc has renderdoc bound):
-  qrenderdoc.exe --python tools/rdc_gpu_profile.py
+  qrenderdoc.exe --python tools/analysis/rdc_gpu_profile.py
 with SR_RDC=<capture.rdc> and SR_RDC_OUT=<report.txt> in the environment.
 
 Replays the frame, fetches EventGPUDuration for every action and writes:

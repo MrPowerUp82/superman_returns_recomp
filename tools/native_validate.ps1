@@ -16,16 +16,16 @@ Steps (run one or several, in this order the first time):
   re       per hook role of game_profile.h: q.py dis/callers/callees of the
            candidate, plus pm4scan.py and a search for the shader container
            magic -> re\<ROLE>.txt. The decision stays manual (plan table 3.1)
-  xex      tools\xex_libraries.py game\default.xex (XDK revision)
-  capture  capture build (SR_NATIVE=CAPTURE or RENDERER): tools\bench.ps1 run
+  xex      tools\analysis\xex_libraries.py game\default.xex (XDK revision)
+  capture  capture build (SR_NATIVE=CAPTURE or RENDERER): tools\bench\bench.ps1 run
            with --sr_native_capture and the shader container dump
            -> logs\native_capture.json, logs\native_shaders\
   shaders  tools\shaders\build_corpus.ps1 on game\ + logs\native_shaders
   ab       RENDERER build: one run with --sr_renderer=native
            --sr_native_ab_mode=true (Xenos renders and presents, native renders
            offscreen) dumping both outputs at -AbSwaps; then
-           tools\native_ab_compare.py
-  bench    tools\bench.ps1 in xenos and in native mode; flags a native run
+           tools\analysis\native_ab_compare.py
+  bench    tools\bench\bench.ps1 in xenos and in native mode; flags a native run
            that fell back to xenos
   build    build.cmd with SR_NATIVE=-Native (CAPTURE by default)
 
@@ -195,7 +195,7 @@ function Step-Re() {
 }
 
 function Step-Xex() {
-  Run (Get-PythonExe) @((Join-Path $root 'tools\xex_libraries.py'), (Join-Path $root 'game\default.xex')) (Join-Path $out 'xex_libraries.txt')
+  Run (Get-PythonExe) @((Join-Path $root 'tools\analysis\xex_libraries.py'), (Join-Path $root 'game\default.xex')) (Join-Path $out 'xex_libraries.txt')
 }
 
 function Step-Build() {
@@ -210,7 +210,7 @@ function Step-Build() {
 }
 
 function Bench($name, $extra) {
-  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'tools\bench.ps1') -Name $name -ExtraArgs $extra
+  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'tools\bench\bench.ps1') -Name $name -ExtraArgs $extra
   if ($LASTEXITCODE -ne 0) { throw "bench.ps1 -Name $name failed" }
   $log = Join-Path $root 'logs\game.log'
   $fallback = Select-String -Path $log -Pattern 'sr_renderer=native.*using the xenos backend' -ErrorAction SilentlyContinue
@@ -243,7 +243,7 @@ function Step-Ab() {
   New-Item -ItemType Directory -Force $dump | Out-Null
   Bench 'native_ab' ("--sr_renderer=native --sr_native_ab_mode=true --sr_native_ab_swaps=$AbSwaps " +
                      "--sr_native_dump_dir=$dump")
-  Run (Get-PythonExe) @((Join-Path $root 'tools\native_ab_compare.py'), $dump, '--ppm') (Join-Path $out 'ab_psnr.txt')
+  Run (Get-PythonExe) @((Join-Path $root 'tools\analysis\native_ab_compare.py'), $dump, '--ppm') (Join-Path $out 'ab_psnr.txt')
 }
 
 function Step-Bench() {

@@ -1,8 +1,8 @@
 <#
-Roda tools\bench.ps1 com os argumentos que o launcher passa para a API escolhida (janela 1280x720,
+Roda tools\bench\bench.ps1 com os argumentos que o launcher passa para a API escolhida (janela 1280x720,
 limite de 30 FPS, opções de melhoria no padrão do jogo). O resultado vai para logs\bench_results.csv.
 
-Uso: tools\bench_api.ps1 -Api vulkan|d3d12 -Name <rótulo> [-Profile] [-Exe <caminho>]
+Uso: tools\bench\bench_api.ps1 -Api vulkan|d3d12 -Name <rótulo> [-Profile] [-Exe <caminho>]
   -Profile liga SR_VULKAN_PROFILE=1 e copia o log do jogo para logs\bench_<Name>.log.
   -Exe     padrão: port\out\build\win-amd64-dist\superman_returns.exe
 #>
@@ -13,7 +13,7 @@ param(
   [switch]$Profile
 )
 $ErrorActionPreference = 'Stop'
-$root = Split-Path $PSScriptRoot -Parent
+$root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 if (-not $Exe) { $Exe = "$root\port\out\build\win-amd64-dist\superman_returns.exe" }
 $gameArgs = @(
   '--sr_renderer=native', '--sr_preset=custom', "--sr_native_api=$Api", '--sr_render_scale=100',

@@ -131,7 +131,7 @@ Cache failures are logged and do not substitute missing pipelines.
 
 ### FPS parity with D3D12 (2026-10-05, Intel UHD, windowed 1280x720, 30 FPS limit)
 
-Three CPU costs were removed, each measured with `tools/bench_api.ps1` and `SR_VULKAN_PROFILE=1`:
+Three CPU costs were removed, each measured with `tools/bench/bench_api.ps1` and `SR_VULKAN_PROFILE=1`:
 
 | Step | Idle FPS | Walking FPS | Guest-thread textures_ms | record / fence / queue (ms) |
 | --- | --- | --- | --- | --- |

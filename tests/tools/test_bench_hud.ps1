@@ -1,7 +1,7 @@
-# Synthetic checks for Test-SupermanHud (tools\bench_hud.ps1).
+# Synthetic checks for Test-SupermanHud (tools\bench\bench_hud.ps1).
 # Run: powershell -NoProfile -File tests\tools\test_bench_hud.ps1
 Add-Type -AssemblyName System.Drawing
-. "$PSScriptRoot\..\..\tools\bench_hud.ps1"
+. "$PSScriptRoot\..\..\tools\bench\bench_hud.ps1"
 
 # 1000x600 bitmap: the scanned region is the top-left 500x180.
 function New-Frame {

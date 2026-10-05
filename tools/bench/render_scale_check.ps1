@@ -4,7 +4,7 @@ Runs the existing gameplay benchmark (which launches/closes the game), keeps
 each log and screenshot, and rejects runs with resolve errors. FPS alone is
 never evidence that a reduced resolution rendered correctly.
 
-Usage: powershell -File tools\render_scale_check.ps1 -Pairs 2
+Usage: powershell -File tools\bench\render_scale_check.ps1 -Pairs 2
 #>
 param(
   [ValidatePattern('^[A-Za-z0-9_-]+$')] [string]$Name = 'scale',
@@ -12,7 +12,7 @@ param(
   [ValidateRange(5, 120)] [int]$Window = 20
 )
 $ErrorActionPreference = 'Stop'
-$root = Split-Path $PSScriptRoot -Parent
+$root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $logs = Join-Path $root 'logs'
 New-Item -ItemType Directory -Force $logs | Out-Null
 $report = Join-Path $logs "render_scale_${Name}.csv"

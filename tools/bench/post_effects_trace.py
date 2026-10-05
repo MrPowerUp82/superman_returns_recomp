@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check what sr_post_effects=false skipped in a raw trace of
---sr_renderer=trace (tools/capture_gpu_trace.ps1 ... -ExtraArgs
-"--sr_post_effects=false"; tools/post_effects_check.ps1 -Trace does both).
+--sr_renderer=trace (tools/analysis/capture_gpu_trace.ps1 ... -ExtraArgs
+"--sr_post_effects=false"; tools/bench/post_effects_check.ps1 -Trace does both).
 
 Prints:
   * skipped passes and resolves per frame (min / max over the frames);
@@ -13,7 +13,7 @@ Prints:
     skipped event, with the other draws folded into one line per run. The
     first 1280 quads after the skipped chain are the composite candidates.
 
-usage: python tools/post_effects_trace.py logs/gpu_trace_<name>.csv [--frame N]
+usage: python tools/bench/post_effects_trace.py logs/gpu_trace_<name>.csv [--frame N]
 Exit code 1 when the trace has no skipped event (the filter matched nothing).
 """
 from __future__ import annotations

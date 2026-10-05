@@ -51,7 +51,7 @@ registers = ["r26", "r31"]
 0x8266FC80 = { name = "gap_8266FC80" }
 0x82717790 = { name = "gap_82717790" }
 
-# Entry points found by tools/find_missing_funcs.py: vtable thunks and leaf
+# Entry points found by tools/analysis/find_missing_funcs.py: vtable thunks and leaf
 # functions referenced only through data pointers or lis/addi pairs.
 0x8211B718 = { name = "vt_8211B718" }
 0x82120EE8 = { name = "vt_82120EE8" }
@@ -158,7 +158,7 @@ registers = ["r26", "r31"]
 0x82796B70 = { name = "vt_82796B70" }
 0x828579B0 = { name = "vt_828579B0" }
 
-# Entry points inside uncovered code gaps (tools/find_missing_funcs.py --gaps):
+# Entry points inside uncovered code gaps (tools/analysis/find_missing_funcs.py --gaps):
 # code right after a terminator, e.g. thunk tables indexed at runtime.
 0x82116C4C = { name = "fn_82116C4C" }
 0x8213C420 = { name = "fn_8213C420" }

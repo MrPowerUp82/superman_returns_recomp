@@ -7,7 +7,7 @@ the trigger file that port/src/renderdoc_capture.cpp polls, which captures
 three whole guest frames. The capture is written to
 logs/rdc/<Name>_frame<N>.rdc. Any running instance of the game is closed first.
 
-Usage: tools\capture_frame.ps1 -Name baseline [-ExtraArgs "..."]
+Usage: tools\analysis\capture_frame.ps1 -Name baseline [-ExtraArgs "..."]
 #>
 param(
   [string]$Name = "frame",
@@ -15,7 +15,7 @@ param(
   [int]$Settle = 25
 )
 $ErrorActionPreference = 'Stop'
-$root = Split-Path $PSScriptRoot -Parent
+$root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $exe = "$root\port\out\build\win-amd64-release\superman_returns.exe"
 $log = "$root\logs\game.log"
 $rdc = "$root\logs\rdc"

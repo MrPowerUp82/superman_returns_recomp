@@ -1,4 +1,4 @@
-# Superman HUD detection for tools\bench.ps1 (functions only, dot-source it).
+# Superman HUD detection for tools\bench\bench.ps1 (functions only, dot-source it).
 
 # True when the Superman gameplay HUD is in the bitmap: a thin blue bar and a thin
 # red bar, top left of the game image, with their vertical centers within 40 px.

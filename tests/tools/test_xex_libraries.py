@@ -1,4 +1,4 @@
-"""tools/xex_libraries.py on synthetic XEX2 headers (no game files)."""
+"""tools/analysis/xex_libraries.py on synthetic XEX2 headers (no game files)."""
 import struct
 
 import pytest

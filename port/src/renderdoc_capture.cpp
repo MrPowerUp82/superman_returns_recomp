@@ -5,7 +5,7 @@
 // so a hotkey capture usually holds no guest rendering. Instead, when the game
 // runs under RenderDoc and SR_RDC_TRIGGER names a file, creating that file
 // captures everything between two guest presents kCapturedFrames apart.
-// tools/capture_frame.ps1 drives this.
+// tools/analysis/capture_frame.ps1 drives this.
 
 #include "renderdoc_capture.h"
 

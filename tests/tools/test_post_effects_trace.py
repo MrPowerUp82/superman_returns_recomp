@@ -1,4 +1,4 @@
-"""tools/post_effects_trace.py on a synthetic raw trace."""
+"""tools/bench/post_effects_trace.py on a synthetic raw trace."""
 import csv
 
 import post_effects_trace as pt

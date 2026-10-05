@@ -9,11 +9,11 @@ Implementado às cegas, sem compilar nem rodar o jogo; nenhum número abaixo foi
 | Opção | Estado |
 | --- | --- |
 | `sr_preset` | `port/src/sr_preset.cpp`. `quality` (padrão) mantém tudo como está; `performance` hoje não altera nada (o `sr_post_effects=false` foi retirado: corrompeu a imagem sem ganho de FPS na validação de 2026-09-29); `custom` não mexe em nada. Aplicado no `OnPreSetup`, só em opções com `GetFlagSource == kDefault`. |
-| `sr_post_effects` | `port/src/native_renderer/post_effects.h` (lista derivada do trace) e o filtro no processador de comandos do projeto. Validação: `tools/post_effects_check.ps1`. |
+| `sr_post_effects` | `port/src/native_renderer/post_effects.h` (lista derivada do trace) e o filtro no processador de comandos do projeto. Validação: `tools/bench/post_effects_check.ps1`. |
 | `sr_render_scale` | Experimental (`port/src/render_scale.cpp`). Os dois presets mantêm `100`; o gancho está comentado na tabela de `sr_preset.cpp`. |
 | `sr_shadows`, `sr_draw_distance` | Não implementados. |
-| Opções de registrador do codegen | Desligadas: ligadas juntas, o jogo não gera nenhum quadro. `tools/bisect_codegen_flags.ps1` testa uma de cada vez. |
-| Espera ativa | `tools/find_spin_loops.py` lista candidatos no código gerado para virarem hooks. |
+| Opções de registrador do codegen | Desligadas: ligadas juntas, o jogo não gera nenhum quadro. `tools/bench/bisect_codegen_flags.ps1` testa uma de cada vez. |
+| Espera ativa | `tools/analysis/find_spin_loops.py` lista candidatos no código gerado para virarem hooks. |
 
 Limitação do preset: o "Save to config" do F4 grava no `.toml` toda opção diferente do padrão, inclusive as que o preset preencheu. Esse valor salvo passa a prevalecer sobre o preset; depois de trocar de preset, apague `sr_post_effects` e `sr_render_scale` do `.toml` (ou defina-os explicitamente).
 
@@ -64,7 +64,7 @@ A lista final só inclui opções com patch confirmado. O preset preenche apenas
 
 ### Etapa 0 — medição
 
-- `tools/bench.ps1`: fecha o jogo aberto, abre com a configuração testada, aperta Start e depois A (inicia jogo novo), aguarda o HUD e mede 20 s parado e 20 s andando para a frente. Grava em `logs/bench_results.csv` (configuração, cenário, FPS médio e mínimo, núcleos, % de GPU) e salva screenshots. O teste de voo ainda precisa de um cenário reproduzível.
+- `tools/bench/bench.ps1`: fecha o jogo aberto, abre com a configuração testada, aperta Start e depois A (inicia jogo novo), aguarda o HUD e mede 20 s parado e 20 s andando para a frente. Grava em `logs/bench_results.csv` (configuração, cenário, FPS médio e mínimo, núcleos, % de GPU) e salva screenshots. O teste de voo ainda precisa de um cenário reproduzível.
 - Pular os vídeos de abertura, se houver patch simples.
 - RenderDoc (integração já existe no runtime) para ver o custo de cada passagem de GPU; se a captura falhar, medir desligando passagens uma a uma.
 - `wpr` com build com símbolos (`-gcodeview`) para ver quais threads estão em espera ativa.
@@ -101,7 +101,7 @@ Com a tabela de FPS do preset Desempenho em mãos: se chegou a 30, fechar e docu
 
 ### Entregáveis
 
-`sr_settings.*`, um `perf_*.cpp` por alavanca viável, `tools/bench.ps1`, `logs/bench_results.csv`, seção de desempenho no README (presets, opções, números medidos, alavancas inviáveis) e `run.cmd` simplificado. Um commit por etapa.
+`sr_settings.*`, um `perf_*.cpp` por alavanca viável, `tools/bench/bench.ps1`, `logs/bench_results.csv`, seção de desempenho no README (presets, opções, números medidos, alavancas inviáveis) e `run.cmd` simplificado. Um commit por etapa.
 
 ## Registro de decisões
 

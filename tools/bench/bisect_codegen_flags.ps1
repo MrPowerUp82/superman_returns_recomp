@@ -13,7 +13,7 @@ option alone, the script:
   4. starts the game with --sr_skip_intro=true and SR_LOG_FPS=1 and waits for
      -FpsLines "guest fps" lines in its log (one line = frames presented in a
      2 s window); no line before -BootTimeout = no frame, exit = crash;
-  5. if it booted, runs tools\bench.ps1 -Name codegen_<option>.
+  5. if it booted, runs tools\bench\bench.ps1 -Name codegen_<option>.
 The original manifest bytes are restored at the end, also on failure or
 Ctrl+C, and the executable is rebuilt from them (skip with -NoRebuild; the
 binary left behind is then built with the last option tested). The
@@ -29,8 +29,8 @@ Output, all under logs\ (ignored by Git):
   codegen_bisect\manifest.backup.toml
 
 Usage:
-  powershell -File tools\bisect_codegen_flags.ps1
-  powershell -File tools\bisect_codegen_flags.ps1 -Flags ctr_as_local,xer_as_local -SkipBench
+  powershell -File tools\bench\bisect_codegen_flags.ps1
+  powershell -File tools\bench\bisect_codegen_flags.ps1 -Flags ctr_as_local,xer_as_local -SkipBench
 #>
 param(
   [ValidateSet('cr_as_local', 'ctr_as_local', 'xer_as_local', 'reserved_as_local',
@@ -44,7 +44,7 @@ param(
   [ValidateRange(1, 100)] [int]$FpsLines = 5
 )
 $ErrorActionPreference = 'Stop'
-$root = Split-Path $PSScriptRoot -Parent
+$root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $port = Join-Path $root 'port'
 $manifest = Join-Path $port 'superman_returns_manifest.toml'
 $generated = Join-Path $port 'generated\default'

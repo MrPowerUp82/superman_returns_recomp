@@ -8,7 +8,7 @@ with XDK 2.0.5632 (rexglue-native-kit README). If Superman Returns' D3D9
 library has the same version, the device offsets likely match; if not, expect
 differences (docs/native-port-plan.md section 4).
 
-usage: python tools/xex_libraries.py game/default.xex [--json]
+usage: python tools/analysis/xex_libraries.py game/default.xex [--json]
 
 XEX2 layout (Xenia xex2_info.h): 'XEX2', u32 module flags, u32 PE offset,
 u32 reserved, u32 security info offset, u32 optional header count, then
