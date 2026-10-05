@@ -9,6 +9,7 @@
 #include <rex/ui/surface_win.h>
 #include <rex/logging.h>
 #include <algorithm>
+#include <atomic>
 #include <map>
 #include <mutex>
 namespace superman_returns::graphics::vulkan {
@@ -21,6 +22,10 @@ struct HostTexture {
 struct Host {
   Context context;std::mutex gpu_mutex;
   Error initialization_error;
+  // Published once initialization succeeds. Packets read it without gpu_mutex,
+  // which presentation holds across paint/present (77+ packets per frame each
+  // waited for it, about 95% of the frame on Intel UHD).
+  std::atomic<GameFrame*> ready_game{nullptr};
   NativeProviderConfig config;
   std::unique_ptr<shaders::VulkanShaderService> shaders;
   std::unique_ptr<GameFrame> game;
@@ -30,7 +35,7 @@ struct Host {
   std::mutex texture_mutex;std::map<uint64_t,std::weak_ptr<HostTexture>> textures;
   uint64_t texture_serial=1000000;bool dummies=false;
   Host(NativeProviderConfig cfg):config(std::move(cfg)) {context.logger=[](const std::string& line){REXLOG_INFO("native Vulkan: {}",line);};}
-  ~Host() {immediate.reset();compositor.reset();resources.reset();game.reset();shaders.reset();}
+  ~Host() {ready_game.store(nullptr);immediate.reset();compositor.reset();resources.reset();game.reset();shaders.reset();}
   bool Initialize(rex::ui::Win32HwndSurface& window,Error& e) {
     std::array<const char*,2> extensions{VK_KHR_SURFACE_EXTENSION_NAME,VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
     if(!context.CreateInstance(extensions,config.validation,e)) return false;
@@ -113,7 +118,8 @@ public:
     auto* swap=std::get_if<guest::SwapPacket>(&packet);auto gamma=swap?swap->gamma:nullptr;bool gamma_enabled=swap && swap->gamma_enabled;
     Error e;std::shared_ptr<TextureResource> image;
     GameFrame* game;
-    {
+    game=host_->ready_game.load(std::memory_order_acquire);
+    if(!game) {
       std::lock_guard lock(host_->gpu_mutex);
       if(!host_->initialization_error.message.empty()) {diagnostic=host_->initialization_error.operation+": "+host_->initialization_error.message;return false;}
       game=host_->game.get();
@@ -133,7 +139,7 @@ protected:
     auto& window=static_cast<rex::ui::Win32HwndSurface&>(surface);
     if(!host_->context.device) {
       if(!host_->Initialize(window,e)) {host_->initialization_error=e;Report(e);return SurfacePaintConnectResult::kFailure;}
-      host_->initialization_error={};
+      host_->initialization_error={};host_->ready_game.store(host_->game.get(),std::memory_order_release);
     }
     else if(hwnd_ && hwnd_!=window.hwnd()) {
       if(!frames_.Retire(host_->context,e)) {Report(e);return SurfacePaintConnectResult::kFailure;}swapchain_.Destroy();
@@ -153,7 +159,9 @@ protected:
     std::lock_guard lock(host_->gpu_mutex);if(!host_->context.device) return;Error e;frames_.Retire(host_->context,e);swapchain_.Destroy();requested_extent_={};
   }
   bool RefreshGuestOutputImpl(uint32_t index,uint32_t,uint32_t,std::function<bool(GuestOutputRefreshContext&)> callback,bool& is8) override {
-    RefreshContext context(is8);if(!callback(context) || !context.output.image) return false;std::lock_guard lock(host_->gpu_mutex);mailbox_[index]=std::move(context.output);return true;
+    // The SDK hands the refresher an exclusive writable slot; consumers only read
+    // acquired/ready slots, so gpu_mutex (held by painting) is not needed here.
+    RefreshContext context(is8);if(!callback(context) || !context.output.image) return false;mailbox_[index]=std::move(context.output);return true;
   }
   PaintResult PaintAndPresentImpl(bool ui) override {
     uint32_t index;GuestOutputProperties properties;auto consumer=ConsumeGuestOutput(index,&properties,nullptr);Mailbox source;if(index!=UINT32_MAX) source=mailbox_[index];consumer.unlock();
