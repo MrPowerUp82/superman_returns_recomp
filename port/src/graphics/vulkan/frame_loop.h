@@ -8,9 +8,9 @@ struct FrameWork {
   std::function<bool(VkCommandBuffer,uint64_t,Error&)> prepare;
   std::function<void(VkCommandBuffer,uint32_t)> paint;
   std::function<void(uint64_t)> retire;
-  // Mutex que serializa a fila e os recursos compartilhados com a thread de gravação do jogo. DrawGame
-  // só o segura em retire, prepare/paint, submit e present; nunca durante uma espera de fence ou de
-  // imagem do swapchain (um vblank, com FIFO). Nulo = sem lock.
+  // Mutex serializing the queue and shared resources with the guest frame recording thread.
+  // DrawGame holds it only during retire, prepare/paint, submit and present; never during a fence
+  // or swapchain image wait (a vblank under FIFO). Null = no lock.
   std::mutex* queue_mutex = nullptr;
 };
 class FrameLoop {

@@ -22,6 +22,11 @@ $gameArgs = @(
   '--sr_native_fxaa=false', '--sr_native_shadow_quality=1', '--sr_native_msaa_samples=1',
   '--mnk_mode=true', '--mnk_mouse=true'
 ) -join ' '
-if ($Profile) { $env:SR_VULKAN_PROFILE = '1' }
-& "$PSScriptRoot\bench.ps1" -Name $Name -Exe $Exe -ExtraArgs $gameArgs -TitleTimeout 180 -WorldTimeout 200
-if ($Profile) { Copy-Item "$root\logs\game.log" "$root\logs\bench_$Name.log" -Force }
+$prevProfile = $env:SR_VULKAN_PROFILE
+try {
+  if ($Profile) { $env:SR_VULKAN_PROFILE = '1' }
+  & "$PSScriptRoot\bench.ps1" -Name $Name -Exe $Exe -ExtraArgs $gameArgs -TitleTimeout 180 -WorldTimeout 200
+  if ($Profile) { Copy-Item "$root\logs\game.log" "$root\logs\bench_$Name.log" -Force }
+} finally {
+  if ($null -ne $prevProfile) { $env:SR_VULKAN_PROFILE = $prevProfile } else { Remove-Item env:SR_VULKAN_PROFILE -ErrorAction SilentlyContinue }
+}
