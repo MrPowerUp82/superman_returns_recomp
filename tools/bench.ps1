@@ -12,8 +12,9 @@ Screenshots of each scenario go to logs/bench_<name>_<scenario>.png.
 Any running instance of the game is closed first. The game runs windowed unless
 ExtraArgs sets --fullscreen: the HUD check reads a screen capture, which does not
 see a fullscreen Vulkan window. It looks for the HUD wherever the window is, and
-presses Start at most -MaxSkips times to skip the opening cinematic. -Exe selects
-the executable (default: the win-amd64-release build).
+alternates Space (A) and Enter (Start) at most -MaxSkips times to confirm a late
+dialog or skip the opening cinematic. -Exe selects the executable (default: the
+win-amd64-release build).
 
 The HUD is checked (bench_hud.ps1) before the run and right before and after each
 measurement: a run that is not on gameplay (menu, title) throws instead of writing a
@@ -25,7 +26,7 @@ param(
   [Parameter(Mandatory)] [string]$Name,
   [string]$ExtraArgs = "",
   [string]$Exe = "",
-  [int]$MaxSkips = 4,
+  [int]$MaxSkips = 6,
   [int]$TitleTimeout = 60,
   [int]$Settle = 25,
   [int]$Window = 20,
@@ -214,14 +215,16 @@ try {
       } else { "the Superman HUD was never seen" }
       throw "no gameplay frame after $WorldTimeout seconds ($why)"
     }
-    # The new-game opening cinematic runs for minutes; Start skips it. The HUD
-    # check above runs first so this never opens the pause menu in gameplay.
-    # Start is pressed at most $MaxSkips times: when the HUD cannot be detected
-    # an unbounded loop would keep toggling the pause menu in gameplay.
+    # The new-game opening cinematic runs for minutes; Start skips it, and a late
+    # "Load a game?" dialog needs A (Space) to select. Space and Enter alternate,
+    # Space first. The HUD check above runs first so this never opens the pause
+    # menu in gameplay. At most $MaxSkips presses: when the HUD cannot be
+    # detected an unbounded loop would keep toggling the pause menu in gameplay.
     if ($skips -lt $MaxSkips -and (Get-Date) -ge $nextSkip) {
-      Key 0x0D
+      if ($skips % 2 -eq 0) { Key 0x20; $keyName = 'Space (A)' }
+      else { Key 0x0D; $keyName = 'Enter (Start)' }
       $skips++
-      Step "pressed Start to skip the cinematic ($skips/$MaxSkips)"
+      Step "pressed $keyName to confirm a dialog or skip the cinematic ($skips/$MaxSkips)"
       $nextSkip = (Get-Date).AddSeconds(8)
     }
     Start-Sleep 2
