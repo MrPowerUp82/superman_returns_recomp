@@ -2,6 +2,7 @@
 #include "descriptors.h"
 #include "resources.h"
 #include <unordered_map>
+#include <deque>
 namespace superman_returns::graphics::vulkan {
 struct DescriptorPage {
   Context* context=nullptr;
@@ -72,7 +73,7 @@ private:
   uint64_t completed_=0;
 
   struct DrawChunk {
-    std::vector<DescriptorDraw> draws;
+    std::deque<DescriptorDraw> draws;
     uint64_t serial = 0;
   };
   std::vector<DrawChunk> draw_pool_;
