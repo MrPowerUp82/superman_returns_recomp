@@ -6,6 +6,7 @@
 //
 #include "native_renderer.h"
 #include "checked_guest_memory.h"
+#include "guest_hash.h"
 #include "../graphics/guest/render_state.h"
 #include "../graphics/guest/edram_alias.h"
 #include "../graphics/guest/render_packet.h"
@@ -302,18 +303,22 @@ struct CaptureTimings {
 };
 thread_local CaptureTimings capture_timings;
 thread_local CheckedGuestReads checked_guest_reads;
-std::span<const uint8_t> ReadCommittedGuest(uint8_t* base, uint32_t address, uint32_t length) {
-  ++capture_timings.reads;capture_timings.bytes+=length;
-  if(uint64_t(address)+length>(uint64_t{1}<<32)) return {};
-  const uint8_t* source=base+address;
+// Ponteiro do host para uma faixa do jogo, ou nullptr se ela cai fora do espaço de endereços.
+const uint8_t* GuestSource(uint8_t* base, uint32_t address, uint32_t length) {
+  if(uint64_t(address)+length>(uint64_t{1}<<32)) return nullptr;
   if(address>=0xa0000000u && address<0xc0000000u) {
     uint32_t physical=address-0xa0000000u;
-    if(uint64_t(physical)+length>0x20000000ull) return {};
+    if(uint64_t(physical)+length>0x20000000ull) return nullptr;
     // PM4 references GPU physical memory. A cached virtual alias may be
     // PAGE_NOACCESS while the SDK's physical mapping remains committed.
-    source=REX_KERNEL_MEMORY()->TranslatePhysical<const uint8_t*>(physical);
+    return REX_KERNEL_MEMORY()->TranslatePhysical<const uint8_t*>(physical);
   }
-  return checked_guest_reads.Read(source,length);
+  return base+address;
+}
+std::span<const uint8_t> ReadCommittedGuest(uint8_t* base, uint32_t address, uint32_t length) {
+  ++capture_timings.reads;capture_timings.bytes+=length;
+  const uint8_t* source=GuestSource(base,address,length);
+  return source?checked_guest_reads.Read(source,length):std::span<const uint8_t>{};
 }
 
 // D3DDevice layout and the device pointer come from game_profile.h (Conan's
@@ -6006,13 +6011,14 @@ void Renderer::CaptureTextures(uint8_t* base) {
         auto started=std::chrono::steady_clock::now();
         if(texture_watch_) ArmTextureWatch(range.address,range.length);
         capture_timings.watch_us+=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-started).count();
+        // Hash the guest bytes where they are. Copying ~100 MB per frame only to learn that nothing
+        // changed cost ~30 ms of the guest thread; the copy now happens only for a changed texture.
+        ++capture_timings.reads;capture_timings.bytes+=range.length;
         started=std::chrono::steady_clock::now();
-        auto bytes=ReadCommittedGuest(base,0xa0000000u+range.address,range.length);
-        capture_timings.read_us+=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-started).count();
-        if(bytes.size()!=range.length) {error="Texture memory is not readable";break;}
-        started=std::chrono::steady_clock::now();
-        hash=XXH3_64bits_withSeed(bytes.data(),bytes.size(),hash);
+        const bool hashed=HashGuestRange(GuestSource(base,0xa0000000u+range.address,range.length),range.length,hash,
+            [](const void* data,size_t size,uint64_t seed) {return uint64_t(XXH3_64bits_withSeed(data,size,seed));},hash);
         capture_timings.hash_us+=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-started).count();
+        if(!hashed) {error="Texture memory is not readable";break;}
       }
       if(!error.empty()) {entry.failed_frame=front_frame_;entry.failure=error;cur_.texture_errors.emplace_back(slot,std::move(error));continue;}
       const bool unchanged=entry.snapshot && hash==entry.content_hash;
