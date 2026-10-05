@@ -9,7 +9,11 @@ and appends one CSV row per scenario to logs/bench_results.csv
 (name, scenario, avg/min guest FPS, CPU cores in use, GPU 3D %, args).
 Screenshots of each scenario go to logs/bench_<name>_<scenario>.png.
 
-Any running instance of the game is closed first.
+Any running instance of the game is closed first. The game runs windowed unless
+ExtraArgs sets --fullscreen: the HUD check reads a screen capture, which does not
+see a fullscreen Vulkan window. It looks for the HUD wherever the window is, and
+presses Start at most -MaxSkips times to skip the opening cinematic. -Exe selects
+the executable (default: the win-amd64-release build).
 
 Usage: tools\bench.ps1 -Name baseline [-ExtraArgs "--native_2x_msaa=false"]
 #>
@@ -17,6 +21,7 @@ param(
   [Parameter(Mandatory)] [string]$Name,
   [string]$ExtraArgs = "",
   [string]$Exe = "",
+  [int]$MaxSkips = 4,
   [int]$TitleTimeout = 60,
   [int]$Settle = 25,
   [int]$Window = 20,
@@ -34,7 +39,11 @@ Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 if (-not ([System.Management.Automation.PSTypeName]'SrBenchInput').Type) {
   Add-Type @"
 using System; using System.Runtime.InteropServices;
+public struct SrRect { public int Left, Top, Right, Bottom; }
+public struct SrPoint { public int X, Y; }
 public static class SrBenchInput {
+  [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out SrRect r);
+  [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref SrPoint p);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
 }
@@ -66,37 +75,72 @@ function Screenshot($path) {
   } finally { $bmp.Dispose() }
 }
 
-function Has-Gameplay-Frame() {
+# Client area of the game window in screen coordinates, clipped to the primary
+# screen (the window may sit anywhere and even hang over the screen edge).
+function Game-Region($proc) {
+  $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+  $proc.Refresh()
+  $handle = $proc.MainWindowHandle
+  $rect = New-Object SrRect
+  $origin = New-Object SrPoint
+  if ($handle -eq [IntPtr]::Zero -or -not [SrBenchInput]::GetClientRect($handle, [ref]$rect)) { return $screen }
+  [SrBenchInput]::ClientToScreen($handle, [ref]$origin) | Out-Null
+  $client = New-Object System.Drawing.Rectangle $origin.X, $origin.Y, $rect.Right, $rect.Bottom
+  $visible = [System.Drawing.Rectangle]::Intersect($client, $screen)
+  if ($visible.Width -lt 200 -or $visible.Height -lt 200) { return $screen }
+  return $visible
+}
+
+# Gameplay is on screen when the Superman HUD (a blue and a red bar, top left of the
+# game image) is found. The title, load prompt and opening cinematic can all show a
+# bright rendered scene without it. The search covers the top left of the game window
+# wherever it is, so it works windowed and fullscreen.
+function Has-Gameplay-Frame($proc) {
+  $region = Game-Region $proc
+  $w = [int]($region.Width * .5)
+  $h = [int]($region.Height * .3)
+  $bmp = New-Object System.Drawing.Bitmap $w, $h
+  try {
+    $gfx = [System.Drawing.Graphics]::FromImage($bmp)
+    try { $gfx.CopyFromScreen($region.Location, [System.Drawing.Point]::Empty, (New-Object System.Drawing.Size $w, $h)) }
+    finally { $gfx.Dispose() }
+    $blueRows = @(); $redRows = @()
+    for ($y = 0; $y -lt $h; $y += 2) {
+      $blue = 0; $red = 0
+      for ($x = 0; $x -lt $w; $x += 4) {
+        $pixel = $bmp.GetPixel($x, $y)
+        if ($pixel.B - $pixel.R -gt 12 -and $pixel.B - $pixel.G -gt 5 -and $pixel.R -gt 80) { $blue++ }
+        elseif ($pixel.R - $pixel.B -gt 20 -and $pixel.R - $pixel.G -gt 15 -and $pixel.R -gt 80) { $red++ }
+      }
+      if ($blue -ge 20) { $blueRows += $y }
+      if ($red -ge 8) { $redRows += $y }
+    }
+    foreach ($blueRow in $blueRows) {
+      foreach ($redRow in $redRows) { if ([math]::Abs($blueRow - $redRow) -le 40) { return $true } }
+    }
+    return $false
+  } finally {
+    $bmp.Dispose()
+  }
+}
+
+# True when the whole screen capture is black. A fullscreen game window (notably a
+# Vulkan one) may not show up in a GDI screen capture, which breaks HUD detection.
+function Capture-IsBlack() {
   $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
   $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
   try {
     $gfx = [System.Drawing.Graphics]::FromImage($bmp)
     try { $gfx.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size) }
     finally { $gfx.Dispose() }
-    $bright = 0
     for ($y = 1; $y -le 9; $y++) {
       for ($x = 1; $x -le 16; $x++) {
         $pixel = $bmp.GetPixel([int]($x * $b.Width / 17), [int]($y * $b.Height / 10))
-        if (($pixel.R + $pixel.G + $pixel.B) -gt 75) { $bright++ }
+        if (($pixel.R + $pixel.G + $pixel.B) -gt 3) { return $false }
       }
     }
-    # Require the blue and red Superman HUD bars. The title, load prompt and
-    # opening cinematic can all contain a bright rendered scene without gameplay.
-    $blueHud = 0
-    $redHud = 0
-    for ($i = 0; $i -lt 30; $i++) {
-      $px = [int]($b.Width * (.12 + $i * .012))
-      $blue = $bmp.GetPixel($px, [int]($b.Height * .18))
-      if ($blue.B - $blue.R -gt 12 -and $blue.B - $blue.G -gt 5 -and
-          $blue.R -gt 80) { $blueHud++ }
-      $red = $bmp.GetPixel($px, [int]($b.Height * .21))
-      if ($red.R - $red.B -gt 20 -and $red.R - $red.G -gt 15 -and
-          $red.R -gt 80) { $redHud++ }
-    }
-    return $bright -ge 12 -and $blueHud -ge 20 -and $redHud -ge 8
-  } finally {
-    $bmp.Dispose()
-  }
+    return $true
+  } finally { $bmp.Dispose() }
 }
 
 function Measure-Window($proc, $scenario) {
@@ -130,6 +174,8 @@ Get-Process superman_returns -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep 2
 if (Test-Path $log) { Clear-Content $log }
 $env:SR_LOG_FPS = '1'
+# The HUD check reads a screen capture, which only sees a windowed game window.
+if ($ExtraArgs -notmatch '--fullscreen') { $ExtraArgs = ("$ExtraArgs --fullscreen=false").Trim() }
 $gameArgs = @(
   "--game_data_root=`"$root\game`"", "--log_file=`"$log`"",
   '--render_target_path_d3d12=rtv', '--depth_float24_convert_in_pixel_shader=true',
@@ -156,18 +202,27 @@ try {
   if ($proc.HasExited) { throw "game exited while loading the save" }
   $worldDeadline = (Get-Date).AddSeconds($WorldTimeout)
   $nextSkip = Get-Date
+  $skips = 0; $blackSamples = 0; $samples = 0
   while ($true) {
     Focus $proc
-    if (Has-Gameplay-Frame) { break }
+    if (Has-Gameplay-Frame $proc) { break }
     if ($proc.HasExited) { throw "game exited before rendering the save" }
+    $samples++; if (Capture-IsBlack) { $blackSamples++ }
     if ((Get-Date) -gt $worldDeadline) {
       Screenshot "$root\logs\bench_${Name}_not_gameplay.png"
-      throw "no gameplay frame after $WorldTimeout seconds"
+      $why = if ($blackSamples -eq $samples) {
+        "every screen capture was black: the game window cannot be captured (fullscreen?); run windowed (--fullscreen=false)"
+      } else { "the Superman HUD was never seen" }
+      throw "no gameplay frame after $WorldTimeout seconds ($why)"
     }
     # The new-game opening cinematic runs for minutes; Start skips it. The HUD
     # check above runs first so this never opens the pause menu in gameplay.
-    if ((Get-Date) -ge $nextSkip) {
+    # Start is pressed at most $MaxSkips times: when the HUD cannot be detected
+    # an unbounded loop would keep toggling the pause menu in gameplay.
+    if ($skips -lt $MaxSkips -and (Get-Date) -ge $nextSkip) {
       Key 0x0D
+      $skips++
+      Step "pressed Start to skip the cinematic ($skips/$MaxSkips)"
       $nextSkip = (Get-Date).AddSeconds(8)
     }
     Start-Sleep 2
