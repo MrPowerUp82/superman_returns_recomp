@@ -1,0 +1,29 @@
+--- a/XenosRecomp/shader_recompiler.cpp
++++ b/XenosRecomp/shader_recompiler.cpp
+@@ -1178,19 +1178,23 @@
+ 
+         case AluScalarOpcode::Logc:
+         case AluScalarOpcode::Log:
+-            print("clamp(log2({}), FLT_MIN, FLT_MAX)", op(SCALAR_0));
++            // Never form an infinity: drivers that assume no inf/NaN may drop
++            // the clamp, and Xenos' 0 * inf = 0 becomes an IEEE NaN.
++            print("select(abs({0}) < 1.17549435e-38, FLT_MIN, clamp(log2({0}), FLT_MIN, FLT_MAX))", op(SCALAR_0));
+             break;
+ 
+         case AluScalarOpcode::Rcpc:
+         case AluScalarOpcode::Rcpf:
+         case AluScalarOpcode::Rcp:
+-            print("clamp(rcp({}), FLT_MIN, FLT_MAX)", op(SCALAR_0));
++            // rcp(+-0) is +-FLT_MAX directly (see Log above): flat areas of
++            // weighted filters divide 0 by a zero sum and must stay finite.
++            print("select(abs({0}) < 1.17549435e-38, select((asuint({0}) >> 31) != 0, FLT_MIN, FLT_MAX), clamp(rcp({0}), FLT_MIN, FLT_MAX))", op(SCALAR_0));
+             break;
+ 
+         case AluScalarOpcode::Rsqc:
+         case AluScalarOpcode::Rsqf:
+         case AluScalarOpcode::Rsq:
+-            print("clamp(rsqrt({}), FLT_MIN, FLT_MAX)", op(SCALAR_0));
++            print("select(abs({0}) < 1.17549435e-38, FLT_MAX, clamp(rsqrt({0}), FLT_MIN, FLT_MAX))", op(SCALAR_0));
+             break;
+ 
+         case AluScalarOpcode::Subs:
