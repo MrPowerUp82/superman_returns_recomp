@@ -18,3 +18,5 @@ build/
 # .NET launcher build output
 **/bin/
 **/obj/
+
+graphify-out/
