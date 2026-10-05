@@ -15,6 +15,10 @@ see a fullscreen Vulkan window. It looks for the HUD wherever the window is, and
 presses Start at most -MaxSkips times to skip the opening cinematic. -Exe selects
 the executable (default: the win-amd64-release build).
 
+The HUD is checked (bench_hud.ps1) before the run and right before and after each
+measurement: a run that is not on gameplay (menu, title) throws instead of writing a
+CSV row, and leaves logs/bench_<name>_not_gameplay.png.
+
 Usage: tools\bench.ps1 -Name baseline [-ExtraArgs "--native_2x_msaa=false"]
 #>
 param(
@@ -36,6 +40,7 @@ $results = "$root\logs\bench_results.csv"
 New-Item -ItemType Directory -Force "$root\logs" | Out-Null
 
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+. "$PSScriptRoot\bench_hud.ps1"
 if (-not ([System.Management.Automation.PSTypeName]'SrBenchInput').Type) {
   Add-Type @"
 using System; using System.Runtime.InteropServices;
@@ -91,36 +96,30 @@ function Game-Region($proc) {
   return $visible
 }
 
-# Gameplay is on screen when the Superman HUD (a blue and a red bar, top left of the
-# game image) is found. The title, load prompt and opening cinematic can all show a
-# bright rendered scene without it. The search covers the top left of the game window
-# wherever it is, so it works windowed and fullscreen.
+# Gameplay is on screen when the Superman HUD (a thin blue and a thin red bar, top
+# left of the game image) is found (Test-SupermanHud, which scans the top left of the
+# bitmap it gets, so the whole client area is captured). The title, load prompt and
+# opening cinematic can all show a bright rendered scene without it. The capture
+# covers the game window wherever it is, so it works windowed and fullscreen.
 function Has-Gameplay-Frame($proc) {
   $region = Game-Region $proc
-  $w = [int]($region.Width * .5)
-  $h = [int]($region.Height * .3)
-  $bmp = New-Object System.Drawing.Bitmap $w, $h
+  $bmp = New-Object System.Drawing.Bitmap $region.Width, $region.Height
   try {
     $gfx = [System.Drawing.Graphics]::FromImage($bmp)
-    try { $gfx.CopyFromScreen($region.Location, [System.Drawing.Point]::Empty, (New-Object System.Drawing.Size $w, $h)) }
+    try { $gfx.CopyFromScreen($region.Location, [System.Drawing.Point]::Empty, $region.Size) }
     finally { $gfx.Dispose() }
-    $blueRows = @(); $redRows = @()
-    for ($y = 0; $y -lt $h; $y += 2) {
-      $blue = 0; $red = 0
-      for ($x = 0; $x -lt $w; $x += 4) {
-        $pixel = $bmp.GetPixel($x, $y)
-        if ($pixel.B - $pixel.R -gt 12 -and $pixel.B - $pixel.G -gt 5 -and $pixel.R -gt 80) { $blue++ }
-        elseif ($pixel.R - $pixel.B -gt 20 -and $pixel.R - $pixel.G -gt 15 -and $pixel.R -gt 80) { $red++ }
-      }
-      if ($blue -ge 20) { $blueRows += $y }
-      if ($red -ge 8) { $redRows += $y }
-    }
-    foreach ($blueRow in $blueRows) {
-      foreach ($redRow in $redRows) { if ([math]::Abs($blueRow - $redRow) -le 40) { return $true } }
-    }
-    return $false
+    return (Test-SupermanHud $bmp)
   } finally {
     $bmp.Dispose()
+  }
+}
+
+# Throws (leaving a screenshot) unless the HUD is on screen, so a run on a menu or the
+# title screen can never produce a CSV row.
+function Assert-Gameplay($proc) {
+  if (-not (Has-Gameplay-Frame $proc)) {
+    Screenshot "$root\logs\bench_${Name}_not_gameplay.png"
+    throw "scene is not gameplay during measurement (menu or title?)"
   }
 }
 
@@ -230,9 +229,15 @@ try {
   Step "visible frame detected"
   Start-Sleep 5
 
+  Assert-Gameplay $proc
   Measure-Window $proc 'idle'
+  Assert-Gameplay $proc
   Focus $proc; Key 0x57 -Down
-  try { Measure-Window $proc 'forward' } finally { Key 0x57 -Up }
+  try {
+    Assert-Gameplay $proc
+    Measure-Window $proc 'forward'
+    Assert-Gameplay $proc
+  } finally { Key 0x57 -Up }
 } catch {
   Step "FAILED: $_"
   throw
