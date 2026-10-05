@@ -105,6 +105,7 @@ using graphics::guest::CaptureRange;
 class Renderer {
  public:
   static Renderer& Get();
+  void EnsureSystemWatchers();
   using PacketSink=std::function<bool(graphics::guest::RenderPacket&&,std::string&)>;
   // Installed once before guest execution. The sink owns the native API path;
   // every dependency is captured and no D3D executor is called for this mode.

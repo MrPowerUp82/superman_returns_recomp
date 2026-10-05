@@ -213,6 +213,7 @@ rex::X_STATUS NativeGraphicsSystem::SetupPresentation(rex::ui::WindowedAppContex
   REXLOG_INFO("native Vulkan: shader tools from {} ({})",packaged?tools.string():std::string("source tree"),python.string());
   config.gpu_uuid=rex::cvar::Query<std::string>("sr_native_vulkan_gpu_uuid");
   provider_=graphics::vulkan::CreateNativeVulkanProvider(std::move(config));
+  Renderer::Get().EnsureSystemWatchers();
 #else
     REXLOG_ERROR("Native Vulkan unavailable: build with SR_VULKAN_GAME=ON");return X_STATUS_UNSUCCESSFUL;
 #endif
