@@ -52,34 +52,30 @@ std::shared_ptr<DescriptorCacheEntry> DescriptorStore::Shared(const DrawBindings
   // Key: identity of every bound resource plus the sampler/filter state that
   // decides which sampler and which format checks apply. Consecutive slots
   // mostly bind the same dummy IDs, so repeated lookups are memoized.
-  std::array<uint64_t, 32*7> key_storage;
-  size_t key_len = 0;
+  std::vector<uint64_t> key;key.reserve(32*7);
   guest::ResourceId last_buffer=~0ull,last_texture=~0ull;const void* buffer_ptr=nullptr;const void* texture_ptr=nullptr;
   auto texture_key=[&](guest::ResourceId id) -> const void* {
     if(id!=last_texture) {auto* t=store.FindTexture(id);texture_ptr=t?t->get():nullptr;last_texture=id;}
     return texture_ptr;
   };
+  // Draws binding per-submission transient buffers (inline geometry) never
+  // repeat: they are written but not cached, so they cannot pin arena chunks.
   bool complete=true,cacheable=true;
-  uint64_t hash=14695981039346656037ull;
-  auto add_key=[&](uint64_t v) {
-    key_storage[key_len++] = v;
-    hash^=v;hash*=1099511628211ull;
-  };
-
   for(uint32_t slot=0;slot<32;++slot) {
     if(bindings.vertex_buffers[slot]!=last_buffer) {auto* b=store.FindBuffer(bindings.vertex_buffers[slot]);buffer_ptr=b?b->get():nullptr;last_buffer=bindings.vertex_buffers[slot];if(b && (*b)->owner) cacheable=false;}
-    add_key(uint64_t(reinterpret_cast<uintptr_t>(buffer_ptr)));complete&=buffer_ptr!=nullptr;
-    for(uint32_t dimension=0;dimension<3;++dimension) {auto* t=texture_key(bindings.textures[dimension][slot]);add_key(uint64_t(reinterpret_cast<uintptr_t>(t)));complete&=t!=nullptr;}
+    key.push_back(uint64_t(reinterpret_cast<uintptr_t>(buffer_ptr)));complete&=buffer_ptr!=nullptr;
+    for(uint32_t dimension=0;dimension<3;++dimension) {auto* t=texture_key(bindings.textures[dimension][slot]);key.push_back(uint64_t(reinterpret_cast<uintptr_t>(t)));complete&=t!=nullptr;}
+    // Only the sampler/filter bits of texture slots matter. Other slots hold
+    // vertex fetch constants whose addresses change every frame.
     if((fetch[slot][0]&3)==2) {
-      add_key((uint64_t(fetch[slot][0]&0x7fc00u)<<32)|(fetch[slot][3]&0xff80000u));
-      add_key((uint64_t(1)<<63)|(uint64_t((fetch[slot][5]>>9)&3)<<32)|bindings.texture_indices[slot]);
-    } else add_key(bindings.texture_indices[slot]);
+      key.push_back((uint64_t(fetch[slot][0]&0x7fc00u)<<32)|(fetch[slot][3]&0xff80000u));
+      key.push_back((uint64_t(1)<<63)|(uint64_t((fetch[slot][5]>>9)&3)<<32)|bindings.texture_indices[slot]);
+    } else key.push_back(bindings.texture_indices[slot]);
   }
-  std::span<const uint64_t> key_span{key_storage.data(), key_len};
-
+  uint64_t hash=14695981039346656037ull;for(auto v:key) {hash^=v;hash*=1099511628211ull;}
   if(complete && cacheable) if(auto found=cache_.find(hash);found!=cache_.end()) {
     auto& list=found->second;
-    for(auto it=list.begin();it!=list.end();++it) if((*it)->key.size() == key_span.size() && std::equal(key_span.begin(), key_span.end(), (*it)->key.begin())) {
+    for(auto it=list.begin();it!=list.end();++it) if((*it)->key==key) {
       auto entry=*it;bound.clear();
       for(auto& weak:entry->watched) {auto strong=weak.lock();if(!strong) {bound.clear();break;}bound.push_back(std::move(strong));}
       if(bound.size()!=entry->watched.size()) {list.erase(it);--cache_entries_;break;}  // a resource died: rebuild
@@ -87,7 +83,6 @@ std::shared_ptr<DescriptorCacheEntry> DescriptorStore::Shared(const DrawBindings
     }
   }
   ++cache_stats_.misses;bound.clear();
-  std::vector<uint64_t> key(key_span.begin(), key_span.end());
   // Miss: resolve, validate and write the sets exactly as an uncached draw would.
   auto entry=std::make_shared<DescriptorCacheEntry>();entry->key=std::move(key);entry->last_used=serial;entry->context=&c_;
   std::array<VkDescriptorBufferInfo,32> vertex_info{};
@@ -158,52 +153,38 @@ void DescriptorStore::Evict(uint64_t serial) {
     it=list.empty()?cache_.erase(it):std::next(it);
   }
 }
-DescriptorDraw* DescriptorStore::Prepare(const DrawBindings& bindings,
+std::shared_ptr<DescriptorDraw> DescriptorStore::Prepare(const DrawBindings& bindings,
     const std::array<std::array<uint32_t,6>,32>& fetch,ResourceStore& store,uint64_t serial,Error& e) {
   if(!layouts_[0] || serial<=completed_ || store.CurrentSerial()!=serial) {
-    e={"Draw descriptors",VK_ERROR_INITIALIZATION_FAILED,"Missing layouts or recording submission"};return nullptr;
+    e={"Draw descriptors",VK_ERROR_INITIALIZATION_FAILED,"Missing layouts or recording submission"};return {};
   }
   for(uint32_t slot=0;slot<32;++slot) if((bindings.texture_indices[slot]&0x7fffu)>=32 || bindings.sampler_indices[slot]!=slot) {
-    e={"Draw descriptors",VK_ERROR_INITIALIZATION_FAILED,"Descriptor index was not remapped into the draw arrays"};return nullptr;
+    e={"Draw descriptors",VK_ERROR_INITIALIZATION_FAILED,"Descriptor index was not remapped into the draw arrays"};return {};
   }
-  if (draw_pool_.empty() || draw_pool_[draw_pool_current_].serial != serial) {
-    bool found = false;
-    for (size_t i = 0; i < draw_pool_.size(); ++i) {
-      if (draw_pool_[i].serial <= completed_) {
-        draw_pool_[i].serial = serial;
-        draw_pool_[i].draws.clear();
-        draw_pool_current_ = i;
-        found = true;
-        break;
-      }
-    }
-    if (!found) {
-      draw_pool_.push_back({{}, serial});
-      draw_pool_current_ = draw_pool_.size() - 1;
-    }
-  }
-  auto& chunk = draw_pool_[draw_pool_current_];
-  chunk.draws.emplace_back();
-  DescriptorDraw* draw = &chunk.draws.back();
-
-  std::vector<std::shared_ptr<void>> temp_bound;
-  draw->shared=Shared(bindings,fetch,store,serial,temp_bound,e);if(!draw->shared) return nullptr;
+  auto draw=std::make_shared<DescriptorDraw>();
+  draw->shared=Shared(bindings,fetch,store,serial,draw->resources,e);if(!draw->shared) return {};
   // VS, PS and shared constants are contiguous in ConstantSnapshot: one upload per draw.
-  auto mapped = store.MapTransient(sizeof(guest::ConstantSnapshot),e);
-  if(!mapped) return nullptr;
-  if(mapped.offset>UINT32_MAX) {e={"Draw descriptors",VK_ERROR_OUT_OF_DEVICE_MEMORY,"Constant block offset exceeds the dynamic offset range"};return nullptr;}
-  std::memcpy(mapped.mapped, bindings.original_constants->vs.data(), 4096);
-  std::memcpy(mapped.mapped + 4096, bindings.original_constants->ps.data(), 4096);
-  std::memcpy(mapped.mapped + 8192, bindings.shared_constants.data(), 4096);
-  draw->sets[0]=ConstantSet(mapped.handle,e);if(!draw->sets[0]) return nullptr;
-  draw->dynamic_offsets.fill(uint32_t(mapped.offset));
+  auto constants=store.UploadTransient(0,std::as_bytes(std::span(&bindings.constants,1)),sizeof(guest::ConstantSnapshot),e);
+  if(!constants) return {};
+  if(constants->offset>UINT32_MAX) {e={"Draw descriptors",VK_ERROR_OUT_OF_DEVICE_MEMORY,"Constant block offset exceeds the dynamic offset range"};return {};}
+  draw->resources.push_back(constants);
+  draw->sets[0]=ConstantSet(*constants,e);if(!draw->sets[0]) return {};
+  draw->dynamic_offsets.fill(uint32_t(constants->offset));
   for(uint32_t i=0;i<3;++i) draw->sets[1+i]=draw->shared->sets[i];
-  return draw;
+  pending_.Keep(serial,draw);e={};return draw;
 }
-VkDescriptorSet DescriptorStore::ConstantSet(VkBuffer chunk_handle,Error& e) {
-  if(!chunk_handle) {e={"Constant descriptors",VK_ERROR_INITIALIZATION_FAILED,"Constants were not suballocated from an arena"};return VK_NULL_HANDLE;}
-  if(auto found=constant_sets_.find(chunk_handle);found!=constant_sets_.end()) {
-    return found->second.set;
+VkDescriptorSet DescriptorStore::ConstantSet(const BufferResource& block,Error& e) {
+  // Blocks are suballocations: every block of one arena chunk shares its handle and its set.
+  const auto& chunk=block.owner;
+  if(!chunk) {e={"Constant descriptors",VK_ERROR_INITIALIZATION_FAILED,"Constants were not suballocated from an arena"};return VK_NULL_HANDLE;}
+  if(auto found=constant_sets_.find(block.handle);found!=constant_sets_.end()) {
+    if(found->second.owner.lock()==chunk) return found->second.set;
+    FreeConstantSet(found->second.set);constant_sets_.erase(found);  // the driver reused the handle of a destroyed chunk
+  }
+  // Sets of destroyed chunks are dead weight: free them before adding another.
+  for(auto it=constant_sets_.begin();it!=constant_sets_.end();) {
+    if(it->second.owner.expired()) {FreeConstantSet(it->second.set);it=constant_sets_.erase(it);}
+    else ++it;
   }
   constexpr uint32_t max_sets=256;
   if(!constant_pool_) {
@@ -219,11 +200,11 @@ VkDescriptorSet DescriptorStore::ConstantSet(VkBuffer chunk_handle,Error& e) {
   constexpr VkDeviceSize block_bytes=4096;
   std::array<VkDescriptorBufferInfo,3> info{};std::array<VkWriteDescriptorSet,3> writes{};
   for(uint32_t i=0;i<3;++i) {
-    info[i]={chunk_handle,i*block_bytes,block_bytes};
+    info[i]={chunk->handle,i*block_bytes,block_bytes};
     auto& w=writes[i];w={VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};w.dstSet=set;w.dstBinding=i;w.descriptorCount=1;w.descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;w.pBufferInfo=&info[i];
   }
   c_.f.vkUpdateDescriptorSets(c_.device,uint32_t(writes.size()),writes.data(),0,nullptr);
-  constant_sets_.emplace(chunk_handle,ConstantSetEntry{set});
+  constant_sets_.emplace(block.handle,ConstantSetEntry{chunk,set});
   return set;
 }
 void DescriptorStore::FreeConstantSet(VkDescriptorSet set) {

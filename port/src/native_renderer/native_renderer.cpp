@@ -714,16 +714,6 @@ void Renderer::ShutdownWorker() {
 
 bool PackShaderLookup(uint64_t hash, bool vertex, const void** data, size_t* size);
 
-void Renderer::EnsureSystemWatchers() {
-  if (REXCVAR_GET(sr_native_texture_watch) && !texture_watch_) {
-    page_write_seq_ = std::make_unique<std::atomic<uint32_t>[]>(0x20000);
-    for (uint32_t p = 0; p < 0x20000; ++p) page_write_seq_[p].store(0);
-    REX_KERNEL_MEMORY()->RegisterPhysicalMemoryInvalidationCallback(&Renderer::OnPhysicalWrite,
-                                                                     this);
-    texture_watch_ = true;
-  }
-}
-
 bool Renderer::EnsureInitialized() {
   if (initialized_) {
     return true;
@@ -768,7 +758,13 @@ bool Renderer::EnsureInitialized() {
   REXLOG_INFO("native: render scale {} ({}x{}), shadow scale {}, msaa {}, anisotropy {}",
               render_scale_, output_width_, output_height_, shadow_scale_, msaa_samples_,
               anisotropy_);
-  EnsureSystemWatchers();
+  if (REXCVAR_GET(sr_native_texture_watch)) {
+    page_write_seq_ = std::make_unique<std::atomic<uint32_t>[]>(0x20000);
+    for (uint32_t p = 0; p < 0x20000; ++p) page_write_seq_[p].store(0);
+    REX_KERNEL_MEMORY()->RegisterPhysicalMemoryInvalidationCallback(&Renderer::OnPhysicalWrite,
+                                                                     this);
+    texture_watch_ = true;
+  }
 
   auto* kernel_state = REX_KERNEL_STATE();
   auto* graphics = kernel_state && kernel_state->emulator()

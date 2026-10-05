@@ -27,9 +27,9 @@ std::shared_ptr<CompositionDraw> FrontbufferCompositor::Prepare(VkCommandBuffer 
   guest::DrawPacket draw;draw.command_serial=++draw_serial_;draw.registers[0x104]=15;draw.registers[0x201]=1|(1<<16);
   auto bindings=BuildBindings(draw,e);if(!e.message.empty()) return {};
   bindings.textures[0][0]=source_id;bindings.texture_indices[0]=0;
-  std::memcpy(bindings.shared_constants.data(),gamma.data(),gamma.size_bytes());
+  std::memcpy(bindings.constants.shared.data(),gamma.data(),gamma.size_bytes());
   uint32_t options[]{uint32_t(gamma_enabled),uint32_t(pass.formats[0]==VK_FORMAT_R8G8B8A8_SRGB || pass.formats[0]==VK_FORMAT_B8G8R8A8_SRGB)};
-  std::memcpy(bindings.shared_constants.data()+1024,options,sizeof(options));
+  std::memcpy(bindings.constants.shared.data()+1024,options,sizeof(options));
   // Linear clamp to edge prevents filtering beyond the frontbuffer at borders.
   draw.texture_fetch[0][0]=(2u<<10)|(2u<<13)|(2u<<16);draw.texture_fetch[0][3]=(1u<<19)|(1u<<21);
   result->descriptors=descriptors_.Prepare(bindings,draw.texture_fetch,resources,resources.CurrentSerial(),e);if(!result->descriptors) return {};

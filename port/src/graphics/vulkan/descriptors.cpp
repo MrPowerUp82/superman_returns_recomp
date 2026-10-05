@@ -29,8 +29,7 @@ bool RemapTextureBindings(std::span<const TextureBindingRequest> requests,DrawBi
   out=std::move(next);error={};return true;
 }
 DrawBindings BuildBindings(const guest::DrawPacket& draw,Error& error) {
-  DrawBindings out;out.original_constants=&draw.constants;
-  std::memcpy(out.shared_constants.data(), draw.constants.shared.data(), 4096);
+  DrawBindings out;out.constants=draw.constants;
   out.vertex_buffers.fill(DummyBuffer);
   std::vector<TextureBindingRequest> requests;
   for(uint32_t slot=0;slot<32;++slot) {
@@ -65,12 +64,12 @@ DrawBindings BuildBindings(const guest::DrawPacket& draw,Error& error) {
         meta.buffer=found->second;
       }
     } else {meta={31,0,0,0};}
-    std::memcpy(out.shared_constants.data()+512+i*16,&meta,16);
+    std::memcpy(out.constants.shared.data()+512+i*16,&meta,16);
   }
   for(uint32_t slot=0;slot<32;++slot) {
     out.sampler_indices[slot]=slot;
-    std::memcpy(out.shared_constants.data()+slot*4,&out.texture_indices[slot],4);
-    std::memcpy(out.shared_constants.data()+128+slot*4,&out.sampler_indices[slot],4);
+    std::memcpy(out.constants.shared.data()+slot*4,&out.texture_indices[slot],4);
+    std::memcpy(out.constants.shared.data()+128+slot*4,&out.sampler_indices[slot],4);
   }
   error={};return out;
 }

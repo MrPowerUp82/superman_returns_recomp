@@ -16,8 +16,7 @@ struct TextureBindingRequest {
   uint32_t flags;
 };
 struct DrawBindings {
-  const guest::ConstantSnapshot* original_constants = nullptr;
-  std::array<uint8_t, 4096> shared_constants{};
+  guest::ConstantSnapshot constants{};
   std::array<std::array<guest::ResourceId,32>,3> textures{};
   std::array<guest::ResourceId,32> vertex_buffers{};
   std::array<uint32_t,32> texture_indices{},sampler_indices{};

@@ -34,7 +34,7 @@ SR_TEST(vertex_descriptor_remap_preserves_ushort2_and_stream_offset) {
   Error e;auto b=BuildBindings(p,e);
   SR_CHECK(e.message.empty());
   SR_CHECK_EQ(b.vertex_buffers[0],1500u);
-  guest::VertexFetchMeta meta{};std::memcpy(&meta,b.shared_constants.data()+512+48*16,16);
+  guest::VertexFetchMeta meta{};std::memcpy(&meta,b.constants.shared.data()+512+48*16,16);
   SR_CHECK_EQ(meta.buffer,0u);SR_CHECK_EQ(meta.offset,14u);SR_CHECK_EQ(meta.type,0x2C2259u);
   SR_CHECK_EQ(b.vertex_buffers[31],DummyBuffer);
 }

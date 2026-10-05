@@ -2,7 +2,6 @@
 #include "descriptors.h"
 #include "resources.h"
 #include <unordered_map>
-#include <deque>
 namespace superman_returns::graphics::vulkan {
 struct DescriptorPage {
   Context* context=nullptr;
@@ -36,13 +35,14 @@ struct DescriptorDraw {
   // Set 0 binds the draw's constants with dynamic offsets: bind with these three offsets.
   std::array<uint32_t,3> dynamic_offsets{};
   std::shared_ptr<DescriptorCacheEntry> shared;
+  std::vector<std::shared_ptr<void>> resources;
 };
 class DescriptorStore {
 public:
   explicit DescriptorStore(Context& context):c_(context) {}
   ~DescriptorStore();
   bool Initialize(Error&);
-  DescriptorDraw* Prepare(const DrawBindings&,
+  std::shared_ptr<DescriptorDraw> Prepare(const DrawBindings&,
       const std::array<std::array<uint32_t,6>,32>& fetch,
       ResourceStore&,uint64_t submission,Error&);
   void Retire(uint64_t completed_serial);
@@ -55,8 +55,8 @@ private:
   std::array<VkDescriptorSetLayout,4> layouts_{};
   std::map<std::array<uint32_t,2>,std::shared_ptr<SamplerResource>> samplers_;
   // Set 0 (the draw's constants, bound with dynamic offsets): one set per arena chunk.
-  struct ConstantSetEntry {VkDescriptorSet set=VK_NULL_HANDLE;};
-  VkDescriptorSet ConstantSet(VkBuffer chunk_handle,Error&);
+  struct ConstantSetEntry {std::weak_ptr<BufferResource> owner;VkDescriptorSet set=VK_NULL_HANDLE;};
+  VkDescriptorSet ConstantSet(const BufferResource& block,Error&);
   void FreeConstantSet(VkDescriptorSet);
   std::unordered_map<VkBuffer,ConstantSetEntry> constant_sets_;
   std::shared_ptr<DescriptorPage> constant_pool_;
@@ -71,12 +71,5 @@ private:
   CacheStats cache_stats_;
   SubmissionResources pending_;
   uint64_t completed_=0;
-
-  struct DrawChunk {
-    std::deque<DescriptorDraw> draws;
-    uint64_t serial = 0;
-  };
-  std::vector<DrawChunk> draw_pool_;
-  size_t draw_pool_current_ = 0;
 };
 } // namespace superman_returns::graphics::vulkan
