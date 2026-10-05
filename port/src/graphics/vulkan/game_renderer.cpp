@@ -69,7 +69,9 @@ bool GameRenderer::Upload(const guest::BufferUpdate& update,bool indices,uint64_
   auto source=indices?std::as_bytes(std::span(update.normalized)):std::as_bytes(std::span(update.bytes));
   size_t begin=indices?size_t(p.begin)/width*4:p.begin,end=indices?size_t(p.end)/width*4:p.end;
   if(source.size()!=end-begin) return Fail(e,"Buffer update payload length differs from range");
-  std::memcpy(bytes.data()+begin,source.data(),source.size());return resources_.UploadBuffer(p.key,std::as_bytes(std::span(bytes)),version,e);
+  std::memcpy(bytes.data()+begin,source.data(),source.size());
+  if(profiling_) {++profile_.buffer_uploads;profile_.buffer_bytes+=bytes.size();}
+  return resources_.UploadBuffer(p.key,std::as_bytes(std::span(bytes)),version,e);
 }
 bool GameRenderer::Record(const guest::RenderPacket& packet,VkCommandBuffer command,Error& e) {
   if(command!=command_ || !serial_) return Fail(e,"Packet command buffer differs from active submission");
@@ -89,8 +91,10 @@ bool GameRenderer::Record(const guest::RenderPacket& packet,VkCommandBuffer comm
     } else s<<"other";
     dump_log_.push_back(s.str());
   }
+  Lap lap(profiling_,profile_);
   try {
     if(auto* draw=std::get_if<guest::DrawPacket>(&packet)) {bool ok=Draw(*draw,command,e);if(!ok && e.result!=VK_NOT_READY) ++stats_.failed;return ok;}
+    struct PacketLap {Lap& lap;RecordProfile::Phase phase;~PacketLap(){lap(phase);}} packet_lap{lap,std::holds_alternative<guest::ResolvePacket>(packet)?RecordProfile::kResolves:RecordProfile::kClears};
     ClosePass();
     if(auto* clear=std::get_if<guest::ClearPacket>(&packet)) {if(!targets_.Clear(*clear,e)) return false;++stats_.clears;return true;}
     if(auto* resolve=std::get_if<guest::ResolvePacket>(&packet)) {
@@ -148,6 +152,7 @@ bool GameRenderer::Draw(const guest::DrawPacket& draw,VkCommandBuffer command,Er
     for(uint32_t q=0;q<draw.count/4;++q) {uint32_t b=draw.first+q*4;expanded.expanded_indices.insert(expanded.expanded_indices.end(),{b,b+1,b+2,b,b+2,b+3});}
     expanded.primitive=guest::Primitive::kTriangles;expanded.indexed=true;expanded.first=0;expanded.count=uint32_t(expanded.expanded_indices.size());return Draw(expanded,command,e);
   }
+  Lap lap(profiling_,profile_);if(profiling_) ++profile_.draws;
   // Consume cache updates even while shaders compile. Later action0/partial
   // packets depend on the first owned version and cannot read guest memory.
   // Single-use geometry is written into mapped transient memory: no copy.
@@ -164,6 +169,7 @@ bool GameRenderer::Draw(const guest::DrawPacket& draw,VkCommandBuffer command,Er
   if(vs.status==shaders::ShaderPoll::failed || ps.status==shaders::ShaderPoll::failed) {e={"Game shader",VK_ERROR_INITIALIZATION_FAILED,vs.status==shaders::ShaderPoll::failed?vs.diagnostic:ps.diagnostic};return false;}
   if(vs.status==shaders::ShaderPoll::pending || ps.status==shaders::ShaderPoll::pending) {++stats_.pending;e={"Game shader",VK_NOT_READY,"Captured shader compilation pending"};return false;}
   if(!vs.artifact || (draw.pixel_shader && !ps.artifact)) return Fail(e,"Ready shader has no owned artifact");
+  lap(RecordProfile::kUploads);
   auto plan=PlanAttachments(draw,e,draw.tiling_active?tiling_:VkExtent2D{});if(!e.message.empty()) return false;
   auto pass=targets_.PreparePass(plan,e,open_pass_.get());if(!pass) return false;
   auto aliases=targets_.Aliases(*pass);if(!aliases.empty()) ClosePass();
@@ -171,15 +177,19 @@ bool GameRenderer::Draw(const guest::DrawPacket& draw,VkCommandBuffer command,Er
     if(!depth_ready_) {if(!depth_resolver_.Initialize(e)) return false;depth_ready_=true;}
     if(!depth_resolver_.RecordAlias(command,destination,alias,targets_,resources_,state_,e,alias_options_)) return false;
   }
+  lap(RecordProfile::kTargets);
   for(uint32_t slot=0;slot<32;++slot) if((draw.texture_fetch[slot][0]&3)==2) {
     auto id=TextureResourceId(draw.texture_fetch[slot]);Error lookup;
     auto current=resources_.Texture(id,lookup);
     if(auto resolved=resolved_latest_.find(ResolvedPhysicalBase(draw.texture_fetch[slot]));resolved!=resolved_latest_.end()) {
       auto& latest=resolved->second;auto selected=((draw.texture_fetch[slot][1]&63)==6 && latest.raw)?latest.raw:latest.image;
-      const auto version=std::pair{resolved->first,latest.generation};
-      if(!current || !resolve_views_.contains(id) || resolve_views_[id]!=version) {
-        auto mapping=PlanResolvedSwizzle(draw.texture_fetch[slot],selected->format,selected==latest.raw?false:latest.swap);
-        if(!resources_.BindTextureView(id,selected,mapping,e)) return false;resolve_views_[id]=version;current=resources_.Texture(id,e);
+      auto mapping=PlanResolvedSwizzle(draw.texture_fetch[slot],selected->format,selected==latest.raw?false:latest.swap);
+      const TextureResource* owner=selected.get();while(owner->image_owner) owner=owner->image_owner.get();
+      auto view=resolve_views_.find(id);
+      const bool same=current && view!=resolve_views_.end() && view->second.owner==owner && current->image_owner.get()==owner &&
+        view->second.mapping.r==mapping.r && view->second.mapping.g==mapping.g && view->second.mapping.b==mapping.b && view->second.mapping.a==mapping.a;
+      if(!same) {
+        if(!resources_.BindTextureView(id,selected,mapping,e)) return false;resolve_views_[id]={owner,mapping};current=resources_.Texture(id,e);
       }
     }
     if(current && current->state==&state_) {
@@ -190,9 +200,13 @@ bool GameRenderer::Draw(const guest::DrawPacket& draw,VkCommandBuffer command,Er
     if(current && current->version==capture->version) continue;
     guest::LinearTexture texture;std::string reason;if(!decoder_ || !decoder_(*capture,texture,reason)) {e={"Game texture",VK_ERROR_FORMAT_NOT_SUPPORTED,reason.empty()?"Captured texture decoder unavailable":reason};return false;}
     if(!resources_.UploadTexture(id,texture,capture->version,e)) return false;
+    if(profiling_) {++profile_.texture_uploads;profile_.texture_bytes+=texture.data.size();}
   }
+  lap(RecordProfile::kTextures);
   auto bindings=BuildBindings(draw,e);if(!e.message.empty()) return false;
+  lap(RecordProfile::kBindings);
   auto descriptors=descriptors_.Prepare(bindings,draw.texture_fetch,resources_,serial_,e);if(!descriptors) return false;
+  lap(RecordProfile::kDescriptors);
   auto pipeline=pipelines_.Acquire(draw,*pass,vs.artifact,ps.artifact,serial_,e);if(!pipeline) {e.message+="; VS="+std::to_string(draw.vertex_shader->hash)+", PS="+std::to_string(draw.pixel_shader?draw.pixel_shader->hash:0)+", RT0="+std::to_string(pass->formats[0])+", DS="+std::to_string(pass->depth_format);return false;}
   struct Binding {uint32_t slot;std::shared_ptr<BufferResource> resource;VkDeviceSize offset;};std::vector<Binding> vertices;
   if(draw.inline_vertices) {auto b=resources_.Buffer(InlineBufferBase|draw.command_serial,e);if(!b) return false;vertices.push_back({0,b,b->offset});}
@@ -205,6 +219,7 @@ bool GameRenderer::Draw(const guest::DrawPacket& draw,VkCommandBuffer command,Er
   auto x1=std::clamp(draw.scissor.right,x0,int32_t(pass->extent.width)),y1=std::clamp(draw.scissor.bottom,y0,int32_t(pass->extent.height));
   if(x0==x1 || y0==y1) {e={};return true;}
   VkRect2D scissor{{x0,y0},{uint32_t(x1-x0),uint32_t(y1-y0)}};float blend[4];for(uint32_t i=0;i<4;++i) blend[i]=std::bit_cast<float>(draw.registers[0x105+i]);
+  lap(RecordProfile::kPipeline);
   if(open_pass_!=pass) {
     ClosePass();
     VkRenderPassBeginInfo begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};begin.renderPass=pass->render_pass;begin.framebuffer=pass->framebuffer;begin.renderArea={{0,0},pass->extent};
@@ -216,7 +231,7 @@ bool GameRenderer::Draw(const guest::DrawPacket& draw,VkCommandBuffer command,Er
   c_.f.vkCmdSetViewport(command,0,1,&viewport);c_.f.vkCmdSetScissor(command,0,1,&scissor);c_.f.vkCmdSetBlendConstants(command,blend);c_.f.vkCmdSetStencilReference(command,VK_STENCIL_FACE_FRONT_AND_BACK,draw.registers[0x10d]&255);
   if(draw.indexed) {c_.f.vkCmdBindIndexBuffer(command,indices->handle,indices->offset,VK_INDEX_TYPE_UINT32);c_.f.vkCmdDrawIndexed(command,draw.count,1,draw.first,draw.base_vertex,0);}else c_.f.vkCmdDraw(command,draw.count,1,draw.first,0);
   if(!merge_passes_) ClosePass();
-  targets_.MarkWritten(*pass);++stats_.draws;e={};return true;
+  targets_.MarkWritten(*pass);++stats_.draws;lap(RecordProfile::kCommands);e={};return true;
 }
 }
 

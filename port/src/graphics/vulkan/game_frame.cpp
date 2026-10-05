@@ -2,31 +2,53 @@
 #include <chrono>
 #include <cstdlib>
 #include <thread>
+#include <unordered_map>
 namespace superman_returns::graphics::vulkan {
-GameFrame::GameFrame(Context& c,std::mutex& mutex,ShaderLookup shaders,TextureDecoder decoder):c_(c),queue_mutex_(mutex),shaders_(std::move(shaders)),renderer_(c,shaders_,std::move(decoder)) {}
+namespace {
+// The service hashes and compares the whole container under a mutex on every
+// lookup (~6000 per frame). Captures are long-lived registry objects, so final
+// results are memoized per capture; pointer, hash and size must all match.
+ShaderLookup MemoizeFinal(ShaderLookup lookup) {
+  struct Entry {uint64_t hash;size_t size;shaders::ShaderResult result;};
+  auto cache=std::make_shared<std::unordered_map<const guest::ShaderCapture*,Entry>>();
+  return [lookup=std::move(lookup),cache](const guest::ShaderCapture& capture) {
+    if(auto found=cache->find(&capture);found!=cache->end() && found->second.hash==capture.hash && found->second.size==capture.container.size()) return found->second.result;
+    auto result=lookup(capture);
+    if(result.status!=shaders::ShaderPoll::pending) (*cache)[&capture]=Entry{capture.hash,capture.container.size(),result};
+    return result;
+  };
+}
+}
+GameFrame::GameFrame(Context& c,std::mutex& mutex,ShaderLookup shaders,TextureDecoder decoder):c_(c),queue_mutex_(mutex),shaders_(shaders?MemoizeFinal(std::move(shaders)):ShaderLookup{}),renderer_(c,shaders_,std::move(decoder)) {
+  const char* profile=std::getenv("SR_VULKAN_PROFILE");profiling_=profile && *profile && *profile!='0';renderer_.EnableProfile(profiling_);
+}
 GameFrame::~GameFrame() {
   std::lock_guard lock(queue_mutex_);snapshots_.clear();
-  if(submitted_) {c_.f.vkDeviceWaitIdle(c_.device);renderer_.Retire(serial_);}
-  if(fence_) c_.f.vkDestroyFence(c_.device,fence_,nullptr);
-  if(pool_) c_.f.vkDestroyCommandPool(c_.device,pool_,nullptr);
+  if(slot_submitted_[0] || slot_submitted_[1]) {c_.f.vkDeviceWaitIdle(c_.device);renderer_.Retire(serial_);}
+  for(auto fence:fences_) if(fence) c_.f.vkDestroyFence(c_.device,fence,nullptr);
+  for(auto pool:pools_) if(pool) c_.f.vkDestroyCommandPool(c_.device,pool,nullptr);
 }
 bool GameFrame::Initialize(const std::filesystem::path& cache,Error& e) {
   if(!renderer_.Initialize(cache,e)) return false;
-  VkCommandPoolCreateInfo pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};pool.queueFamilyIndex=c_.graphics_family;
-  if(!Check(c_.f.vkCreateCommandPool(c_.device,&pool,nullptr,&pool_),"Game command pool",e)) return false;
-  VkCommandBufferAllocateInfo command{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};command.commandPool=pool_;command.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;command.commandBufferCount=2;
-  VkFenceCreateInfo fence{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};fence.flags=VK_FENCE_CREATE_SIGNALED_BIT;
-  std::array<VkCommandBuffer,2> commands{};
-  if(!Check(c_.f.vkAllocateCommandBuffers(c_.device,&command,commands.data()),"Game command buffer",e)) return false;
-  upload_=commands[0];command_=commands[1];
-  return Check(c_.f.vkCreateFence(c_.device,&fence,nullptr,&fence_),"Game fence",e);
+  for(size_t slot=0;slot<kSlots;++slot) {
+    VkCommandPoolCreateInfo pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};pool.queueFamilyIndex=c_.graphics_family;
+    if(!Check(c_.f.vkCreateCommandPool(c_.device,&pool,nullptr,&pools_[slot]),"Game command pool",e)) return false;
+    VkCommandBufferAllocateInfo command{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};command.commandPool=pools_[slot];command.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;command.commandBufferCount=2;
+    VkFenceCreateInfo fence{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};fence.flags=VK_FENCE_CREATE_SIGNALED_BIT;
+    std::array<VkCommandBuffer,2> commands{};
+    if(!Check(c_.f.vkAllocateCommandBuffers(c_.device,&command,commands.data()),"Game command buffer",e)) return false;
+    uploads_[slot]=commands[0];commands_[slot]=commands[1];
+    if(!Check(c_.f.vkCreateFence(c_.device,&fence,nullptr,&fences_[slot]),"Game fence",e)) return false;
+  }
+  return true;
 }
-bool GameFrame::WaitFence(Error& e) {
-  if(!submitted_) return true;
+bool GameFrame::WaitSlot(size_t slot,Error& e) {
+  if(!slot_submitted_[slot]) return true;
   // The queue lock isn't held across waits, so UI paints can be submitted.
+  // The queue completes in order, so retiring this serial retires older ones.
   for(;;) {
-    auto result=c_.f.vkWaitForFences(c_.device,1,&fence_,VK_TRUE,25000000);
-    if(result==VK_SUCCESS) {std::lock_guard lock(queue_mutex_);renderer_.Retire(serial_);submitted_=false;return true;}
+    auto result=c_.f.vkWaitForFences(c_.device,1,&fences_[slot],VK_TRUE,25000000);
+    if(result==VK_SUCCESS) {std::lock_guard lock(queue_mutex_);renderer_.Retire(slot_serial_[slot]);slot_submitted_[slot]=false;return true;}
     if(result!=VK_TIMEOUT) return Check(result,"Game frame completion",e);
     if(cancelled_) {e={"Game frame",VK_ERROR_INITIALIZATION_FAILED,"Rendering cancelled"};return false;}
   }
@@ -59,7 +81,10 @@ bool GameFrame::Enqueue(guest::RenderPacket&& packet,std::shared_ptr<TextureReso
   const auto started=std::chrono::steady_clock::now();
   if(!WaitShaders(e)) {failed_=true;return false;}
   const auto shaders_ready=std::chrono::steady_clock::now();
-  if(!WaitFence(e)) {failed_=true;return false;}
+  // Wait only for the frame that last used this slot (N-2).
+  const size_t slot=(serial_+1)%kSlots;
+  if(!WaitSlot(slot,e)) {failed_=true;return false;}
+  pool_=pools_[slot];command_=commands_[slot];upload_=uploads_[slot];fence_=fences_[slot];
   const auto fence_ready=std::chrono::steady_clock::now();
   // This worker owns its command pool, descriptors, pipelines and mutable game
   // targets. Presentation reads immutable mailbox snapshots; ImageState also
@@ -82,7 +107,8 @@ bool GameFrame::Enqueue(guest::RenderPacket&& packet,std::shared_ptr<TextureReso
   renderer_.FinishSubmission();
   auto source=renderer_.SelectFrontbuffer(std::get<guest::SwapPacket>(packet),e);if(!source) return fail();
   // A mailbox owns a snapshot, never an image that the next guest frame mutates.
-  // The previous submission has retired, so a snapshot held only here is free.
+  // In-flight submissions keep their snapshot referenced, so a snapshot held
+  // only by this pool is free to overwrite.
   constexpr guest::ResourceId snapshot_id=UINT64_MAX-16;
   auto& resources=renderer_.Resources();
   for(auto& snapshot:snapshots_) if(snapshot.use_count()==1 && snapshot->format==source->format && snapshot->extent.width==source->extent.width && snapshot->extent.height==source->extent.height) {output=snapshot;break;}
@@ -108,10 +134,13 @@ bool GameFrame::Enqueue(guest::RenderPacket&& packet,std::shared_ptr<TextureReso
     queue_ready=std::chrono::steady_clock::now();
     if(!Check(c_.f.vkQueueSubmit(c_.graphics_queue,1,&submit,fence_),"Submit game frame",e)) return fail();
   }
-  submitted_=true;
+  slot_submitted_[slot]=true;slot_serial_[slot]=serial_;
+  // Loading frames stage hundreds of MB; keeping two of them in flight can
+  // exhaust a shared-memory iGPU. Finish such a frame before recording more.
+  if(kSlots>1 && renderer_.Resources().SubmissionBytes()>(64ull<<20) && !WaitSlot(slot,e)) return fail();
   if(dump) {
     const char* dir=std::getenv("SR_VULKAN_DUMP_DIR");
-    if(!WaitFence(e) || !renderer_.WriteDump(dir?dir:"vk_dump",e)) return fail();
+    if(!WaitSlot(slot,e) || !renderer_.WriteDump(dir?dir:"vk_dump",e)) return fail();
     c_.Log("Dumped native Vulkan frame "+std::to_string(serial_)+" to "+std::string(dir?dir:"vk_dump"));
   }
   if(serial_==1 || std::chrono::steady_clock::now()-cache_checkpoint_>=std::chrono::seconds(5)) {
@@ -121,8 +150,26 @@ bool GameFrame::Enqueue(guest::RenderPacket&& packet,std::shared_ptr<TextureReso
   }
   const auto finished=std::chrono::steady_clock::now();
   auto ms=[](auto a,auto b) {return std::chrono::duration_cast<std::chrono::milliseconds>(b-a).count();};
+  if(profiling_) {
+    auto us=[](auto a,auto b) {return uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(b-a).count());};
+    auto& t=timing_;++t.frames;t.packets+=packets_.size();
+    if(last_swap_.time_since_epoch().count()) t.interval_us+=us(last_swap_,started);
+    t.shaders_us+=us(started,shaders_ready);t.fence_us+=us(shaders_ready,fence_ready);t.record_us+=us(record_started,submit_started);
+    t.queue_us+=us(submit_started,queue_ready);t.tail_us+=us(queue_ready,finished);last_swap_=finished;
+    if(t.frames==120) {
+      auto p=renderer_.TakeProfile();auto cache=renderer_.TakeDescriptorStats();auto avg=[&](uint64_t v) {return std::to_string(v/1000/t.frames)+"."+std::to_string(v/100/t.frames%10);};
+      c_.Log("Vulkan profile (ms/frame over 120): interval="+avg(t.interval_us)+" shaders="+avg(t.shaders_us)+" fence="+avg(t.fence_us)+" record="+avg(t.record_us)+" queue="+avg(t.queue_us)+" tail="+avg(t.tail_us)
+        +" | uploads="+avg(p.us[RecordProfile::kUploads])+" targets="+avg(p.us[RecordProfile::kTargets])+" textures="+avg(p.us[RecordProfile::kTextures])+" bindings="+avg(p.us[RecordProfile::kBindings])
+        +" descriptors="+avg(p.us[RecordProfile::kDescriptors])+" pipeline="+avg(p.us[RecordProfile::kPipeline])+" commands="+avg(p.us[RecordProfile::kCommands])+" resolves="+avg(p.us[RecordProfile::kResolves])+" clears="+avg(p.us[RecordProfile::kClears])
+        +" | draws="+std::to_string(p.draws/t.frames)+" packets="+std::to_string(t.packets/t.frames)+" buffer_uploads="+std::to_string(p.buffer_uploads/t.frames)+" buffer_kb="+std::to_string(p.buffer_bytes/1024/t.frames)
+        +" texture_uploads="+std::to_string(p.texture_uploads/t.frames)+" texture_kb="+std::to_string(p.texture_bytes/1024/t.frames)
+        +" | descriptor_cache hits="+std::to_string(cache.hits/t.frames)+" misses="+std::to_string(cache.misses/t.frames)+" evicted="+std::to_string(cache.evicted/t.frames)+" entries="+std::to_string(cache.entries)
+        +" | live buffers="+std::to_string(LiveMemory().buffers.load())+" ("+std::to_string(LiveMemory().buffer_bytes.load()>>20)+" MB) images="+std::to_string(LiveMemory().images.load())+" ("+std::to_string(LiveMemory().image_bytes.load()>>20)+" MB)");
+      t={};
+    }
+  }
   if(serial_==1 || serial_%120==0 || ms(started,finished)>100) {
-    auto stats=renderer_.Stats();c_.Log("Submitted native Vulkan frame="+std::to_string(serial_)+", draws="+std::to_string(stats.draws)+", pending="+std::to_string(stats.pending)+", failed="+std::to_string(stats.failed)+", shaders_ms="+std::to_string(ms(started,shaders_ready))+", fence_ms="+std::to_string(ms(shaders_ready,fence_ready))+", queue_ms="+std::to_string(ms(submit_started,queue_ready))+", record_submit_ms="+std::to_string(ms(record_started,submit_started)+ms(queue_ready,finished))+", packets="+std::to_string(packets_.size()));
+    auto stats=renderer_.Stats();c_.Log("Submitted native Vulkan frame="+std::to_string(serial_)+", draws="+std::to_string(stats.draws)+", pending="+std::to_string(stats.pending)+", failed="+std::to_string(stats.failed)+", shaders_ms="+std::to_string(ms(started,shaders_ready))+", fence_ms="+std::to_string(ms(shaders_ready,fence_ready))+", queue_ms="+std::to_string(ms(submit_started,queue_ready))+", record_submit_ms="+std::to_string(ms(record_started,submit_started)+ms(queue_ready,finished))+", packets="+std::to_string(packets_.size())+", live_buffers="+std::to_string(LiveMemory().buffers.load())+", live_mb="+std::to_string((LiveMemory().buffer_bytes.load()+LiveMemory().image_bytes.load())>>20));
   }
   packets_.clear();return true;
 }

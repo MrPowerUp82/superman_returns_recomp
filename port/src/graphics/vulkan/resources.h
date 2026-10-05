@@ -2,6 +2,7 @@
 #include "context.h"
 #include "../guest/texture_layout.h"
 #include "../guest/render_packet.h"
+#include <atomic>
 #include <map>
 #include <memory>
 namespace superman_returns::graphics::vulkan {
@@ -25,6 +26,9 @@ struct TextureUploadPlan {
   std::vector<uint8_t> bytes;
 };
 bool PlanTextureUpload(const guest::LinearTexture&,VkDeviceSize alignment,TextureUploadPlan&,Error&);
+// Live VkDeviceMemory owned by buffers/textures of this module (diagnostics).
+struct MemoryCounters {std::atomic<int64_t> buffers{0},buffer_bytes{0},images{0},image_bytes{0};};
+MemoryCounters& LiveMemory();
 struct BufferResource {
   Context* context=nullptr;
   // A suballocation shares owner's handle; bind it at offset, never destroy it.
@@ -48,7 +52,7 @@ struct TextureResource {
   VkExtent3D extent{};
   uint32_t layers=1,mips=1;
   VkImageViewType view_type=VK_IMAGE_VIEW_TYPE_2D;
-  uint64_t version=0;
+  uint64_t version=0;VkDeviceSize allocation=0;
   ~TextureResource();
 };
 // Context must outlive the store and any resources retained by descriptor sets.
@@ -77,10 +81,16 @@ public:
   bool Readback(const std::shared_ptr<BufferResource>&,std::vector<uint8_t>&,Error&);
   bool BindTextureView(guest::ResourceId,std::shared_ptr<TextureResource>,VkComponentMapping,Error&);
   std::shared_ptr<BufferResource> Buffer(guest::ResourceId,Error&);
+  // Lookups without registering the resource with the current submission;
+  // the caller must keep what it binds alive (descriptor cache entries do).
+  const std::shared_ptr<BufferResource>* FindBuffer(guest::ResourceId id) const {auto f=buffers_.find(id);return f==buffers_.end()?nullptr:&f->second;}
+  const std::shared_ptr<TextureResource>* FindTexture(guest::ResourceId id) const {auto f=textures_.find(id);return f==textures_.end()?nullptr:&f->second;}
   std::shared_ptr<TextureResource> Texture(guest::ResourceId,Error&);
   bool CreateDummies(Error&);
   bool UploadHostBuffer(guest::ResourceId,std::span<const std::byte>,uint64_t version,Error&);
   uint64_t CurrentSerial() const {return serial_;}
+  // Bytes staged for buffer/texture uploads in the current submission.
+  VkDeviceSize SubmissionBytes() const {return submission_bytes_;}
   void ForgetBuffer(guest::ResourceId id) {buffers_.erase(id);}
   void ForgetTexture(guest::ResourceId id) {textures_.erase(id);}
 private:
@@ -88,11 +98,13 @@ private:
   bool Write(const std::shared_ptr<BufferResource>&,std::span<const std::byte>,Error&,VkDeviceSize offset=0);
   bool Ready(Error&);
   struct ArenaChunk {std::shared_ptr<BufferResource> buffer;VkDeviceSize used=0;uint64_t serial=0;};
-  struct Arena {VkBufferUsageFlags usage=0;std::vector<ArenaChunk> chunks;size_t current=SIZE_MAX;VkDeviceSize bytes=0;};
+  // `overflow` is the current chunk once the pooled budget is spent; it is
+  // filled like a pooled chunk and released when its submission retires.
+  struct Arena {VkBufferUsageFlags usage=0;std::vector<ArenaChunk> chunks;size_t current=SIZE_MAX;VkDeviceSize bytes=0;ArenaChunk overflow;};
   std::shared_ptr<BufferResource> Suballocate(Arena&,VkDeviceSize size,VkDeviceSize alignment,Error&);
   Context& c_;
   VkCommandBuffer command_=VK_NULL_HANDLE,upload_=VK_NULL_HANDLE;
-  bool upload_barrier_=false;std::vector<VkImageMemoryBarrier> texture_barriers_;
+  bool upload_barrier_=false;std::vector<VkImageMemoryBarrier> texture_barriers_;VkDeviceSize submission_bytes_=0;
   Arena staging_{VK_BUFFER_USAGE_TRANSFER_SRC_BIT},transient_{VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_VERTEX_BUFFER_BIT|VK_BUFFER_USAGE_INDEX_BUFFER_BIT};
   uint64_t serial_=0,completed_=0;
   SubmissionResources submissions_;

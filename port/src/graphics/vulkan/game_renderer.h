@@ -3,10 +3,16 @@
 #include "depth_resolve.h"
 #include "../guest/texture_capture.h"
 #include <atomic>
+#include <chrono>
 namespace superman_returns::graphics::vulkan {
 using ShaderLookup=std::function<shaders::ShaderResult(const guest::ShaderCapture&)>;
 using TextureDecoder=std::function<bool(const guest::TextureCapture&,guest::LinearTexture&,std::string&)>;
 struct GameRenderStats {uint64_t draws=0,pending=0,failed=0,clears=0;};
+// SR_VULKAN_PROFILE=1: CPU time of each recording phase, summed until read.
+struct RecordProfile {
+  enum Phase {kUploads,kTargets,kTextures,kBindings,kDescriptors,kPipeline,kCommands,kResolves,kClears,kCount};
+  std::array<uint64_t,kCount> us{};uint64_t draws=0,texture_uploads=0,texture_bytes=0,buffer_uploads=0,buffer_bytes=0;
+};
 class GameRenderer {
 public:
   GameRenderer(Context& c,ShaderLookup shaders,TextureDecoder decoder={},AliasOptions aliases={}):c_(c),shaders_(std::move(shaders)),decoder_(std::move(decoder)),state_(c.f),resources_(c),targets_(c,state_),descriptors_(c),pipelines_(c),depth_resolver_(c),alias_options_(aliases) {
@@ -29,6 +35,9 @@ public:
   ResourceStore& Resources() {return resources_;}
   const GameRenderStats& Stats() const {return stats_;}
   bool CheckpointCache(Error& e) {return pipelines_.CheckpointCache(e);}
+  void EnableProfile(bool on) {profiling_=on;}
+  RecordProfile TakeProfile() {auto p=profile_;profile_={};return p;}
+  DescriptorStore::CacheStats TakeDescriptorStats() {return descriptors_.TakeCacheStats();}
   // Diagnostics (SR_VULKAN_DUMP_FRAME): while a dump is active, Record logs
   // every packet and reads back each resolve destination when it is written.
   struct DumpImage {std::string name;std::shared_ptr<BufferResource> buffer;VkFormat format=VK_FORMAT_UNDEFINED;VkExtent3D extent{};uint32_t texel=0;};
@@ -47,7 +56,12 @@ private:
   std::map<guest::ResourceId,std::vector<uint8_t>> cpu_buffers_;
   struct ResolvedBinding {std::shared_ptr<TextureResource> image,raw;bool swap=false;uint64_t generation=0;};
   std::map<uint32_t,ResolvedBinding> resolved_latest_;
-  std::map<guest::ResourceId,std::pair<uint32_t,uint64_t>> resolve_views_;
+  // View of a resolved image: rebuilt only when the image or swizzle changes.
+  // Resolves update the image in place, so a new generation needs no new view
+  // (a new view object per frame defeated the descriptor cache). The view owns
+  // its image, so the recorded owner pointer cannot be reused while it lives.
+  struct ResolveView {const TextureResource* owner=nullptr;VkComponentMapping mapping{};};
+  std::map<guest::ResourceId,ResolveView> resolve_views_;
   uint64_t resolve_generation_=0;
   VkCommandBuffer command_=VK_NULL_HANDLE;uint64_t serial_=0;bool dummies_=false;
   GameRenderStats stats_;
@@ -55,5 +69,12 @@ private:
   VkExtent2D tiling_{};
   std::shared_ptr<TargetPass> open_pass_;VkPipeline bound_pipeline_=VK_NULL_HANDLE;bool merge_passes_=false;
   std::atomic<VkCommandBuffer> recording_{VK_NULL_HANDLE};
+  bool profiling_=false;RecordProfile profile_;
+  // Adds the time since the previous lap to a phase; free when profiling is off.
+  struct Lap {
+    bool on;RecordProfile& p;std::chrono::steady_clock::time_point t;
+    Lap(bool enabled,RecordProfile& profile):on(enabled),p(profile),t(enabled?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{}) {}
+    void operator()(RecordProfile::Phase phase) {if(!on) return;auto now=std::chrono::steady_clock::now();p.us[phase]+=uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(now-t).count());t=now;}
+  };
 };
 }

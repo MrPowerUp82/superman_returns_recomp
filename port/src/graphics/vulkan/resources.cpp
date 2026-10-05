@@ -98,8 +98,10 @@ bool PlanTextureUpload(const guest::LinearTexture& texture,VkDeviceSize alignmen
   }
   result=std::move(out);e={};return true;
 }
+MemoryCounters& LiveMemory() {static MemoryCounters counters;return counters;}
 BufferResource::~BufferResource() {
   if(!context || !context->device || owner) return;
+  if(memory) {--LiveMemory().buffers;LiveMemory().buffer_bytes-=int64_t(allocation);}
   if(handle) context->f.vkDestroyBuffer(context->device,handle,nullptr);
   if(memory) context->f.vkFreeMemory(context->device,memory,nullptr);
 }
@@ -107,6 +109,7 @@ TextureResource::~TextureResource() {
   if(!context || !context->device) return;
   if(view) context->f.vkDestroyImageView(context->device,view,nullptr);
   if(image_owner) return;
+  if(memory) {--LiveMemory().images;LiveMemory().image_bytes-=int64_t(allocation);}
   if(state && handle) state->Forget(handle);
   if(handle) context->f.vkDestroyImage(context->device,handle,nullptr);
   if(memory) context->f.vkFreeMemory(context->device,memory,nullptr);
@@ -118,6 +121,7 @@ ResourceStore::~ResourceStore() {
 bool ResourceStore::BeginSubmission(VkCommandBuffer cmd,uint64_t serial,Error& e,VkCommandBuffer upload) {
   if(!cmd || serial<=completed_ || serial<serial_) return Fail(e,"Resource submission","Missing command buffer or invalid submission serial");
   if(serial!=serial_) for(auto& [size,pool]:host_pool_) pool.cursor=0;
+  if(serial!=serial_) submission_bytes_=0;
   command_=cmd;upload_=upload;upload_barrier_=false;texture_barriers_.clear();serial_=serial;e={};return true;
 }
 void ResourceStore::FinishUploads() {
@@ -144,6 +148,7 @@ std::shared_ptr<BufferResource> ResourceStore::NewBuffer(VkDeviceSize size,VkBuf
   VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};alloc.allocationSize=mr.size;alloc.memoryTypeIndex=*type;
   if(!Check(c_.f.vkAllocateMemory(c_.device,&alloc,nullptr,&b->memory),"Allocate resource buffer",e) ||
      !Check(c_.f.vkBindBufferMemory(c_.device,b->handle,b->memory,0),"Bind resource buffer",e)) return {};
+  ++LiveMemory().buffers;LiveMemory().buffer_bytes+=int64_t(b->allocation);
   // Host-visible memory stays mapped for its lifetime; freeing it unmaps.
   if((required&VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && !Check(c_.f.vkMapMemory(c_.device,b->memory,0,VK_WHOLE_SIZE,0,&b->mapped),"Map resource buffer",e)) return {};
   return b;
@@ -160,7 +165,9 @@ bool ResourceStore::Write(const std::shared_ptr<BufferResource>& b,std::span<con
   return Check(c_.f.vkFlushMappedMemoryRanges(c_.device,1,&range),"Flush staging",e);
 }
 std::shared_ptr<BufferResource> ResourceStore::Suballocate(Arena& arena,VkDeviceSize size,VkDeviceSize alignment,Error& e) {
-  constexpr VkDeviceSize chunk_size=8ull*1024*1024,budget=64ull*1024*1024;
+  if(&arena==&staging_) submission_bytes_+=size;
+  // Budget covers two frames in flight of constants (~36 MiB per 3000 draws).
+  constexpr VkDeviceSize chunk_size=8ull*1024*1024,budget=128ull*1024*1024;
   auto view=[&](ArenaChunk& chunk) {
     VkDeviceSize offset=(chunk.used+alignment-1)/alignment*alignment;
     if(offset+size>chunk.buffer->size) return std::shared_ptr<BufferResource>{};
@@ -171,6 +178,7 @@ std::shared_ptr<BufferResource> ResourceStore::Suballocate(Arena& arena,VkDevice
     return v;
   };
   if(arena.current<arena.chunks.size() && arena.chunks[arena.current].serial==serial_) if(auto v=view(arena.chunks[arena.current])) return v;
+  if(arena.overflow.buffer && arena.overflow.serial==serial_) if(auto v=view(arena.overflow)) return v;
   // A chunk referenced only by the arena has no pending submission or view.
   for(size_t i=0;i<arena.chunks.size();++i) {
     auto& chunk=arena.chunks[i];
@@ -181,7 +189,9 @@ std::shared_ptr<BufferResource> ResourceStore::Suballocate(Arena& arena,VkDevice
   if(buffer->size==chunk_size && arena.bytes+buffer->allocation<=budget) {
     arena.bytes+=buffer->allocation;arena.chunks.push_back({buffer,0,0});arena.current=arena.chunks.size()-1;return view(arena.chunks.back());
   }
-  ArenaChunk single{buffer,0,0};return view(single);  // oversized or over budget: this submission only
+  // Oversized or over budget: lives for this submission only. Keep filling
+  // it, otherwise every later small allocation would create another chunk.
+  arena.overflow={buffer,0,0};return view(arena.overflow);
 }
 std::shared_ptr<BufferResource> ResourceStore::UploadTransient(guest::ResourceId id,std::span<const std::byte> bytes,VkDeviceSize reserve,Error& e) {
   if(!Ready(e)) return {};
@@ -240,6 +250,7 @@ bool ResourceStore::UploadTexture(guest::ResourceId id,const guest::LinearTextur
   if(!type) return Fail(e,"Texture memory","Device-local memory unavailable");
   VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};alloc.allocationSize=mr.size;alloc.memoryTypeIndex=*type;
   if(!Check(c_.f.vkAllocateMemory(c_.device,&alloc,nullptr,&gpu->memory),"Allocate texture",e) || !Check(c_.f.vkBindImageMemory(c_.device,gpu->handle,gpu->memory,0),"Bind texture",e)) return false;
+  gpu->allocation=mr.size;++LiveMemory().images;LiveMemory().image_bytes+=int64_t(mr.size);
   VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};view.image=gpu->handle;view.viewType=plan.view_type;view.format=plan.format;view.components=plan.swizzle;
   view.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,plan.mips,0,plan.view_type==VK_IMAGE_VIEW_TYPE_CUBE?6u:1u};
   if(!Check(c_.f.vkCreateImageView(c_.device,&view,nullptr,&gpu->view),"Create texture view",e)) return false;
@@ -276,6 +287,7 @@ std::shared_ptr<TextureResource> ResourceStore::ResolveTexture(guest::ResourceId
   if(!type) {Fail(e,"Resolve memory","Device-local memory unavailable");return {};}
   VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};allocation.allocationSize=mr.size;allocation.memoryTypeIndex=*type;
   if(!Check(c_.f.vkAllocateMemory(c_.device,&allocation,nullptr,&t->memory),"Allocate resolve texture",e) || !Check(c_.f.vkBindImageMemory(c_.device,t->handle,t->memory,0),"Bind resolve texture",e)) return {};
+  t->allocation=mr.size;++LiveMemory().images;LiveMemory().image_bytes+=int64_t(mr.size);
   VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};view.image=t->handle;view.viewType=view_type;view.format=format;view.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,mips,0,cube?layers:1};
   if(!Check(c_.f.vkCreateImageView(c_.device,&view,nullptr,&t->view),"Create resolve view",e) || !state.Register(t->handle,mips,layers,VK_IMAGE_ASPECT_COLOR_BIT,e)) return {};
   t->state=&state;
