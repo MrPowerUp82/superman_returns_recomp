@@ -23,6 +23,7 @@ GameFrame::GameFrame(Context& c,std::mutex& mutex,ShaderLookup shaders,TextureDe
   const char* profile=std::getenv("SR_VULKAN_PROFILE");profiling_=profile && *profile && *profile!='0';renderer_.EnableProfile(profiling_);
 }
 GameFrame::~GameFrame() {
+  StopAsync();
   std::lock_guard lock(queue_mutex_);snapshots_.clear();
   if(slot_submitted_[0] || slot_submitted_[1]) {c_.f.vkDeviceWaitIdle(c_.device);renderer_.Retire(serial_);}
   for(auto fence:fences_) if(fence) c_.f.vkDestroyFence(c_.device,fence,nullptr);
@@ -53,9 +54,33 @@ bool GameFrame::WaitSlot(size_t slot,Error& e) {
     if(cancelled_) {e={"Game frame",VK_ERROR_INITIALIZATION_FAILED,"Rendering cancelled"};return false;}
   }
 }
-bool GameFrame::WaitShaders(Error& e) {
+void GameFrame::Cancel() {
+  cancelled_.store(true);{std::lock_guard lock(job_mutex_);}job_cv_.notify_all();
+}
+void GameFrame::StartAsync(OutputCallback output) {
+  std::lock_guard lock(job_mutex_);if(recorder_.joinable()) return;
+  output_=std::move(output);stop_=false;recorder_=std::thread(&GameFrame::RecorderMain,this);
+}
+void GameFrame::StopAsync() {
+  {std::lock_guard lock(job_mutex_);if(!recorder_.joinable()) return;stop_=true;}
+  job_cv_.notify_all();recorder_.join();
+  std::lock_guard lock(job_mutex_);output_={};
+}
+void GameFrame::RecorderMain() {
+  for(;;) {
+    {std::unique_lock lock(job_mutex_);job_cv_.wait(lock,[&]{return stop_ || job_pending_;});if(!job_pending_) return;}
+    // job_pending_ stays set while recording: the producer never touches the job.
+    std::shared_ptr<TextureResource> output;Error e;
+    bool ok=RecordFrame(job_packets_,*job_swap_,output,e);
+    if(ok && output && output_) output_(output,*job_swap_);
+    std::lock_guard lock(job_mutex_);
+    if(!ok) {async_error_=e;failed_=true;}
+    job_packets_.clear();job_swap_.reset();job_pending_=false;job_cv_.notify_all();
+  }
+}
+bool GameFrame::WaitShaders(const std::vector<guest::RenderPacket>& packets,Error& e) {
   std::vector<std::shared_ptr<const guest::ShaderCapture>> captures;
-  for(auto& packet:packets_) if(auto* draw=std::get_if<guest::DrawPacket>(&packet);draw && draw->count) {
+  for(auto& packet:packets) if(auto* draw=std::get_if<guest::DrawPacket>(&packet);draw && draw->count) {
     if(!draw->vertex_shader) {e={"Game shader",VK_ERROR_INITIALIZATION_FAILED,"Draw has no captured vertex shader"};return false;}
     for(auto& shader:{draw->vertex_shader,draw->pixel_shader}) if(shader && std::find(captures.begin(),captures.end(),shader)==captures.end()) captures.push_back(shader);
   }
@@ -78,8 +103,19 @@ bool GameFrame::Enqueue(guest::RenderPacket&& packet,std::shared_ptr<TextureReso
     if(packets_.size()>=262144) {failed_=true;e={"Game frame",VK_ERROR_OUT_OF_HOST_MEMORY,"Frame packet limit exceeded"};return false;}
     packets_.push_back(std::move(packet));return true;
   }
+  if(recorder_.joinable()) {
+    std::unique_lock lock(job_mutex_);
+    job_cv_.wait(lock,[&]{return !job_pending_ || cancelled_ || stop_;});
+    if(failed_) {e=async_error_.message.empty()?Error{"Game frame",VK_ERROR_INITIALIZATION_FAILED,"Renderer stopped"}:async_error_;return false;}
+    if(cancelled_ || stop_) {e={"Game frame",VK_ERROR_INITIALIZATION_FAILED,"Rendering cancelled"};return false;}
+    job_packets_.swap(packets_);packets_.clear();job_swap_=std::move(std::get<guest::SwapPacket>(packet));job_pending_=true;
+    lock.unlock();job_cv_.notify_all();return true;
+  }
+  return RecordFrame(packets_,std::get<guest::SwapPacket>(packet),output,e);
+}
+bool GameFrame::RecordFrame(std::vector<guest::RenderPacket>& packets_,const guest::SwapPacket& swap,std::shared_ptr<TextureResource>& output,Error& e) {
   const auto started=std::chrono::steady_clock::now();
-  if(!WaitShaders(e)) {failed_=true;return false;}
+  if(!WaitShaders(packets_,e)) {failed_=true;return false;}
   const auto shaders_ready=std::chrono::steady_clock::now();
   // Wait only for the frame that last used this slot (N-2).
   const size_t slot=(serial_+1)%kSlots;
@@ -105,7 +141,7 @@ bool GameFrame::Enqueue(guest::RenderPacket&& packet,std::shared_ptr<TextureReso
   for(size_t i=0;i<packets_.size();++i) if(!renderer_.Record(packets_[i],command_,e)) {e.message+=" (frame packet "+std::to_string(i)+", kind="+std::to_string(packets_[i].index())+")";return fail();}
   if(dump && !renderer_.DumpTargets(command_,e)) return fail();
   renderer_.FinishSubmission();
-  auto source=renderer_.SelectFrontbuffer(std::get<guest::SwapPacket>(packet),e);if(!source) return fail();
+  auto source=renderer_.SelectFrontbuffer(swap,e);if(!source) return fail();
   // A mailbox owns a snapshot, never an image that the next guest frame mutates.
   // In-flight submissions keep their snapshot referenced, so a snapshot held
   // only by this pool is free to overwrite.

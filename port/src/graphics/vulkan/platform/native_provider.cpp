@@ -110,7 +110,10 @@ public:
 class Presenter final:public rex::ui::Presenter {
 public:
   Presenter(std::shared_ptr<Host> host,HostGpuLossCallback loss):rex::ui::Presenter(std::move(loss)),host_(std::move(host)) {}
-  ~Presenter() override {SetWindowSurfaceFromUIThread(nullptr,nullptr);DisconnectPaintingFromSurfaceFromUIThreadImpl();for(auto& mailbox:mailbox_) mailbox={};}
+  ~Presenter() override {
+    // The recording thread calls back into this presenter: stop it first.
+    if(host_->game) host_->game->StopAsync();
+    SetWindowSurfaceFromUIThread(nullptr,nullptr);DisconnectPaintingFromSurfaceFromUIThreadImpl();for(auto& mailbox:mailbox_) mailbox={};}
   bool Initialize() {return InitializeCommonSurfaceIndependent();}
   rex::ui::Surface::TypeFlags GetSupportedSurfaceTypes() const override {return rex::ui::Surface::kTypeFlag_Win32Hwnd;}
   bool CaptureGuestOutput(rex::ui::RawImage& image) override;
@@ -125,13 +128,19 @@ public:
       game=host_->game.get();
       if(!game) {diagnostic="Vulkan window/device has not been initialized";return false;}
     }
+    // Frames record on GameFrame's thread while this worker replays the next.
+    std::call_once(async_started_,[&] {game->StartAsync([this](std::shared_ptr<TextureResource> image,const guest::SwapPacket& swap) {
+      if(!Publish(image,swap.gamma,swap.gamma_enabled)) REXLOG_WARN("native Vulkan: presenter rejected a submitted frontbuffer");
+    });});
     if(!game->Enqueue(std::move(packet),image,e)) {diagnostic=e.operation+": "+e.message;return false;}
     if(!image) return true;
-    bool refreshed=RefreshGuestOutput(image->extent.width,image->extent.height,1280,720,[&](GuestOutputRefreshContext& base) {
+    if(!Publish(image,gamma,gamma_enabled)) {diagnostic="Vulkan presenter rejected submitted frontbuffer";return false;}
+    return true;
+  }
+  bool Publish(const std::shared_ptr<TextureResource>& image,const std::shared_ptr<const std::array<uint32_t,256>>& gamma,bool gamma_enabled) {
+    return RefreshGuestOutput(image->extent.width,image->extent.height,1280,720,[&](GuestOutputRefreshContext& base) {
       auto& context=static_cast<RefreshContext&>(base);context.output.image=image;if(gamma) context.output.gamma=*gamma;context.output.gamma_enabled=gamma_enabled;context.SetIs8bpc(image->format==VK_FORMAT_R8G8B8A8_UNORM);return true;
     });
-    if(!refreshed) diagnostic="Vulkan presenter rejected submitted frontbuffer";
-    return refreshed;
   }
 protected:
   SurfacePaintConnectResult ConnectOrReconnectPaintingToSurfaceFromUIThread(rex::ui::Surface& surface,uint32_t width,uint32_t height,bool was_paintable,bool& implicit_vsync) override {
@@ -183,7 +192,7 @@ protected:
     Report(e);return e.result==VK_ERROR_DEVICE_LOST?PaintResult::kGpuLostResponsible:PaintResult::kNotPresented;
   }
 private:
-  std::shared_ptr<Host> host_;std::array<Mailbox,kGuestOutputMailboxSize> mailbox_;
+  std::shared_ptr<Host> host_;std::array<Mailbox,kGuestOutputMailboxSize> mailbox_;std::once_flag async_started_;
   Swapchain swapchain_;FrameLoop frames_;VkExtent2D requested_extent_{};HWND hwnd_=nullptr;
 };
 bool Presenter::CaptureGuestOutput(rex::ui::RawImage& output) {

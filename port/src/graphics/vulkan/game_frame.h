@@ -3,6 +3,9 @@
 #include <atomic>
 #include <mutex>
 #include <chrono>
+#include <condition_variable>
+#include <optional>
+#include <thread>
 namespace superman_returns::graphics::vulkan {
 // Shares queue submission ordering with host presentation. Shader waits and
 // CPU recording happen outside this mutex so the window can keep responding.
@@ -12,11 +15,20 @@ public:
   ~GameFrame();
   bool Initialize(const std::filesystem::path&,Error&);
   bool Enqueue(guest::RenderPacket&&,std::shared_ptr<TextureResource>&,Error&);
-  void Cancel() {cancelled_.store(true);}
+  void Cancel();
+  // Async mode: Enqueue(swap) hands the frame to a recording thread and
+  // returns without an output; the thread calls `output` once the frame is
+  // submitted. The packet producer accumulates the next frame meanwhile and
+  // blocks at its swap only while the previous frame is still recording.
+  using OutputCallback=std::function<void(std::shared_ptr<TextureResource>,const guest::SwapPacket&)>;
+  void StartAsync(OutputCallback output);
+  void StopAsync();
   std::function<void()> compilation_progress;
   GameRenderer& Renderer() {return renderer_;}
 private:
-  bool WaitShaders(Error&);
+  bool WaitShaders(const std::vector<guest::RenderPacket>&,Error&);
+  bool RecordFrame(std::vector<guest::RenderPacket>&,const guest::SwapPacket&,std::shared_ptr<TextureResource>&,Error&);
+  void RecorderMain();
   bool WaitSlot(size_t slot,Error&);
   Context& c_;std::mutex& queue_mutex_;ShaderLookup shaders_;GameRenderer renderer_;
   std::vector<guest::RenderPacket> packets_;
@@ -29,7 +41,9 @@ private:
   VkCommandPool pool_=VK_NULL_HANDLE;VkCommandBuffer command_=VK_NULL_HANDLE,upload_=VK_NULL_HANDLE;
   // Presentation snapshots, reused once neither a mailbox nor a submission holds them.
   std::vector<std::shared_ptr<TextureResource>> snapshots_;
-  VkFence fence_=VK_NULL_HANDLE;uint64_t serial_=0;bool failed_=false;
+  VkFence fence_=VK_NULL_HANDLE;uint64_t serial_=0;std::atomic<bool> failed_{false};
+  std::thread recorder_;std::mutex job_mutex_;std::condition_variable job_cv_;OutputCallback output_;
+  bool job_pending_=false,stop_=false;std::vector<guest::RenderPacket> job_packets_;std::optional<guest::SwapPacket> job_swap_;Error async_error_;
   std::atomic<bool> cancelled_{false};
   std::chrono::steady_clock::time_point cache_checkpoint_{};
   // SR_VULKAN_PROFILE=1: per-stage averages logged every 120 frames.

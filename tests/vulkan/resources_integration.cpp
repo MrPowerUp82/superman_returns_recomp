@@ -347,6 +347,33 @@ void CheckGameFrame(Context& c) {
   if(frame.Enqueue(guest::RenderPacket(guest::SwapPacket{}),unused,e) || e.message.empty()) throw std::runtime_error("Cancelled game frame accepted work");
   std::cout<<"Game frame producer submits owned packets, tiling clears and immutable mailbox snapshots\n";
 }
+// Same frames as CheckGameFrame, recorded on GameFrame's async thread: the
+// producer gets no output, the callback receives both frames in order.
+void CheckGameFrameAsync(Context& c) {
+  Error e;std::mutex queue_mutex;GameFrame frame(c,queue_mutex,{},{});Require(frame.Initialize({},e),e);
+  std::mutex outputs_mutex;std::vector<std::shared_ptr<TextureResource>> outputs;
+  frame.StartAsync([&](std::shared_ptr<TextureResource> image,const guest::SwapPacket&) {std::lock_guard lock(outputs_mutex);outputs.push_back(std::move(image));});
+  guest::SurfaceDesc source{1001,false,{16,16,0,0,0,1}};
+  guest::WorkBatch batch;batch.bytes={0,0x10,0,6};batch.ranges={{0x500020,4,0}};guest::WorkCmd command;command.range_count=1;guest::CapturedMemory memory;std::string reason;
+  if(!guest::CapturedMemory::Capture(batch,command,memory,reason)) throw std::runtime_error(reason);
+  std::shared_ptr<TextureResource> unused;
+  for(bool green:{false,true}) {
+    guest::PassPacket tiling{};tiling.operation=guest::Op::kBeginTiling;tiling.rects={{0,0,8,8}};tiling.clear_color=true;tiling.color_surface=source;tiling.color=green?std::array<float,4>{0,1,0,1}:std::array<float,4>{1,0,0,1};
+    Require(frame.Enqueue(guest::RenderPacket(tiling),unused,e),e);
+    guest::ResolvePacket resolve{};resolve.source_surface=source;resolve.destination=1002;resolve.destination_fetch={2,0x100006,15u|(15u<<13),0,0,1u<<9};Require(frame.Enqueue(guest::RenderPacket(resolve),unused,e),e);
+    Require(frame.Enqueue(guest::RenderPacket(guest::SwapPacket{0x500000,1,memory}),unused,e),e);
+    if(unused) throw std::runtime_error("Async frame returned a synchronous output");
+  }
+  frame.StopAsync();
+  if(outputs.size()!=2 || outputs[0]->handle==outputs[1]->handle) throw std::runtime_error("Async recorder must publish two distinct snapshots");
+  for(size_t i=0;i<2;++i) {
+    UploadFixture fixture(c);Require(frame.Renderer().Images().Transition(fixture.command,outputs[i]->handle,{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1},ImageUsage::TransferSource(),e),e);
+    VkBufferImageCopy copy{};copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.imageExtent={16,16,1};c.f.vkCmdCopyImageToBuffer(fixture.command,outputs[i]->handle,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,fixture.readback,1,&copy);
+    auto bytes=fixture.Finish();uint8_t expected[]{uint8_t(i?0:255),uint8_t(i?255:0),0,255};
+    for(uint32_t pixel=0;pixel<256;++pixel) if(std::memcmp(bytes.data()+pixel*4,expected,4)) throw std::runtime_error("Async game frame snapshot pixels mismatch");
+  }
+  std::cout<<"Async game frame recorder publishes ordered snapshots and drains on stop\n";
+}
 void CheckImmediate(Context& c) {
   Error e;UploadFixture fixture(c);ImageState state(c.f);TargetStore targets(c,state);ResourceStore resources(c);ImmediateRenderer immediate(c);
   Require(resources.BeginSubmission(fixture.command,1,e),e);Require(resources.CreateDummies(e),e);Require(targets.BeginSubmission(fixture.command,1,e),e);Require(immediate.Initialize(e),e);
@@ -412,6 +439,7 @@ int main(int argc,char** argv) {
     if(argc==2 && std::string(argv[1])=="--alias-defaults") {CheckEdramAlias(c,true);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--resolve-sample") {CheckResolvedDraw(c);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--game-frame") {CheckGameFrame(c);return c.validation_errors.load()?1:0;}
+    if(argc==2 && std::string(argv[1])=="--game-frame-async") {CheckGameFrameAsync(c);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--immediate") {CheckImmediate(c);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--stacked-resolve") {CheckStackedResolve(c);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--composition") {CheckComposition(c);return c.validation_errors.load()?1:0;}
