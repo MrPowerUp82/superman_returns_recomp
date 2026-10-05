@@ -119,16 +119,25 @@ Opções disponíveis: `--keybind_a`, `_b`, `_x`, `_y`, `_left_trigger`, `_right
 
 ## Estrutura
 
+No repositório (versionado):
+
 - `port/`: projeto CMake e manifesto ReXGlue (`port/src/native_renderer/` é o renderer nativo; `port/src/graphics/vulkan/` é o backend Vulkan).
 - `launcher/`: launcher WPF ([launcher/README.md](launcher/README.md)).
-- `docs/`: documentação técnica e a página do instalador.
-- `tests/`: testes que não precisam do jogo (renderer nativo, Vulkan, shaders, launcher).
-- `artifacts/`: gerado localmente pelos scripts (corpus de shaders, launcher), ignorado pelo Git.
-- `game/`: arquivos extraídos da ISO, mantidos apenas localmente.
-- `.tools/`: ferramentas e SDK baixados localmente.
+- `tools/`: scripts de apoio, com índice em [tools/README.md](tools/README.md): compilar e publicar na raiz, `bench/` (medir desempenho), `analysis/` (capturas e análises), `shaders/` (corpus) e `release/`. `tools\clean.ps1` apaga o que é gerado.
+- `tests/`: testes que não precisam do jogo (renderer nativo, Vulkan, shaders, launcher, ferramentas).
+- `docs/`: documentação técnica, a página do instalador (GitHub Pages) e as notas de sessão em `docs/checkpoints/`.
 - `build.cmd`: configura e compila a versão Windows x64.
 - `run.cmd` / `run_keyboard.cmd`: iniciam o jogo com controle ou com teclado e mouse.
-- `tools/`: scripts de análise, benchmark (`bench.ps1`), shaders e empacotamento.
+
+Só na sua máquina (ignorado pelo Git, recriável, exceto `game/`):
+
+- `game/`: arquivos extraídos da ISO.
+- `.tools/`: ferramentas e SDK baixados (clang, ReXGlue, DXC, cabeçalhos Vulkan).
+- `port/out/build/`: o executável do jogo (`win-amd64-release` é o build padrão; `win-amd64-dist` é o de empacotamento).
+- `port/generated/`: o C++ gerado a partir do `default.xex`.
+- `build/`: testes e builds avulsos (`tests-native`, `tests-vulkan`, `vulkan-game`) e, em `vulkan-m2` e `vulkan-m3-runtime`, o tradutor de shaders e o cache do Vulkan em desenvolvimento.
+- `artifacts/`: corpus de shaders e launcher gerados pelos scripts.
+- `logs/`: logs, screenshots do bench, dumps de shaders de runtime e `bench_results.csv`. Os dumps de shaders (`native_shaders`, `rt_corpus3`, `rt_shaders2`) e `port/logs` são entrada do `tools\shaders\build_corpus.ps1`: não os apague.
 
 ## Preparação no Windows
 
