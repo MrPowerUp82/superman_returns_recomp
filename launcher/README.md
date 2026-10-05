@@ -1,7 +1,10 @@
 # Launcher Windows
 
 GUI WPF em português, adaptada do pacote fornecido pelo usuário. Inicia o renderer
-nativo Direct3D 12 com as flags existentes do projeto. Vulkan ainda não está disponível.
+nativo com a API escolhida: Vulkan (padrão, experimental) ou Direct3D 12 (`--sr_native_api`).
+Com Vulkan, escala interna, FXAA, MSAA, sombras e filtro anisotrópico ficam no padrão do jogo.
+O launcher só envia `--sr_native_gpu_luid` quando uma GPU específica foi escolhida: um argumento
+`--opção=` vazio faz o parser do engine ler o argumento seguinte como valor.
 
 Oferece resolução, tela cheia sem bordas/janela, GPU DXGI, teclado/mouse ou controle,
 escala interna, FXAA, filtro de texturas, sombras, MSAA, VSync e limite de FPS.

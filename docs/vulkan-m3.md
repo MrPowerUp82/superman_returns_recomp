@@ -4,8 +4,9 @@ The opt-in build presents guest draws through the project's Vulkan device and
 Win32 presenter. It does not create a D3D12 reserve provider or silently fall
 back to Xenos. M3 is still open: opening videos and the animated title have been
 observed, but tutorial/meteor HUD, city gameplay, War World parity and the full
-window lifecycle have not yet been fully verified in this build. Vulkan is not exposed
-in the launcher or included in a release.
+window lifecycle have not yet been fully verified in this build. Since 2026-10-05 Vulkan
+is the launcher's default API and is part of the release (Direct3D 12 stays selectable);
+it is still experimental.
 
 ## Building and selecting the backend
 
