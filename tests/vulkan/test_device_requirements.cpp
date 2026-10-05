@@ -27,3 +27,23 @@ SR_TEST(layout_shared_bindings_count_once_and_reject_conflicts) {
   layout.back().count=33;
   SR_CHECK(!CheckDeviceRequirements(vs,ps,layout,caps).empty());
 }
+
+SR_TEST(game_layout_binds_the_constants_with_dynamic_offsets_inside_the_guaranteed_limits) {
+  uint32_t dynamic = 0;
+  for (const auto& b : GameBindingLayout()) {
+    if (b.set == 0) {
+      SR_CHECK(b.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC);
+      SR_CHECK_EQ(b.count, 1u);
+      ++dynamic;
+    } else {
+      SR_CHECK(b.type != VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC);
+    }
+  }
+  SR_CHECK_EQ(dynamic, 3u);  // o Vulkan garante maxDescriptorSetStorageBuffersDynamic >= 4
+  DeviceCaps caps{};
+  caps.stage.storage_buffers = 35;caps.stage.sampled_images = 96;caps.stage.samplers = 32;caps.stage.descriptor_sets = 4;
+  caps.layout = caps.stage;
+  SR_CHECK(CheckDeviceRequirements({}, {}, GameBindingLayout(), caps).empty());
+  caps.layout.storage_buffers = 34;  // 3 dinâmicos + 32 de vertex buffers exigem 35
+  SR_CHECK(!CheckDeviceRequirements({}, {}, GameBindingLayout(), caps).empty());
+}

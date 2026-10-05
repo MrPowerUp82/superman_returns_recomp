@@ -1,7 +1,11 @@
 #include "descriptor_sets.h"
 #include "device_requirements.h"
 #include <algorithm>
+#include <cstddef>
 namespace superman_returns::graphics::vulkan {
+// The three constant blocks of a draw are bound as one contiguous 12 KiB range.
+static_assert(sizeof(guest::ConstantSnapshot)==3*4096 && offsetof(guest::ConstantSnapshot,vs)==0 &&
+              offsetof(guest::ConstantSnapshot,ps)==4096 && offsetof(guest::ConstantSnapshot,shared)==8192);
 DescriptorPage::~DescriptorPage() {if(pool) context->f.vkDestroyDescriptorPool(context->device,pool,nullptr);}
 DescriptorCacheEntry::~DescriptorCacheEntry() {
   if(!context || !pool || !sets[0]) return;
@@ -10,7 +14,7 @@ DescriptorCacheEntry::~DescriptorCacheEntry() {
 SamplerResource::~SamplerResource() {if(handle) context->f.vkDestroySampler(context->device,handle,nullptr);}
 DescriptorStore::~DescriptorStore() {
   if(c_.device) c_.f.vkDeviceWaitIdle(c_.device);
-  pending_.Retire(UINT64_MAX);pages_.clear();free_pages_.clear();cache_.clear();cache_pools_.clear();samplers_.clear();
+  pending_.Retire(UINT64_MAX);constant_sets_.clear();constant_pool_.reset();cache_.clear();cache_pools_.clear();samplers_.clear();
   for(auto layout:layouts_) if(layout) c_.f.vkDestroyDescriptorSetLayout(c_.device,layout,nullptr);
 }
 bool DescriptorStore::Initialize(Error& e) {
@@ -159,41 +163,54 @@ std::shared_ptr<DescriptorDraw> DescriptorStore::Prepare(const DrawBindings& bin
   }
   auto draw=std::make_shared<DescriptorDraw>();
   draw->shared=Shared(bindings,fetch,store,serial,draw->resources,e);if(!draw->shared) return {};
-  std::array<VkDescriptorBufferInfo,3> constant_info{};
-  std::array<std::span<const std::byte>,3> bytes{std::as_bytes(std::span(bindings.constants.vs)),std::as_bytes(std::span(bindings.constants.ps)),std::as_bytes(std::span(bindings.constants.shared))};
-  for(uint32_t i=0;i<3;++i) {
-    // Suballocated from the store's mapped per-submission arena.
-    ++constant_serial_;auto buffer=store.UploadTransient(0,bytes[i],4096,e);
-    if(!buffer) return {};
-    constant_info[i]={buffer->handle,buffer->offset,4096};draw->resources.push_back(buffer);
-  }
-  // Only the per-draw constant set comes from the per-submission pages.
-  constexpr uint32_t sets_per_page=512;
-  auto& pages=pages_[serial];
-  if((pages.empty() || pages.back()->draws>=sets_per_page) && !free_pages_.empty()) {
-    pages.push_back(std::move(free_pages_.back()));free_pages_.pop_back();
-  }
-  if(pages.empty() || pages.back()->draws>=sets_per_page) {
-    auto page=std::make_shared<DescriptorPage>();page->context=&c_;
-    VkDescriptorPoolSize sizes[]{{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,3*sets_per_page}};
-    VkDescriptorPoolCreateInfo pool{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};pool.maxSets=sets_per_page;pool.poolSizeCount=1;pool.pPoolSizes=sizes;
-    if(!Check(c_.f.vkCreateDescriptorPool(c_.device,&pool,nullptr,&page->pool),"Create draw descriptor page",e)) return {};
-    pages.push_back(page);
-  }
-  draw->page=pages.back();
-  VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};allocate.descriptorPool=draw->page->pool;allocate.descriptorSetCount=1;allocate.pSetLayouts=layouts_.data();
-  if(!Check(c_.f.vkAllocateDescriptorSets(c_.device,&allocate,draw->sets.data()),"Allocate draw descriptor sets",e)) return {};
-  ++draw->page->draws;
+  // VS, PS and shared constants are contiguous in ConstantSnapshot: one upload per draw.
+  auto constants=store.UploadTransient(0,std::as_bytes(std::span(&bindings.constants,1)),sizeof(guest::ConstantSnapshot),e);
+  if(!constants) return {};
+  if(constants->offset>UINT32_MAX) {e={"Draw descriptors",VK_ERROR_OUT_OF_DEVICE_MEMORY,"Constant block offset exceeds the dynamic offset range"};return {};}
+  draw->resources.push_back(constants);
+  draw->sets[0]=ConstantSet(*constants,e);if(!draw->sets[0]) return {};
+  draw->dynamic_offsets.fill(uint32_t(constants->offset));
   for(uint32_t i=0;i<3;++i) draw->sets[1+i]=draw->shared->sets[i];
-  std::array<VkWriteDescriptorSet,3> writes{};
-  for(uint32_t i=0;i<3;++i) {auto& w=writes[i];w={VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};w.dstSet=draw->sets[0];w.dstBinding=i;w.descriptorCount=1;w.descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;w.pBufferInfo=&constant_info[i];}
-  c_.f.vkUpdateDescriptorSets(c_.device,uint32_t(writes.size()),writes.data(),0,nullptr);
   pending_.Keep(serial,draw);e={};return draw;
+}
+VkDescriptorSet DescriptorStore::ConstantSet(const BufferResource& block,Error& e) {
+  // Blocks are suballocations: every block of one arena chunk shares its handle and its set.
+  const auto& chunk=block.owner;
+  if(!chunk) {e={"Constant descriptors",VK_ERROR_INITIALIZATION_FAILED,"Constants were not suballocated from an arena"};return VK_NULL_HANDLE;}
+  if(auto found=constant_sets_.find(block.handle);found!=constant_sets_.end()) {
+    if(found->second.owner.lock()==chunk) return found->second.set;
+    FreeConstantSet(found->second.set);constant_sets_.erase(found);  // the driver reused the handle of a destroyed chunk
+  }
+  // Sets of destroyed chunks are dead weight: free them before adding another.
+  for(auto it=constant_sets_.begin();it!=constant_sets_.end();) {
+    if(it->second.owner.expired()) {FreeConstantSet(it->second.set);it=constant_sets_.erase(it);}
+    else ++it;
+  }
+  constexpr uint32_t max_sets=256;
+  if(!constant_pool_) {
+    auto pool=std::make_shared<DescriptorPage>();pool->context=&c_;
+    VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC,3*max_sets};
+    VkDescriptorPoolCreateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};info.flags=VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;info.maxSets=max_sets;info.poolSizeCount=1;info.pPoolSizes=&size;
+    if(!Check(c_.f.vkCreateDescriptorPool(c_.device,&info,nullptr,&pool->pool),"Create constant descriptor pool",e)) return VK_NULL_HANDLE;
+    constant_pool_=std::move(pool);
+  }
+  VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};allocate.descriptorPool=constant_pool_->pool;allocate.descriptorSetCount=1;allocate.pSetLayouts=layouts_.data();
+  VkDescriptorSet set=VK_NULL_HANDLE;
+  if(!Check(c_.f.vkAllocateDescriptorSets(c_.device,&allocate,&set),"Allocate constant descriptor set",e)) return VK_NULL_HANDLE;
+  constexpr VkDeviceSize block_bytes=4096;
+  std::array<VkDescriptorBufferInfo,3> info{};std::array<VkWriteDescriptorSet,3> writes{};
+  for(uint32_t i=0;i<3;++i) {
+    info[i]={chunk->handle,i*block_bytes,block_bytes};
+    auto& w=writes[i];w={VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};w.dstSet=set;w.dstBinding=i;w.descriptorCount=1;w.descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;w.pBufferInfo=&info[i];
+  }
+  c_.f.vkUpdateDescriptorSets(c_.device,uint32_t(writes.size()),writes.data(),0,nullptr);
+  constant_sets_.emplace(block.handle,ConstantSetEntry{chunk,set});
+  return set;
+}
+void DescriptorStore::FreeConstantSet(VkDescriptorSet set) {
+  if(set && constant_pool_) c_.f.vkFreeDescriptorSets(c_.device,constant_pool_->pool,1,&set);
 }
 void DescriptorStore::Retire(uint64_t serial) {
   completed_=std::max(completed_,serial);pending_.Retire(completed_);
-  // Reset retired pools for reuse instead of destroying and recreating them.
-  for(auto it=pages_.begin();it!=pages_.upper_bound(completed_);it=pages_.erase(it))
-    for(auto& page:it->second) if(page.use_count()==1 && free_pages_.size()<64 && c_.f.vkResetDescriptorPool(c_.device,page->pool,0)==VK_SUCCESS) {page->draws=0;free_pages_.push_back(std::move(page));}
 }
 } // namespace superman_returns::graphics::vulkan

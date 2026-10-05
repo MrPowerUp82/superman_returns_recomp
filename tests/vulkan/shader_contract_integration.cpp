@@ -59,6 +59,7 @@ public:
   VkPipelineLayout pipeline_layout{};
   std::array<VkDescriptorSetLayout, 4> layouts{};
   std::array<VkDescriptorSet, 4> sets{};
+  std::array<uint32_t, 3> dynamic_offsets{};uint32_t dynamic_count = 0;
   VkDescriptorPool descriptor_pool{};
   VkSampler sampler{};
   std::vector<VkShaderModule> modules;
@@ -463,7 +464,7 @@ public:
     c.f.vkCmdBeginRenderPass(command, &bi, VK_SUBPASS_CONTENTS_INLINE);
     c.f.vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     f.vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                              pipeline_layout, 0, 4, sets.data(), 0, nullptr);
+                              pipeline_layout, 0, 4, sets.data(), dynamic_count, dynamic_offsets.data());
     f.vkCmdBindIndexBuffer(command, buffers[indices].handle, 0,
                            VK_INDEX_TYPE_UINT32);
     f.vkCmdDrawIndexed(command, count, 1, 0, 0, 0);
@@ -644,6 +645,7 @@ int Run(const std::filesystem::path &shaders_dir, const std::string &uuid,
           auto sets=descriptors.Prepare(bindings,packet.texture_fetch,resources,uint64_t(variant)+1,e);
           if(!sets) throw std::runtime_error(e.operation+": "+e.message);
           fixture.sets=sets->sets;
+          fixture.dynamic_offsets=sets->dynamic_offsets;fixture.dynamic_count=uint32_t(sets->dynamic_offsets.size());
         }):std::function<void()>{});
     if(production) {descriptors.Retire(uint64_t(variant)+1);resources.Retire(uint64_t(variant)+1);}
     std::array<uint8_t, 4> color =

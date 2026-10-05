@@ -226,7 +226,7 @@ bool GameRenderer::Draw(const guest::DrawPacket& draw,VkCommandBuffer command,Er
     c_.f.vkCmdBeginRenderPass(command,&begin,VK_SUBPASS_CONTENTS_INLINE);open_pass_=pass;
   }
   if(bound_pipeline_!=pipeline->handle) {c_.f.vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline->handle);bound_pipeline_=pipeline->handle;}
-  c_.f.vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelines_.Layout(),0,4,descriptors->sets.data(),0,nullptr);
+  c_.f.vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelines_.Layout(),0,4,descriptors->sets.data(),uint32_t(descriptors->dynamic_offsets.size()),descriptors->dynamic_offsets.data());
   for(auto& b:vertices) if(std::any_of(pipeline->bindings.begin(),pipeline->bindings.end(),[&](const auto& binding){return binding.binding==b.slot;})) c_.f.vkCmdBindVertexBuffers(command,b.slot,1,&b.resource->handle,&b.offset);
   c_.f.vkCmdSetViewport(command,0,1,&viewport);c_.f.vkCmdSetScissor(command,0,1,&scissor);c_.f.vkCmdSetBlendConstants(command,blend);c_.f.vkCmdSetStencilReference(command,VK_STENCIL_FACE_FRONT_AND_BACK,draw.registers[0x10d]&255);
   if(draw.indexed) {c_.f.vkCmdBindIndexBuffer(command,indices->handle,indices->offset,VK_INDEX_TYPE_UINT32);c_.f.vkCmdDrawIndexed(command,draw.count,1,draw.first,draw.base_vertex,0);}else c_.f.vkCmdDraw(command,draw.count,1,draw.first,0);

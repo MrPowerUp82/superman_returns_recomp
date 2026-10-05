@@ -38,7 +38,7 @@ std::shared_ptr<CompositionDraw> FrontbufferCompositor::Prepare(VkCommandBuffer 
 }
 void FrontbufferCompositor::Record(VkCommandBuffer command,const CompositionDraw& draw) {
   c_.f.vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_GRAPHICS,draw.pipeline->handle);
-  c_.f.vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelines_.Layout(),0,4,draw.descriptors->sets.data(),0,nullptr);
+  c_.f.vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelines_.Layout(),0,4,draw.descriptors->sets.data(),uint32_t(draw.descriptors->dynamic_offsets.size()),draw.descriptors->dynamic_offsets.data());
   auto& box=draw.rectangle;VkViewport viewport{float(box.offset.x),float(box.offset.y),float(box.extent.width),float(box.extent.height),0,1};
   c_.f.vkCmdSetViewport(command,0,1,&viewport);c_.f.vkCmdSetScissor(command,0,1,&box);float blend[4]{};c_.f.vkCmdSetBlendConstants(command,blend);c_.f.vkCmdSetStencilReference(command,VK_STENCIL_FACE_FRONT_AND_BACK,0);c_.f.vkCmdDraw(command,3,1,0,0);
 }

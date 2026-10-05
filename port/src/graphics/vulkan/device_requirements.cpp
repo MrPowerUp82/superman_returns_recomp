@@ -48,7 +48,8 @@ std::vector<std::string> CheckDeviceRequirements(const shaders::ShaderRequiremen
   auto add=[&](Counts& c,const LayoutBinding& b) {
     c.sets=std::max(c.sets,uint64_t(b.set)+1);
     switch(b.type) {
-    case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:c.storage+=b.count;break;
+    case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+    case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:c.storage+=b.count;break;
     case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:c.uniform+=b.count;break;
     case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:c.images+=b.count;break;
     case VK_DESCRIPTOR_TYPE_SAMPLER:c.samplers+=b.count;break;
@@ -77,9 +78,10 @@ std::vector<std::string> CheckDeviceRequirements(const shaders::ShaderRequiremen
 }
 std::vector<LayoutBinding> GameBindingLayout() {
   constexpr auto both=VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT;
-  return {{0,0,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,1,VK_SHADER_STAGE_VERTEX_BIT},
-          {0,1,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,1,VK_SHADER_STAGE_FRAGMENT_BIT},
-          {0,2,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,1,both},
+  // Set 0 holds the draw's VS/PS/shared constants: dynamic offsets avoid allocating and updating a set per draw.
+  return {{0,0,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC,1,VK_SHADER_STAGE_VERTEX_BIT},
+          {0,1,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC,1,VK_SHADER_STAGE_FRAGMENT_BIT},
+          {0,2,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC,1,both},
           {1,0,VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,32,both},
           {1,1,VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,32,both},
           {1,2,VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,32,both},
