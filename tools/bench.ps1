@@ -16,9 +16,10 @@ alternates Space (A) and Enter (Start) at most -MaxSkips times to confirm a late
 dialog or skip the opening cinematic. -Exe selects the executable (default: the
 win-amd64-release build).
 
-The HUD is checked (bench_hud.ps1) before the run and right before and after each
-measurement: a run that is not on gameplay (menu, title) throws instead of writing a
-CSV row, and leaves logs/bench_<name>_not_gameplay.png.
+The HUD is checked (bench_hud.ps1) before the idle window and right after the forward
+window, while W is held: the game fades the HUD after ~20 s without input, so it is
+not checked after idle. A run that is not on gameplay (menu, title) throws and leaves
+logs/bench_<name>_not_gameplay.png.
 
 Usage: tools\bench.ps1 -Name baseline [-ExtraArgs "--native_2x_msaa=false"]
 #>
@@ -232,12 +233,14 @@ try {
   Step "visible frame detected"
   Start-Sleep 5
 
+  # The game fades the HUD after ~20 s without input, so it is asserted only where
+  # it is expected: just before the idle window (it was just detected) and right
+  # after the forward window while W is still held (input keeps it visible). A menu
+  # or title therefore still fails the run: no HUD before idle or after forward.
   Assert-Gameplay $proc
   Measure-Window $proc 'idle'
-  Assert-Gameplay $proc
   Focus $proc; Key 0x57 -Down
   try {
-    Assert-Gameplay $proc
     Measure-Window $proc 'forward'
     Assert-Gameplay $proc
   } finally { Key 0x57 -Up }
