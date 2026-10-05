@@ -23,7 +23,8 @@ public sealed class LauncherSettings
     public string Msaa { get; set; } = "1";
     public string InputMode { get; set; } = "KeyboardMouse";
     public string Renderer { get; set; } = "native";
-    public string GraphicsApi { get; set; } = "d3d12";
+    public string GraphicsApi { get; set; } = "vulkan";
+    public bool UsesVulkan => GraphicsApi == "vulkan";
     public bool SkipIntro { get; set; }
 
     public static LauncherSettings Load(string path)
@@ -54,7 +55,7 @@ public sealed class LauncherSettings
                 case "msaa": s.Msaa = value; break;
                 case "input": s.InputMode = value; break;
                 case "renderer": s.Renderer = value; break;
-                case "graphics_api": s.GraphicsApi = value; break;
+                case "graphics_api": s.GraphicsApi = value == "d3d12" ? "d3d12" : "vulkan"; break;
                 case "skip_intro": if (bool.TryParse(value, out var si)) s.SkipIntro = si; break;
             }
         }
@@ -86,11 +87,16 @@ public sealed class LauncherSettings
             && w >= 640 && w <= 8192 && h >= 480 && h <= 8192) { width = w; height = h; }
         int filter = TextureFilter switch { "Anisotropic2x" => 2, "Anisotropic4x" => 4,
             "Anisotropic8x" => 8, "Anisotropic16x" => 16, _ => -1 };
-        var percent = ValidChoice(RenderScale, 100, 50, 75, 100, 125, 150, 200, 300, 400);
+        // Vulkan does not support the enhancement options yet: they stay at the
+        // game's defaults so the engine accepts the launch (backend_selection.cpp).
+        var vulkan = UsesVulkan;
+        var percent = vulkan ? 100 : ValidChoice(RenderScale, 100, 50, 75, 100, 125, 150, 200, 300, 400);
+        if (vulkan) filter = -1;
         var lowScale = percent < 100;
         var scale = (lowScale ? 100 : percent) / 100.0;
         var result = new List<string> {
-            $"--sr_renderer={(Renderer == "xenos" ? "xenos" : "native")}", "--sr_preset=custom",
+            $"--sr_renderer={(Renderer == "xenos" && !vulkan ? "xenos" : "native")}", "--sr_preset=custom",
+            $"--sr_native_api={(vulkan ? "vulkan" : "d3d12")}",
             $"--sr_skip_intro={SkipIntro.ToString().ToLowerInvariant()}",
             $"--sr_render_scale={(lowScale ? percent : 100)}",
             $"--window_width={width}", $"--window_height={height}",
@@ -101,9 +107,9 @@ public sealed class LauncherSettings
             $"--sr_native_fps_limit={ValidChoice(FpsLimit, 30, 0, 30, 60, 120)}",
             $"--sr_native_render_scale={scale.ToString("0.##", CultureInfo.InvariantCulture)}",
             $"--sr_native_anisotropic_filtering={filter}",
-            $"--sr_native_fxaa={(Antialiasing == "FXAA").ToString().ToLowerInvariant()}",
-            $"--sr_native_shadow_quality={ValidChoice(ShadowQuality, 1, 1, 2, 4)}",
-            $"--sr_native_msaa_samples={ValidChoice(Msaa, 1, 1, 4, 8)}"
+            $"--sr_native_fxaa={(!vulkan && Antialiasing == "FXAA").ToString().ToLowerInvariant()}",
+            $"--sr_native_shadow_quality={(vulkan ? 1 : ValidChoice(ShadowQuality, 1, 1, 2, 4))}",
+            $"--sr_native_msaa_samples={(vulkan ? 1 : ValidChoice(Msaa, 1, 1, 4, 8))}"
         };
         if (InputMode == "KeyboardMouse") { result.Add("--mnk_mode=true"); result.Add("--mnk_mouse=true"); }
         else { result.Add("--mnk_mode=false"); result.Add("--mnk_mouse=false"); }
@@ -114,8 +120,6 @@ public sealed class LauncherSettings
 
     public ProcessStartInfo CreateLaunch(string baseDirectory)
     {
-        if (GraphicsApi != "d3d12")
-            throw new InvalidOperationException("Vulkan ainda não renderiza o jogo. Selecione Direct3D 12.");
         var exe = Path.GetFullPath(GameExe, baseDirectory);
         if (!File.Exists(exe) || !Path.GetFileName(exe).Equals("superman_returns.exe", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Selecione o executável superman_returns.exe da build do jogo.");

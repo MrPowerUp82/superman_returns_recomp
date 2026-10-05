@@ -32,12 +32,18 @@ if /i not "%SR_NATIVE%"=="OFF" if not exist "%ROOT%.tools\rexglue-sdk-source\src
   if errorlevel 1 echo Warning: GPU sources unavailable; the game will use the xenos backend.
 )
 if not defined SR_LSFG set "SR_LSFG=OFF"
+rem Native Vulkan renderer (the launcher's default API); SR_VULKAN=OFF builds D3D12 only.
+if not defined SR_VULKAN set "SR_VULKAN=ON"
+if /i "%SR_VULKAN%"=="ON" if not exist "%ROOT%.tools\vulkan-headers\include\vulkan\vulkan.h" (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%tools\setup_vulkan.ps1"
+  if errorlevel 1 exit /b 1
+)
 rem Optional separate executable folder; an empty value restores normal output.
 rem tools\package_release.ps1 builds a separate folder with SR_EMBED_SHADERS=OFF: a
 rem release carries nothing translated from the game.
 if not defined SR_BUILD_DIR set "SR_BUILD_DIR=%ROOT%port\out\build\win-amd64-release"
 if not defined SR_EMBED_SHADERS set "SR_EMBED_SHADERS=ON"
-cmake -S "%ROOT%port" -B "%SR_BUILD_DIR%" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_PREFIX_PATH="%SDK%" -DSR_NATIVE=%SR_NATIVE% -DSR_LSFG=%SR_LSFG% -DSR_NATIVE_EMBED_SHADERS=%SR_EMBED_SHADERS% -DCMAKE_RUNTIME_OUTPUT_DIRECTORY="%SR_RUNTIME_OUTPUT_DIR%"
+cmake -S "%ROOT%port" -B "%SR_BUILD_DIR%" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_PREFIX_PATH="%SDK%" -DSR_NATIVE=%SR_NATIVE% -DSR_LSFG=%SR_LSFG% -DSR_VULKAN_FOUNDATION=%SR_VULKAN% -DSR_VULKAN_GAME=%SR_VULKAN% -DSR_NATIVE_EMBED_SHADERS=%SR_EMBED_SHADERS% -DCMAKE_RUNTIME_OUTPUT_DIRECTORY="%SR_RUNTIME_OUTPUT_DIR%"
 if errorlevel 1 exit /b 1
 cmake --build "%SR_BUILD_DIR%" --parallel 4
 if errorlevel 1 exit /b 1

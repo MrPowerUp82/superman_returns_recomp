@@ -183,11 +183,28 @@ rex::X_STATUS NativeGraphicsSystem::SetupPresentation(rex::ui::WindowedAppContex
   const bool vulkan=native_api_==graphics::NativeApi::kVulkan;
   if(vulkan) {
 #if SR_VULKAN_GAME
-  const std::filesystem::path root=SR_VULKAN_PROJECT_ROOT;
-  wchar_t python[MAX_PATH]{};if(!SearchPathW(nullptr,L"python.exe",nullptr,MAX_PATH,python,nullptr)) {REXLOG_ERROR("native Vulkan: python.exe not found on PATH");return X_STATUS_UNSUCCESSFUL;}
+  // Release layout (tools/package_release.ps1): shader_tools/ next to the exe,
+  // with its own Python; caches go to shader_cache/vulkan. Development builds
+  // fall back to the source tree and python.exe on PATH.
+  wchar_t module[MAX_PATH]{};GetModuleFileNameW(nullptr,module,MAX_PATH);
+  const auto exe_dir=std::filesystem::path(module).parent_path(),tools=exe_dir/"shader_tools";
+  const bool packaged=std::filesystem::is_regular_file(tools/"vulkan/runtime_vulkan_shader.py");
+  std::filesystem::path python=tools/"python/python.exe";
+  if(!packaged || !std::filesystem::is_regular_file(python)) {
+    wchar_t found[MAX_PATH]{};if(!SearchPathW(nullptr,L"python.exe",nullptr,MAX_PATH,found,nullptr)) {REXLOG_ERROR("native Vulkan: python.exe not found (shader_tools/python or PATH)");return X_STATUS_UNSUCCESSFUL;}
+    python=found;
+  }
   graphics::vulkan::NativeProviderConfig config;
-  config.shaders={python,root/"tools/shaders/runtime_vulkan_shader.py",root/"build/vulkan-m3-runtime",root/"build/vulkan-m2/emitter-build/XenosRecompCorpus.exe",root/"build/vulkan-m2/emitter-tree/src/XenosRecomp/shader_common.h",root/".tools/dxc/bin/x64/dxc.exe"};
-  config.driver_cache=root/"build/vulkan-m3-runtime/driver.cache";
+  if(packaged) {
+    const auto cache=exe_dir/"shader_cache/vulkan";std::error_code cache_error;std::filesystem::create_directories(cache,cache_error);
+    config.shaders={python,tools/"vulkan/runtime_vulkan_shader.py",cache,tools/"sr_xenosrecomp.exe",tools/"shader_common.h",tools/"dxc.exe"};
+    config.driver_cache=cache/"driver.cache";
+  } else {
+    const std::filesystem::path root=SR_VULKAN_PROJECT_ROOT;
+    config.shaders={python,root/"tools/shaders/runtime_vulkan_shader.py",root/"build/vulkan-m3-runtime",root/"build/vulkan-m2/emitter-build/XenosRecompCorpus.exe",root/"build/vulkan-m2/emitter-tree/src/XenosRecomp/shader_common.h",root/".tools/dxc/bin/x64/dxc.exe"};
+    config.driver_cache=root/"build/vulkan-m3-runtime/driver.cache";
+  }
+  REXLOG_INFO("native Vulkan: shader tools from {} ({})",packaged?tools.string():std::string("source tree"),python.string());
   config.gpu_uuid=rex::cvar::Query<std::string>("sr_native_vulkan_gpu_uuid");
   provider_=graphics::vulkan::CreateNativeVulkanProvider(std::move(config));
 #else

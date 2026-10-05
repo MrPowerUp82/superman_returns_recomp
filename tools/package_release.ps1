@@ -1,7 +1,9 @@
 <#
 Builds the distribution package: the port's executable built WITHOUT the
-shader corpus (SR_EMBED_SHADERS=OFF), the shader translation tools, the Visual
-C++ runtime, launch scripts and notices, as one zip. Nothing derived from the
+shader corpus (SR_EMBED_SHADERS=OFF) and with the native Vulkan renderer, the
+shader translation tools (plus the Vulkan runtime scripts and a minimal Python
+built from the local installation), the Visual C++ runtime, launch scripts and
+notices, as one zip. Nothing derived from the
 game's shaders or data goes in: the shaders are translated on the user's
 machine (port/src/native_renderer/shader_translator.h).
 
@@ -23,12 +25,14 @@ if (-not $OutDir) { $OutDir = Join-Path $root 'artifacts\release' }
 if (-not $NoBuild) {
   $env:SR_BUILD_DIR = $BuildDir
   $env:SR_EMBED_SHADERS = 'OFF'
+  $env:SR_VULKAN = 'ON'
   try {
     & cmd.exe /c (Join-Path $root 'build.cmd')
     if ($LASTEXITCODE -ne 0) { throw "build.cmd failed ($LASTEXITCODE)" }
   } finally {
     $env:SR_BUILD_DIR = $null
     $env:SR_EMBED_SHADERS = $null
+    $env:SR_VULKAN = $null
   }
   & (Join-Path $root 'tools\build_launcher.ps1')
 }
@@ -74,7 +78,34 @@ Copy-Item $translator (Join-Path $stage 'shader_tools\sr_xenosrecomp.exe')
 foreach ($f in 'dxc.exe', 'dxcompiler.dll', 'dxil.dll') { Copy-Item (Join-Path $dxcDir $f) (Join-Path $stage 'shader_tools') }
 Copy-Item $common (Join-Path $stage 'shader_tools')
 
+# Native Vulkan translates shaders at runtime through these scripts (standard
+# library only), run by a minimal Python in the embeddable layout: exe + DLLs,
+# the standard library zipped, and a ._pth that also exposes ..\vulkan.
+$vulkanTools = Join-Path $stage 'shader_tools\vulkan'
+New-Item -ItemType Directory -Force $vulkanTools | Out-Null
+foreach ($script in 'runtime_vulkan_shader.py', 'compile_vulkan.py', 'spirv_metadata.py', 'validate_vulkan_corpus.py', 'vulkan_contract.py') {
+  Copy-Item (Need (Join-Path $root "tools\shaders\$script") '') $vulkanTools
+}
+$python = (Get-Command python -ErrorAction Stop).Source
+$pyHome = Split-Path $python
+$pyVersion = (& $python -c "import sys;print(f'{sys.version_info[0]}{sys.version_info[1]}')").Trim()
+$pyOut = Join-Path $stage 'shader_tools\python'
+New-Item -ItemType Directory -Force $pyOut | Out-Null
+foreach ($f in 'python.exe', 'python3.dll', "python$pyVersion.dll", 'vcruntime140.dll', 'vcruntime140_1.dll') {
+  $src = Join-Path $pyHome $f
+  if (Test-Path $src) { Copy-Item $src $pyOut }
+}
+Get-ChildItem (Join-Path $pyHome 'DLLs') -File | Where-Object {
+  ($_.Extension -in '.pyd', '.dll') -and $_.Name -notmatch '^(_test|_tkinter|tcl|tk|_ctypes_test|_sqlite3|sqlite3)'
+} | Copy-Item -Destination $pyOut
+& $python (Join-Path $root 'tools\release\make_python_zip.py') (Join-Path $pyHome 'Lib') (Join-Path $pyOut "python$pyVersion.zip")
+if ($LASTEXITCODE -ne 0) { throw 'Python standard library zip failed' }
+Set-Content (Join-Path $pyOut "python$pyVersion._pth") "python$pyVersion.zip`r`n.`r`n..\vulkan`r`n" -Encoding ascii
+& (Join-Path $pyOut 'python.exe') -c "import runtime_vulkan_shader, hashlib, subprocess, json, concurrent.futures; hashlib.sha256(b'x')"
+if ($LASTEXITCODE -ne 0) { throw 'The bundled Python cannot import the Vulkan shader scripts.' }
+
 $licenses = Join-Path $stage 'licenses'
+Copy-Item (Join-Path $pyHome 'LICENSE.txt') (Join-Path $licenses 'LICENSE-Python.txt')
 Copy-Item (Join-Path $root '.tools\xenosrecomp\src\LICENSE.md') (Join-Path $licenses 'LICENSE-XenosRecomp.md')
 foreach ($pair in @(@('LICENCE-MIT.txt', 'MIT'), @('LICENSE-LLVM.txt', 'LLVM'), @('LICENSE-MS.txt', 'MS'))) {
   $src = Join-Path $root (".tools\dxc\" + $pair[0])

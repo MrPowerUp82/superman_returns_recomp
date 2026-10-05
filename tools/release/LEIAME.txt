@@ -11,10 +11,15 @@ COMO JOGAR
      run_keyboard.cmd e run.cmd continuam disponiveis como alternativas.
   3. Na primeira execucao o jogo traduz os shaders no seu PC, em segundo plano e uma so
      vez (pasta shader_cache\). Leva alguns minutos e as primeiras cenas podem engasgar.
+     O launcher usa Vulkan por padrao; Direct3D 12 continua disponivel na opcao "API".
+     Com Vulkan, escala interna, FXAA, MSAA, sombras e filtro anisotropico ficam no
+     padrao do jogo. Os scripts de traducao do Vulkan usam o Python que vem em
+     shader_tools\python (nao precisa instalar nada).
   4. O log fica em logs\game.log. Anexe-o se abrir uma issue.
 
 REQUISITOS
-  Windows 10/11 64 bits, GPU com Direct3D 12. O jogo roda a 30 FPS (limite do original).
+  Windows 10/11 64 bits, GPU com Vulkan 1.1 (padrao) ou Direct3D 12.
+  O jogo roda a ate 30 FPS (limite do original).
   Os runtimes do Visual C++ vem junto (msvcp140.dll e outros). Se faltar alguma DLL,
   instale o "Microsoft Visual C++ Redistributable" x64.
 
@@ -29,7 +34,10 @@ ENGLISH
   does it in your browser, nothing is uploaded). Open SupermanReturnsLauncher.exe
   and click JOGAR. Its .NET runtime is bundled. The batch launch scripts also work.
   The first run translates the shaders on your PC in the background (shader_cache\).
-  Windows 10/11 64-bit with Direct3D 12. The log is logs\game.log.
+  The launcher uses Vulkan by default (Direct3D 12 is still available under "API");
+  Vulkan keeps internal scale, FXAA, MSAA, shadows and anisotropic filtering at the
+  game's defaults, and its shader scripts use the bundled shader_tools\python.
+  Windows 10/11 64-bit with Vulkan 1.1 or Direct3D 12. The log is logs\game.log.
 
 Projeto de fas, sem relacao com a Warner Bros., a EA ou a Microsoft. E preciso ter uma
 copia legitima do jogo. Este pacote nao contem arquivos do jogo.
