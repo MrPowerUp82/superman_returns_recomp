@@ -35,7 +35,7 @@ SR_TEST(shader_service_owns_source_deduplicates_and_reports_process_failure) {
   std::atomic<uint32_t> calls=0;std::vector<uint8_t> container{1,2,3};ShaderKey key=0;
   {
     VulkanShaderService service(config,[&](auto args,auto,std::stop_token,std::string&) {
-      ++calls;std::ifstream raw(args[3],std::ios::binary);std::vector<uint8_t> source((std::istreambuf_iterator<char>(raw)),{});SR_CHECK((source==std::vector<uint8_t>{1,2,3}));
+      ++calls;SR_CHECK(args[1]=="-B");std::ifstream raw(args[4],std::ios::binary);std::vector<uint8_t> source((std::istreambuf_iterator<char>(raw)),{});SR_CHECK((source==std::vector<uint8_t>{1,2,3}));
       auto bytes=Wire();std::ofstream result(args.back(),std::ios::binary);result.write(reinterpret_cast<const char*>(bytes.data()),bytes.size());return true;
     });
     key=service.Request(container,ShaderStage::kVertex);SR_CHECK_EQ(key,service.Request(container,ShaderStage::kVertex));container.assign(3,99);
@@ -45,6 +45,21 @@ SR_TEST(shader_service_owns_source_deduplicates_and_reports_process_failure) {
     SR_CHECK(service.Poll(0).status==ShaderPoll::failed);
   }
   auto job=config.cache/"runtime_requests"/std::to_string(key);std::filesystem::remove(job/"shader.vs.bin");std::filesystem::remove(job/"result.bin");std::filesystem::remove(job);std::filesystem::remove(config.cache/"runtime_requests");std::filesystem::remove(config.cache);
+}
+SR_TEST(shader_service_retries_a_process_that_dies_without_a_result) {
+  VulkanShaderConfig config;config.cache=std::filesystem::temp_directory_path()/std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+  std::atomic<uint32_t> calls=0;
+  {
+    VulkanShaderService service(config,[&](auto args,auto,std::stop_token,std::string& error) {
+      if(++calls==1) {error="Shader compiler exited with code 1";return false;}  // transient death, no result
+      auto bytes=Wire();std::ofstream result(args.back(),std::ios::binary);result.write(reinterpret_cast<const char*>(bytes.data()),bytes.size());return true;
+    });
+    uint8_t a=7;auto key=service.Request({&a,1},ShaderStage::kVertex);
+    auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);ShaderResult result;
+    do {result=service.Poll(key);if(result.status!=ShaderPoll::pending) break;std::this_thread::sleep_for(std::chrono::milliseconds(1));} while(std::chrono::steady_clock::now()<deadline);
+    SR_CHECK(result.status==ShaderPoll::ready);SR_CHECK_EQ(calls.load(),2u);
+  }
+  std::filesystem::remove_all(config.cache); // Unique temporary test directory.
 }
 SR_TEST(shader_service_compiles_distinct_requests_concurrently_when_configured) {
   VulkanShaderConfig config;config.cache=std::filesystem::temp_directory_path()/std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());

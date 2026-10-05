@@ -67,8 +67,17 @@ struct VulkanShaderService::Impl {
         auto raw=directory/(stage==ShaderStage::kVertex?"shader.vs.bin":"shader.ps.bin"),output=directory/"result.bin";
         {std::ofstream file(raw,std::ios::binary|std::ios::trunc);if(!file.write(reinterpret_cast<const char*>(container.data()),container.size())) throw std::runtime_error("Cannot write captured shader container");}
         std::error_code ignored;std::filesystem::remove(output,ignored);
-        std::vector<std::filesystem::path> args{config.python,config.script,"--container",raw,"--stage",stage==ShaderStage::kVertex?"vs":"ps","--cache",config.cache,"--emitter",config.emitter,"--common",config.common,"--dxc",config.dxc,"--result",output};
-        if(!process || !process(args,config.timeout,token,result.diagnostic)) {if(result.diagnostic.empty()) result.diagnostic="Shader compiler process failed";}
+        // -B: concurrent workers must not race writing the scripts' __pycache__.
+        std::vector<std::filesystem::path> args{config.python,"-B",config.script,"--container",raw,"--stage",stage==ShaderStage::kVertex?"vs":"ps","--cache",config.cache,"--emitter",config.emitter,"--common",config.common,"--dxc",config.dxc,"--result",output};
+        // A shader that fails to translate still writes a failure result. A
+        // process that dies without one is retried: a transient fault must not
+        // stop the game (seen once in a package smoke test, not reproducible).
+        bool ran=false;
+        for(int attempt=0;attempt<3 && !ran && process && !token.stop_requested();++attempt) {
+          result.diagnostic.clear();ran=process(args,config.timeout,token,result.diagnostic);
+          if(!ran && std::filesystem::is_regular_file(output)) break;
+        }
+        if(!ran) {if(result.diagnostic.empty()) result.diagnostic="Shader compiler process failed";}
         else {auto artifact=std::make_shared<CompiledShader>();if(DecodeShaderResult(ReadFile(output),stage,*artifact,result.diagnostic)) {result.status=ShaderPoll::ready;result.artifact=std::move(artifact);}}
       } catch(const std::exception& e) {result.diagnostic=e.what();}
       {std::lock_guard lock(mutex);jobs.at(key).result=std::move(result);}
