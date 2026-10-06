@@ -1,6 +1,7 @@
 #pragma once
 #include "game_pipeline.h"
 #include "depth_resolve.h"
+#include "state_shadow.h"
 #include "../guest/texture_capture.h"
 #include <atomic>
 #include <chrono>
@@ -15,7 +16,7 @@ struct RecordProfile {
 };
 class GameRenderer {
 public:
-  GameRenderer(Context& c,ShaderLookup shaders,TextureDecoder decoder={},AliasOptions aliases={}):c_(c),shaders_(std::move(shaders)),decoder_(std::move(decoder)),state_(c.f),resources_(c),targets_(c,state_),descriptors_(c),pipelines_(c),depth_resolver_(c),alias_options_(aliases) {
+  GameRenderer(Context& c,ShaderLookup shaders,TextureDecoder decoder={},AliasOptions aliases={}):c_(c),shaders_(std::move(shaders)),decoder_(std::move(decoder)),state_(c.f),resources_(c),targets_(c,state_),descriptors_(c),pipelines_(c),depth_resolver_(c),alias_options_(aliases),shadow_(StateFilterEnabled()) {
     // Any barrier on the recording command buffer ends the open render pass.
     state_.before_barrier=[this](VkCommandBuffer command) {if(command && command==recording_.load(std::memory_order_relaxed)) ClosePass();};
   }
@@ -50,6 +51,7 @@ private:
   bool DumpImageNow(VkCommandBuffer,const std::string& name,VkImage,VkFormat,VkExtent3D,VkImageAspectFlags,bool target,Error&);
   bool dumping_=false;uint64_t dump_packet_=0;std::vector<std::string> dump_log_;std::vector<DumpImage> dump_images_;
   bool Upload(const guest::BufferUpdate&,bool indices,uint64_t version,Error&);
+  static bool StateFilterEnabled();
   Context& c_;ShaderLookup shaders_;TextureDecoder decoder_;ImageState state_;ResourceStore resources_;TargetStore targets_;DescriptorStore descriptors_;GamePipelineStore pipelines_;
   DepthResolver depth_resolver_;bool depth_ready_=false;
   AliasOptions alias_options_;
@@ -68,6 +70,8 @@ private:
   std::map<uint64_t,std::vector<guest::ResourceId>> transient_buffers_;
   VkExtent2D tiling_{};
   std::shared_ptr<TargetPass> open_pass_;VkPipeline bound_pipeline_=VK_NULL_HANDLE;bool merge_passes_=false;
+  // Last value emitted of each redundant command; invalidated wherever bound_pipeline_ is reset.
+  StateShadow shadow_;
   std::atomic<VkCommandBuffer> recording_{VK_NULL_HANDLE};
   bool profiling_=false;RecordProfile profile_;
   // Adds the time since the previous lap to a phase; free when profiling is off.

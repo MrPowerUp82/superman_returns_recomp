@@ -5,7 +5,7 @@ add_subdirectory(../../port/src/graphics/vulkan vulkan)
 add_executable(sr_vulkan_tests main.cpp test_policy.cpp test_context.cpp test_frame_loop.cpp test_swapchain.cpp test_triangle.cpp test_smoke_options.cpp test_device_requirements.cpp test_descriptors.cpp test_resources.cpp test_render_targets.cpp test_image_state.cpp test_shader_service.cpp test_game_pipeline.cpp test_resolve.cpp)
 target_include_directories(sr_vulkan_tests PRIVATE ../native)
 target_link_libraries(sr_vulkan_tests PRIVATE sr_vulkan_core)
-target_sources(sr_vulkan_tests PRIVATE test_composition.cpp)
+target_sources(sr_vulkan_tests PRIVATE test_composition.cpp test_state_shadow.cpp)
 add_test(NAME sr_vulkan_tests COMMAND sr_vulkan_tests)
 
 if(WIN32)

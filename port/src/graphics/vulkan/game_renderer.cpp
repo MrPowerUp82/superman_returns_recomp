@@ -3,6 +3,7 @@
 #include "../guest/primitive_expansion.h"
 #include <algorithm>
 #include <bit>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <fstream>
@@ -27,6 +28,11 @@ constexpr guest::ResourceId MissingVertex=UINT64_MAX-4;
 bool Fail(Error& e,const char* message) {e={"Game renderer",VK_ERROR_INITIALIZATION_FAILED,message};return false;}
 }
 bool GameRenderer::Initialize(const std::filesystem::path& path,Error& e) {return descriptors_.Initialize(e) && pipelines_.Initialize(descriptors_.Layouts(),path,e);}
+// SR_VULKAN_NO_STATE_FILTER=1 turns the redundant-command filter off (A/B diagnostics).
+bool GameRenderer::StateFilterEnabled() {
+  const char* value=std::getenv("SR_VULKAN_NO_STATE_FILTER");
+  return !(value && value[0] && value[0]!='0');
+}
 std::shared_ptr<TextureResource> GameRenderer::SelectFrontbuffer(const guest::SwapPacket& swap,Error& e) const {
   if(!swap.frontbuffer || swap.frontbuffer>UINT32_MAX-0x23u) {Fail(e,"Invalid captured frontbuffer object");return {};}
   try {
@@ -39,7 +45,7 @@ std::shared_ptr<TextureResource> GameRenderer::SelectFrontbuffer(const guest::Sw
   } catch(const std::exception& ex) {e={"Captured frontbuffer",VK_ERROR_INITIALIZATION_FAILED,ex.what()};return {};}
 }
 bool GameRenderer::BeginSubmission(VkCommandBuffer command,uint64_t serial,Error& e,VkCommandBuffer upload) {
-  open_pass_.reset();bound_pipeline_=VK_NULL_HANDLE;
+  open_pass_.reset();bound_pipeline_=VK_NULL_HANDLE;shadow_.Invalidate();
   if(!resources_.BeginSubmission(command,serial,e,upload) || !targets_.BeginSubmission(command,serial,e)) return false;
   command_=command;serial_=serial;merge_passes_=upload!=VK_NULL_HANDLE;recording_.store(command,std::memory_order_relaxed);
   if(!dummies_) {float missing[]{0,0,0,1};if(!resources_.CreateDummies(e) || !resources_.UploadBuffer(MissingVertex,std::as_bytes(std::span(missing)),1,e)) return false;dummies_=true;}
@@ -47,7 +53,7 @@ bool GameRenderer::BeginSubmission(VkCommandBuffer command,uint64_t serial,Error
 }
 void GameRenderer::ClosePass() {
   if(!open_pass_) return;
-  c_.f.vkCmdEndRenderPass(command_);open_pass_.reset();bound_pipeline_=VK_NULL_HANDLE;
+  c_.f.vkCmdEndRenderPass(command_);open_pass_.reset();bound_pipeline_=VK_NULL_HANDLE;shadow_.Invalidate();
 }
 void GameRenderer::FinishSubmission() {
   ClosePass();resources_.FinishUploads();recording_.store(VK_NULL_HANDLE,std::memory_order_relaxed);
@@ -228,10 +234,29 @@ bool GameRenderer::Draw(const guest::DrawPacket& draw,VkCommandBuffer command,Er
     c_.f.vkCmdBeginRenderPass(command,&begin,VK_SUBPASS_CONTENTS_INLINE);open_pass_=pass;
   }
   if(bound_pipeline_!=pipeline->handle) {c_.f.vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline->handle);bound_pipeline_=pipeline->handle;}
-  c_.f.vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelines_.Layout(),0,4,descriptors.sets.data(),uint32_t(descriptors.dynamic_offsets.size()),descriptors.dynamic_offsets.data());
-  for(uint32_t i=0;i<vertex_count;++i) {const auto& b=vertices[i];if(std::any_of(pipeline->bindings.begin(),pipeline->bindings.end(),[&](const auto& binding){return binding.binding==b.slot;})) c_.f.vkCmdBindVertexBuffers(command,b.slot,1,&b.handle,&b.offset);}
-  c_.f.vkCmdSetViewport(command,0,1,&viewport);c_.f.vkCmdSetScissor(command,0,1,&scissor);c_.f.vkCmdSetBlendConstants(command,blend);c_.f.vkCmdSetStencilReference(command,VK_STENCIL_FACE_FRONT_AND_BACK,draw.registers[0x10d]&255);
-  if(draw.indexed) {c_.f.vkCmdBindIndexBuffer(command,indices->handle,indices->offset,VK_INDEX_TYPE_UINT32);c_.f.vkCmdDrawIndexed(command,draw.count,1,draw.first,draw.base_vertex,0);}else c_.f.vkCmdDraw(command,draw.count,1,draw.first,0);
+  // Set 0 (the constants) moves with every draw. Sets 1-3 only when their resources change: every game pipeline
+  // shares one layout, so binding set 0 alone leaves sets 1-3 in place. The four dynamic states persist on the
+  // command buffer across pipeline binds because every game pipeline declares the same four.
+  if(shadow_.enabled()) {
+    c_.f.vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelines_.Layout(),0,1,descriptors.sets.data(),uint32_t(descriptors.dynamic_offsets.size()),descriptors.dynamic_offsets.data());
+    if(shadow_.SetSharedSets(descriptors.sets.data()+1)) c_.f.vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelines_.Layout(),1,3,descriptors.sets.data()+1,0,nullptr);
+  } else {
+    c_.f.vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelines_.Layout(),0,4,descriptors.sets.data(),uint32_t(descriptors.dynamic_offsets.size()),descriptors.dynamic_offsets.data());
+  }
+  for(uint32_t i=0;i<vertex_count;++i) {
+    const auto& b=vertices[i];
+    if(std::any_of(pipeline->bindings.begin(),pipeline->bindings.end(),[&](const auto& binding){return binding.binding==b.slot;}) && shadow_.SetVertexBuffer(b.slot,b.handle,b.offset))
+      c_.f.vkCmdBindVertexBuffers(command,b.slot,1,&b.handle,&b.offset);
+  }
+  if(shadow_.SetViewport(viewport)) c_.f.vkCmdSetViewport(command,0,1,&viewport);
+  if(shadow_.SetScissor(scissor)) c_.f.vkCmdSetScissor(command,0,1,&scissor);
+  if(shadow_.SetBlend(blend)) c_.f.vkCmdSetBlendConstants(command,blend);
+  const uint32_t stencil=draw.registers[0x10d]&255;
+  if(shadow_.SetStencil(stencil)) c_.f.vkCmdSetStencilReference(command,VK_STENCIL_FACE_FRONT_AND_BACK,stencil);
+  if(draw.indexed) {
+    if(shadow_.SetIndexBuffer(indices->handle,indices->offset,VK_INDEX_TYPE_UINT32)) c_.f.vkCmdBindIndexBuffer(command,indices->handle,indices->offset,VK_INDEX_TYPE_UINT32);
+    c_.f.vkCmdDrawIndexed(command,draw.count,1,draw.first,draw.base_vertex,0);
+  } else c_.f.vkCmdDraw(command,draw.count,1,draw.first,0);
   if(!merge_passes_) ClosePass();
   targets_.MarkWritten(*pass);++stats_.draws;lap(RecordProfile::kCommands);e={};return true;
 }
