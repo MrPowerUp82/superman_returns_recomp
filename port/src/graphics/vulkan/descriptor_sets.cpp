@@ -52,10 +52,12 @@ DescriptorCacheEntry* DescriptorStore::Shared(const DrawBindings& bindings,
   // Consecutive slots mostly bind the same dummy IDs, so repeated lookups are memoized.
   std::array<uint64_t,6*32> key;uint32_t words=0;uint64_t hash=14695981039346656037ull;
   auto push=[&](uint64_t value) {key[words++]=value;hash^=value;hash*=1099511628211ull;};
-  guest::ResourceId last_buffer=~0ull,last_texture=~0ull;const void* buffer_ptr=nullptr;const void* texture_ptr=nullptr;
-  auto texture_key=[&](guest::ResourceId id) -> const void* {
-    if(id!=last_texture) {auto* t=store.FindTexture(id);texture_ptr=t?t->get():nullptr;last_texture=id;}
-    return texture_ptr;
+  // The texture loop visits dimension 0, 1, 2 of each slot in turn, so each dimension keeps its own last id.
+  guest::ResourceId last_buffer=~0ull;const void* buffer_ptr=nullptr;
+  std::array<guest::ResourceId,3> last_id{~0ull,~0ull,~0ull};std::array<const void*,3> last_ptr{};
+  auto texture_key=[&](uint32_t dimension,guest::ResourceId id) -> const void* {
+    if(id!=last_id[dimension]) {auto* t=store.FindTexture(id);last_ptr[dimension]=t?t->get():nullptr;last_id[dimension]=id;}
+    return last_ptr[dimension];
   };
   // Draws binding per-submission transient buffers (inline geometry) never
   // repeat: they are written but not cached, so they cannot pin arena chunks.
@@ -63,7 +65,7 @@ DescriptorCacheEntry* DescriptorStore::Shared(const DrawBindings& bindings,
   for(uint32_t slot=0;slot<32;++slot) {
     if(bindings.vertex_buffers[slot]!=last_buffer) {auto* b=store.FindBuffer(bindings.vertex_buffers[slot]);buffer_ptr=b?b->get():nullptr;last_buffer=bindings.vertex_buffers[slot];if(b && (*b)->owner) cacheable=false;}
     push(uint64_t(reinterpret_cast<uintptr_t>(buffer_ptr)));complete&=buffer_ptr!=nullptr;
-    for(uint32_t dimension=0;dimension<3;++dimension) {auto* t=texture_key(bindings.textures[dimension][slot]);push(uint64_t(reinterpret_cast<uintptr_t>(t)));complete&=t!=nullptr;}
+    for(uint32_t dimension=0;dimension<3;++dimension) {auto* t=texture_key(dimension,bindings.textures[dimension][slot]);push(uint64_t(reinterpret_cast<uintptr_t>(t)));complete&=t!=nullptr;}
     // Only the sampler/filter bits of texture slots matter. Other slots hold
     // vertex fetch constants whose addresses change every frame.
     if((fetch[slot][0]&3)==2) {

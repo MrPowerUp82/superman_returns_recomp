@@ -12,7 +12,7 @@ struct GameRenderStats {uint64_t draws=0,pending=0,failed=0,clears=0;};
 // SR_VULKAN_PROFILE=1: CPU time of each recording phase, summed until read.
 struct RecordProfile {
   enum Phase {kUploads,kTargets,kTextures,kBindings,kDescriptors,kPipeline,kCommands,kResolves,kClears,kCount};
-  std::array<uint64_t,kCount> us{};uint64_t draws=0,texture_uploads=0,texture_bytes=0,buffer_uploads=0,buffer_bytes=0;
+  std::array<uint64_t,kCount> ns{};uint64_t draws=0,texture_uploads=0,texture_bytes=0,buffer_uploads=0,buffer_bytes=0;
 };
 class GameRenderer {
 public:
@@ -74,11 +74,12 @@ private:
   StateShadow shadow_;
   std::atomic<VkCommandBuffer> recording_{VK_NULL_HANDLE};
   bool profiling_=false;RecordProfile profile_;
-  // Adds the time since the previous lap to a phase; free when profiling is off.
+  // Adds the time since the previous lap to a phase, in nanoseconds (a lap per phase per draw would lose ~0.5 us
+  // each to truncation); free when profiling is off.
   struct Lap {
     bool on;RecordProfile& p;std::chrono::steady_clock::time_point t;
     Lap(bool enabled,RecordProfile& profile):on(enabled),p(profile),t(enabled?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{}) {}
-    void operator()(RecordProfile::Phase phase) {if(!on) return;auto now=std::chrono::steady_clock::now();p.us[phase]+=uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(now-t).count());t=now;}
+    void operator()(RecordProfile::Phase phase) {if(!on) return;auto now=std::chrono::steady_clock::now();p.ns[phase]+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(now-t).count());t=now;}
   };
 };
 }

@@ -5,6 +5,7 @@
 #include <atomic>
 #include <map>
 #include <memory>
+#include <unordered_map>
 namespace superman_returns::graphics::vulkan {
 class ImageState;
 class SubmissionResources {
@@ -76,7 +77,7 @@ struct TextureResource {
 // command buffer; replacement is immutable and never destroys pending versions.
 class ResourceStore {
 public:
-  explicit ResourceStore(Context& c):c_(c) {}
+  explicit ResourceStore(Context& c):c_(c) {buffers_.reserve(4096);textures_.reserve(4096);}
   ~ResourceStore();
   // With a separate upload command buffer (submitted before the main one),
   // buffer/texture uploads record there and share one barrier written by
@@ -133,10 +134,12 @@ private:
   Arena staging_{VK_BUFFER_USAGE_TRANSFER_SRC_BIT},transient_{VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_VERTEX_BUFFER_BIT|VK_BUFFER_USAGE_INDEX_BUFFER_BIT};
   uint64_t serial_=0,completed_=0;
   SubmissionResources submissions_;
-  std::map<guest::ResourceId,std::shared_ptr<BufferResource>> buffers_;
+  // Hashed: ~17k live buffer versions make an ordered map cost ~15 dependent cache misses per lookup. Nothing
+  // iterates these in order, and node storage keeps the pointers FindBuffer/FindTexture return stable.
+  std::unordered_map<guest::ResourceId,std::shared_ptr<BufferResource>> buffers_;
   struct HostPool {std::vector<std::shared_ptr<BufferResource>> buffers;size_t cursor=0;};
   std::map<VkDeviceSize,HostPool> host_pool_;
   VkDeviceSize host_pool_bytes_=0;
-  std::map<guest::ResourceId,std::shared_ptr<TextureResource>> textures_;
+  std::unordered_map<guest::ResourceId,std::shared_ptr<TextureResource>> textures_;
 };
 } // namespace superman_returns::graphics::vulkan

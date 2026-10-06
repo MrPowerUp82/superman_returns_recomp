@@ -194,9 +194,10 @@ bool GameFrame::RecordFrame(std::vector<guest::RenderPacket>& packets_,const gue
     t.queue_us+=us(submit_started,queue_ready);t.tail_us+=us(queue_ready,finished);last_swap_=finished;
     if(t.frames==120) {
       auto p=renderer_.TakeProfile();auto cache=renderer_.TakeDescriptorStats();auto avg=[&](uint64_t v) {return std::to_string(v/1000/t.frames)+"."+std::to_string(v/100/t.frames%10);};
+      auto avg_ns=[&](uint64_t v) {return std::to_string(v/1000000/t.frames)+"."+std::to_string(v/100000/t.frames%10);};
       c_.Log("Vulkan profile (ms/frame over 120): interval="+avg(t.interval_us)+" shaders="+avg(t.shaders_us)+" fence="+avg(t.fence_us)+" record="+avg(t.record_us)+" queue="+avg(t.queue_us)+" tail="+avg(t.tail_us)
-        +" | uploads="+avg(p.us[RecordProfile::kUploads])+" targets="+avg(p.us[RecordProfile::kTargets])+" textures="+avg(p.us[RecordProfile::kTextures])+" bindings="+avg(p.us[RecordProfile::kBindings])
-        +" descriptors="+avg(p.us[RecordProfile::kDescriptors])+" pipeline="+avg(p.us[RecordProfile::kPipeline])+" commands="+avg(p.us[RecordProfile::kCommands])+" resolves="+avg(p.us[RecordProfile::kResolves])+" clears="+avg(p.us[RecordProfile::kClears])
+        +" | uploads="+avg_ns(p.ns[RecordProfile::kUploads])+" targets="+avg_ns(p.ns[RecordProfile::kTargets])+" textures="+avg_ns(p.ns[RecordProfile::kTextures])+" bindings="+avg_ns(p.ns[RecordProfile::kBindings])
+        +" descriptors="+avg_ns(p.ns[RecordProfile::kDescriptors])+" pipeline="+avg_ns(p.ns[RecordProfile::kPipeline])+" commands="+avg_ns(p.ns[RecordProfile::kCommands])+" resolves="+avg_ns(p.ns[RecordProfile::kResolves])+" clears="+avg_ns(p.ns[RecordProfile::kClears])
         +" | draws="+std::to_string(p.draws/t.frames)+" packets="+std::to_string(t.packets/t.frames)+" buffer_uploads="+std::to_string(p.buffer_uploads/t.frames)+" buffer_kb="+std::to_string(p.buffer_bytes/1024/t.frames)
         +" texture_uploads="+std::to_string(p.texture_uploads/t.frames)+" texture_kb="+std::to_string(p.texture_bytes/1024/t.frames)
         +" | descriptor_cache hits="+std::to_string(cache.hits/t.frames)+" misses="+std::to_string(cache.misses/t.frames)+" evicted="+std::to_string(cache.evicted/t.frames)+" entries="+std::to_string(cache.entries)

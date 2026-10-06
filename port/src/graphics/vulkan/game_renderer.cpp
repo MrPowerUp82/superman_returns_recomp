@@ -185,24 +185,29 @@ bool GameRenderer::Draw(const guest::DrawPacket& draw,VkCommandBuffer command,Er
   }
   lap(RecordProfile::kTargets);
   for(uint32_t slot=0;slot<32;++slot) if((draw.texture_fetch[slot][0]&3)==2) {
-    auto id=TextureResourceId(draw.texture_fetch[slot]);Error lookup;
-    auto current=resources_.Texture(id,lookup);
+    auto id=TextureResourceId(draw.texture_fetch[slot]);
+    // Only the value is read: look it up in place and Hold it, with no shared_ptr copy per slot.
+    auto find_held=[&]() -> TextureResource* {
+      const auto* found=resources_.FindTexture(id);if(!found) return nullptr;
+      resources_.Hold(*found);return found->get();
+    };
+    TextureResource* current=find_held();
     if(auto resolved=resolved_latest_.find(ResolvedPhysicalBase(draw.texture_fetch[slot]));resolved!=resolved_latest_.end()) {
-      auto& latest=resolved->second;auto selected=((draw.texture_fetch[slot][1]&63)==6 && latest.raw)?latest.raw:latest.image;
+      auto& latest=resolved->second;const auto& selected=((draw.texture_fetch[slot][1]&63)==6 && latest.raw)?latest.raw:latest.image;
       auto mapping=PlanResolvedSwizzle(draw.texture_fetch[slot],selected->format,selected==latest.raw?false:latest.swap);
       const TextureResource* owner=selected.get();while(owner->image_owner) owner=owner->image_owner.get();
       auto view=resolve_views_.find(id);
       const bool same=current && view!=resolve_views_.end() && view->second.owner==owner && current->image_owner.get()==owner &&
         view->second.mapping.r==mapping.r && view->second.mapping.g==mapping.g && view->second.mapping.b==mapping.b && view->second.mapping.a==mapping.a;
       if(!same) {
-        if(!resources_.BindTextureView(id,selected,mapping,e)) return false;resolve_views_[id]={owner,mapping};current=resources_.Texture(id,e);
+        if(!resources_.BindTextureView(id,selected,mapping,e)) return false;resolve_views_[id]={owner,mapping};current=find_held();
       }
     }
     if(current && current->state==&state_) {
       if(!state_.Transition(command,current->handle,{VK_IMAGE_ASPECT_COLOR_BIT,0,current->mips,0,current->layers},ImageUsage::Sampled(),e)) return false;
       continue;
     }
-    auto capture=draw.textures[slot];if(!capture) return Fail(e,"Bound texture needs a captured upload or resolved image");
+    const auto& capture=draw.textures[slot];if(!capture) return Fail(e,"Bound texture needs a captured upload or resolved image");
     if(current && current->version==capture->version) continue;
     guest::LinearTexture texture;std::string reason;if(!decoder_ || !decoder_(*capture,texture,reason)) {e={"Game texture",VK_ERROR_FORMAT_NOT_SUPPORTED,reason.empty()?"Captured texture decoder unavailable":reason};return false;}
     if(!resources_.UploadTexture(id,texture,capture->version,e)) return false;
@@ -217,10 +222,16 @@ bool GameRenderer::Draw(const guest::DrawPacket& draw,VkCommandBuffer command,Er
   auto pipeline=pipelines_.Acquire(draw,*pass,vs.artifact,ps.artifact,serial_,e);if(!pipeline) {e.message+="; VS="+std::to_string(draw.vertex_shader->hash)+", PS="+std::to_string(draw.pixel_shader?draw.pixel_shader->hash:0)+", RT0="+std::to_string(pass->formats[0])+", DS="+std::to_string(pass->depth_format);return false;}
   struct Binding {uint32_t slot;VkBuffer handle;VkDeviceSize offset;};
   std::array<Binding,33> vertices;uint32_t vertex_count=0;  // at most 32 streams (BuildBindings) plus the missing-vertex stub
-  if(draw.inline_vertices) {auto b=resources_.Buffer(InlineBufferBase|draw.command_serial,e);if(!b) return false;vertices[vertex_count++]={0,b->handle,b->offset};}
-  else for(auto& stream:draw.streams) {auto b=resources_.Buffer(stream.update.plan.key,e);if(!b || stream.offset>b->size) return Fail(e,"Vertex stream offset exceeds buffer");vertices[vertex_count++]={stream.stream,b->handle,b->offset+stream.offset};}
-  auto missing=resources_.Buffer(MissingVertex,e);if(!missing) return false;vertices[vertex_count++]={31,missing->handle,missing->offset};
-  std::shared_ptr<BufferResource> indices;if(draw.indexed) {indices=resources_.Buffer(index_id,e);if(!indices || uint64_t(draw.first+uint64_t(draw.count))*4>indices->size) {e={"Index draw",VK_ERROR_INITIALIZATION_FAILED,"Draw exceeds captured buffer: first="+std::to_string(draw.first)+", count="+std::to_string(draw.count)+", bytes="+std::to_string(indices?indices->size:0)+", plan="+std::to_string(draw.indices.plan.size)+", format="+std::to_string(draw.indices.plan.format)+", action="+std::to_string(draw.indices.plan.action)+", serial="+std::to_string(draw.command_serial)};return false;}}
+  // Same as ResourceStore::Buffer without the shared_ptr copy: the draw only reads handle, offset and size.
+  auto held_buffer=[&](guest::ResourceId id) -> const BufferResource* {
+    const auto* found=resources_.FindBuffer(id);
+    if(!found) {e={"Buffer binding",VK_ERROR_INITIALIZATION_FAILED,"Buffer has no captured upload"};return nullptr;}
+    resources_.Hold(*found);return found->get();
+  };
+  if(draw.inline_vertices) {auto* b=held_buffer(InlineBufferBase|draw.command_serial);if(!b) return false;vertices[vertex_count++]={0,b->handle,b->offset};}
+  else for(auto& stream:draw.streams) {auto* b=held_buffer(stream.update.plan.key);if(!b || stream.offset>b->size) return Fail(e,"Vertex stream offset exceeds buffer");vertices[vertex_count++]={stream.stream,b->handle,b->offset+stream.offset};}
+  auto* missing=held_buffer(MissingVertex);if(!missing) return false;vertices[vertex_count++]={31,missing->handle,missing->offset};
+  const BufferResource* indices=nullptr;if(draw.indexed) {indices=held_buffer(index_id);if(!indices || uint64_t(draw.first+uint64_t(draw.count))*4>indices->size) {e={"Index draw",VK_ERROR_INITIALIZATION_FAILED,"Draw exceeds captured buffer: first="+std::to_string(draw.first)+", count="+std::to_string(draw.count)+", bytes="+std::to_string(indices?indices->size:0)+", plan="+std::to_string(draw.indices.plan.size)+", format="+std::to_string(draw.indices.plan.format)+", action="+std::to_string(draw.indices.plan.action)+", serial="+std::to_string(draw.command_serial)};return false;}}
   VkViewport viewport{draw.viewport.x,draw.viewport.y,draw.viewport.width,draw.viewport.height,draw.viewport.min_depth,draw.viewport.max_depth};
   if(viewport.width<=0 || viewport.height<=0) viewport={0,0,float(pass->extent.width),float(pass->extent.height),0,1};
   auto x0=std::clamp(draw.scissor.left,0,int32_t(pass->extent.width)),y0=std::clamp(draw.scissor.top,0,int32_t(pass->extent.height));

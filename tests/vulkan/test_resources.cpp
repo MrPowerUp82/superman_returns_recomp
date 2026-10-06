@@ -165,3 +165,33 @@ SR_TEST(map_transient_skips_the_flush_on_coherent_memory) {
   }
   SR_CHECK(allocations.empty());
 }
+SR_TEST(resource_lookups_survive_rehash_replace_and_forget_across_thousands_of_ids) {
+  allocations.clear();copies=flushes=destroyed=0;
+  Context c(ResourceFake());c.device=reinterpret_cast<VkDevice>(1);
+  c.memory.memoryTypeCount=1;c.memory.memoryTypes[0].propertyFlags=VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+  c.properties.limits.maxStorageBufferRange=4096;c.properties.limits.nonCoherentAtomSize=64;
+  {
+    ResourceStore store(c);Error e;std::array<std::byte,4> bytes{};constexpr uint64_t count=5000;  // more than the initial reserve: forces a rehash
+    SR_CHECK(store.BeginSubmission(reinterpret_cast<VkCommandBuffer>(1),1,e));
+    SR_CHECK(store.FindBuffer(1)==nullptr);
+    SR_CHECK(store.UploadHostBuffer(1,bytes,1,e));
+    const auto* first=store.FindBuffer(1);SR_CHECK(first!=nullptr);
+    for(uint64_t id=2;id<=count;++id) SR_CHECK(store.UploadHostBuffer(id,bytes,id,e));
+    // Pointers handed out earlier stay valid when the table grows.
+    SR_CHECK(store.FindBuffer(1)==first);SR_CHECK_EQ((*first)->version,1u);
+    for(uint64_t id=1;id<=count;++id) {auto* found=store.FindBuffer(id);SR_CHECK(found!=nullptr);if(found) SR_CHECK_EQ((*found)->version,id);}
+    SR_CHECK(store.FindBuffer(count+1)==nullptr);SR_CHECK(store.FindBuffer(0)==nullptr);
+    // Replacing an id stores the new version under the same key.
+    for(uint64_t id=3;id<=count;id+=3) SR_CHECK(store.UploadHostBuffer(id,bytes,id+100000,e));
+    for(uint64_t id=1;id<=count;++id) {auto* found=store.FindBuffer(id);SR_CHECK(found!=nullptr);if(found) SR_CHECK_EQ((*found)->version,id%3==0?id+100000:id);}
+    // Forgetting removes exactly that id and nothing else.
+    for(uint64_t id=1;id<=count;id+=2) store.ForgetBuffer(id);
+    for(uint64_t id=1;id<=count;++id) {
+      auto* found=store.FindBuffer(id);
+      if(id%2) {SR_CHECK(found==nullptr);SR_CHECK(!store.Buffer(id,e));}
+      else {SR_CHECK(found!=nullptr);auto held=store.Buffer(id,e);SR_CHECK(held!=nullptr);if(found && held) SR_CHECK(held==*found);}
+    }
+    store.Retire(1);
+  }
+  SR_CHECK(allocations.empty());
+}
