@@ -1,0 +1,4 @@
+# Preserve pinned compiler bytes and copied support headers across Windows checkouts.
+docs/wasm/*.mjs -text whitespace=-blank-at-eol
+docs/wasm/*.wasm -text
+docs/wasm/shader_common.h -text whitespace=-blank-at-eol

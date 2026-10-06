@@ -46,6 +46,19 @@ Ficam aqui porque o `build.cmd`, os CMake e o código os chamam por caminho.
 | `xex_libraries.py`, `inspect_lsfg_dll.py` | Leem metadados do `default.xex` e da `Lossless.dll`, sem copiar dados para o repositório. |
 | `native_ab_compare.py` | Compara dumps A/B do renderer nativo com o Xenos (PSNR). |
 
+## Pré-shaders Vulkan e WebAssembly
+
+`shaders/make_vulkan_preshaders.py` compila o corpus local com o contrato do runtime,
+gera `superman_returns_vulkan.srvk` e um relatório e aceita `--install <pasta>`.
+`shaders/verify_vulkan_preshaders.py <arquivo>` confere o formato e reconstitui
+independentemente os metadados de cada SPIR-V. Dados do jogo ficam locais.
+
+`shaders/build_wasm.ps1` reproduz o emissor Vulkan com Emscripten 4.0.23 e obtém
+o DXC WebAssembly genérico com revisão e SHA-256 fixos. Os módulos em `docs/wasm`
+são ferramentas sem dados do jogo. `shaders/generate_wasm_preshaders.mjs <game>`
+exercita o mesmo fluxo da página em Node. Testes: `node --test tests/web/vulkan-preshaders.test.mjs`.
+Veja [cobertura e instruções](../docs/vulkan-preshaders.md).
+
 ## Limpeza
 
 `tools\clean.ps1` mostra, sem apagar, o que ocuparia espaço e pode ser recriado: logs e screenshots, caches e builds de teste avulsos. Para apagar, passe `-Apply`; os grupos são `-Logs`, `-Caches` e `-TestBuilds`.

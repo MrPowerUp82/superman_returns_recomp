@@ -6,6 +6,20 @@ using namespace superman_returns::graphics::vulkan;
 namespace shaders=superman_returns::graphics::shaders;
 int main(int argc,char** argv) {
   try {
+    if(argc==5 && std::string(argv[1])=="--library") {
+      shaders::VulkanShaderConfig config;config.library=argv[2];uint32_t calls=0;
+      shaders::VulkanShaderService service(config,[&](auto,auto,std::stop_token,std::string&) {++calls;return false;});
+      if(!service.PrecompiledCount() || !service.LibraryDiagnostic().empty()) throw std::runtime_error("Library rejected: "+service.LibraryDiagnostic());
+      for(uint32_t i=0;i<2;++i) {
+        std::ifstream input(argv[3+i],std::ios::binary);std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(input)),{});
+        if(!input) throw std::runtime_error("Missing original test container");
+        auto key=service.Request(bytes,i?shaders::ShaderStage::kPixel:shaders::ShaderStage::kVertex);auto result=service.Poll(key);
+        if(result.status!=shaders::ShaderPoll::ready || !result.artifact) throw std::runtime_error("Library did not return an immediate shader");
+        std::cout<<"Precompiled "<<(i?"PS":"VS")<<": "<<result.artifact->words.size()<<" SPIR-V words\n";
+      }
+      if(calls) throw std::runtime_error("Precompiled lookup invoked the runtime compiler");
+      return 0;
+    }
     if(argc==6 && std::string(argv[2])=="--runtime") {
       std::filesystem::path root=std::filesystem::absolute(argv[3]);
       shaders::VulkanShaderConfig config{argv[1],root/"tools/shaders/runtime_vulkan_shader.py",root/"build/vulkan-m3-runtime",root/"build/vulkan-m2/emitter-build/XenosRecompCorpus.exe",root/"build/vulkan-m2/emitter-tree/src/XenosRecomp/shader_common.h",root/".tools/dxc/bin/x64/dxc.exe"};

@@ -19,10 +19,16 @@ public:
   std::string Text() {auto n=Word();if(n>16384) throw std::runtime_error("Oversized shader diagnostic/type");auto b=Bytes(n);return {reinterpret_cast<const char*>(b.data()),b.size()};}
   bool Done() const {return position_==bytes_.size();}
 };
-std::vector<uint8_t> ReadFile(const std::filesystem::path& p) {
+std::vector<uint8_t> ReadFile(const std::filesystem::path& p,size_t maximum=17*1024*1024) {
   std::ifstream f(p,std::ios::binary|std::ios::ate);auto size=f.tellg();
-  if(!f || size<0 || size>17*1024*1024) throw std::runtime_error("Missing/oversized shader result");
+  if(!f || size<0 || uint64_t(size)>maximum) throw std::runtime_error("Missing/oversized shader file");
   std::vector<uint8_t> bytes(static_cast<size_t>(size));f.seekg(0);if(!f.read(reinterpret_cast<char*>(bytes.data()),size)) throw std::runtime_error("Shader result read failed");return bytes;
+}
+uint64_t HashBytes(std::span<const uint8_t> bytes) {
+  uint64_t hash=14695981039346656037ull;for(auto b:bytes) {hash^=b;hash*=1099511628211ull;}return hash;
+}
+ShaderKey RequestHash(std::span<const uint8_t> bytes,ShaderStage stage) {
+  auto hash=(HashBytes(bytes)^uint32_t(stage))*1099511628211ull;return hash?hash:1;
 }
 }
 bool DecodeShaderResult(std::span<const uint8_t> bytes,ShaderStage stage,CompiledShader& result,std::string& error) {
@@ -52,8 +58,38 @@ std::vector<std::string> ValidateShaderPair(const CompiledShader& vs,const Compi
 struct VulkanShaderService::Impl {
   struct Job {ShaderStage stage;std::vector<uint8_t> container;ShaderResult result;};
   VulkanShaderConfig config;ShaderProcess process;mutable std::mutex mutex;std::condition_variable cv;std::map<ShaderKey,Job> jobs;std::deque<ShaderKey> queue;bool stop=false;std::vector<std::jthread> threads;
+  size_t precompiled_count=0;std::string library_diagnostic;
   Impl(VulkanShaderConfig c,ShaderProcess p):config(std::move(c)),process(std::move(p)) {
+    LoadLibrary();
     for(uint32_t i=0;i<std::clamp(config.compiler_workers,1u,4u);++i) threads.emplace_back([this](std::stop_token token){Run(token);});
+  }
+  void LoadLibrary() {
+    if(config.library.empty()) return;
+    try {
+      auto bytes=ReadFile(config.library,256*1024*1024);Reader r(bytes);
+      auto magic=r.Bytes(8);if(std::memcmp(magic.data(),"SRVKLIB\0",8) || r.Word()!=1) throw std::runtime_error("Vulkan shader library schema/ABI mismatch");
+      auto count=r.Word();if(!count || count>16384) throw std::runtime_error("Invalid shader library count");
+      uint64_t checksum=r.Word();checksum|=uint64_t(r.Word())<<32;
+      if(HashBytes(std::span<const uint8_t>(bytes).subspan(24))!=checksum) throw std::runtime_error("Shader library checksum mismatch");
+      // All-or-nothing: a damaged library must never publish a partial set.
+      std::map<ShaderKey,Job> loaded;
+      for(uint32_t i=0;i<count;++i) {
+        auto stage_word=r.Word(),container_size=r.Word(),result_size=r.Word(),reserved=r.Word();
+        if(stage_word>1 || reserved || container_size<24 || container_size>1024*1024 || result_size>17*1024*1024) throw std::runtime_error("Invalid shader library entry");
+        auto stage=ShaderStage(stage_word);auto container=r.Bytes(container_size);auto wire=r.Bytes(result_size);
+        auto artifact=std::make_shared<CompiledShader>();std::string error;
+        if(!DecodeShaderResult(wire,stage,*artifact,error)) throw std::runtime_error(error);
+        auto key=RequestHash(container,stage);
+        for(;;) {
+          auto found=loaded.find(key);if(found==loaded.end()) break;
+          if(found->second.stage==stage && std::equal(container.begin(),container.end(),found->second.container.begin(),found->second.container.end())) throw std::runtime_error("Duplicate shader library entry");
+          if(!++key) key=1;
+        }
+        loaded.emplace(key,Job{stage,{container.begin(),container.end()},{ShaderPoll::ready,std::move(artifact),{}}});
+      }
+      if(!r.Done()) throw std::runtime_error("Trailing shader library data");
+      jobs=std::move(loaded);precompiled_count=count;
+    } catch(const std::exception& e) {library_diagnostic=e.what();}
   }
   ~Impl() {{std::lock_guard lock(mutex);stop=true;}for(auto& thread:threads) thread.request_stop();cv.notify_all();for(auto& thread:threads) thread.join();}
   void Run(std::stop_token token) {
@@ -88,7 +124,7 @@ VulkanShaderService::VulkanShaderService(VulkanShaderConfig c,ShaderProcess p):i
 VulkanShaderService::~VulkanShaderService()=default;
 ShaderKey VulkanShaderService::Request(std::span<const uint8_t> bytes,ShaderStage stage) {
   if(bytes.empty() || bytes.size()>16*1024*1024) return 0;
-  uint64_t hash=14695981039346656037ull;for(auto b:bytes) {hash^=b;hash*=1099511628211ull;}hash^=uint32_t(stage);hash*=1099511628211ull;if(!hash) hash=1;
+  auto hash=RequestHash(bytes,stage);
   std::lock_guard lock(impl_->mutex);
   // A hash collision never aliases a different container or stage.
   for(;;) {
@@ -101,4 +137,6 @@ ShaderKey VulkanShaderService::Request(std::span<const uint8_t> bytes,ShaderStag
 ShaderResult VulkanShaderService::Poll(ShaderKey key) const {
   std::lock_guard lock(impl_->mutex);auto found=impl_->jobs.find(key);if(found==impl_->jobs.end()) return {ShaderPoll::failed,{},"Unknown/empty captured shader"};return found->second.result;
 }
+size_t VulkanShaderService::PrecompiledCount() const {return impl_->precompiled_count;}
+const std::string& VulkanShaderService::LibraryDiagnostic() const {return impl_->library_diagnostic;}
 } // namespace superman_returns::graphics::shaders

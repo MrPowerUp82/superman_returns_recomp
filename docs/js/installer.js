@@ -73,10 +73,11 @@ export async function inspectGame(files) {
  * Writes the package: the entries of `buildZip` (a Blob), then the game files
  * under game/. `sink.put(path, stream, onBytes)` stores one file.
  */
-export async function writePackage({ buildZip, game, sink, onProgress = () => {} }) {
-  const entries = (await readZip(buildZip)).filter((e) => !e.name.endsWith('/'));
+export async function writePackage({ buildZip, game, sink, extraFiles = new Map(), onProgress = () => {} }) {
+  const entries = (await readZip(buildZip)).filter((e) => !e.name.endsWith('/') && !extraFiles.has(e.name));
   let total = game ? [...game.values()].reduce((sum, b) => sum + b.size, 0) : 0;
   total += entries.reduce((sum, e) => sum + e.size, 0);
+  total += [...extraFiles.values()].reduce((sum, blob) => sum + blob.size, 0);
   let done = 0;
   const count = (n) => {
     done += n;
@@ -84,6 +85,9 @@ export async function writePackage({ buildZip, game, sink, onProgress = () => {}
   };
   for (const entry of entries) {
     await sink.put(entry.name, await entryStream(buildZip, entry), count, entry.size);
+  }
+  for (const [path, blob] of extraFiles) {
+    await sink.put(path, blob.stream(), count, blob.size);
   }
   if (game) {
     for (const [path, blob] of game) {

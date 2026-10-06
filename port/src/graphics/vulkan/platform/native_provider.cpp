@@ -48,6 +48,8 @@ struct Host {
     if(!(context.selected.queues[context.graphics_family].flags&VK_QUEUE_COMPUTE_BIT)) {e={"Game queue",VK_ERROR_FEATURE_NOT_PRESENT,"Graphics queue must also support compute resolves"};return false;}
     config.shaders.compiler_workers=2;
     shaders=std::make_unique<shaders::VulkanShaderService>(config.shaders,WindowsShaderProcess());
+    REXLOG_INFO("native Vulkan: {} precompiled shaders from {}",shaders->PrecompiledCount(),config.shaders.library.string());
+    if(!shaders->LibraryDiagnostic().empty()) REXLOG_WARN("native Vulkan: pre-shader library unavailable: {}; compiling misses at runtime",shaders->LibraryDiagnostic());
     ShaderLookup lookup=[this](const guest::ShaderCapture& capture) {auto key=shaders->Request(capture.container,capture.vertex?shaders::ShaderStage::kVertex:shaders::ShaderStage::kPixel);return shaders->Poll(key);};
     TextureDecoder decode=[](const guest::TextureCapture& capture,guest::LinearTexture& result,std::string& error){return guest::DecodeTextureLayout(capture.fetch,capture.memory,result,error);};
     game=std::make_unique<GameFrame>(context,gpu_mutex,std::move(lookup),std::move(decode));

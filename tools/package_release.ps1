@@ -45,7 +45,7 @@ function Need($path, $hint) {
 $exe = Need (Join-Path $BuildDir 'superman_returns.exe') 'Run without -NoBuild.'
 $launcherDir = if (Test-Path (Join-Path $BuildDir 'SupermanReturnsLauncher.exe')) { $BuildDir } else { Join-Path $root 'artifacts\launcher' }
 $launcher = Need (Join-Path $launcherDir 'SupermanReturnsLauncher.exe') 'Run tools\build_launcher.ps1 first.'
-foreach ($leftover in 'superman_returns_shaders.srsl', 'superman_returns_shaders.pak') {
+foreach ($leftover in 'superman_returns_shaders.srsl', 'superman_returns_shaders.pak', 'superman_returns_vulkan.srvk') {
   if (Test-Path (Join-Path $BuildDir $leftover)) {
     throw "$leftover is in ${BuildDir}: that build embeds game-derived shaders. Use a SR_EMBED_SHADERS=OFF build folder."
   }
@@ -83,6 +83,12 @@ Copy-Item $common (Join-Path $stage 'shader_tools')
 # the standard library zipped, and a ._pth that also exposes ..\vulkan.
 $vulkanTools = Join-Path $stage 'shader_tools\vulkan'
 New-Item -ItemType Directory -Force $vulkanTools | Out-Null
+# Keep the Vulkan ABI emitter separate from the D3D12 translator/header.
+# The browser pre-shaders use this exact patched tree too.
+& (Join-Path $root 'tools/build_vulkan_m2.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'Vulkan shader emitter build failed' }
+Copy-Item (Need (Join-Path $root 'build/vulkan-m2/emitter-build/XenosRecompCorpus.exe') '') (Join-Path $vulkanTools 'sr_xenosrecomp.exe')
+Copy-Item (Need (Join-Path $root 'build/vulkan-m2/emitter-tree/src/XenosRecomp/shader_common.h') '') $vulkanTools
 foreach ($script in 'runtime_vulkan_shader.py', 'compile_vulkan.py', 'spirv_metadata.py', 'validate_vulkan_corpus.py', 'vulkan_contract.py') {
   Copy-Item (Need (Join-Path $root "tools\shaders\$script") '') $vulkanTools
 }

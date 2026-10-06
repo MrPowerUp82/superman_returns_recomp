@@ -3,6 +3,8 @@ import { STRINGS, detectLanguage } from './i18n.js';
 import { openDisc } from './xdvdfs.js';
 import { inspectGame, writePackage, XEX_SHA256 } from './installer.js';
 import { directorySink, zipSink } from './sinks.js';
+import { generateVulkanShaders } from './generate-vulkan-shaders.js';
+import { VULKAN_LIBRARY_NAME } from './vulkan-preshaders.js';
 
 const $ = (id) => document.getElementById(id);
 const state = {
@@ -13,6 +15,8 @@ const state = {
   buildName: '',
   buildVersion: null,
   busy: false,
+  preshaders: null,
+  shaderAbort: null,
 };
 
 const hasFolderPicker = typeof window.showDirectoryPicker === 'function';
@@ -85,6 +89,8 @@ function renderGameStatus() {
 
 async function loadGame(filesPromise) {
   state.game = null;
+  state.preshaders = null;
+  $('shaderStatus').textContent = '';
   state.gameView = { kind: 'reading' };
   renderGameStatus();
   updateButtons();
@@ -193,21 +199,44 @@ function setProgress(done, total) {
 
 function updateButtons() {
   const updateOnly = $('updateOnly').checked;
-  const ready = !state.busy && (updateOnly || !!state.game);
+  const ready = !state.busy && (updateOnly || !!state.game) && (!$('generateShaders').checked || !!state.game);
   $('saveFolder').disabled = !ready || !hasFolderPicker;
   $('saveZip').disabled = !ready || !hasSavePicker;
   $('chooseIso').disabled = state.busy;
   $('chooseFolder').disabled = state.busy;
+  $('saveShaders').disabled = state.busy || !state.game || !hasSavePicker;
+  $('generateShaders').disabled = state.busy;
+  $('updateOnly').disabled = state.busy;
+  $('chooseBuildZip').disabled = state.busy;
+  for (const radio of document.querySelectorAll('input[name="buildSource"]')) radio.disabled = state.busy;
   $('localBuildRow').hidden = buildSource() !== 'local';
   $('buildZipName').textContent = state.buildName && state.buildName !== 'download' ? state.buildName : '';
   $('writeStatus').title = ready ? '' : t().needGameFirst;
+}
+
+async function ensureShaders() {
+  if (state.preshaders) return state.preshaders;
+  if (!state.game) throw new Error(t().shaderNeedGame);
+  state.shaderAbort = new AbortController();
+  $('cancelShaders').hidden = false;
+  try {
+    state.preshaders = await generateVulkanShaders(state.game.game, (value) => {
+      $('shaderStatus').textContent = t().shaderProgress(value);
+      if (value.total) setProgress(value.done, value.total);
+    }, state.shaderAbort.signal);
+    $('shaderStatus').textContent = t().shaderFinished(state.preshaders.summary.ready, state.preshaders.summary.failed.length);
+    return state.preshaders;
+  } finally {
+    state.shaderAbort = null;
+    $('cancelShaders').hidden = true;
+  }
 }
 
 async function run(makeSink) {
   const s = t();
   if (state.busy) return;
   const updateOnly = $('updateOnly').checked;
-  if (!updateOnly && !state.game) {
+  if ((!updateOnly || $('generateShaders').checked) && !state.game) {
     setWriteStatus(s.needGameFirst, 'bad');
     return;
   }
@@ -225,12 +254,15 @@ async function run(makeSink) {
     const buildZip = buildSource() === 'local' ? state.buildBlob : await downloadBuild();
     if (!buildZip) {
       setWriteStatus(s.buildMissing, 'bad');
+      await sink.abort?.();
       return;
     }
+    const extraFiles = $('generateShaders').checked ? (await ensureShaders()).files : new Map();
     await writePackage({
       buildZip,
       game: updateOnly ? null : state.game.game,
       sink,
+      extraFiles,
       onProgress: (done, total) => {
         setProgress(done, total);
         setWriteStatus(s.writing(formatSize(done), formatSize(total)));
@@ -238,6 +270,7 @@ async function run(makeSink) {
     });
     setWriteStatus(s.finished, 'ok');
   } catch (error) {
+    await sink?.abort?.().catch(() => {});
     console.error(error);
     setWriteStatus(error.message || String(error), 'bad');
   } finally {
@@ -283,6 +316,23 @@ function wire() {
     event.target.value = '';
   });
   $('updateOnly').addEventListener('change', updateButtons);
+  $('generateShaders').addEventListener('change', updateButtons);
+  $('cancelShaders').addEventListener('click', () => state.shaderAbort?.abort());
+  $('saveShaders').addEventListener('click', async () => {
+    if (state.busy || !state.game) return;
+    let writable;
+    try {
+      const handle = await window.showSaveFilePicker({ suggestedName: VULKAN_LIBRARY_NAME,
+        types: [{ description: 'Vulkan pre-shaders', accept: { 'application/octet-stream': ['.srvk'] } }] });
+      state.busy = true; updateButtons();
+      const result = await ensureShaders();
+      writable = await handle.createWritable();
+      await writable.write(result.library); await writable.close(); writable = null;
+    } catch (error) {
+      if (writable) await writable.abort().catch(() => {});
+      if (error.name !== 'AbortError') $('shaderStatus').textContent = error.message || String(error);
+    } finally { state.busy = false; updateButtons(); }
+  });
   $('saveFolder').addEventListener('click', () => run(async () => {
     const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
     return directorySink(handle);

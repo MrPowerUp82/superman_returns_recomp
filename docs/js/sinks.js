@@ -34,6 +34,7 @@ export function directorySink(rootHandle) {
       await stream.pipeThrough(counting(onBytes)).pipeTo(writable);
     },
     async close() {},
+    async abort() {}, // Files already completed remain useful; no stream stays open.
   };
 }
 
@@ -50,5 +51,6 @@ export function zipSink(writable, rootName = '') {
       await zip.finish();
       await writer.close();
     },
+    async abort() { await writer.abort(); },
   };
 }

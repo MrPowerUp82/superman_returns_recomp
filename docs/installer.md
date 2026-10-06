@@ -1,6 +1,6 @@
 # Instalador e builds pré-compilados
 
-O port pode ser distribuído **sem nenhum dado do jogo e sem nenhum shader traduzido**. O usuário monta o pacote em uma página (GitHub Pages) que roda inteira no navegador, a partir da própria cópia do jogo, e os shaders são traduzidos no PC dele na primeira execução. É o mesmo desenho do [`nfsmw-nx`](https://github.com/StevensND/nfsmw-nx), adaptado ao D3D12.
+O port pode ser distribuído **sem nenhum dado do jogo e sem nenhum shader traduzido**. O usuário monta o pacote em uma página (GitHub Pages) que roda inteira no navegador, a partir da própria cópia do jogo. A página pode gerar pré-shaders Vulkan com WebAssembly antes de salvar o pacote; shaders ausentes continuam sendo traduzidos no PC durante o jogo. Veja [pré-shaders Vulkan](vulkan-preshaders.md) para cobertura, geração local e ferramentas. O D3D12 mantém sua tradução própria em runtime. O fluxo foi inspirado pelo [`nfsmw-nx`](https://github.com/StevensND/nfsmw-nx).
 
 ## Peças
 

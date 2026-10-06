@@ -98,3 +98,54 @@ SR_TEST(shader_service_cancels_all_inflight_workers_on_shutdown) {
   SR_CHECK_EQ(cancelled.load(),2u);
   std::filesystem::remove_all(config.cache);
 }
+namespace {
+std::vector<uint8_t> Library(std::vector<uint8_t> body,uint32_t count=1) {
+  std::vector<uint8_t> bytes{'S','R','V','K','L','I','B',0};Word(bytes,1);Word(bytes,count);
+  uint64_t checksum=14695981039346656037ull;for(auto b:body) {checksum^=b;checksum*=1099511628211ull;}
+  Word(bytes,uint32_t(checksum));Word(bytes,uint32_t(checksum>>32));bytes.insert(bytes.end(),body.begin(),body.end());return bytes;
+}
+std::vector<uint8_t> LibraryBody(ShaderStage stage,const std::vector<uint8_t>& container,const std::vector<uint8_t>& result) {
+  std::vector<uint8_t> body;Word(body,uint32_t(stage));Word(body,uint32_t(container.size()));Word(body,uint32_t(result.size()));Word(body,0);
+  body.insert(body.end(),container.begin(),container.end());body.insert(body.end(),result.begin(),result.end());return body;
+}
+void WriteLibrary(const std::filesystem::path& path,const std::vector<uint8_t>& data) {
+  std::ofstream file(path,std::ios::binary);file.write(reinterpret_cast<const char*>(data.data()),data.size());
+}
+}
+SR_TEST(shader_library_returns_ready_without_a_compiler_and_misses_use_runtime) {
+  auto directory=std::filesystem::temp_directory_path()/std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());std::filesystem::create_directory(directory);
+  VulkanShaderConfig config;config.cache=directory/"cache";config.library=directory/"shaders.srvk";
+  std::vector<uint8_t> original(24,7);auto bytes=Library(LibraryBody(ShaderStage::kVertex,original,Wire()));WriteLibrary(config.library,bytes);
+  std::atomic<uint32_t> calls=0;
+  {
+    VulkanShaderService service(config,[&](auto args,auto,std::stop_token,std::string&) {
+      ++calls;auto wire=Wire();std::ofstream result(args.back(),std::ios::binary);result.write(reinterpret_cast<const char*>(wire.data()),wire.size());return true;
+    });
+    SR_CHECK_EQ(service.PrecompiledCount(),1u);SR_CHECK(service.LibraryDiagnostic().empty());
+    auto key=service.Request(original,ShaderStage::kVertex);auto result=service.Poll(key);
+    SR_CHECK(result.status==ShaderPoll::ready);SR_CHECK(bool(result.artifact));SR_CHECK_EQ(calls.load(),0u);
+    SR_CHECK_EQ(key,service.Request(original,ShaderStage::kVertex));original.back()=8;
+    auto miss=service.Request(original,ShaderStage::kVertex);SR_CHECK(miss!=key);
+    auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+    while(service.Poll(miss).status==ShaderPoll::pending && std::chrono::steady_clock::now()<deadline) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    SR_CHECK(service.Poll(miss).status==ShaderPoll::ready);SR_CHECK_EQ(calls.load(),1u);
+  }
+  std::filesystem::remove_all(directory);
+}
+SR_TEST(shader_library_rejects_corruption_wrong_stage_duplicates_and_partial_loads) {
+  auto directory=std::filesystem::temp_directory_path()/std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());std::filesystem::create_directory(directory);
+  VulkanShaderConfig config;config.cache=directory;config.library=directory/"shaders.srvk";
+  std::vector<uint8_t> original(24,7);auto body=LibraryBody(ShaderStage::kVertex,original,Wire());auto valid=Library(body);
+  std::vector<std::vector<uint8_t>> invalid;
+  auto truncated=valid;truncated.pop_back();invalid.push_back(truncated);
+  auto checksum=valid;checksum[16]^=1;invalid.push_back(checksum);
+  auto version=valid;version[8]=2;invalid.push_back(version);
+  auto trailing=body;trailing.push_back(0);invalid.push_back(Library(trailing));
+  auto duplicated=body;duplicated.insert(duplicated.end(),body.begin(),body.end());invalid.push_back(Library(duplicated,2));
+  auto wrong=LibraryBody(ShaderStage::kPixel,original,Wire());auto partial=body;partial.insert(partial.end(),wrong.begin(),wrong.end());invalid.push_back(Library(partial,2));
+  for(const auto& data:invalid) {
+    WriteLibrary(config.library,data);VulkanShaderService service(config,{});
+    SR_CHECK_EQ(service.PrecompiledCount(),0u);SR_CHECK(!service.LibraryDiagnostic().empty());
+  }
+  std::filesystem::remove_all(directory);
+}

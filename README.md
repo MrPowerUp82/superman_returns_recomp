@@ -173,6 +173,8 @@ A biblioteca contém dados derivados do jogo: não a envie para o Git.
 
 O mesmo renderer nativo também pode desenhar com Vulkan, em vez de D3D12. É o padrão do launcher, mas continua experimental e, em GPU integrada, bem mais lento que o D3D12 (veja [Desempenho](#desempenho)). Os detalhes, as otimizações e o que ainda falta validar estão em [`docs/vulkan-m3.md`](docs/vulkan-m3.md) (e em `vulkan-m1.md` e `vulkan-m2.md`).
 
+O Vulkan também carrega pré-shaders em `superman_returns_vulkan.srvk`, ao lado do executável. O instalador do navegador pode gerá-los com WebAssembly a partir dos seus arquivos `.AST`, incluí-los no pacote ou salvar somente a biblioteca. Shaders ausentes continuam sendo compilados ao jogar; os pipelines do driver continuam específicos da GPU. Geração local, cobertura e testes em [pré-shaders Vulkan](docs/vulkan-preshaders.md).
+
 - Selecionar: `--sr_native_api=vulkan` (precisa de `--sr_renderer=native`). `--sr_native_vulkan_gpu_uuid=<32 dígitos hex>` escolhe a GPU pelo UUID Vulkan que aparece no log; o LUID do DXGI não vale aqui.
 - Compilar: o `build.cmd` já inclui o Vulkan (`SR_VULKAN=ON`). Por CMake: `-DSR_NATIVE=RENDERER -DSR_VULKAN_FOUNDATION=ON -DSR_VULKAN_GAME=ON`. Sem esse build, pedir Vulkan é um erro explícito.
 - Não há fallback: se o Vulkan não iniciar, o jogo para com o motivo. Ele também não volta para D3D12 nem para Xenos.

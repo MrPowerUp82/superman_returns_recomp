@@ -28,6 +28,8 @@ struct VulkanShaderConfig {
   std::filesystem::path python,script,cache,emitter,common,dxc;
   std::chrono::milliseconds timeout{210000};
   uint32_t compiler_workers=1;
+  // Local, game-derived SPIR-V library; misses still use the runtime compiler.
+  std::filesystem::path library;
 };
 // Platform runner receives individual arguments, never a shell command.
 using ShaderProcess=std::function<bool(std::span<const std::filesystem::path>,std::chrono::milliseconds,std::stop_token,std::string&)>;
@@ -37,6 +39,8 @@ public:
   ~VulkanShaderService();
   ShaderKey Request(std::span<const uint8_t>,ShaderStage);
   ShaderResult Poll(ShaderKey) const;
+  size_t PrecompiledCount() const;
+  const std::string& LibraryDiagnostic() const;
   VulkanShaderService(const VulkanShaderService&)=delete;
   VulkanShaderService& operator=(const VulkanShaderService&)=delete;
 private:

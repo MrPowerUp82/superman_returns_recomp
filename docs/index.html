@@ -48,6 +48,13 @@
     </div>
     <div id="buildStatus" class="status" aria-live="polite"></div>
     <label class="check"><input type="checkbox" id="updateOnly"> <span data-i18n="updateOnly"></span></label>
+    <label class="check"><input type="checkbox" id="generateShaders" checked> <span data-i18n="generateShaders"></span></label>
+    <p class="note" data-i18n="shaderHint"></p>
+    <div class="actions">
+      <button type="button" id="saveShaders" data-i18n="saveShaders"></button>
+      <button type="button" id="cancelShaders" data-i18n="cancelShaders" hidden></button>
+    </div>
+    <div id="shaderStatus" class="status" aria-live="polite"></div>
     <div class="actions">
       <button type="button" id="saveFolder" class="primary"></button>
       <button type="button" id="saveZip"></button>

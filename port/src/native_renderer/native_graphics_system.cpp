@@ -203,7 +203,7 @@ rex::X_STATUS NativeGraphicsSystem::SetupPresentation(rex::ui::WindowedAppContex
   graphics::vulkan::NativeProviderConfig config;
   if(packaged) {
     const auto cache=exe_dir/"shader_cache/vulkan";std::error_code cache_error;std::filesystem::create_directories(cache,cache_error);
-    config.shaders={python,tools/"vulkan/runtime_vulkan_shader.py",cache,tools/"sr_xenosrecomp.exe",tools/"shader_common.h",tools/"dxc.exe"};
+    config.shaders={python,tools/"vulkan/runtime_vulkan_shader.py",cache,tools/"vulkan/sr_xenosrecomp.exe",tools/"vulkan/shader_common.h",tools/"dxc.exe"};
     config.driver_cache=cache/"driver.cache";
   } else {
     const std::filesystem::path root=SR_VULKAN_PROJECT_ROOT;
@@ -211,6 +211,7 @@ rex::X_STATUS NativeGraphicsSystem::SetupPresentation(rex::ui::WindowedAppContex
     config.driver_cache=root/"build/vulkan-m3-runtime/driver.cache";
   }
   REXLOG_INFO("native Vulkan: shader tools from {} ({})",packaged?tools.string():std::string("source tree"),python.string());
+  config.shaders.library=exe_dir/"superman_returns_vulkan.srvk";
   config.gpu_uuid=rex::cvar::Query<std::string>("sr_native_vulkan_gpu_uuid");
   provider_=graphics::vulkan::CreateNativeVulkanProvider(std::move(config));
 #else
