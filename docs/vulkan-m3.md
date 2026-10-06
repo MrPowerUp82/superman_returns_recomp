@@ -146,6 +146,18 @@ Three CPU costs were removed, each measured with `tools/bench/bench_api.ps1` and
 - `FrameLoop::DrawGame` takes the queue mutex only around retire, recording, submit and present, so a vblank wait no longer blocks the game's submissions.
 - Draw constants (VS, PS, shared: one contiguous 12 KiB block) are bound through `STORAGE_BUFFER_DYNAMIC` descriptors, one set per arena chunk, instead of a descriptor set per draw.
 
+### Cycle 3 final measurements (2026-10-06, same Intel UHD, 1280x720, 30 FPS limit)
+
+| Run (local time) | Idle FPS | Walking FPS | Capture textures / hash (ms) | Record (ms) | Image gate |
+| --- | --- | --- | --- | --- | --- |
+| `c3_final1` (14:42) | 17.4 | 18.4 | 17–19 / 11–13 | 28.5–30.9 | PASS (21.6 dB, histogram 0.057) |
+| `c3_final2` (14:44) | 17.6 | 17.5 | 17–22 / 11–15 | 27.6–31.6 | PASS (21.4 dB, histogram 0.026) |
+| `c3_final_d3d12` (14:47) | 25.5 | 27.5 | n/a | n/a | not requested |
+
+The game was rebuilt at `0c87c6c` before these consecutive Vulkan runs. CPU recording fell from the cycle-3 baseline 49.8–56.1 ms to about 28–32 ms, but **the ≥29 FPS goal failed in both scenarios in both runs**. Resource lifetime, exact texture hashes each frame and backend selection are preserved. The approved second round removed further work from resources/descriptors, targets/pipelines and constants/binds; the hash pool was skipped. Investigation identified replay worker (~40 ms), guest capture including PM4 (22–26 ms) and GPU (32–35 ms) as remaining limits. Further worker/capture/GPU or parallel-recording work needs a new user decision.
+
+Final validation: 93 native and 85 Vulkan unit tests, production bindings contract, resource base, 15 GPU fixtures with pixel checks and the hold-lifetime ownership fixture passed; HUD tests passed. The initial image-gate suite exited 1 because its wildcard classified four local screenshots as accepted positives, including D3D12 and previously rejected camera/window/pose captures; synthetic checks and the two current Vulkan gates passed. Separate commit `d5b866f` replaced the wildcard with an explicit calibrated positive/negative inventory; final rerun passed 43 checks with zero failures/skips (13 synthetic/API/CSV plus 30 real-image checks: 19 positive, 11 negative). No thresholds or historical artifacts were changed. Full conditional `verify_vulkan_m3.ps1` was unavailable because `build/vulkan-main` is absent (local shader corpus exists). Validation layers remain absent. A single D3D12 result within historical scene variation does not establish non-regression. Scene parity and window lifecycle remain separate M3 requirements. The [cycle-3 spec](superpowers/specs/2026-10-06-vulkan-fps-parity-cycle3-design.md#resultado-2026-10-06-ciclo-3) records all task measurements and limitations.
+
 ## Recorded checks
 
 On 2026-10-04, using the RTX 2060, the native suite passed 89 tests, the Vulkan

@@ -110,3 +110,32 @@ Cada passo é um commit próprio: 0 gate de imagem → 1 constantes → 2 posse 
 
 - A fase 1 da gravação leva os ~44 a 63 ms a ≤ 33 ms sozinha? Só depois dos passos 1 a 3.
 - A thread do jogo cabe em ~33 ms depois do hash? Só depois do passo 4.
+
+## Resultado (2026-10-06, ciclo 3)
+
+Medições no i5-13420H + Intel UHD, janela 1280x720, vsync e limite de 30 FPS, New Game com HUD detectado, 20 s parado e 20 s andando. As duas execuções finais consecutivas foram feitas após recompilar a HEAD `0c87c6c`, às 14:42 e 14:44 (horário local). **A meta de média ≥ 29 FPS nas duas situações e nas duas execuções não foi atingida.** Os dois gates finais passaram sem alterar limites.
+
+| Etapa | Parado (FPS) | Andando (FPS) | bindings / descriptors / commands (µs por draw) | textures_ms / hash_ms | record (ms) |
+| --- | --- | --- | --- | --- | --- |
+| Linha de base `c3_base` | 17,6 | 17,0 | 2,74–2,89 / 5,72–6,66 / 1,03–1,16 | 17–24 / 12–17 | 49,8–56,1 |
+| 1 constantes `c3_t1` | 17,6 | 19,4 | 1,97–2,05 / 4,98–5,21 / 1,11–1,18 | 18–20 / 12–14 | 43,4–46,7 |
+| 2 posse `c3_t2` | 17,8 | 19,5 | 2,08–2,13 / 3,91–4,30 / 1,06–1,15 | 20–22 / 13–15 | 40,4–44,2 |
+| 3 filtro `c3_t3` | 17,9 | 18,4 | 2,05–2,16 / 3,86–5,00 / 0,99–1,12 | 19–22 / 13–16 | 44,9–47,9 |
+| 4a AVX2 `c3_t4` | 17,2 | 18,2 | 2,12–2,17 / 3,98–4,15 / 1,08–1,14 | 15–20 / 10–13 | 46,6–47,9 |
+| 4b pool `c3_t5` | não aplicado | não aplicado | — | — | — |
+| 7 recursos/descriptors `c3_t7` | 17,3 | 19,6 | 2,68–2,71 / 2,22–2,82 / 1,52–1,59 | 18–21 / 12–14 | 30,2–35,5 |
+| 8 targets/pipeline `c3_t8` (última tentativa) | 16,6 | 16,8 | 2,67–2,82 / 2,41–2,67 / 1,56–1,61 | 18–20 / 11–12 | 31,9–33,4 |
+| 9 constantes/bind `c3_t9` (gate PASS) | 17,6 | 18,5 | 2,33–2,44 / 2,33–2,93 / 1,50–1,51 | 19–20 / 12–13 | 30,3–33,2 |
+| Final `c3_final1` (14:42) | 17,4 | 18,4 | 2,50–2,59 / 2,24–2,41 / 1,54–1,62 | 17–19 / 11–13 | 28,5–30,9 |
+| Final `c3_final2` (14:44) | 17,6 | 17,5 | 2,38–2,45 / 2,34–3,15 / 1,47–1,58 | 17–22 / 11–15 | 27,6–31,6 |
+| D3D12 `c3_final_d3d12` (14:47) | 25,5 | 27,5 | n/a | n/a | n/a |
+
+Custos: intervalo das três últimas médias de 120 quadros de cada log; µs/draw = ms × 1000 / draws da mesma linha. `textures_ms`/`hash_ms` são os três últimos snapshots de captura, não a média do benchmark. O ganho AVX2 medido isoladamente na Tarefa 4 foi hash 12,5 → 7,9 ms em média; os tails acima incluem variação de cena. Até a Tarefa 4, cada lap interno truncava frações de microssegundo, acumulando milissegundos por quadro; a Tarefa 7 passou a acumular nanossegundos antes de converter o perfil. Não comparar a soma das fases antigas com a nova sem essa ressalva.
+
+Gate final: `c3_final1` PASS (PSNR 21,6 dB, histograma 0,057); `c3_final2` PASS (21,4 dB, 0,026). A verificação mantém PSNR/histograma globais e regiões de HUD/personagem; só detecta corrupção grosseira. Tentativas anteriores tiveram falsos negativos por câmera, posição da janela e pose; não foram usadas como prova de corrupção nem ocultadas. Logs, screenshots, CSV e referência local foram preservados; os nomes finais já existiam de uma sessão anterior, cujos artefatos disponíveis foram copiados para `logs/c3_previous_final_artifacts`, e os resultados atuais são identificados pelo horário no CSV.
+
+O pool da Tarefa 5 não foi implementado: a gravação ainda excedia 33 ms após a Tarefa 4, e o usuário aprovou outra rodada por draw (Tarefas 7–9). Essa rodada trouxe a gravação para aproximadamente 28–32 ms, mas não resolveu o FPS: a investigação apontou replay worker (~40 ms), captura na thread do jogo (22–26 ms com PM4) e GPU (32–35 ms) como próximos limites. Não houve nova otimização nem mudança na exatidão de texturas durante o fechamento. Trabalho em worker/captura/GPU ou gravação paralela exige nova decisão do usuário. O ciclo 2 permanece revertido; seus atalhos de posse e vigilância de texturas não foram retomados.
+
+Verificação final: build da HEAD exit 0; 93 testes nativos e 85 Vulkan sem falhas; contrato `--production-bindings`, recurso base, 15 fixtures de GPU com checagem de pixels e o fixture de posse `hold-lifetime` exit 0; cinco casos de HUD exit 0. A primeira execução de `test_image_gate.ps1` saiu com 1: os testes sintéticos passaram, mas o wildcard tratou quatro screenshots locais como positivos, incluindo D3D12 e tentativas historicamente rejeitadas (`bench_c3_final_d3d12_start.png`, `bench_c3_t4_d3d12_start.png`, `bench_c3_t8_checkaliases_start.png`, `bench_c3_t9_attempt1_start.png`). O commit separado `d5b866f` corrigiu a seleção com inventário explícito de positivos calibrados e negativos históricos, sem alterar limites nem histórico. A execução final passou: 43 checks, zero falhas e zero skips (13 sintéticos/API/CSV + 30 com imagens reais: 19 positivos e 11 negativos). O verify completo condicional não foi executado: `build/vulkan-main` está ausente, embora o corpus local exista (462 binários). As validation layers continuam ausentes; `validation_errors=0` não prova validação por camada. Cenas M3 e ciclo de vida da janela continuam fora deste fechamento.
+
+D3D12 final: 25,5/27,5 FPS, dentro da faixa histórica de cenas (24,5–29,5 parado; 26,4–29,8 andando), mas inferior ao limite de 30 e ao resultado 29,8 da Tarefa 4. Uma execução com câmera variável não comprova ausência de regressão; a medição é inconclusiva nesse critério.
