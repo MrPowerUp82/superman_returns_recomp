@@ -27,6 +27,7 @@ Ficam aqui porque o `build.cmd`, os CMake e o código os chamam por caminho.
 | `bench_api.ps1` | Roda o `bench.ps1` com os argumentos que o launcher passa para uma API (`-Api vulkan` ou `d3d12`); `-Profile` liga o perfil do Vulkan. É o ponto de partida. |
 | `bench.ps1` | Inicia o jogo, começa um jogo novo e mede o FPS parado e andando. Só mede com o HUD de gameplay visível. Linhas em `logs/bench_results.csv`. |
 | `bench_hud.ps1` | Detecção do HUD (duas barras finas, azul e vermelha) usada pelo `bench.ps1`; teste em `tests/tools/test_bench_hud.ps1`. |
+| `image_gate.ps1`, `image_gate_lib.ps1` | Gate de imagem: compara o screenshot do instante em que o HUD é detectado (`logs/bench_<Nome>_start.png`) com a referência local `artifacts/golden/start.png` por PSNR e distância de histograma. `bench_api.ps1 -Gate record` grava a referência numa build boa; `-Gate check` compara. Pega corrupção grosseira, não diferenças de poucos pixels. Teste em `tests/tools/test_image_gate.ps1`. |
 | `vulkan_profile_summary.ps1` | Resume um log gravado com `SR_VULKAN_PROFILE=1`: custo por estágio da gravação e da captura de texturas. |
 | `post_effects_check.ps1`, `post_effects_trace.py` | Teste A/B do `sr_post_effects` (bloom e raios de luz). |
 | `render_scale_check.ps1` | Compara 100, 75 e 50% de resolução interna. |

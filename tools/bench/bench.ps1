@@ -116,6 +116,18 @@ function Has-Gameplay-Frame($proc) {
   }
 }
 
+# Saves the game window's client area as PNG (the image gate compares it with a reference).
+function Save-GameRegion($proc, $path) {
+  $region = Game-Region $proc
+  $bmp = New-Object System.Drawing.Bitmap $region.Width, $region.Height
+  try {
+    $gfx = [System.Drawing.Graphics]::FromImage($bmp)
+    try { $gfx.CopyFromScreen($region.Location, [System.Drawing.Point]::Empty, $region.Size) }
+    finally { $gfx.Dispose() }
+    $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+  } finally { $bmp.Dispose() }
+}
+
 # Throws (leaving a screenshot) unless the HUD is seen in one of up to 4 samples, one
 # second apart (a single sample can miss it on D3D12), so a run on a menu or the
 # title screen cannot go unnoticed.
@@ -234,6 +246,8 @@ try {
     Start-Sleep 2
   }
   Step "visible frame detected"
+  # Initial camera and pose: the one scene that does not vary between runs (the image gate compares it).
+  Save-GameRegion $proc "$root\logs\bench_${Name}_start.png"
   Start-Sleep 5
 
   # The wait loop above detected the HUD seconds ago, so it is not checked again

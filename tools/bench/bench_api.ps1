@@ -2,15 +2,17 @@
 Roda tools\bench\bench.ps1 com os argumentos que o launcher passa para a API escolhida (janela 1280x720,
 limite de 30 FPS, opções de melhoria no padrão do jogo). O resultado vai para logs\bench_results.csv.
 
-Uso: tools\bench\bench_api.ps1 -Api vulkan|d3d12 -Name <rótulo> [-Profile] [-Exe <caminho>]
+Uso: tools\bench\bench_api.ps1 -Api vulkan|d3d12 -Name <rótulo> [-Profile] [-Gate record|check] [-Exe <caminho>]
   -Profile liga SR_VULKAN_PROFILE=1 e copia o log do jogo para logs\bench_<Name>.log.
+  -Gate    record grava a referência de imagem (build boa); check compara e falha se a imagem divergir (tools\bench\image_gate.ps1).
   -Exe     padrão: port\out\build\win-amd64-dist\superman_returns.exe
 #>
 param(
   [Parameter(Mandatory)] [ValidateSet('vulkan', 'd3d12')] [string]$Api,
   [Parameter(Mandatory)] [string]$Name,
   [string]$Exe = '',
-  [switch]$Profile
+  [switch]$Profile,
+  [ValidateSet('', 'record', 'check')] [string]$Gate = ''
 )
 $ErrorActionPreference = 'Stop'
 $root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
@@ -27,6 +29,7 @@ try {
   if ($Profile) { $env:SR_VULKAN_PROFILE = '1' }
   & "$PSScriptRoot\bench.ps1" -Name $Name -Exe $Exe -ExtraArgs $gameArgs -TitleTimeout 180 -WorldTimeout 200
   if ($Profile) { Copy-Item "$root\logs\game.log" "$root\logs\bench_$Name.log" -Force }
+  if ($Gate) { & "$PSScriptRoot\image_gate.ps1" -Name $Name -Mode $Gate }
 } finally {
   if ($null -ne $prevProfile) { $env:SR_VULKAN_PROFILE = $prevProfile } else { Remove-Item env:SR_VULKAN_PROFILE -ErrorAction SilentlyContinue }
 }
