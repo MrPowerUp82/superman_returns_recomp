@@ -181,6 +181,7 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
             ${SR_NATIVE_ROOT}/shader_translator.cpp
             ${SR_NATIVE_ROOT}/pipeline_cache.cpp
             ${SR_NATIVE_ROOT}/hang_watchdog.cpp
+            ${SR_NATIVE_ROOT}/xxh3_avx2.cpp
         )
         set(SR_NATIVE_DEFINITIONS SR_HAS_NATIVE=1)
         if(SR_NATIVE STREQUAL "RENDERER")
@@ -198,6 +199,9 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
         if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
             target_compile_options(sr_native PRIVATE -Wno-unused-variable -mssse3 -msse4.1)
         endif()
+        # The only file built with AVX2: selected at run time (cpu_features.h), never called without it.
+        set_source_files_properties(${SR_NATIVE_ROOT}/xxh3_avx2.cpp PROPERTIES
+            COMPILE_OPTIONS "$<IF:$<CXX_COMPILER_ID:MSVC>,/arch:AVX2,-mavx2>")
         target_link_libraries(sr_native PRIVATE rex::runtime rex::xxhash)
         if(SR_VULKAN_GAME)
             target_sources(sr_native PRIVATE src/graphics/vulkan/platform/native_provider.cpp src/graphics/vulkan/platform/shader_process.cpp)

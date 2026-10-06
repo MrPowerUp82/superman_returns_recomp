@@ -7,6 +7,8 @@
 #include "native_renderer.h"
 #include "checked_guest_memory.h"
 #include "guest_hash.h"
+#include "cpu_features.h"
+#include "xxh3_avx2.h"
 #include "../graphics/guest/render_state.h"
 #include "../graphics/guest/edram_alias.h"
 #include "../graphics/guest/render_packet.h"
@@ -314,6 +316,18 @@ const uint8_t* GuestSource(uint8_t* base, uint32_t address, uint32_t length) {
     return REX_KERNEL_MEMORY()->TranslatePhysical<const uint8_t*>(physical);
   }
   return base+address;
+}
+uint64_t Xxh3Baseline(const void* data,size_t size,uint64_t seed) {return uint64_t(XXH3_64bits_withSeed(data,size,seed));}
+using Xxh3Fn=uint64_t(*)(const void*,size_t,uint64_t);
+// The texture hash: the same XXH3 value either way, the AVX2 build when the CPU has it. Chosen once, on the first
+// call (the guest thread, before any helper thread exists); SR_NATIVE_HASH_NO_AVX2=1 forces the baseline (A/B).
+Xxh3Fn TextureHash() {
+  static const Xxh3Fn fn=[]() -> Xxh3Fn {
+    const char* off=std::getenv("SR_NATIVE_HASH_NO_AVX2");
+    const bool avx2=superman_returns::native::Avx2Available() && !(off && off[0] && off[0]!='0');
+    return avx2?&superman_returns::native::Xxh3Avx2:&Xxh3Baseline;
+  }();
+  return fn;
 }
 std::span<const uint8_t> ReadCommittedGuest(uint8_t* base, uint32_t address, uint32_t length) {
   ++capture_timings.reads;capture_timings.bytes+=length;
@@ -6016,7 +6030,7 @@ void Renderer::CaptureTextures(uint8_t* base) {
         ++capture_timings.reads;capture_timings.bytes+=range.length;
         started=std::chrono::steady_clock::now();
         const bool hashed=HashGuestRange(GuestSource(base,0xa0000000u+range.address,range.length),range.length,hash,
-            [](const void* data,size_t size,uint64_t seed) {return uint64_t(XXH3_64bits_withSeed(data,size,seed));},hash);
+            TextureHash(),hash);
         capture_timings.hash_us+=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-started).count();
         if(!hashed) {error="Texture memory is not readable";break;}
       }
@@ -6040,7 +6054,7 @@ void Renderer::CaptureTextures(uint8_t* base) {
         hash=0xcbf29ce484222325ull;
         for(const auto& range:entry.snapshot->ranges) {
           auto bytes=entry.snapshot->memory.Read(0xa0000000u+range.address,range.length);
-          hash=XXH3_64bits_withSeed(bytes.data(),bytes.size(),hash);
+          hash=TextureHash()(bytes.data(),bytes.size(),hash);
         }
         entry.content_hash=hash;
         capture_timings.copy_us+=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-started).count();

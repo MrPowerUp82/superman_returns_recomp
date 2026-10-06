@@ -43,5 +43,18 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(sr_native_tests PRIVATE -Wall -Wextra)
 endif()
 
+# XXH3 compiled with AVX2 (the only file built with -mavx2) against the baseline build. Needs the SDK's xxhash.h
+# (.tools/rexglue-sdk); without it these tests are left out.
+set(SR_XXHASH_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../../.tools/rexglue-sdk/win-amd64/include")
+if(WIN32 AND EXISTS "${SR_XXHASH_INCLUDE}/xxhash.h")
+    target_sources(sr_native_tests PRIVATE test_xxh3_avx2.cpp xxh3_reference.cpp "${SR_NATIVE_DIR}/xxh3_avx2.cpp")
+    set_source_files_properties("${SR_NATIVE_DIR}/xxh3_avx2.cpp" PROPERTIES
+        COMPILE_OPTIONS "$<IF:$<CXX_COMPILER_ID:MSVC>,/arch:AVX2,-mavx2>")
+    set_source_files_properties(xxh3_reference.cpp "${SR_NATIVE_DIR}/xxh3_avx2.cpp" PROPERTIES
+        INCLUDE_DIRECTORIES "${SR_XXHASH_INCLUDE}")
+else()
+    message(STATUS "xxhash.h not found: the AVX2 XXH3 tests are left out")
+endif()
+
 enable_testing()
 add_test(NAME sr_native_tests COMMAND sr_native_tests)
