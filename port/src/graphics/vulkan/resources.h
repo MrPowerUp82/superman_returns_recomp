@@ -10,9 +10,16 @@ class ImageState;
 class SubmissionResources {
 public:
   void Keep(uint64_t serial,std::shared_ptr<void> resource);
+  // Keeps a resource for the submission once: `held_serial` says it is already in that submission's list.
+  // Invariant: everything a recorded command refers to is held before the command is recorded.
+  template<class T> void Hold(uint64_t serial,const std::shared_ptr<T>& resource) {
+    if(!resource || resource->held_serial==serial) return;
+    resource->held_serial=serial;Keep(serial,resource);
+  }
   void Retire(uint64_t completed_serial);
 private:
   std::map<uint64_t,std::vector<std::shared_ptr<void>>> pending_;
+  std::vector<std::vector<std::shared_ptr<void>>> spare_;  // emptied lists keep their capacity for the next submission
 };
 struct TextureUploadPlan {
   VkFormat format=VK_FORMAT_UNDEFINED;
@@ -37,6 +44,7 @@ struct BufferResource {
   VkDeviceMemory memory=VK_NULL_HANDLE;
   VkDeviceSize size=0,allocation=0,offset=0;
   uint64_t version=0;
+  uint64_t held_serial=0;  // submission whose list already holds this resource (SubmissionResources::Hold)
   bool coherent=false;
   void* mapped=nullptr;  // persistent mapping of host-visible allocations
   ~BufferResource();
@@ -60,6 +68,7 @@ struct TextureResource {
   uint32_t layers=1,mips=1;
   VkImageViewType view_type=VK_IMAGE_VIEW_TYPE_2D;
   uint64_t version=0;VkDeviceSize allocation=0;
+  uint64_t held_serial=0;  // see BufferResource::held_serial
   ~TextureResource();
 };
 // Context must outlive the store and any resources retained by descriptor sets.
@@ -100,6 +109,8 @@ public:
   bool CreateDummies(Error&);
   bool UploadHostBuffer(guest::ResourceId,std::span<const std::byte>,uint64_t version,Error&);
   uint64_t CurrentSerial() const {return serial_;}
+  // Keeps a buffer or texture alive until the current submission retires (once per submission).
+  template<class T> void Hold(const std::shared_ptr<T>& resource) {submissions_.Hold(serial_,resource);}
   // Bytes staged for buffer/texture uploads in the current submission.
   VkDeviceSize SubmissionBytes() const {return submission_bytes_;}
   void ForgetBuffer(guest::ResourceId id) {buffers_.erase(id);}

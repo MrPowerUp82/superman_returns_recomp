@@ -31,9 +31,9 @@ bool ImmediateRenderer::Draw(VkCommandBuffer command,const TargetPass& pass,Reso
   std::memcpy(constants.data+kSharedConstantsOffset,&options,sizeof(options));
   if(input.texture) {bindings.textures[0][0]=input.texture;bindings.texture_indices[0]=0;}
   uint32_t clamp=input.repeated?0:2;draw.texture_fetch[0][0]=(clamp<<10)|(clamp<<13)|(clamp<<16);draw.texture_fetch[0][3]=input.linear?((1u<<19)|(1u<<21)):0;
-  auto descriptor=descriptors_.Prepare(bindings,draw.texture_fetch,resources,resources.CurrentSerial(),constants,e);if(!descriptor) return false;
+  DescriptorDraw descriptor;if(!descriptors_.Prepare(bindings,draw.texture_fetch,resources,resources.CurrentSerial(),constants,descriptor,e)) return false;
   auto pipeline=pipelines_.Acquire(draw,pass,vertex_,&pixel_,resources.CurrentSerial(),e);if(!pipeline) return false;
-  c_.f.vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline->handle);c_.f.vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelines_.Layout(),0,4,descriptor->sets.data(),uint32_t(descriptor->dynamic_offsets.size()),descriptor->dynamic_offsets.data());
+  c_.f.vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline->handle);c_.f.vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelines_.Layout(),0,4,descriptor.sets.data(),uint32_t(descriptor.dynamic_offsets.size()),descriptor.dynamic_offsets.data());
   VkViewport viewport{0,0,float(pass.extent.width),float(pass.extent.height),0,1};c_.f.vkCmdSetViewport(command,0,1,&viewport);c_.f.vkCmdSetScissor(command,0,1,&input.scissor);float blend[4]{};c_.f.vkCmdSetBlendConstants(command,blend);c_.f.vkCmdSetStencilReference(command,VK_STENCIL_FACE_FRONT_AND_BACK,0);
   VkDeviceSize offset=0;c_.f.vkCmdBindVertexBuffers(command,0,1,&vertices_->handle,&offset);
   if(indices_) {c_.f.vkCmdBindIndexBuffer(command,indices_->handle,0,VK_INDEX_TYPE_UINT16);c_.f.vkCmdDrawIndexed(command,input.count,1,input.first,input.base_vertex,0);}else c_.f.vkCmdDraw(command,input.count,1,input.first,0);

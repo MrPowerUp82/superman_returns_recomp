@@ -12,6 +12,21 @@ SR_TEST(submission_resources_retire_only_completed_versions) {
   submissions.Retire(4);SR_CHECK(old_view.expired());SR_CHECK(!current_view.expired());
   submissions.Retire(7);SR_CHECK(current_view.expired());
 }
+SR_TEST(submission_resources_hold_keeps_a_resource_once_per_serial_and_until_retire) {
+  SubmissionResources submissions;
+  auto buffer=std::make_shared<BufferResource>();std::weak_ptr<BufferResource> view=buffer;
+  submissions.Hold(4,buffer);submissions.Hold(4,buffer);submissions.Hold(4,buffer);
+  SR_CHECK_EQ(buffer.use_count(),2);          // the caller's reference and one entry of submission 4
+  submissions.Hold(7,buffer);
+  SR_CHECK_EQ(buffer.use_count(),3);          // a later submission holds it again
+  buffer.reset();                              // the store replaced the resource: only the lists keep it
+  submissions.Retire(4);SR_CHECK(!view.expired());
+  submissions.Retire(7);SR_CHECK(view.expired());
+  // Lists are reused: later submissions still work and release their resources.
+  auto next=std::make_shared<BufferResource>();std::weak_ptr<BufferResource> next_view=next;
+  submissions.Hold(9,next);next.reset();SR_CHECK(!next_view.expired());
+  submissions.Retire(9);SR_CHECK(next_view.expired());
+}
 SR_TEST(texture_upload_plan_keeps_cube_faces_and_volume_slices) {
   superman_returns::graphics::guest::LinearTexture t;
   t.width=2;t.height=2;t.depth=6;t.dimension=3;t.format=superman_returns::graphics::guest::LinearFormat::kRGBA8Unorm;

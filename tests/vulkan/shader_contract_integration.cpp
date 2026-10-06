@@ -643,10 +643,10 @@ int Run(const std::filesystem::path &shaders_dir, const std::string &uuid,
           if(!resources.UploadTexture(TextureResourceId(packet.texture_fetch[7]),linear,1,e)) throw std::runtime_error(e.operation+": "+e.message);
           TransientSlice constants;if(!resources.MapTransient(sizeof(guest::ConstantSnapshot),constants,e)) throw std::runtime_error(e.operation+": "+e.message);
           DrawBindings bindings;if(!BuildBindings(packet,constants.data,bindings,e)) throw std::runtime_error(e.message);
-          auto sets=descriptors.Prepare(bindings,packet.texture_fetch,resources,uint64_t(variant)+1,constants,e);
-          if(!sets) throw std::runtime_error(e.operation+": "+e.message);
-          fixture.sets=sets->sets;
-          fixture.dynamic_offsets=sets->dynamic_offsets;fixture.dynamic_count=uint32_t(sets->dynamic_offsets.size());
+          DescriptorDraw sets;
+          if(!descriptors.Prepare(bindings,packet.texture_fetch,resources,uint64_t(variant)+1,constants,sets,e)) throw std::runtime_error(e.operation+": "+e.message);
+          fixture.sets=sets.sets;
+          fixture.dynamic_offsets=sets.dynamic_offsets;fixture.dynamic_count=uint32_t(sets.dynamic_offsets.size());
         }):std::function<void()>{});
     if(production) {descriptors.Retire(uint64_t(variant)+1);resources.Retire(uint64_t(variant)+1);}
     std::array<uint8_t, 4> color =

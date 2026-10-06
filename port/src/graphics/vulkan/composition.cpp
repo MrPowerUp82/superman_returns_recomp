@@ -34,13 +34,13 @@ std::shared_ptr<CompositionDraw> FrontbufferCompositor::Prepare(VkCommandBuffer 
   std::memcpy(shared+1024,options,sizeof(options));
   // Linear clamp to edge prevents filtering beyond the frontbuffer at borders.
   draw.texture_fetch[0][0]=(2u<<10)|(2u<<13)|(2u<<16);draw.texture_fetch[0][3]=(1u<<19)|(1u<<21);
-  result->descriptors=descriptors_.Prepare(bindings,draw.texture_fetch,resources,resources.CurrentSerial(),constants,e);if(!result->descriptors) return {};
+  if(!descriptors_.Prepare(bindings,draw.texture_fetch,resources,resources.CurrentSerial(),constants,result->descriptors,e)) return {};
   result->pipeline=pipelines_.Acquire(draw,pass,vertex_,&pixel_,resources.CurrentSerial(),e);if(!result->pipeline) return {};
   e={};return result;
 }
 void FrontbufferCompositor::Record(VkCommandBuffer command,const CompositionDraw& draw) {
   c_.f.vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_GRAPHICS,draw.pipeline->handle);
-  c_.f.vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelines_.Layout(),0,4,draw.descriptors->sets.data(),uint32_t(draw.descriptors->dynamic_offsets.size()),draw.descriptors->dynamic_offsets.data());
+  c_.f.vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelines_.Layout(),0,4,draw.descriptors.sets.data(),uint32_t(draw.descriptors.dynamic_offsets.size()),draw.descriptors.dynamic_offsets.data());
   auto& box=draw.rectangle;VkViewport viewport{float(box.offset.x),float(box.offset.y),float(box.extent.width),float(box.extent.height),0,1};
   c_.f.vkCmdSetViewport(command,0,1,&viewport);c_.f.vkCmdSetScissor(command,0,1,&box);float blend[4]{};c_.f.vkCmdSetBlendConstants(command,blend);c_.f.vkCmdSetStencilReference(command,VK_STENCIL_FACE_FRONT_AND_BACK,0);c_.f.vkCmdDraw(command,3,1,0,0);
 }

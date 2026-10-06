@@ -6,10 +6,22 @@
 #include <numeric>
 namespace superman_returns::graphics::vulkan {
 void SubmissionResources::Keep(uint64_t serial,std::shared_ptr<void> resource) {
-  if(resource) pending_[serial].push_back(std::move(resource));
+  if(!resource) return;
+  auto found=pending_.find(serial);
+  if(found==pending_.end()) {
+    std::vector<std::shared_ptr<void>> list;
+    if(!spare_.empty()) {list=std::move(spare_.back());spare_.pop_back();}
+    found=pending_.emplace(serial,std::move(list)).first;
+  }
+  found->second.push_back(std::move(resource));
 }
 void SubmissionResources::Retire(uint64_t completed) {
-  pending_.erase(pending_.begin(),pending_.upper_bound(completed));
+  auto end=pending_.upper_bound(completed);
+  for(auto it=pending_.begin();it!=end;++it) {
+    auto list=std::move(it->second);list.clear();  // releases the resources
+    if(spare_.size()<8) spare_.push_back(std::move(list));
+  }
+  pending_.erase(pending_.begin(),end);
 }
 namespace {
 struct Format {VkFormat vk;uint32_t block,bytes,source_bytes;};
@@ -228,7 +240,7 @@ bool ResourceStore::UploadBuffer(guest::ResourceId id,std::span<const std::byte>
   if(!Ready(e)) return false;
   if(!id || bytes.empty() || bytes.size()>c_.properties.limits.maxStorageBufferRange) return Fail(e,"Upload buffer","Invalid buffer ID or storage range");
   auto found=buffers_.find(id);
-  if(found!=buffers_.end() && found->second->version==version) {submissions_.Keep(serial_,found->second);e={};return true;}
+  if(found!=buffers_.end() && found->second->version==version) {submissions_.Hold(serial_,found->second);e={};return true;}
   if(found!=buffers_.end() && version<found->second->version) return Fail(e,"Upload buffer","Stale buffer version");
   auto staging_alignment=std::lcm<VkDeviceSize>(16,std::max<VkDeviceSize>(1,c_.properties.limits.nonCoherentAtomSize));
   auto upload=Suballocate(staging_,bytes.size(),staging_alignment,e);
@@ -237,18 +249,18 @@ bool ResourceStore::UploadBuffer(guest::ResourceId id,std::span<const std::byte>
   if(!gpu) return false;
   gpu->version=version;
   VkBufferCopy copy{upload->offset,0,bytes.size()};c_.f.vkCmdCopyBuffer(upload_?upload_:command_,upload->handle,gpu->handle,1,&copy);
-  if(upload_) {upload_barrier_=true;submissions_.Keep(serial_,gpu);buffers_[id]=std::move(gpu);e={};return true;}
+  if(upload_) {upload_barrier_=true;submissions_.Hold(serial_,gpu);buffers_[id]=std::move(gpu);e={};return true;}
   VkBufferMemoryBarrier barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
   barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT|VK_ACCESS_INDEX_READ_BIT;
   barrier.srcQueueFamilyIndex=barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;barrier.buffer=gpu->handle;barrier.size=VK_WHOLE_SIZE;
   c_.f.vkCmdPipelineBarrier(command_,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_VERTEX_SHADER_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,0,0,nullptr,1,&barrier,0,nullptr);
-  submissions_.Keep(serial_,upload);submissions_.Keep(serial_,gpu);buffers_[id]=std::move(gpu);e={};return true;
+  submissions_.Hold(serial_,upload);submissions_.Hold(serial_,gpu);buffers_[id]=std::move(gpu);e={};return true;
 }
 bool ResourceStore::UploadTexture(guest::ResourceId id,const guest::LinearTexture& texture,uint64_t version,Error& e) {
   if(!Ready(e)) return false;
   if(!id) return Fail(e,"Upload texture","Missing resource ID");
   auto found=textures_.find(id);
-  if(found!=textures_.end() && found->second->version==version) {submissions_.Keep(serial_,found->second);e={};return true;}
+  if(found!=textures_.end() && found->second->version==version) {submissions_.Hold(serial_,found->second);e={};return true;}
   if(found!=textures_.end() && version<found->second->version) return Fail(e,"Upload texture","Stale texture version");
   TextureUploadPlan plan;
   if(!PlanTextureUpload(texture,c_.properties.limits.optimalBufferCopyOffsetAlignment,plan,e)) return false;
@@ -282,7 +294,7 @@ bool ResourceStore::UploadTexture(guest::ResourceId id,const guest::LinearTextur
   barrier.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;barrier.newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_SHADER_READ_BIT;
   if(upload_) texture_barriers_.push_back(barrier);
   else c_.f.vkCmdPipelineBarrier(command_,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_VERTEX_SHADER_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,0,0,nullptr,0,nullptr,1,&barrier);
-  submissions_.Keep(serial_,upload);submissions_.Keep(serial_,gpu);textures_[id]=std::move(gpu);e={};return true;
+  submissions_.Hold(serial_,upload);submissions_.Hold(serial_,gpu);textures_[id]=std::move(gpu);e={};return true;
 }
 std::shared_ptr<TextureResource> ResourceStore::ResolveTexture(guest::ResourceId id,VkFormat format,VkExtent3D extent,uint32_t mips,uint32_t layers,bool cube,ImageState& state,Error& e) {
   if(!Ready(e)) return {};
@@ -293,7 +305,7 @@ std::shared_ptr<TextureResource> ResourceStore::ResolveTexture(guest::ResourceId
   auto old=textures_.find(id);
   if(old!=textures_.end()) {
     auto t=old->second;
-    if(t->state==&state && t->format==format && t->extent.width==extent.width && t->extent.height==extent.height && t->mips==mips && t->layers==layers && t->view_type==view_type) {submissions_.Keep(serial_,t);e={};return t;}
+    if(t->state==&state && t->format==format && t->extent.width==extent.width && t->extent.height==extent.height && t->mips==mips && t->layers==layers && t->view_type==view_type) {submissions_.Hold(serial_,t);e={};return t;}
   }
   auto flags=cube?VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT:0u;
   constexpr VkImageUsageFlags usage=VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -316,7 +328,7 @@ std::shared_ptr<TextureResource> ResourceStore::ResolveTexture(guest::ResourceId
   if(!state.Transition(command_,t->handle,allocation_range,ImageUsage::TransferDestination(),e)) return {};
   VkClearColorValue zero{};c_.f.vkCmdClearColorImage(command_,t->handle,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,&zero,1,&allocation_range);
   if(!state.Transition(command_,t->handle,allocation_range,ImageUsage::Sampled(),e)) return {};
-  submissions_.Keep(serial_,t);textures_[id]=t;e={};return t;
+  submissions_.Hold(serial_,t);textures_[id]=t;e={};return t;
 }
 bool ResourceStore::BindTextureView(guest::ResourceId id,std::shared_ptr<TextureResource> owner,VkComponentMapping mapping,Error& e) {
   if(!Ready(e)) return false;
@@ -326,13 +338,13 @@ bool ResourceStore::BindTextureView(guest::ResourceId id,std::shared_ptr<Texture
   auto t=std::make_shared<TextureResource>();t->context=&c_;t->image_owner=owner;t->handle=owner->handle;t->state=owner->state;t->format=owner->format;t->extent=owner->extent;t->layers=owner->layers;t->mips=owner->mips;t->view_type=owner->view_type;
   VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};view.image=t->handle;view.viewType=t->view_type;view.format=t->format;view.components=mapping;view.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,t->mips,0,t->view_type==VK_IMAGE_VIEW_TYPE_2D?1:t->layers};
   if(!Check(c_.f.vkCreateImageView(c_.device,&view,nullptr,&t->view),"Resolved fetch view",e)) return false;
-  submissions_.Keep(serial_,t);textures_[id]=t;e={};return true;
+  submissions_.Hold(serial_,t);textures_[id]=t;e={};return true;
 }
 std::shared_ptr<BufferResource> ResourceStore::ResolveScratch(VkDeviceSize size,Error& e) {
   if(!Ready(e)) return {};
   if(!size || size>c_.properties.limits.maxStorageBufferRange) {Fail(e,"Resolve scratch","Invalid storage buffer size");return {};}
   auto buffer=NewBuffer(size,VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,e);
-  if(buffer) {submissions_.Keep(serial_,buffer);e={};}return buffer;
+  if(buffer) {submissions_.Hold(serial_,buffer);e={};}return buffer;
 }
 bool ResourceStore::UploadHostBuffer(guest::ResourceId id,std::span<const std::byte> bytes,uint64_t version,Error& e) {
   if(!Ready(e)) return false;
@@ -353,12 +365,12 @@ bool ResourceStore::UploadHostBuffer(guest::ResourceId id,std::span<const std::b
     }
   }
   if(!buffer || !Write(buffer,bytes,e)) return false;
-  buffer->version=version;submissions_.Keep(serial_,buffer);buffers_[id]=std::move(buffer);e={};return true;
+  buffer->version=version;submissions_.Hold(serial_,buffer);buffers_[id]=std::move(buffer);e={};return true;
 }
 std::shared_ptr<BufferResource> ResourceStore::ReadbackBuffer(VkDeviceSize size,Error& e) {
   if(!Ready(e)) return {};
   if(!size || size>256*1024*1024) {Fail(e,"Readback buffer","Image readback size exceeds limit");return {};}
-  auto buffer=NewBuffer(size,VK_BUFFER_USAGE_TRANSFER_DST_BIT,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,e);if(buffer) submissions_.Keep(serial_,buffer);return buffer;
+  auto buffer=NewBuffer(size,VK_BUFFER_USAGE_TRANSFER_DST_BIT,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,e);if(buffer) submissions_.Hold(serial_,buffer);return buffer;
 }
 bool ResourceStore::Readback(const std::shared_ptr<BufferResource>& buffer,std::vector<uint8_t>& bytes,Error& e) {
   if(!buffer || buffer->context!=&c_) return Fail(e,"Readback buffer","Buffer is absent or belongs to another device");
@@ -370,13 +382,13 @@ std::shared_ptr<BufferResource> ResourceStore::Buffer(guest::ResourceId id,Error
   if(!Ready(e)) return {};
   auto found=buffers_.find(id);
   if(found==buffers_.end()) {Fail(e,"Buffer binding","Buffer has no captured upload");return {};}
-  submissions_.Keep(serial_,found->second);e={};return found->second;
+  submissions_.Hold(serial_,found->second);e={};return found->second;
 }
 std::shared_ptr<TextureResource> ResourceStore::Texture(guest::ResourceId id,Error& e) {
   if(!Ready(e)) return {};
   auto found=textures_.find(id);
   if(found==textures_.end()) {Fail(e,"Texture binding","Texture has no upload or resolve");return {};}
-  submissions_.Keep(serial_,found->second);e={};return found->second;
+  submissions_.Hold(serial_,found->second);e={};return found->second;
 }
 bool ResourceStore::CreateDummies(Error& e) {
   std::array<std::byte,16> zero{};

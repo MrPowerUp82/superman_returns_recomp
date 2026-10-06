@@ -2,6 +2,7 @@
 #include "device_requirements.h"
 #include <algorithm>
 #include <cstddef>
+#include <cstring>
 namespace superman_returns::graphics::vulkan {
 DescriptorPage::~DescriptorPage() {if(pool) context->f.vkDestroyDescriptorPool(context->device,pool,nullptr);}
 DescriptorCacheEntry::~DescriptorCacheEntry() {
@@ -44,12 +45,13 @@ std::shared_ptr<SamplerResource> DescriptorStore::Sampler(std::span<const uint32
   if(!Check(c_.f.vkCreateSampler(c_.device,&info,nullptr,&sampler->handle),"Create game sampler",e)) return {};
   samplers_.emplace(key,sampler);return sampler;
 }
-std::shared_ptr<DescriptorCacheEntry> DescriptorStore::Shared(const DrawBindings& bindings,
-    const std::array<std::array<uint32_t,6>,32>& fetch,ResourceStore& store,uint64_t serial,std::vector<std::shared_ptr<void>>& bound,Error& e) {
-  // Key: identity of every bound resource plus the sampler/filter state that
-  // decides which sampler and which format checks apply. Consecutive slots
-  // mostly bind the same dummy IDs, so repeated lookups are memoized.
-  std::vector<uint64_t> key;key.reserve(32*7);
+DescriptorCacheEntry* DescriptorStore::Shared(const DrawBindings& bindings,
+    const std::array<std::array<uint32_t,6>,32>& fetch,ResourceStore& store,uint64_t serial,Error& e) {
+  // Key: identity of every bound resource plus the sampler/filter state that decides which sampler and which
+  // format checks apply. Built in a fixed array together with its hash, so a hit allocates nothing.
+  // Consecutive slots mostly bind the same dummy IDs, so repeated lookups are memoized.
+  std::array<uint64_t,6*32> key;uint32_t words=0;uint64_t hash=14695981039346656037ull;
+  auto push=[&](uint64_t value) {key[words++]=value;hash^=value;hash*=1099511628211ull;};
   guest::ResourceId last_buffer=~0ull,last_texture=~0ull;const void* buffer_ptr=nullptr;const void* texture_ptr=nullptr;
   auto texture_key=[&](guest::ResourceId id) -> const void* {
     if(id!=last_texture) {auto* t=store.FindTexture(id);texture_ptr=t?t->get():nullptr;last_texture=id;}
@@ -60,58 +62,68 @@ std::shared_ptr<DescriptorCacheEntry> DescriptorStore::Shared(const DrawBindings
   bool complete=true,cacheable=true;
   for(uint32_t slot=0;slot<32;++slot) {
     if(bindings.vertex_buffers[slot]!=last_buffer) {auto* b=store.FindBuffer(bindings.vertex_buffers[slot]);buffer_ptr=b?b->get():nullptr;last_buffer=bindings.vertex_buffers[slot];if(b && (*b)->owner) cacheable=false;}
-    key.push_back(uint64_t(reinterpret_cast<uintptr_t>(buffer_ptr)));complete&=buffer_ptr!=nullptr;
-    for(uint32_t dimension=0;dimension<3;++dimension) {auto* t=texture_key(bindings.textures[dimension][slot]);key.push_back(uint64_t(reinterpret_cast<uintptr_t>(t)));complete&=t!=nullptr;}
+    push(uint64_t(reinterpret_cast<uintptr_t>(buffer_ptr)));complete&=buffer_ptr!=nullptr;
+    for(uint32_t dimension=0;dimension<3;++dimension) {auto* t=texture_key(bindings.textures[dimension][slot]);push(uint64_t(reinterpret_cast<uintptr_t>(t)));complete&=t!=nullptr;}
     // Only the sampler/filter bits of texture slots matter. Other slots hold
     // vertex fetch constants whose addresses change every frame.
     if((fetch[slot][0]&3)==2) {
-      key.push_back((uint64_t(fetch[slot][0]&0x7fc00u)<<32)|(fetch[slot][3]&0xff80000u));
-      key.push_back((uint64_t(1)<<63)|(uint64_t((fetch[slot][5]>>9)&3)<<32)|bindings.texture_indices[slot]);
-    } else key.push_back(bindings.texture_indices[slot]);
+      push((uint64_t(fetch[slot][0]&0x7fc00u)<<32)|(fetch[slot][3]&0xff80000u));
+      push((uint64_t(1)<<63)|(uint64_t((fetch[slot][5]>>9)&3)<<32)|bindings.texture_indices[slot]);
+    } else push(bindings.texture_indices[slot]);
   }
-  uint64_t hash=14695981039346656037ull;for(auto v:key) {hash^=v;hash*=1099511628211ull;}
   if(complete && cacheable) if(auto found=cache_.find(hash);found!=cache_.end()) {
     auto& list=found->second;
-    for(auto it=list.begin();it!=list.end();++it) if((*it)->key==key) {
-      auto entry=*it;bound.clear();
-      for(auto& weak:entry->watched) {auto strong=weak.lock();if(!strong) {bound.clear();break;}bound.push_back(std::move(strong));}
-      if(bound.size()!=entry->watched.size()) {list.erase(it);--cache_entries_;break;}  // a resource died: rebuild
-      entry->last_used=serial;++cache_stats_.hits;e={};return entry;
+    for(auto it=list.begin();it!=list.end();++it) {
+      auto& entry=*it;
+      if(entry->key.size()!=words || std::memcmp(entry->key.data(),key.data(),words*sizeof(uint64_t))!=0) continue;
+      if(entry->held_serial!=serial) {
+        // First use in this submission: every resource must still be alive (a dead one means the key's addresses
+        // may have been reused). Hold them and the entry until the submission retires; later draws skip this.
+        bool alive=true;
+        for(auto& weak:entry->buffers) {auto strong=weak.lock();if(!strong) {alive=false;break;}store.Hold(strong);}
+        if(alive) for(auto& weak:entry->textures) {auto strong=weak.lock();if(!strong) {alive=false;break;}store.Hold(strong);}
+        if(!alive) {list.erase(it);--cache_entries_;break;}  // a resource died: rebuild
+        pending_.Hold(serial,entry);
+      }
+      entry->last_used=serial;++cache_stats_.hits;e={};return entry.get();
     }
   }
-  ++cache_stats_.misses;bound.clear();
-  // Miss: resolve, validate and write the sets exactly as an uncached draw would.
-  auto entry=std::make_shared<DescriptorCacheEntry>();entry->key=std::move(key);entry->last_used=serial;entry->context=&c_;
+  ++cache_stats_.misses;
+  // Miss: resolve, validate and write the sets exactly as an uncached draw would. store.Buffer/Texture hold what they return.
+  auto entry=std::make_shared<DescriptorCacheEntry>();entry->key.assign(key.begin(),key.begin()+words);entry->last_used=serial;entry->context=&c_;
   std::array<VkDescriptorBufferInfo,32> vertex_info{};
   std::array<std::array<VkDescriptorImageInfo,32>,3> texture_info{};
   std::array<VkDescriptorImageInfo,32> sampler_info{};
+  std::vector<std::shared_ptr<BufferResource>> buffers;std::vector<std::shared_ptr<TextureResource>> textures;
   for(uint32_t slot=0;slot<32;++slot) {
-    auto buffer=store.Buffer(bindings.vertex_buffers[slot],e);if(!buffer) return {};
-    vertex_info[slot]={buffer->handle,buffer->offset,buffer->size};bound.push_back(buffer);
+    auto buffer=store.Buffer(bindings.vertex_buffers[slot],e);if(!buffer) return nullptr;
+    vertex_info[slot]={buffer->handle,buffer->offset,buffer->size};buffers.push_back(buffer);
     for(uint32_t dimension=0;dimension<3;++dimension) {
-      auto texture=store.Texture(bindings.textures[dimension][slot],e);if(!texture) return {};
+      auto texture=store.Texture(bindings.textures[dimension][slot],e);if(!texture) return nullptr;
       auto expected=dimension==0?VK_IMAGE_VIEW_TYPE_2D:(dimension==1?VK_IMAGE_VIEW_TYPE_3D:VK_IMAGE_VIEW_TYPE_CUBE);
-      if(texture->view_type!=expected) {e={"Texture descriptors",VK_ERROR_INITIALIZATION_FAILED,"Texture view dimension mismatches shader array"};return {};}
-      texture_info[dimension][slot]={VK_NULL_HANDLE,texture->view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};bound.push_back(texture);
+      if(texture->view_type!=expected) {e={"Texture descriptors",VK_ERROR_INITIALIZATION_FAILED,"Texture view dimension mismatches shader array"};return nullptr;}
+      texture_info[dimension][slot]={VK_NULL_HANDLE,texture->view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};textures.push_back(texture);
     }
     // Non-texture slots only expose the dummy texture: any sampler will do.
     static constexpr std::array<uint32_t,6> no_texture{};
-    auto sampler=Sampler((fetch[slot][0]&3)==2?std::span<const uint32_t,6>(fetch[slot]):std::span<const uint32_t,6>(no_texture),e);if(!sampler) return {};
+    auto sampler=Sampler((fetch[slot][0]&3)==2?std::span<const uint32_t,6>(fetch[slot]):std::span<const uint32_t,6>(no_texture),e);if(!sampler) return nullptr;
     sampler_info[slot]={sampler->handle,VK_NULL_HANDLE,VK_IMAGE_LAYOUT_UNDEFINED};
     if(entry->samplers.empty() || entry->samplers.back()!=sampler) entry->samplers.push_back(sampler);
     if((fetch[slot][0]&3)==2 && (((fetch[slot][3]>>19)&3)==1 || ((fetch[slot][3]>>21)&3)==1 || ((fetch[slot][3]>>25)&7)>1)) {
       uint32_t dimension=(fetch[slot][5]>>9)&3;dimension=dimension?dimension-1:0;
-      auto texture=store.Texture(bindings.textures[dimension][bindings.texture_indices[slot]&0x7fffu],e);if(!texture) return {};
+      auto texture=store.Texture(bindings.textures[dimension][bindings.texture_indices[slot]&0x7fffu],e);if(!texture) return nullptr;
       auto features=filter_features_.find(texture->format);
       if(features==filter_features_.end()) {VkFormatProperties properties{};c_.f.vkGetPhysicalDeviceFormatProperties(c_.physical,texture->format,&properties);features=filter_features_.emplace(texture->format,properties.optimalTilingFeatures).first;}
       if(!(features->second&VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)) {
-        e={"Texture filtering",VK_ERROR_FORMAT_NOT_SUPPORTED,"Guest sampler requests linear filtering of an unsupported format"};return {};
+        e={"Texture filtering",VK_ERROR_FORMAT_NOT_SUPPORTED,"Guest sampler requests linear filtering of an unsupported format"};return nullptr;
       }
     }
   }
-  // Bind each distinct buffer/texture once; the entry watches them weakly.
-  std::sort(bound.begin(),bound.end());bound.erase(std::unique(bound.begin(),bound.end()),bound.end());
-  for(auto& resource:bound) entry->watched.push_back(resource);
+  // Watch each distinct buffer/texture once, weakly: the entry never extends their lifetime.
+  std::sort(buffers.begin(),buffers.end());buffers.erase(std::unique(buffers.begin(),buffers.end()),buffers.end());
+  std::sort(textures.begin(),textures.end());textures.erase(std::unique(textures.begin(),textures.end()),textures.end());
+  for(auto& buffer:buffers) entry->buffers.push_back(buffer);
+  for(auto& texture:textures) entry->textures.push_back(texture);
   constexpr uint32_t entries_per_pool=64;
   // Entries own old texture versions (e.g. movie frames): sweep regularly.
   // A full cache stops admitting entries instead of scanning on every miss.
@@ -122,11 +134,11 @@ std::shared_ptr<DescriptorCacheEntry> DescriptorStore::Shared(const DrawBindings
     auto pool=std::make_shared<DescriptorPage>();pool->context=&c_;
     VkDescriptorPoolSize sizes[]{{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,32*entries_per_pool},{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,96*entries_per_pool},{VK_DESCRIPTOR_TYPE_SAMPLER,32*entries_per_pool}};
     VkDescriptorPoolCreateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};info.flags=VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;info.maxSets=3*entries_per_pool;info.poolSizeCount=3;info.pPoolSizes=sizes;
-    if(!Check(c_.f.vkCreateDescriptorPool(c_.device,&info,nullptr,&pool->pool),"Create shared descriptor pool",e)) return {};
+    if(!Check(c_.f.vkCreateDescriptorPool(c_.device,&info,nullptr,&pool->pool),"Create shared descriptor pool",e)) return nullptr;
     cache_pools_.push_back(pool);entry->pool=pool;
   }
   VkDescriptorSetAllocateInfo allocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};allocate.descriptorPool=entry->pool->pool;allocate.descriptorSetCount=3;allocate.pSetLayouts=layouts_.data()+1;
-  if(!Check(c_.f.vkAllocateDescriptorSets(c_.device,&allocate,entry->sets.data()),"Allocate shared descriptor sets",e)) return {};
+  if(!Check(c_.f.vkAllocateDescriptorSets(c_.device,&allocate,entry->sets.data()),"Allocate shared descriptor sets",e)) return nullptr;
   ++entry->pool->draws;
   std::array<VkWriteDescriptorSet,5> writes{};
   auto write=[&](uint32_t index,uint32_t set,uint32_t binding,VkDescriptorType type,const VkDescriptorBufferInfo* buffers,const VkDescriptorImageInfo* images) {
@@ -136,8 +148,9 @@ std::shared_ptr<DescriptorCacheEntry> DescriptorStore::Shared(const DrawBindings
   write(3,1,0,VK_DESCRIPTOR_TYPE_SAMPLER,nullptr,sampler_info.data());
   write(4,2,0,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,vertex_info.data(),nullptr);
   c_.f.vkUpdateDescriptorSets(c_.device,uint32_t(writes.size()),writes.data(),0,nullptr);
+  pending_.Hold(serial,entry);
   if(complete && cacheable) {cache_[hash].push_back(entry);++cache_entries_;}
-  e={};return entry;
+  e={};return entry.get();  // the submission list keeps the entry alive until it retires
 }
 void DescriptorStore::Evict(uint64_t serial) {
   // Free entries no submission holds (use_count 1) and unused for 8 frames.
@@ -150,26 +163,25 @@ void DescriptorStore::Evict(uint64_t serial) {
     it=list.empty()?cache_.erase(it):std::next(it);
   }
 }
-std::shared_ptr<DescriptorDraw> DescriptorStore::Prepare(const DrawBindings& bindings,
-    const std::array<std::array<uint32_t,6>,32>& fetch,ResourceStore& store,uint64_t serial,const TransientSlice& constants,Error& e) {
+bool DescriptorStore::Prepare(const DrawBindings& bindings,const std::array<std::array<uint32_t,6>,32>& fetch,
+    ResourceStore& store,uint64_t serial,const TransientSlice& constants,DescriptorDraw& out,Error& e) {
   if(!layouts_[0] || serial<=completed_ || store.CurrentSerial()!=serial) {
-    e={"Draw descriptors",VK_ERROR_INITIALIZATION_FAILED,"Missing layouts or recording submission"};return {};
+    e={"Draw descriptors",VK_ERROR_INITIALIZATION_FAILED,"Missing layouts or recording submission"};return false;
   }
   for(uint32_t slot=0;slot<32;++slot) if((bindings.texture_indices[slot]&0x7fffu)>=32 || bindings.sampler_indices[slot]!=slot) {
-    e={"Draw descriptors",VK_ERROR_INITIALIZATION_FAILED,"Descriptor index was not remapped into the draw arrays"};return {};
+    e={"Draw descriptors",VK_ERROR_INITIALIZATION_FAILED,"Descriptor index was not remapped into the draw arrays"};return false;
   }
   if(!constants.chunk || constants.size!=sizeof(guest::ConstantSnapshot)) {
-    e={"Draw descriptors",VK_ERROR_INITIALIZATION_FAILED,"Constant block is missing or has the wrong size"};return {};
+    e={"Draw descriptors",VK_ERROR_INITIALIZATION_FAILED,"Constant block is missing or has the wrong size"};return false;
   }
-  if(constants.offset>UINT32_MAX) {e={"Draw descriptors",VK_ERROR_OUT_OF_DEVICE_MEMORY,"Constant block offset exceeds the dynamic offset range"};return {};}
-  auto draw=std::make_shared<DescriptorDraw>();
-  draw->shared=Shared(bindings,fetch,store,serial,draw->resources,e);if(!draw->shared) return {};
+  if(constants.offset>UINT32_MAX) {e={"Draw descriptors",VK_ERROR_OUT_OF_DEVICE_MEMORY,"Constant block offset exceeds the dynamic offset range"};return false;}
+  const DescriptorCacheEntry* shared=Shared(bindings,fetch,store,serial,e);if(!shared) return false;
   // VS, PS and shared constants are contiguous in ConstantSnapshot: one block per draw, written in place.
-  if(!store.FlushTransient(constants,e)) return {};
-  draw->sets[0]=ConstantSet(constants.chunk,e);if(!draw->sets[0]) return {};
-  draw->dynamic_offsets.fill(uint32_t(constants.offset));
-  for(uint32_t i=0;i<3;++i) draw->sets[1+i]=draw->shared->sets[i];
-  pending_.Keep(serial,draw);e={};return draw;
+  if(!store.FlushTransient(constants,e)) return false;
+  out.sets[0]=ConstantSet(constants.chunk,e);if(!out.sets[0]) return false;
+  out.dynamic_offsets.fill(uint32_t(constants.offset));
+  for(uint32_t i=0;i<3;++i) out.sets[1+i]=shared->sets[i];
+  e={};return true;
 }
 VkDescriptorSet DescriptorStore::ConstantSet(const std::shared_ptr<BufferResource>& chunk,Error& e) {
   // Blocks are suballocations: every block of one arena chunk shares its handle and its set.

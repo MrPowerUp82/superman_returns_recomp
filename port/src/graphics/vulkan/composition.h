@@ -3,7 +3,7 @@
 namespace superman_returns::graphics::vulkan {
 VkRect2D PlanPresentRect(VkExtent2D,uint32_t aspect_x,uint32_t aspect_y);
 struct CompositionDraw {
-  std::shared_ptr<DescriptorDraw> descriptors;std::shared_ptr<GamePipeline> pipeline;
+  DescriptorDraw descriptors;std::shared_ptr<GamePipeline> pipeline;
   VkRect2D rectangle{};
 };
 class FrontbufferCompositor {

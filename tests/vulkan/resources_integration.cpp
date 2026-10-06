@@ -421,6 +421,48 @@ void CheckPipelineCheckpoint(Context& c) {
   fixture.Finish();pipelines.Retire(1);reopened.Retire(1);targets.Retire(1);
   std::cout<<"Driver pipeline cache checkpoints before shutdown, replaces and reloads successfully\n";
 }
+// A texture replaced while a recorded draw still refers to it must live until its submission retires, on the
+// cache-miss path and on the cache-hit paths (a hit in the same submission, and a hit from an earlier submission,
+// which promotes the entry's resources). Every texture is uploaded in a submission that has already retired, so the
+// upload's own Hold cannot be what keeps it alive: only the draw's Hold can.
+// Nothing is submitted: the command buffer only exists so that the stores have a recording submission.
+void CheckHoldLifetime(Context& c) {
+  Error e;UploadFixture fixture(c);ResourceStore resources(c);DescriptorStore descriptors(c);Require(descriptors.Initialize(e),e);
+  guest::DrawPacket packet;packet.texture_fetch[3][0]=2|(2<<10)|(2<<13)|(2<<16);packet.texture_fetch[3][1]=0x1006;packet.texture_fetch[3][5]=1<<9;
+  const auto id=TextureResourceId(packet.texture_fetch[3]);
+  auto begin=[&](uint64_t serial) {Require(resources.BeginSubmission(fixture.command,serial,e),e);if(serial==1) Require(resources.CreateDummies(e),e);};
+  auto upload=[&](uint64_t version,uint8_t value) {
+    guest::LinearTexture t;t.width=t.height=1;t.format=guest::LinearFormat::kRGBA8Unorm;t.levels={{1,1,4,1,0}};t.data={value,value,value,255};
+    Require(resources.UploadTexture(id,t,version,e),e);
+  };
+  auto draw=[&](uint64_t serial) {
+    TransientSlice constants;Require(resources.MapTransient(sizeof(guest::ConstantSnapshot),constants,e),e);
+    DrawBindings bindings;Require(BuildBindings(packet,constants.data,bindings,e),e);
+    DescriptorDraw sets;Require(descriptors.Prepare(bindings,packet.texture_fetch,resources,serial,constants,sets,e),e);
+  };
+  auto current=[&]() {return std::weak_ptr<TextureResource>(*resources.FindTexture(id));};
+  auto expect=[](bool ok,const char* what) {if(!ok) throw std::runtime_error(what);};
+  auto retire=[&](uint64_t serial) {descriptors.Retire(serial);resources.Retire(serial);};
+  // Submission 1 only uploads v1 and retires: from now on v1 is held by the store alone.
+  begin(1);upload(1,10);retire(1);
+  // Submission 2, cache miss: the draw binds v1, then v1 is replaced by v2 before the fence.
+  begin(2);auto v1=current();draw(2);
+  expect(descriptors.TakeCacheStats().misses==1,"first draw must miss the descriptor cache");
+  upload(2,20);expect(!v1.expired(),"a texture bound by a recorded draw was destroyed before its submission retired (miss path)");
+  retire(2);expect(v1.expired(),"a replaced texture leaked after its submission retired");
+  // Submission 3: a miss for v2, then the same bindings again in the same submission (a hit that skips the promotion).
+  begin(3);auto v2=current();draw(3);draw(3);
+  auto stats=descriptors.TakeCacheStats();expect(stats.misses==1 && stats.hits==1,"the second draw of a submission must hit the cache");
+  upload(3,30);expect(!v2.expired(),"a texture bound by a recorded draw was destroyed before its submission retired (same-submission hit)");
+  retire(3);expect(v2.expired(),"a replaced texture leaked after its submission retired");
+  // Submission 4 builds the entry for v3 (a miss); submission 5 hits it (a hit from an earlier submission), then v3 is replaced.
+  begin(4);draw(4);retire(4);descriptors.TakeCacheStats();
+  begin(5);auto v3=current();draw(5);
+  stats=descriptors.TakeCacheStats();expect(stats.hits==1 && stats.misses==0,"a later submission must hit the cached entry");
+  upload(4,40);expect(!v3.expired(),"a texture promoted by a cache hit was destroyed before its submission retired (hit path)");
+  retire(5);expect(v3.expired(),"a replaced texture leaked after its submission retired");
+  std::cout<<"Resources bound by recorded draws stay alive until their submission retires (cache miss, hit in the same and in a later submission)\n";
+}
 int main(int argc,char** argv) {
   try {
     Win32Window window;Context c;Error e;
@@ -443,6 +485,7 @@ int main(int argc,char** argv) {
     if(argc==2 && std::string(argv[1])=="--immediate") {CheckImmediate(c);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--stacked-resolve") {CheckStackedResolve(c);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--composition") {CheckComposition(c);return c.validation_errors.load()?1:0;}
+    if(argc==2 && std::string(argv[1])=="--hold-lifetime") {CheckHoldLifetime(c);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--resolve-copy") {CheckResolveCopy(c);return c.validation_errors.load()?1:0;}
     if(argc!=1) throw std::runtime_error("Unknown GPU fixture argument; refusing a different test");
     UploadFixture fixture(c);ResourceStore store(c);Require(store.BeginSubmission(fixture.command,1,e),e);

@@ -17,25 +17,26 @@ struct SamplerResource {
 // Sets 1-3 (textures, samplers, vertex buffers) shared by every draw that binds
 // the same resources. The entry only watches buffers/textures (weak), so it
 // never extends their lifetime: a hit requires all of them alive, which also
-// guarantees their addresses (the key) were not reused. Draws hold strong
-// references while their submission is in flight.
+// guarantees their addresses (the key) were not reused. The submission holds the entry and the resources strongly (SubmissionResources::Hold) while it is in flight.
 struct DescriptorCacheEntry {
   Context* context=nullptr;
   std::vector<uint64_t> key;
   std::array<VkDescriptorSet,3> sets{};
   std::shared_ptr<DescriptorPage> pool;
-  std::vector<std::weak_ptr<void>> watched;
+  std::vector<std::weak_ptr<BufferResource>> buffers;
+  std::vector<std::weak_ptr<TextureResource>> textures;
   std::vector<std::shared_ptr<void>> samplers;
   uint64_t last_used=0;
+  uint64_t held_serial=0;  // submission whose list already holds this entry (SubmissionResources::Hold)
   // Returns the sets to their pool; runs once no submission or cache holds it.
   ~DescriptorCacheEntry();
 };
+// A draw's four descriptor sets. Everything they refer to (the cache entry, the buffers, the textures and the
+// constants chunk) is held by the submission until it retires, so the draw owns nothing.
 struct DescriptorDraw {
   std::array<VkDescriptorSet,4> sets{};
   // Set 0 binds the draw's constants with dynamic offsets: bind with these three offsets.
   std::array<uint32_t,3> dynamic_offsets{};
-  std::shared_ptr<DescriptorCacheEntry> shared;
-  std::vector<std::shared_ptr<void>> resources;
 };
 class DescriptorStore {
 public:
@@ -43,14 +44,14 @@ public:
   ~DescriptorStore();
   bool Initialize(Error&);
   // `constants` is the draw's 12 KiB block, already filled (BuildBindings); Prepare flushes it and binds it.
-  std::shared_ptr<DescriptorDraw> Prepare(const DrawBindings&,
-      const std::array<std::array<uint32_t,6>,32>& fetch,
-      ResourceStore&,uint64_t submission,const TransientSlice& constants,Error&);
+  bool Prepare(const DrawBindings&,const std::array<std::array<uint32_t,6>,32>& fetch,
+      ResourceStore&,uint64_t submission,const TransientSlice& constants,DescriptorDraw& out,Error&);
   void Retire(uint64_t completed_serial);
   const std::array<VkDescriptorSetLayout,4>& Layouts() const {return layouts_;}
 private:
   std::shared_ptr<SamplerResource> Sampler(std::span<const uint32_t,6>,Error&);
-  std::shared_ptr<DescriptorCacheEntry> Shared(const DrawBindings&,const std::array<std::array<uint32_t,6>,32>&,ResourceStore&,uint64_t serial,std::vector<std::shared_ptr<void>>& bound,Error&);
+  // Returns the entry, held by the submission (and by the cache when cacheable); null on error.
+  DescriptorCacheEntry* Shared(const DrawBindings&,const std::array<std::array<uint32_t,6>,32>&,ResourceStore&,uint64_t serial,Error&);
   void Evict(uint64_t serial);
   Context& c_;
   std::array<VkDescriptorSetLayout,4> layouts_{};
