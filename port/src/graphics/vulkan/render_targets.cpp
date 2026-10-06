@@ -134,13 +134,13 @@ std::shared_ptr<TargetPass> TargetStore::PreparePass(const PassPlan& plan,Error&
   for(uint32_t i=0;i<4;++i) if(plan.colors[i].id) {key[i]=Acquire(plan.colors[i],e);if(!key[i]) return {};}
   if(plan.depth.id) {key[4]=Acquire(plan.depth,e);if(!key[4]) return {};}
   for(uint32_t i=0;i<5;++i) for(uint32_t j=i+1;j<5;++j) if(key[i] && key[i]==key[j]) {Fail(e,"Render pass","Same target bound to multiple attachments");return {};}
-  if(open) if(auto found=passes_.find(key);found!=passes_.end() && found->second.get()==open) {pending_.Keep(serial_,found->second);e={};return found->second;}
+  if(open) if(auto found=passes_.find(key);found!=passes_.end() && found->second.get()==open) {pending_.Hold(serial_,found->second);e={};return found->second;}
   std::vector<std::shared_ptr<TargetResource>> references;
   for(auto id:key) if(id) {
     auto target=Get(id,e);if(!target || !Initialize(target,e) || !state_.Transition(command_,target->image,{target->aspects,0,1,0,1},target->description.depth?ImageUsage::DepthAttachment():ImageUsage::ColorAttachment(),e)) return {};
     references.push_back(target);
   }
-  if(auto found=passes_.find(key);found!=passes_.end()) {pending_.Keep(serial_,found->second);e={};return found->second;}
+  if(auto found=passes_.find(key);found!=passes_.end()) {pending_.Hold(serial_,found->second);e={};return found->second;}
   auto pass=std::make_shared<TargetPass>();pass->context=&c_;pass->extent=plan.extent;pass->color_count=plan.color_count;pass->targets=references;
   std::vector<VkAttachmentDescription> attachments;std::vector<VkImageView> views;
   std::array<VkAttachmentReference,4> colors{};for(auto& color:colors) color={VK_ATTACHMENT_UNUSED,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
@@ -167,7 +167,7 @@ std::shared_ptr<TargetPass> TargetStore::PreparePass(const PassPlan& plan,Error&
   if(!Check(c_.f.vkCreateRenderPass(c_.device,&create,nullptr,&pass->render_pass),"Create game render pass",e)) return {};
   VkFramebufferCreateInfo framebuffer{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};framebuffer.renderPass=pass->render_pass;framebuffer.attachmentCount=uint32_t(views.size());framebuffer.pAttachments=views.data();framebuffer.width=plan.extent.width;framebuffer.height=plan.extent.height;framebuffer.layers=1;
   if(!Check(c_.f.vkCreateFramebuffer(c_.device,&framebuffer,nullptr,&pass->framebuffer),"Create game framebuffer",e)) return {};
-  passes_[key]=pass;pending_.Keep(serial_,pass);e={};return pass;
+  passes_[key]=pass;pending_.Hold(serial_,pass);e={};return pass;
 }
 void TargetStore::MarkWritten(const TargetPass& pass) {uint64_t serial=++write_serial_;for(auto& target:pass.targets) target->last_write=serial;}
 std::vector<std::pair<TargetId,AliasPlan>> TargetStore::Aliases(const TargetPass& pass) const {

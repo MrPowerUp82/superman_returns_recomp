@@ -8,7 +8,8 @@
 namespace superman_returns::graphics::vulkan {
 using ShaderLookup=std::function<shaders::ShaderResult(const guest::ShaderCapture&)>;
 using TextureDecoder=std::function<bool(const guest::TextureCapture&,guest::LinearTexture&,std::string&)>;
-struct GameRenderStats {uint64_t draws=0,pending=0,failed=0,clears=0;};
+// alias_violations: draws that found alias work on an already open pass (SR_VULKAN_CHECK_ALIASES=1 only).
+struct GameRenderStats {uint64_t draws=0,pending=0,failed=0,clears=0,alias_violations=0;};
 // SR_VULKAN_PROFILE=1: CPU time of each recording phase, summed until read.
 struct RecordProfile {
   enum Phase {kUploads,kTargets,kTextures,kBindings,kDescriptors,kPipeline,kCommands,kResolves,kClears,kCount};
@@ -35,6 +36,7 @@ public:
   ImageState& Images() {return state_;}
   ResourceStore& Resources() {return resources_;}
   const GameRenderStats& Stats() const {return stats_;}
+  const GamePipelineStore::Stats& PipelineStats() const {return pipelines_.stats();}
   bool CheckpointCache(Error& e) {return pipelines_.CheckpointCache(e);}
   void EnableProfile(bool on) {profiling_=on;}
   RecordProfile TakeProfile() {auto p=profile_;profile_={};return p;}
@@ -52,6 +54,7 @@ private:
   bool dumping_=false;uint64_t dump_packet_=0;std::vector<std::string> dump_log_;std::vector<DumpImage> dump_images_;
   bool Upload(const guest::BufferUpdate&,bool indices,uint64_t version,Error&);
   static bool StateFilterEnabled();
+  static bool AliasCheckEnabled();
   Context& c_;ShaderLookup shaders_;TextureDecoder decoder_;ImageState state_;ResourceStore resources_;TargetStore targets_;DescriptorStore descriptors_;GamePipelineStore pipelines_;
   DepthResolver depth_resolver_;bool depth_ready_=false;
   AliasOptions alias_options_;
@@ -72,6 +75,8 @@ private:
   std::shared_ptr<TargetPass> open_pass_;VkPipeline bound_pipeline_=VK_NULL_HANDLE;bool merge_passes_=false;
   // Last value emitted of each redundant command; invalidated wherever bound_pipeline_ is reset.
   StateShadow shadow_;
+  // SR_VULKAN_CHECK_ALIASES=1 (read once, at construction): plan aliases on every draw, even on an open pass.
+  bool check_aliases_=AliasCheckEnabled();
   std::atomic<VkCommandBuffer> recording_{VK_NULL_HANDLE};
   bool profiling_=false;RecordProfile profile_;
   // Adds the time since the previous lap to a phase, in nanoseconds (a lap per phase per draw would lose ~0.5 us

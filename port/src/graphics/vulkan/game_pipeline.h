@@ -20,7 +20,28 @@ bool ValidateGamePipelineFeatures(const GamePipelinePlan&,uint32_t color_count,c
 struct GamePipeline {
   Context* context=nullptr;VkPipeline handle=VK_NULL_HANDLE;
   std::vector<VkVertexInputBindingDescription> bindings;
+  uint64_t held_serial=0;  // submission whose list already holds this pipeline (SubmissionResources::Hold)
   ~GamePipeline();
+};
+// Last pipeline handed out and the raw inputs it was acquired with. A draw whose inputs are all identical is the same
+// pipeline, so the plan, the cache key and the map lookup are skipped. Every input PlanGamePipeline reads, plus the
+// shader artifacts (which add their SPIR-V digest to the key), is compared; when in doubt an input belongs here.
+class GamePipelineMemo {
+public:
+  using Shader=std::shared_ptr<const shaders::CompiledShader>;
+  bool Matches(const guest::DrawPacket&,const TargetPass&,const Shader& vs,const Shader& ps) const;
+  void Store(const guest::DrawPacket&,const TargetPass&,const Shader& vs,const Shader& ps,std::shared_ptr<GamePipeline>);
+  void Clear() {pipeline_.reset();in_=Inputs{};}
+  const std::shared_ptr<GamePipeline>& pipeline() const {return pipeline_;}
+private:
+  struct Inputs {
+    Shader vs,ps;  // kept alive so the addresses compared stay unique
+    guest::Primitive primitive=guest::Primitive::kTriangles;bool indexed=false,restart=false,inline_vertices=false;
+    uint32_t r200=0,r201=0,r205=0,r104=0,r10d=0,inline_stride=0;int32_t depth_bias=0;uint32_t slope_bits=0;
+    uint32_t color_count=0;std::array<VkFormat,4> formats{};VkFormat depth_format=VK_FORMAT_UNDEFINED;
+    std::vector<guest::VertexAttribute> attributes;std::vector<std::pair<uint32_t,uint32_t>> streams;  // (stream, stride)
+  };
+  Inputs in_;std::shared_ptr<GamePipeline> pipeline_;
 };
 class GamePipelineStore {
 public:
@@ -37,6 +58,8 @@ public:
   // Call on the recording thread, serialized with Acquire on the same store.
   bool CheckpointCache(Error&);
   void Retire(uint64_t serial) {pending_.Retire(serial);}
+  struct Stats {uint64_t plans=0,memo_hits=0,created=0;};  // PlanGamePipeline runs, draws answered by the memo, pipelines created (all cumulative)
+  const Stats& stats() const {return stats_;}
 private:
   bool Validate(const shaders::CompiledShader&,const shaders::CompiledShader*,Error&) const;
   std::shared_ptr<GamePipeline> AcquireValidated(const guest::DrawPacket&,const TargetPass&,const shaders::CompiledShader&,const shaders::CompiledShader*,uint64_t vs_digest,uint64_t ps_digest,uint64_t submission,Error&);
@@ -45,5 +68,6 @@ private:
   Context& c_;VkPipelineLayout layout_=VK_NULL_HANDLE;VkPipelineCache driver_cache_=VK_NULL_HANDLE;
   std::filesystem::path cache_path_;std::map<GamePipelineKey,std::shared_ptr<GamePipeline>> pipelines_;SubmissionResources pending_;
   bool cache_dirty_=false;
+  GamePipelineMemo memo_;Stats stats_;
 };
 }

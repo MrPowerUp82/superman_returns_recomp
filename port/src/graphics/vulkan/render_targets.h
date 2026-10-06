@@ -26,6 +26,7 @@ struct TargetPass {
   Context* context=nullptr;VkRenderPass render_pass=VK_NULL_HANDLE;VkFramebuffer framebuffer=VK_NULL_HANDLE;
   VkExtent2D extent{};std::array<VkFormat,4> formats{};VkFormat depth_format=VK_FORMAT_UNDEFINED;
   uint32_t color_count=0;std::vector<std::shared_ptr<TargetResource>> targets;
+  uint64_t held_serial=0;  // submission whose list already holds this pass (SubmissionResources::Hold)
   ~TargetPass();
 };
 class TargetStore {

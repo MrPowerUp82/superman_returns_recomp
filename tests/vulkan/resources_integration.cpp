@@ -116,6 +116,7 @@ void CheckTargetDraws(Context& c,bool record=false,bool merged=false) {
   auto vertex=std::make_shared<shaders::CompiledShader>(),pixel=std::make_shared<shaders::CompiledShader>();pixel->stage=shaders::ShaderStage::kPixel;
   Require(ReadSpirv(std::filesystem::path(SR_TARGET_SHADER_DIR)/"vs.spv",vertex->words,e),e);Require(ReadSpirv(std::filesystem::path(SR_TARGET_SHADER_DIR)/"ps.spv",pixel->words,e),e);
   bool shader_pending=record;
+  if(merged) _putenv_s("SR_VULKAN_CHECK_ALIASES","1");  // read when the renderer is constructed
   GameRenderer renderer(c,[&](const guest::ShaderCapture& capture){return shader_pending?shaders::ShaderResult{}:shaders::ShaderResult{shaders::ShaderPoll::ready,capture.vertex?vertex:pixel,{}};});
   auto& targets=record?renderer.Targets():direct_targets;auto& state=record?renderer.Images():direct_state;
   if(record) {Require(renderer.Initialize({},e),e);Require(renderer.BeginSubmission(fixture.command,1,e,merged?fixture.BeginUploads():VK_NULL_HANDLE),e);}
@@ -139,6 +140,14 @@ void CheckTargetDraws(Context& c,bool record=false,bool merged=false) {
       // pixel the first draw wrote, so the expected readback is unchanged.
       draw.command_serial=3;Require(renderer.Record(guest::RenderPacket(draw),fixture.command,e),e);
       if(renderer.Stats().draws!=2 || renderer.Stats().failed) throw std::runtime_error("Merged GameRenderer draw failed");
+      // The third draw has the same inputs as the second: the pipeline memo answers it. The open pass needed no alias plan.
+      if(renderer.PipelineStats().plans!=1 || renderer.PipelineStats().memo_hits!=1) throw std::runtime_error("Pipeline memo did not answer the repeated draw (plans="+std::to_string(renderer.PipelineStats().plans)+", hits="+std::to_string(renderer.PipelineStats().memo_hits)+")");
+      if(renderer.Stats().alias_violations) throw std::runtime_error("Alias skip assumption violated by a repeated draw on the open pass");
+      // A write to an overlapping surface of another format while the pass is open is exactly what the skip assumes
+      // cannot happen. With the check on, the draw must fail loudly instead of recording a stale target.
+      auto other=targets.Acquire(guest::SurfaceDesc{604,false,{16,16,0,12,0,1}},e);Require(other!=0,e);targets.MarkWritten(other);
+      draw.command_serial=4;
+      if(renderer.Record(guest::RenderPacket(draw),fixture.command,e) || renderer.Stats().alias_violations!=1) throw std::runtime_error("SR_VULKAN_CHECK_ALIASES did not report alias work on an open pass");
     }
     renderer.FinishSubmission();
   } else {

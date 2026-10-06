@@ -132,6 +132,28 @@ bool PlanGamePipeline(const guest::DrawPacket& draw,const TargetPass& pass,const
   result=std::move(out);e={};return true;
 }
 GamePipeline::~GamePipeline() {if(handle) context->f.vkDestroyPipeline(context->device,handle,nullptr);}
+bool GamePipelineMemo::Matches(const guest::DrawPacket& d,const TargetPass& pass,const Shader& vs,const Shader& ps) const {
+  if(!pipeline_) return false;
+  const auto& l=in_;
+  if(l.vs!=vs || l.ps!=ps || l.primitive!=d.primitive || l.indexed!=d.indexed || l.restart!=d.primitive_restart || l.inline_vertices!=d.inline_vertices || l.inline_stride!=d.inline_stride ||
+     l.r200!=d.registers[0x200] || l.r201!=d.registers[0x201] || l.r205!=d.registers[0x205] || l.r104!=d.registers[0x104] || l.r10d!=d.registers[0x10d] ||
+     l.depth_bias!=d.depth_bias || l.slope_bits!=std::bit_cast<uint32_t>(d.slope_bias) ||
+     l.color_count!=pass.color_count || l.formats!=pass.formats || l.depth_format!=pass.depth_format ||
+     l.attributes.size()!=d.attributes.size() || l.streams.size()!=d.streams.size()) return false;
+  static_assert(sizeof(guest::VertexAttribute)==5*sizeof(uint32_t),"VertexAttribute is compared byte-wise");
+  if(!d.attributes.empty() && std::memcmp(l.attributes.data(),d.attributes.data(),d.attributes.size()*sizeof(guest::VertexAttribute))) return false;
+  for(size_t i=0;i<d.streams.size();++i) if(l.streams[i].first!=d.streams[i].stream || l.streams[i].second!=d.streams[i].stride) return false;
+  return true;
+}
+void GamePipelineMemo::Store(const guest::DrawPacket& d,const TargetPass& pass,const Shader& vs,const Shader& ps,std::shared_ptr<GamePipeline> pipeline) {
+  auto& l=in_;l.vs=vs;l.ps=ps;l.primitive=d.primitive;l.indexed=d.indexed;l.restart=d.primitive_restart;l.inline_vertices=d.inline_vertices;l.inline_stride=d.inline_stride;
+  l.r200=d.registers[0x200];l.r201=d.registers[0x201];l.r205=d.registers[0x205];l.r104=d.registers[0x104];l.r10d=d.registers[0x10d];
+  l.depth_bias=d.depth_bias;l.slope_bits=std::bit_cast<uint32_t>(d.slope_bias);
+  l.color_count=pass.color_count;l.formats=pass.formats;l.depth_format=pass.depth_format;
+  l.attributes.assign(d.attributes.begin(),d.attributes.end());
+  l.streams.clear();for(auto& s:d.streams) l.streams.emplace_back(s.stream,s.stride);
+  pipeline_=std::move(pipeline);
+}
 bool ValidateGamePipelineFeatures(const GamePipelinePlan& plan,uint32_t colors,const VkPhysicalDeviceLimits& limits,const VkPhysicalDeviceFeatures& features,Error& e) {
   if(colors>4 || colors>limits.maxColorAttachments) {e={"Game pipeline limits",VK_ERROR_FEATURE_NOT_PRESENT,"Color attachment count exceeds device limits"};return false;}
   for(auto& binding:plan.bindings) if(binding.binding>=limits.maxVertexInputBindings || binding.stride>limits.maxVertexInputBindingStride) {e={"Game pipeline limits",VK_ERROR_FEATURE_NOT_PRESENT,"Vertex binding or stride exceeds device limits"};return false;}
@@ -143,7 +165,7 @@ bool ValidateGamePipelineFeatures(const GamePipelinePlan& plan,uint32_t colors,c
   e={};return true;
 }
 GamePipelineStore::~GamePipelineStore() {
-  if(!c_.device) return;auto waited=c_.f.vkDeviceWaitIdle(c_.device);pending_.Retire(UINT64_MAX);pipelines_.clear();
+  if(!c_.device) return;auto waited=c_.f.vkDeviceWaitIdle(c_.device);pending_.Retire(UINT64_MAX);memo_.Clear();pipelines_.clear();
   if(driver_cache_) {
     if(waited==VK_SUCCESS) {Error e;if(!CheckpointCache(e)) c_.Log(e.operation+": "+e.message);}
     c_.f.vkDestroyPipelineCache(c_.device,driver_cache_,nullptr);
@@ -202,19 +224,22 @@ std::shared_ptr<GamePipeline> GamePipelineStore::Acquire(const guest::DrawPacket
 }
 std::shared_ptr<GamePipeline> GamePipelineStore::Acquire(const guest::DrawPacket& d,const TargetPass& pass,const std::shared_ptr<const shaders::CompiledShader>& vs,const std::shared_ptr<const shaders::CompiledShader>& ps,uint64_t serial,Error& e) {
   if(!vs || !serial) {Fail(e,"Pipeline layout/serial/shaders invalid");return {};}
+  if(memo_.Matches(d,pass,vs,ps)) {++stats_.memo_hits;pending_.Hold(serial,memo_.pipeline());e={};return memo_.pipeline();}
   // Retained artifacts keep their addresses unique for the cache lifetime.
   auto key=std::pair{vs.get(),ps.get()};auto found=validated_.find(key);
   if(found==validated_.end()) {
     if(!Validate(*vs,ps.get(),e)) return {};
     found=validated_.emplace(key,ShaderPair{vs,ps,ShaderDigest(*vs),ps?ShaderDigest(*ps):0}).first;
   }
-  return AcquireValidated(d,pass,*vs,ps.get(),found->second.vs_digest,found->second.ps_digest,serial,e);
+  auto result=AcquireValidated(d,pass,*vs,ps.get(),found->second.vs_digest,found->second.ps_digest,serial,e);
+  if(result) memo_.Store(d,pass,vs,ps,result);
+  return result;
 }
 std::shared_ptr<GamePipeline> GamePipelineStore::AcquireValidated(const guest::DrawPacket& d,const TargetPass& pass,const shaders::CompiledShader& vs,const shaders::CompiledShader* ps,uint64_t vs_digest,uint64_t ps_digest,uint64_t serial,Error& e) {
-  GamePipelinePlan plan;if(!PlanGamePipeline(d,pass,vs,plan,e)) return {};
+  ++stats_.plans;GamePipelinePlan plan;if(!PlanGamePipeline(d,pass,vs,plan,e)) return {};
   if(!ValidateGamePipelineFeatures(plan,pass.color_count,c_.properties.limits,c_.enabled_features,e)) return {};
   plan.key.push_back(vs_digest);plan.key.push_back(ps_digest);
-  if(auto found=pipelines_.find(plan.key);found!=pipelines_.end()) {pending_.Keep(serial,found->second);return found->second;}
+  if(auto found=pipelines_.find(plan.key);found!=pipelines_.end()) {pending_.Hold(serial,found->second);return found->second;}
   for(auto& a:plan.attributes) {VkFormatProperties props{};c_.f.vkGetPhysicalDeviceFormatProperties(c_.physical,a.format,&props);if(!(props.bufferFeatures&VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT)) {Fail(e,"Vertex format unsupported by device");return {};}}
   VkShaderModule modules[2]{};auto release=[&]{for(auto m:modules) if(m) c_.f.vkDestroyShaderModule(c_.device,m,nullptr);};
   VkPipelineShaderStageCreateInfo stages[2]{};std::array<std::string,2> entries;uint32_t stage_count=ps?2:1;
@@ -227,6 +252,6 @@ std::shared_ptr<GamePipeline> GamePipelineStore::AcquireValidated(const guest::D
   VkDynamicState dynamic[]{VK_DYNAMIC_STATE_VIEWPORT,VK_DYNAMIC_STATE_SCISSOR,VK_DYNAMIC_STATE_BLEND_CONSTANTS,VK_DYNAMIC_STATE_STENCIL_REFERENCE};VkPipelineDynamicStateCreateInfo dyn{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};dyn.dynamicStateCount=4;dyn.pDynamicStates=dynamic;
   VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};info.stageCount=stage_count;info.pStages=stages;info.pVertexInputState=&vertex;info.pInputAssemblyState=&assembly;info.pViewportState=&viewport;info.pRasterizationState=&plan.raster;info.pMultisampleState=&samples;info.pDepthStencilState=&plan.depth;info.pColorBlendState=&blend;info.pDynamicState=&dyn;info.layout=layout_;info.renderPass=pass.render_pass;
   auto p=std::make_shared<GamePipeline>();p->context=&c_;p->bindings=plan.bindings;auto status=c_.f.vkCreateGraphicsPipelines(c_.device,driver_cache_,1,&info,nullptr,&p->handle);release();if(!Check(status,"Create game graphics pipeline",e)) return {};
-  pipelines_[plan.key]=p;cache_dirty_=true;pending_.Keep(serial,p);e={};return p;
+  pipelines_[plan.key]=p;cache_dirty_=true;++stats_.created;pending_.Hold(serial,p);e={};return p;
 }
 }

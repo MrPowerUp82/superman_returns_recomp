@@ -33,6 +33,10 @@ bool GameRenderer::StateFilterEnabled() {
   const char* value=std::getenv("SR_VULKAN_NO_STATE_FILTER");
   return !(value && value[0] && value[0]!='0');
 }
+bool GameRenderer::AliasCheckEnabled() {
+  const char* value=std::getenv("SR_VULKAN_CHECK_ALIASES");
+  return value && value[0] && value[0]!='0';
+}
 std::shared_ptr<TextureResource> GameRenderer::SelectFrontbuffer(const guest::SwapPacket& swap,Error& e) const {
   if(!swap.frontbuffer || swap.frontbuffer>UINT32_MAX-0x23u) {Fail(e,"Invalid captured frontbuffer object");return {};}
   try {
@@ -178,7 +182,18 @@ bool GameRenderer::Draw(const guest::DrawPacket& draw,VkCommandBuffer command,Er
   lap(RecordProfile::kUploads);
   auto plan=PlanAttachments(draw,e,draw.tiling_active?tiling_:VkExtent2D{});if(!e.message.empty()) return false;
   auto pass=targets_.PreparePass(plan,e,open_pass_.get());if(!pass) return false;
-  auto aliases=targets_.Aliases(*pass);if(!aliases.empty()) ClosePass();
+  // While `pass` is still the open pass, every one of its targets holds the newest write serial, so no alias can
+  // apply: whatever else writes a target (clears, resolves, depth aliases, another pass) closes the pass first.
+  // SR_VULKAN_CHECK_ALIASES=1 plans anyway and fails the draw if that assumption is ever wrong.
+  const bool open=open_pass_==pass;
+  std::vector<std::pair<TargetId,AliasPlan>> aliases;
+  if(!open || check_aliases_) aliases=targets_.Aliases(*pass);
+  if(open && !aliases.empty()) {
+    ++stats_.alias_violations;
+    c_.Log("GameRenderer alias violation: "+std::to_string(aliases.size())+" alias plan(s) on the open pass (draw serial "+std::to_string(draw.command_serial)+"); the alias skip assumption is wrong");
+    return Fail(e,"Alias plan on an open render pass (SR_VULKAN_CHECK_ALIASES)");
+  }
+  if(!aliases.empty()) ClosePass();
   for(auto& [destination,alias]:aliases) {
     if(!depth_ready_) {if(!depth_resolver_.Initialize(e)) return false;depth_ready_=true;}
     if(!depth_resolver_.RecordAlias(command,destination,alias,targets_,resources_,state_,e,alias_options_)) return false;
