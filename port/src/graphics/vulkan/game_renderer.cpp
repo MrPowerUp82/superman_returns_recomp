@@ -264,8 +264,9 @@ bool GameRenderer::Draw(const guest::DrawPacket& draw,VkCommandBuffer command,Er
   // shares one layout, so binding set 0 alone leaves sets 1-3 in place. The four dynamic states persist on the
   // command buffer across pipeline binds because every game pipeline declares the same four.
   if(shadow_.enabled()) {
-    c_.f.vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelines_.Layout(),0,1,descriptors.sets.data(),uint32_t(descriptors.dynamic_offsets.size()),descriptors.dynamic_offsets.data());
-    if(shadow_.SetSharedSets(descriptors.sets.data()+1)) c_.f.vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelines_.Layout(),1,3,descriptors.sets.data()+1,0,nullptr);
+    // One call covers set 0 and, when they changed, sets 1-3 (the dynamic offsets belong to set 0 either way).
+    const bool shared_changed=shadow_.SetSharedSets(descriptors.sets.data()+1);
+    c_.f.vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelines_.Layout(),0,shared_changed?4:1,descriptors.sets.data(),uint32_t(descriptors.dynamic_offsets.size()),descriptors.dynamic_offsets.data());
   } else {
     c_.f.vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelines_.Layout(),0,4,descriptors.sets.data(),uint32_t(descriptors.dynamic_offsets.size()),descriptors.dynamic_offsets.data());
   }

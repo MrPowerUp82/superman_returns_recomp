@@ -72,6 +72,95 @@ SR_TEST(build_bindings_writes_vs_ps_and_patches_shared_in_the_block) {
   std::memcpy(&word,block.shared()+128+7*4,4);SR_CHECK_EQ(word,7u);                // sampler index of slot 7
   SR_CHECK_EQ(b.sampler_indices[7],7u);
 }
+namespace {
+// The implementation before Task 9: copies the whole 12 KiB snapshot, then overwrites shared[0,256) and shared[512,4096).
+bool ReferenceBuildBindings(const guest::DrawPacket& draw,std::byte* block,DrawBindings& out,Error& error) {
+  out=DrawBindings{};
+  out.vertex_buffers.fill(DummyBuffer);
+  std::array<TextureBindingRequest,32> requests;size_t request_count=0;
+  for(uint32_t slot=0;slot<32;++slot) {
+    const auto& fetch=draw.texture_fetch[slot];
+    if((fetch[0]&3)!=2) continue;
+    uint32_t dim=(fetch[5]>>9)&3;
+    if(dim==0) dim=1;
+    uint32_t gamma=0;
+    if(((fetch[0]>>2)&3)==3 && ((fetch[0]>>4)&3)==3 && ((fetch[0]>>6)&3)==3) gamma=0x80000000u;
+    requests[request_count++]={slot,TextureResourceId(fetch),TextureDimension(dim-1),gamma};
+  }
+  if(!RemapTextureBindings(std::span<const TextureBindingRequest>(requests.data(),request_count),out,error)) return false;
+  std::array<uint8_t,32> stream_index;stream_index.fill(0xff);uint32_t streams=0;
+  if(draw.inline_vertices) {
+    out.vertex_buffers[0]=InlineBufferBase|draw.command_serial;
+  } else {
+    for(const auto& stream:draw.streams) {
+      if(stream.stream>=32 || !stream.update.plan.key || stream_index[stream.stream]!=0xff || streams>=32) {
+        error={"Vertex remap",VK_ERROR_INITIALIZATION_FAILED,"Invalid or duplicate vertex stream"};return false;
+      }
+      stream_index[stream.stream]=uint8_t(streams);out.vertex_buffers[streams++]=stream.update.plan.key;
+    }
+  }
+  std::memcpy(block,&draw.constants,sizeof(guest::ConstantSnapshot));
+  std::byte* shared=block+kSharedConstantsOffset;
+  for(uint32_t i=0;i<draw.vertex_fetch.size();++i) {
+    auto meta=draw.vertex_fetch[i];
+    if(meta.type) {
+      if(draw.inline_vertices) meta.buffer=0;
+      else {
+        if(meta.buffer>=32 || stream_index[meta.buffer]==0xff) {error={"Vertex remap",VK_ERROR_INITIALIZATION_FAILED,"Vertex metadata references missing stream"};return false;}
+        meta.buffer=stream_index[meta.buffer];
+      }
+    } else {meta={31,0,0,0};}
+    std::memcpy(shared+512+i*16,&meta,16);
+  }
+  for(uint32_t slot=0;slot<32;++slot) {
+    out.sampler_indices[slot]=slot;
+    std::memcpy(shared+slot*4,&out.texture_indices[slot],4);
+    std::memcpy(shared+128+slot*4,&out.sampler_indices[slot],4);
+  }
+  error={};return true;
+}
+// Fills every constant of the packet with distinct, non-zero bytes so a missed copy cannot hide.
+void FillConstants(guest::DrawPacket& p,uint32_t seed) {
+  for(uint32_t i=0;i<1024;++i) {p.constants.vs[i]=seed*2654435761u+i*7u+1u;p.constants.ps[i]=seed*40503u+i*13u+3u;}
+  for(uint32_t i=0;i<4096;++i) p.constants.shared[i]=uint8_t(seed*31u+i*5u+1u);
+}
+void ExpectSameBlockAsReference(const guest::DrawPacket& p) {
+  Block fresh,old;fresh.bytes.fill(std::byte{0xCD});old.bytes.fill(std::byte{0x5A});  // the arena is neither zeroed nor initialized
+  DrawBindings nb,ob;Error ne,oe;
+  SR_CHECK(ReferenceBuildBindings(p,old.data(),ob,oe));
+  SR_CHECK(BuildBindings(p,fresh.data(),nb,ne));
+  SR_CHECK(std::memcmp(fresh.data(),old.data(),sizeof(guest::ConstantSnapshot))==0);
+  SR_CHECK(std::memcmp(&nb,&ob,sizeof(DrawBindings))==0);
+  // The two blocks start from different patterns, so equality proves every byte was written by BuildBindings.
+}
+}
+SR_TEST(build_bindings_block_matches_the_reference_implementation_byte_for_byte) {
+  {  // no textures, no streams
+    guest::DrawPacket p;FillConstants(p,1);ExpectSameBlockAsReference(p);
+  }
+  {  // textures (all 32 slots, three dimensions and a gamma one) and several streams
+    guest::DrawPacket p;FillConstants(p,2);
+    for(uint32_t slot=0;slot<32;++slot) {
+      p.texture_fetch[slot][0]=2|(slot==5?((3<<2)|(3<<4)|(3<<6)):0);p.texture_fetch[slot][1]=0x1000+slot;
+      p.texture_fetch[slot][5]=(slot%3)<<9;
+    }
+    for(uint32_t s=0;s<3;++s) {
+      guest::VertexStream stream{};stream.stream=s*2+1;stream.size=16;stream.stride=4;stream.update.plan.key=1500+s;p.streams.push_back(stream);
+    }
+    p.vertex_fetch[0]={1,0,4,0x2C2259};p.vertex_fetch[48]={5,14,4,0x2C2259};p.vertex_fetch[223]={3,2,8,0x1A2086};
+    ExpectSameBlockAsReference(p);
+  }
+  {  // inline vertices
+    guest::DrawPacket p;FillConstants(p,3);p.inline_vertices=true;p.inline_stride=32;p.command_serial=77;
+    p.texture_fetch[0][0]=2;p.texture_fetch[0][5]=1<<9;p.texture_fetch[31][0]=2;p.texture_fetch[31][5]=2<<9;
+    p.vertex_fetch[0]={9,0,4,0x2C2259};p.vertex_fetch[10]={20,8,4,0x2C23A5};p.vertex_fetch[100]={0,16,4,0x1A2086};
+    ExpectSameBlockAsReference(p);
+  }
+  {  // the packets composition and immediate build (zero constants)
+    guest::DrawPacket p;p.inline_vertices=true;p.inline_stride=24;ExpectSameBlockAsReference(p);
+    guest::DrawPacket q;ExpectSameBlockAsReference(q);
+  }
+}
 SR_TEST(build_bindings_rejects_duplicate_and_missing_streams) {
   Block block;DrawBindings b;Error e;
   guest::VertexStream stream{};stream.stream=2;stream.size=16;stream.stride=4;stream.update.plan.key=1500;

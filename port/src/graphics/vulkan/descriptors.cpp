@@ -55,8 +55,14 @@ bool BuildBindings(const guest::DrawPacket& draw,std::byte* block,DrawBindings& 
       stream_index[stream.stream]=uint8_t(streams);out.vertex_buffers[streams++]=stream.update.plan.key;
     }
   }
-  std::memcpy(block,&draw.constants,sizeof(guest::ConstantSnapshot));
+  // The block is write-combined memory that is neither zeroed nor initialized, and reading the cold packet is the
+  // expensive half of the copy. Take only what survives: vs, ps and shared[256,512). shared[0,256) (texture and
+  // sampler indices) and shared[512,4096) (vertex fetch) are rewritten in full below.
+  static_assert(offsetof(guest::ConstantSnapshot,vs)==0 && offsetof(guest::ConstantSnapshot,ps)==sizeof(guest::ConstantSnapshot::vs) && kSharedConstantsOffset==sizeof(guest::ConstantSnapshot::vs)+sizeof(guest::ConstantSnapshot::ps),"vs, ps and shared are contiguous");
+  static_assert(sizeof(guest::ConstantSnapshot::shared)==512+224*16 && sizeof(draw.vertex_fetch)==224*sizeof(guest::VertexFetchMeta) && sizeof(guest::VertexFetchMeta)==16,"vertex fetch fills shared[512,4096)");
   std::byte* shared=block+kSharedConstantsOffset;
+  std::memcpy(block,&draw.constants,kSharedConstantsOffset);
+  std::memcpy(shared+256,draw.constants.shared.data()+256,256);
   for(uint32_t i=0;i<draw.vertex_fetch.size();++i) {
     auto meta=draw.vertex_fetch[i];
     if(meta.type) {
