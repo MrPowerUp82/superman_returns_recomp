@@ -3,6 +3,10 @@ Gate de imagem do bench: compara o screenshot do instante em que o HUD é detect
 (logs\bench_<Nome>_start.png, salvo pelo bench.ps1) com uma referência da build boa
 (artifacts\golden\start.png, local e ignorada pelo Git).
 
+Duas camadas (veja image_gate_lib.ps1): PSNR e histograma globais, folgados (so pegam falhas grosseiras), e regioes
+fixas (logo e barras do HUD, capa do personagem) por diferenca de cor media, cromaticidade e PSNR. O angulo da
+camera na abertura da fase varia entre execucoes; HUD e personagem ficam no mesmo lugar.
+
   -Mode record   grava a referência a partir do screenshot (rode numa build que se sabe boa)
   -Mode check    compara; sai com erro se reprovar
 
@@ -31,7 +35,6 @@ if (-not (Test-Path -LiteralPath $golden)) { throw "No reference at ${golden}: r
 $result = Compare-GateImages -Reference $golden -Candidate $shot
 $invariant = [cultureinfo]::InvariantCulture
 $verdict = if ($result.Pass) { 'PASS' } else { 'FAIL' }
-Write-Output ("GATE {0} {1} psnr={2} dB hist={3} {4}" -f $verdict, $Name, $result.Psnr.ToString('0.0', $invariant), $result.Histogram.ToString('0.000', $invariant), $result.Reason)
-"{0},{1},{2},{3},{4}" -f (Get-Date -Format s), $Name, $result.Psnr.ToString('0.00', $invariant), $result.Histogram.ToString('0.0000', $invariant), $verdict |
-  Add-Content -Encoding utf8 "$root\logs\bench_gate.csv"
+Write-Output ("GATE {0} {1} psnr={2} dB hist={3} {4} {5}" -f $verdict, $Name, $result.Psnr.ToString('0.0', $invariant), $result.Histogram.ToString('0.000', $invariant), (Format-GateRegions $result), $result.Reason)
+Add-GateCsvRow "$root\logs\bench_gate.csv" $Name $verdict $result
 if (-not $result.Pass) { throw "Image gate failed for ${Name}: $($result.Reason)" }
