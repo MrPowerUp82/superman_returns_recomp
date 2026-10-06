@@ -641,8 +641,9 @@ int Run(const std::filesystem::path &shaders_dir, const std::string &uuid,
           packet.texture_fetch[7][0]=2|(3<<10)|(3<<13);packet.texture_fetch[7][1]=0x1006;packet.texture_fetch[7][5]=1<<9;
           guest::LinearTexture linear;linear.width=linear.height=1;linear.format=guest::LinearFormat::kRGBA8Unorm;linear.levels={{1,1,4,1,0}};linear.data={255,255,255,255};
           if(!resources.UploadTexture(TextureResourceId(packet.texture_fetch[7]),linear,1,e)) throw std::runtime_error(e.operation+": "+e.message);
-          auto bindings=BuildBindings(packet,e);if(!e.message.empty()) throw std::runtime_error(e.message);
-          auto sets=descriptors.Prepare(bindings,packet.texture_fetch,resources,uint64_t(variant)+1,e);
+          TransientSlice constants;if(!resources.MapTransient(sizeof(guest::ConstantSnapshot),constants,e)) throw std::runtime_error(e.operation+": "+e.message);
+          DrawBindings bindings;if(!BuildBindings(packet,constants.data,bindings,e)) throw std::runtime_error(e.message);
+          auto sets=descriptors.Prepare(bindings,packet.texture_fetch,resources,uint64_t(variant)+1,constants,e);
           if(!sets) throw std::runtime_error(e.operation+": "+e.message);
           fixture.sets=sets->sets;
           fixture.dynamic_offsets=sets->dynamic_offsets;fixture.dynamic_count=uint32_t(sets->dynamic_offsets.size());

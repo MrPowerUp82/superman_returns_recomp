@@ -1,6 +1,6 @@
 #include "descriptors.h"
 #include <cstring>
-#include <map>
+#include <array>
 #include <algorithm>
 namespace superman_returns::graphics::vulkan {
 guest::ResourceId TextureResourceId(std::span<const uint32_t,6> words) {
@@ -11,27 +11,29 @@ guest::ResourceId TextureResourceId(std::span<const uint32_t,6> words) {
 }
 bool RemapTextureBindings(std::span<const TextureBindingRequest> requests,DrawBindings& out,Error& error) {
   if(requests.size()>32) {error={"Descriptor remap",VK_ERROR_FEATURE_NOT_PRESENT,"More than 32 texture slots"};return false;}
-  DrawBindings next=out;
-  for(uint32_t dim=0;dim<3;++dim) next.textures[dim].fill(DummyTexture(TextureDimension(dim)));
-  next.texture_indices.fill(31);
-  std::array<uint32_t,3> count{};
   std::array<bool,32> used{};
-  for(const auto& r:requests) {
+  for(const auto& r:requests) {  // validate everything before touching `out`
     auto dim=uint32_t(r.dimension);
     if(r.slot>=32 || dim>=3 || used[r.slot] || !r.resource || r.resource>=DummyBuffer) {
       error={"Descriptor remap",VK_ERROR_INITIALIZATION_FAILED,"Invalid or duplicate texture slot/resource/dimension"};return false;
     }
     used[r.slot]=true;
-    uint32_t index=count[dim]++;
-    next.textures[dim][index]=r.resource;
-    next.texture_indices[r.slot]=(r.flags&~0x7fffu)|index;
   }
-  out=std::move(next);error={};return true;
+  for(uint32_t dim=0;dim<3;++dim) out.textures[dim].fill(DummyTexture(TextureDimension(dim)));
+  out.texture_indices.fill(31);
+  std::array<uint32_t,3> count{};
+  for(const auto& r:requests) {
+    auto dim=uint32_t(r.dimension);
+    uint32_t index=count[dim]++;
+    out.textures[dim][index]=r.resource;
+    out.texture_indices[r.slot]=(r.flags&~0x7fffu)|index;
+  }
+  error={};return true;
 }
-DrawBindings BuildBindings(const guest::DrawPacket& draw,Error& error) {
-  DrawBindings out;out.constants=draw.constants;
+bool BuildBindings(const guest::DrawPacket& draw,std::byte* block,DrawBindings& out,Error& error) {
+  out=DrawBindings{};
   out.vertex_buffers.fill(DummyBuffer);
-  std::vector<TextureBindingRequest> requests;
+  std::array<TextureBindingRequest,32> requests;size_t request_count=0;
   for(uint32_t slot=0;slot<32;++slot) {
     const auto& fetch=draw.texture_fetch[slot];
     if((fetch[0]&3)!=2) continue;
@@ -39,39 +41,39 @@ DrawBindings BuildBindings(const guest::DrawPacket& draw,Error& error) {
     if(dim==0) dim=1; // SDK prepares 1D as a one-row 2D image.
     uint32_t gamma=0;
     if(((fetch[0]>>2)&3)==3 && ((fetch[0]>>4)&3)==3 && ((fetch[0]>>6)&3)==3) gamma=0x80000000u;
-    requests.push_back({slot,TextureResourceId(fetch),TextureDimension(dim-1),gamma});
+    requests[request_count++]={slot,TextureResourceId(fetch),TextureDimension(dim-1),gamma};
   }
-  if(!RemapTextureBindings(requests,out,error)) return {};
-  std::map<uint32_t,uint32_t> streams;
+  if(!RemapTextureBindings(std::span<const TextureBindingRequest>(requests.data(),request_count),out,error)) return false;
+  std::array<uint8_t,32> stream_index;stream_index.fill(0xff);uint32_t streams=0;
   if(draw.inline_vertices) {
     out.vertex_buffers[0]=InlineBufferBase|draw.command_serial;
   } else {
     for(const auto& stream:draw.streams) {
-      if(stream.stream>=32 || !stream.update.plan.key || streams.contains(stream.stream) || streams.size()>=32) {
-        error={"Vertex remap",VK_ERROR_INITIALIZATION_FAILED,"Invalid or duplicate vertex stream"};return {};
+      if(stream.stream>=32 || !stream.update.plan.key || stream_index[stream.stream]!=0xff || streams>=32) {
+        error={"Vertex remap",VK_ERROR_INITIALIZATION_FAILED,"Invalid or duplicate vertex stream"};return false;
       }
-      uint32_t index=uint32_t(streams.size());streams.emplace(stream.stream,index);
-      out.vertex_buffers[index]=stream.update.plan.key;
+      stream_index[stream.stream]=uint8_t(streams);out.vertex_buffers[streams++]=stream.update.plan.key;
     }
   }
+  std::memcpy(block,&draw.constants,sizeof(guest::ConstantSnapshot));
+  std::byte* shared=block+kSharedConstantsOffset;
   for(uint32_t i=0;i<draw.vertex_fetch.size();++i) {
     auto meta=draw.vertex_fetch[i];
     if(meta.type) {
       if(draw.inline_vertices) meta.buffer=0;
       else {
-        auto found=streams.find(meta.buffer);
-        if(found==streams.end()) {error={"Vertex remap",VK_ERROR_INITIALIZATION_FAILED,"Vertex metadata references missing stream"};return {};}
-        meta.buffer=found->second;
+        if(meta.buffer>=32 || stream_index[meta.buffer]==0xff) {error={"Vertex remap",VK_ERROR_INITIALIZATION_FAILED,"Vertex metadata references missing stream"};return false;}
+        meta.buffer=stream_index[meta.buffer];
       }
     } else {meta={31,0,0,0};}
-    std::memcpy(out.constants.shared.data()+512+i*16,&meta,16);
+    std::memcpy(shared+512+i*16,&meta,16);
   }
   for(uint32_t slot=0;slot<32;++slot) {
     out.sampler_indices[slot]=slot;
-    std::memcpy(out.constants.shared.data()+slot*4,&out.texture_indices[slot],4);
-    std::memcpy(out.constants.shared.data()+128+slot*4,&out.sampler_indices[slot],4);
+    std::memcpy(shared+slot*4,&out.texture_indices[slot],4);
+    std::memcpy(shared+128+slot*4,&out.sampler_indices[slot],4);
   }
-  error={};return out;
+  error={};return true;
 }
 bool PlanSampler(std::span<const uint32_t,6> fetch,const VkPhysicalDeviceFeatures& features,
                  const VkPhysicalDeviceLimits& limits,bool mirror_clamp,VkSamplerCreateInfo& out,Error& e) {

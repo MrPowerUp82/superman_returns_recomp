@@ -116,3 +116,37 @@ SR_TEST(host_upload_reuses_only_completed_unreferenced_buffers) {
   }
   SR_CHECK(allocations.empty());SR_CHECK_EQ(copies,0);SR_CHECK_EQ(flushes,4);
 }
+SR_TEST(map_transient_hands_out_mapped_slices_of_one_chunk_and_flushes_non_coherent_memory) {
+  allocations.clear();copies=flushes=destroyed=0;
+  Context c(ResourceFake());c.device=reinterpret_cast<VkDevice>(1);
+  c.memory.memoryTypeCount=1;c.memory.memoryTypes[0].propertyFlags=VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;  // not coherent
+  c.properties.limits.maxStorageBufferRange=4096;c.properties.limits.nonCoherentAtomSize=64;c.properties.limits.minStorageBufferOffsetAlignment=16;
+  {
+    ResourceStore store(c);Error e;TransientSlice a,b;
+    SR_CHECK(!store.MapTransient(16,a,e));                       // no recording submission yet
+    SR_CHECK(store.BeginSubmission(reinterpret_cast<VkCommandBuffer>(1),1,e));
+    SR_CHECK(!store.MapTransient(0,a,e));SR_CHECK(!store.MapTransient(5000,a,e));  // empty and over maxStorageBufferRange
+    SR_CHECK(store.MapTransient(16,a,e));SR_CHECK(store.MapTransient(16,b,e));
+    SR_CHECK(a.data!=nullptr);SR_CHECK(a.chunk==b.chunk);
+    SR_CHECK_EQ(a.offset,0u);SR_CHECK_EQ(b.offset,64u);          // aligned to the non-coherent atom size
+    SR_CHECK_EQ(size_t(b.data-a.data),size_t(64));
+    std::memset(a.data,0x5a,16);                                  // the slice is the mapped memory itself
+    SR_CHECK_EQ(allocations[a.chunk->memory][0],0x5au);
+    SR_CHECK(store.FlushTransient(a,e));SR_CHECK_EQ(flushes,1);   // FakeFlush checks offset 0, size 64
+    store.Retire(1);
+  }
+  SR_CHECK(allocations.empty());
+}
+SR_TEST(map_transient_skips_the_flush_on_coherent_memory) {
+  allocations.clear();copies=flushes=destroyed=0;
+  Context c(ResourceFake());c.device=reinterpret_cast<VkDevice>(1);
+  c.memory.memoryTypeCount=1;c.memory.memoryTypes[0].propertyFlags=VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+  c.properties.limits.maxStorageBufferRange=4096;c.properties.limits.nonCoherentAtomSize=64;
+  {
+    ResourceStore store(c);Error e;TransientSlice a;
+    SR_CHECK(store.BeginSubmission(reinterpret_cast<VkCommandBuffer>(1),1,e));
+    SR_CHECK(store.MapTransient(16,a,e));SR_CHECK(store.FlushTransient(a,e));SR_CHECK_EQ(flushes,0);
+    store.Retire(1);
+  }
+  SR_CHECK(allocations.empty());
+}

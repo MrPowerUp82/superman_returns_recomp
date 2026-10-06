@@ -41,6 +41,13 @@ struct BufferResource {
   void* mapped=nullptr;  // persistent mapping of host-visible allocations
   ~BufferResource();
 };
+// A host-visible slice of the transient arena that the caller fills in place (no copy). The arena chunk is
+// kept by the submission (Place keeps it once per serial), so the slice needs no ownership of its own.
+struct TransientSlice {
+  std::shared_ptr<BufferResource> chunk;  // handle, memory and coherency come from the chunk
+  VkDeviceSize offset=0,size=0;
+  std::byte* data=nullptr;
+};
 struct TextureResource {
   Context* context=nullptr;
   ImageState* state=nullptr;
@@ -71,6 +78,10 @@ public:
   // Host-visible per-submission suballocation; the returned view binds at
   // its offset and stays valid until this submission retires.
   std::shared_ptr<BufferResource> UploadTransient(guest::ResourceId,std::span<const std::byte>,VkDeviceSize reserve,Error&);
+  // UploadTransient without the copy: write `size` bytes at slice.data, then FlushTransient. Valid until
+  // this submission retires.
+  bool MapTransient(VkDeviceSize size,TransientSlice&,Error&);
+  bool FlushTransient(const TransientSlice&,Error&);
   bool UploadBuffer(guest::ResourceId,std::span<const std::byte>,uint64_t version,Error&);
   bool UploadTexture(guest::ResourceId,const guest::LinearTexture&,uint64_t version,Error&);
   // Tracked resolve images remain GPU-authoritative and preserve partial writes.
@@ -101,7 +112,10 @@ private:
   // `overflow` is the current chunk once the pooled budget is spent; it is
   // filled like a pooled chunk and released when its submission retires.
   struct Arena {VkBufferUsageFlags usage=0;std::vector<ArenaChunk> chunks;size_t current=SIZE_MAX;VkDeviceSize bytes=0;ArenaChunk overflow;};
+  struct Placement {std::shared_ptr<BufferResource> chunk;VkDeviceSize offset=0;};
+  bool Place(Arena&,VkDeviceSize size,VkDeviceSize alignment,Placement&,Error&);
   std::shared_ptr<BufferResource> Suballocate(Arena&,VkDeviceSize size,VkDeviceSize alignment,Error&);
+  VkDeviceSize TransientAlignment() const;
   Context& c_;
   VkCommandBuffer command_=VK_NULL_HANDLE,upload_=VK_NULL_HANDLE;
   bool upload_barrier_=false;std::vector<VkImageMemoryBarrier> texture_barriers_;VkDeviceSize submission_bytes_=0;

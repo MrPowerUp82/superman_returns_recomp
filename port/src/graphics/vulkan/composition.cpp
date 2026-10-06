@@ -25,14 +25,16 @@ std::shared_ptr<CompositionDraw> FrontbufferCompositor::Prepare(VkCommandBuffer 
   constexpr guest::ResourceId source_id=UINT64_MAX-8;
   if(!resources.BindTextureView(source_id,source,{VK_COMPONENT_SWIZZLE_R,VK_COMPONENT_SWIZZLE_G,VK_COMPONENT_SWIZZLE_B,VK_COMPONENT_SWIZZLE_A},e)) return {};
   guest::DrawPacket draw;draw.command_serial=++draw_serial_;draw.registers[0x104]=15;draw.registers[0x201]=1|(1<<16);
-  auto bindings=BuildBindings(draw,e);if(!e.message.empty()) return {};
+  TransientSlice constants;if(!resources.MapTransient(sizeof(guest::ConstantSnapshot),constants,e)) return {};
+  DrawBindings bindings;if(!BuildBindings(draw,constants.data,bindings,e)) return {};
   bindings.textures[0][0]=source_id;bindings.texture_indices[0]=0;
-  std::memcpy(bindings.constants.shared.data(),gamma.data(),gamma.size_bytes());
+  std::byte* shared=constants.data+kSharedConstantsOffset;
+  std::memcpy(shared,gamma.data(),gamma.size_bytes());
   uint32_t options[]{uint32_t(gamma_enabled),uint32_t(pass.formats[0]==VK_FORMAT_R8G8B8A8_SRGB || pass.formats[0]==VK_FORMAT_B8G8R8A8_SRGB)};
-  std::memcpy(bindings.constants.shared.data()+1024,options,sizeof(options));
+  std::memcpy(shared+1024,options,sizeof(options));
   // Linear clamp to edge prevents filtering beyond the frontbuffer at borders.
   draw.texture_fetch[0][0]=(2u<<10)|(2u<<13)|(2u<<16);draw.texture_fetch[0][3]=(1u<<19)|(1u<<21);
-  result->descriptors=descriptors_.Prepare(bindings,draw.texture_fetch,resources,resources.CurrentSerial(),e);if(!result->descriptors) return {};
+  result->descriptors=descriptors_.Prepare(bindings,draw.texture_fetch,resources,resources.CurrentSerial(),constants,e);if(!result->descriptors) return {};
   result->pipeline=pipelines_.Acquire(draw,pass,vertex_,&pixel_,resources.CurrentSerial(),e);if(!result->pipeline) return {};
   e={};return result;
 }

@@ -3,6 +3,14 @@
 #include <cstring>
 using namespace superman_returns::graphics::vulkan;
 namespace guest=superman_returns::graphics::guest;
+namespace {
+// The 12 KiB constant block of one draw (vs, ps, shared), as MapTransient hands it out.
+struct Block {
+  alignas(16) std::array<std::byte,sizeof(guest::ConstantSnapshot)> bytes{};
+  std::byte* data() {return bytes.data();}
+  const std::byte* shared() const {return bytes.data()+kSharedConstantsOffset;}
+};
+}
 SR_TEST(descriptor_arrays_accept_32_slots_and_reject_33) {
   std::vector<TextureBindingRequest> requests;
   for(uint32_t i=0;i<32;++i) requests.push_back({i,1500+i,TextureDimension::k2D,0});
@@ -26,17 +34,56 @@ SR_TEST(descriptors_remap_global_ids_keep_flags_and_dimension_dummies) {
   requests.push_back(requests[0]);
   SR_CHECK(!RemapTextureBindings(requests,b,e));
 }
+SR_TEST(remap_failure_leaves_the_bindings_untouched) {
+  DrawBindings b;Error e;
+  std::vector<TextureBindingRequest> good{{3,1500,TextureDimension::k2D,0}};
+  SR_CHECK(RemapTextureBindings(good,b,e));
+  const DrawBindings before=b;
+  std::vector<TextureBindingRequest> bad{{4,1600,TextureDimension::k2D,0},{4,1601,TextureDimension::k2D,0}};  // duplicate slot
+  SR_CHECK(!RemapTextureBindings(bad,b,e));
+  SR_CHECK(std::memcmp(&before,&b,sizeof(DrawBindings))==0);
+  std::vector<TextureBindingRequest> zero{{5,0,TextureDimension::k2D,0}};  // no resource
+  SR_CHECK(!RemapTextureBindings(zero,b,e));
+  SR_CHECK(std::memcmp(&before,&b,sizeof(DrawBindings))==0);
+}
 SR_TEST(vertex_descriptor_remap_preserves_ushort2_and_stream_offset) {
   guest::DrawPacket p;
   p.vertex_fetch[48]={7,14,4,0x2C2259};
   guest::VertexStream stream{};stream.stream=7;stream.offset=12;stream.size=16;stream.stride=4;stream.update.plan.key=1500;
   p.streams.push_back(stream);
-  Error e;auto b=BuildBindings(p,e);
-  SR_CHECK(e.message.empty());
+  Block block;DrawBindings b;Error e;
+  SR_CHECK(BuildBindings(p,block.data(),b,e));
   SR_CHECK_EQ(b.vertex_buffers[0],1500u);
-  guest::VertexFetchMeta meta{};std::memcpy(&meta,b.constants.shared.data()+512+48*16,16);
+  guest::VertexFetchMeta meta{};std::memcpy(&meta,block.shared()+512+48*16,16);
   SR_CHECK_EQ(meta.buffer,0u);SR_CHECK_EQ(meta.offset,14u);SR_CHECK_EQ(meta.type,0x2C2259u);
   SR_CHECK_EQ(b.vertex_buffers[31],DummyBuffer);
+}
+SR_TEST(build_bindings_writes_vs_ps_and_patches_shared_in_the_block) {
+  guest::DrawPacket p;
+  p.constants.vs[3]=0x11111111;p.constants.ps[5]=0x22222222;p.constants.shared[300]=0x7e;  // 300 is outside the patched ranges
+  p.texture_fetch[7][0]=2;p.texture_fetch[7][5]=1<<9;p.texture_fetch[7][1]=0x1006;
+  Block block;DrawBindings b;Error e;
+  SR_CHECK(BuildBindings(p,block.data(),b,e));
+  uint32_t word=0;
+  std::memcpy(&word,block.data()+3*4,4);SR_CHECK_EQ(word,0x11111111u);
+  std::memcpy(&word,block.data()+4096+5*4,4);SR_CHECK_EQ(word,0x22222222u);
+  SR_CHECK_EQ(uint32_t(block.shared()[300]),0x7eu);
+  std::memcpy(&word,block.shared()+7*4,4);SR_CHECK_EQ(word,b.texture_indices[7]);   // texture index of slot 7
+  std::memcpy(&word,block.shared()+128+7*4,4);SR_CHECK_EQ(word,7u);                // sampler index of slot 7
+  SR_CHECK_EQ(b.sampler_indices[7],7u);
+}
+SR_TEST(build_bindings_rejects_duplicate_and_missing_streams) {
+  Block block;DrawBindings b;Error e;
+  guest::VertexStream stream{};stream.stream=2;stream.size=16;stream.stride=4;stream.update.plan.key=1500;
+  guest::DrawPacket duplicate;duplicate.streams={stream,stream};
+  SR_CHECK(!BuildBindings(duplicate,block.data(),b,e));
+  guest::DrawPacket no_key;stream.update.plan.key=0;no_key.streams={stream};
+  SR_CHECK(!BuildBindings(no_key,block.data(),b,e));
+  guest::DrawPacket missing;stream.update.plan.key=1500;missing.streams={stream};
+  missing.vertex_fetch[0]={9,0,4,0x2C2259};   // references stream 9, which the draw does not have
+  SR_CHECK(!BuildBindings(missing,block.data(),b,e));
+  guest::DrawPacket out_of_range;out_of_range.vertex_fetch[0]={40,0,4,0x2C2259};
+  SR_CHECK(!BuildBindings(out_of_range,block.data(),b,e));
 }
 SR_TEST(sampler_plan_preserves_fetch_filters_and_address_modes) {
   std::array<uint32_t,6> fetch{};
@@ -62,10 +109,10 @@ SR_TEST(sampler_plan_preserves_fetch_filters_and_address_modes) {
 }
 SR_TEST(draw_bindings_gamma_matches_reference_rgb_sign_rule) {
   guest::DrawPacket packet;packet.texture_fetch[0][0]=2|(3<<2);packet.texture_fetch[0][5]=1<<9;
-  Error e;auto bindings=BuildBindings(packet,e);SR_CHECK(e.message.empty());
+  Block block;DrawBindings bindings;Error e;SR_CHECK(BuildBindings(packet,block.data(),bindings,e));
   SR_CHECK_EQ(bindings.texture_indices[0]&0x80000000u,0u);
   packet.texture_fetch[0][0]|=(3<<4)|(3<<6);
-  bindings=BuildBindings(packet,e);SR_CHECK_EQ(bindings.texture_indices[0]&0x80000000u,0x80000000u);
+  SR_CHECK(BuildBindings(packet,block.data(),bindings,e));SR_CHECK_EQ(bindings.texture_indices[0]&0x80000000u,0x80000000u);
 }
 SR_TEST(resource_id_bases_do_not_collide) {
   SR_CHECK(InlineBufferBase != ExpandedIndexBufferBase);

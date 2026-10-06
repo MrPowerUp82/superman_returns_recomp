@@ -42,9 +42,10 @@ public:
   explicit DescriptorStore(Context& context):c_(context) {}
   ~DescriptorStore();
   bool Initialize(Error&);
+  // `constants` is the draw's 12 KiB block, already filled (BuildBindings); Prepare flushes it and binds it.
   std::shared_ptr<DescriptorDraw> Prepare(const DrawBindings&,
       const std::array<std::array<uint32_t,6>,32>& fetch,
-      ResourceStore&,uint64_t submission,Error&);
+      ResourceStore&,uint64_t submission,const TransientSlice& constants,Error&);
   void Retire(uint64_t completed_serial);
   const std::array<VkDescriptorSetLayout,4>& Layouts() const {return layouts_;}
 private:
@@ -56,7 +57,7 @@ private:
   std::map<std::array<uint32_t,2>,std::shared_ptr<SamplerResource>> samplers_;
   // Set 0 (the draw's constants, bound with dynamic offsets): one set per arena chunk.
   struct ConstantSetEntry {std::weak_ptr<BufferResource> owner;VkDescriptorSet set=VK_NULL_HANDLE;};
-  VkDescriptorSet ConstantSet(const BufferResource& block,Error&);
+  VkDescriptorSet ConstantSet(const std::shared_ptr<BufferResource>& chunk,Error&);
   void FreeConstantSet(VkDescriptorSet);
   std::unordered_map<VkBuffer,ConstantSetEntry> constant_sets_;
   std::shared_ptr<DescriptorPage> constant_pool_;

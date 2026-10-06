@@ -164,40 +164,61 @@ bool ResourceStore::Write(const std::shared_ptr<BufferResource>& b,std::span<con
   VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};range.memory=b->memory;range.offset=aligned.offset;range.size=aligned.size;
   return Check(c_.f.vkFlushMappedMemoryRanges(c_.device,1,&range),"Flush staging",e);
 }
-std::shared_ptr<BufferResource> ResourceStore::Suballocate(Arena& arena,VkDeviceSize size,VkDeviceSize alignment,Error& e) {
+bool ResourceStore::Place(Arena& arena,VkDeviceSize size,VkDeviceSize alignment,Placement& out,Error& e) {
   if(&arena==&staging_) submission_bytes_+=size;
   // Budget covers two frames in flight of constants (~36 MiB per 3000 draws).
   constexpr VkDeviceSize chunk_size=8ull*1024*1024,budget=128ull*1024*1024;
-  auto view=[&](ArenaChunk& chunk) {
+  auto fit=[&](ArenaChunk& chunk) {
     VkDeviceSize offset=(chunk.used+alignment-1)/alignment*alignment;
-    if(offset+size>chunk.buffer->size) return std::shared_ptr<BufferResource>{};
+    if(offset+size>chunk.buffer->size) return false;
     if(chunk.serial!=serial_) {chunk.serial=serial_;submissions_.Keep(serial_,chunk.buffer);}
-    chunk.used=offset+size;
-    auto v=std::make_shared<BufferResource>();v->context=&c_;v->owner=chunk.buffer;v->handle=chunk.buffer->handle;v->memory=chunk.buffer->memory;
-    v->size=size;v->allocation=size;v->offset=offset;v->coherent=chunk.buffer->coherent;v->mapped=static_cast<std::byte*>(chunk.buffer->mapped)+offset;
-    return v;
+    chunk.used=offset+size;out.chunk=chunk.buffer;out.offset=offset;return true;
   };
-  if(arena.current<arena.chunks.size() && arena.chunks[arena.current].serial==serial_) if(auto v=view(arena.chunks[arena.current])) return v;
-  if(arena.overflow.buffer && arena.overflow.serial==serial_) if(auto v=view(arena.overflow)) return v;
+  if(arena.current<arena.chunks.size() && arena.chunks[arena.current].serial==serial_) if(fit(arena.chunks[arena.current])) return true;
+  if(arena.overflow.buffer && arena.overflow.serial==serial_) if(fit(arena.overflow)) return true;
   // A chunk referenced only by the arena has no pending submission or view.
   for(size_t i=0;i<arena.chunks.size();++i) {
     auto& chunk=arena.chunks[i];
     if(chunk.buffer.use_count()!=1 || chunk.buffer->size<size) continue;
-    chunk.used=0;chunk.serial=0;arena.current=i;if(auto v=view(chunk)) return v;
+    chunk.used=0;chunk.serial=0;arena.current=i;if(fit(chunk)) return true;
   }
-  auto buffer=NewBuffer(std::max(chunk_size,size),arena.usage,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,e);if(!buffer) return {};
+  auto buffer=NewBuffer(std::max(chunk_size,size),arena.usage,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,e);if(!buffer) return false;
   if(buffer->size==chunk_size && arena.bytes+buffer->allocation<=budget) {
-    arena.bytes+=buffer->allocation;arena.chunks.push_back({buffer,0,0});arena.current=arena.chunks.size()-1;return view(arena.chunks.back());
+    arena.bytes+=buffer->allocation;arena.chunks.push_back({buffer,0,0});arena.current=arena.chunks.size()-1;return fit(arena.chunks.back());
   }
   // Oversized or over budget: lives for this submission only. Keep filling
   // it, otherwise every later small allocation would create another chunk.
-  arena.overflow={buffer,0,0};return view(arena.overflow);
+  arena.overflow={buffer,0,0};return fit(arena.overflow);
+}
+std::shared_ptr<BufferResource> ResourceStore::Suballocate(Arena& arena,VkDeviceSize size,VkDeviceSize alignment,Error& e) {
+  Placement at;if(!Place(arena,size,alignment,at,e)) return {};
+  auto v=std::make_shared<BufferResource>();v->context=&c_;v->owner=at.chunk;v->handle=at.chunk->handle;v->memory=at.chunk->memory;
+  v->size=size;v->allocation=size;v->offset=at.offset;v->coherent=at.chunk->coherent;v->mapped=static_cast<std::byte*>(at.chunk->mapped)+at.offset;
+  return v;
+}
+VkDeviceSize ResourceStore::TransientAlignment() const {
+  return std::lcm<VkDeviceSize>(std::max<VkDeviceSize>(16,c_.properties.limits.minStorageBufferOffsetAlignment),std::max<VkDeviceSize>(1,c_.properties.limits.nonCoherentAtomSize));
+}
+bool ResourceStore::MapTransient(VkDeviceSize size,TransientSlice& out,Error& e) {
+  if(!Ready(e)) return false;
+  if(!size || size>c_.properties.limits.maxStorageBufferRange) return Fail(e,"Map transient","Invalid storage buffer range");
+  Placement at;if(!Place(transient_,size,TransientAlignment(),at,e)) return false;
+  out.chunk=std::move(at.chunk);out.offset=at.offset;out.size=size;out.data=static_cast<std::byte*>(out.chunk->mapped)+at.offset;
+  e={};return true;
+}
+bool ResourceStore::FlushTransient(const TransientSlice& slice,Error& e) {
+  if(!slice.chunk || !slice.data) return Fail(e,"Flush transient","Slice was not mapped");
+  if(slice.chunk->coherent) {e={};return true;}
+  auto aligned=AlignFlushRange(slice.offset,slice.size,slice.chunk->allocation,std::max<VkDeviceSize>(1,c_.properties.limits.nonCoherentAtomSize));
+  if(!aligned.valid) return Fail(e,"Flush transient","Invalid flush range");
+  VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};range.memory=slice.chunk->memory;range.offset=aligned.offset;range.size=aligned.size;
+  return Check(c_.f.vkFlushMappedMemoryRanges(c_.device,1,&range),"Flush transient",e);
 }
 std::shared_ptr<BufferResource> ResourceStore::UploadTransient(guest::ResourceId id,std::span<const std::byte> bytes,VkDeviceSize reserve,Error& e) {
   if(!Ready(e)) return {};
   VkDeviceSize size=std::max<VkDeviceSize>(bytes.size(),reserve);
   if(!size || size>c_.properties.limits.maxStorageBufferRange) {Fail(e,"Upload transient","Invalid storage buffer range");return {};}
-  auto alignment=std::lcm<VkDeviceSize>(std::max<VkDeviceSize>(16,c_.properties.limits.minStorageBufferOffsetAlignment),std::max<VkDeviceSize>(1,c_.properties.limits.nonCoherentAtomSize));
+  auto alignment=TransientAlignment();
   auto buffer=Suballocate(transient_,size,alignment,e);
   if(!buffer || !Write(buffer,bytes,e)) return {};
   if(id) {buffer->version=serial_;buffers_[id]=buffer;}

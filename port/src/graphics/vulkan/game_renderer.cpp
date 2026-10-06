@@ -203,15 +203,17 @@ bool GameRenderer::Draw(const guest::DrawPacket& draw,VkCommandBuffer command,Er
     if(profiling_) {++profile_.texture_uploads;profile_.texture_bytes+=texture.data.size();}
   }
   lap(RecordProfile::kTextures);
-  auto bindings=BuildBindings(draw,e);if(!e.message.empty()) return false;
+  TransientSlice constants;if(!resources_.MapTransient(sizeof(guest::ConstantSnapshot),constants,e)) return false;
+  DrawBindings bindings;if(!BuildBindings(draw,constants.data,bindings,e)) return false;
   lap(RecordProfile::kBindings);
-  auto descriptors=descriptors_.Prepare(bindings,draw.texture_fetch,resources_,serial_,e);if(!descriptors) return false;
+  auto descriptors=descriptors_.Prepare(bindings,draw.texture_fetch,resources_,serial_,constants,e);if(!descriptors) return false;
   lap(RecordProfile::kDescriptors);
   auto pipeline=pipelines_.Acquire(draw,*pass,vs.artifact,ps.artifact,serial_,e);if(!pipeline) {e.message+="; VS="+std::to_string(draw.vertex_shader->hash)+", PS="+std::to_string(draw.pixel_shader?draw.pixel_shader->hash:0)+", RT0="+std::to_string(pass->formats[0])+", DS="+std::to_string(pass->depth_format);return false;}
-  struct Binding {uint32_t slot;std::shared_ptr<BufferResource> resource;VkDeviceSize offset;};std::vector<Binding> vertices;
-  if(draw.inline_vertices) {auto b=resources_.Buffer(InlineBufferBase|draw.command_serial,e);if(!b) return false;vertices.push_back({0,b,b->offset});}
-  else for(auto& stream:draw.streams) {auto b=resources_.Buffer(stream.update.plan.key,e);if(!b || stream.offset>b->size) return Fail(e,"Vertex stream offset exceeds buffer");vertices.push_back({stream.stream,b,b->offset+stream.offset});}
-  auto missing=resources_.Buffer(MissingVertex,e);if(!missing) return false;vertices.push_back({31,missing,missing->offset});
+  struct Binding {uint32_t slot;VkBuffer handle;VkDeviceSize offset;};
+  std::array<Binding,33> vertices;uint32_t vertex_count=0;  // at most 32 streams (BuildBindings) plus the missing-vertex stub
+  if(draw.inline_vertices) {auto b=resources_.Buffer(InlineBufferBase|draw.command_serial,e);if(!b) return false;vertices[vertex_count++]={0,b->handle,b->offset};}
+  else for(auto& stream:draw.streams) {auto b=resources_.Buffer(stream.update.plan.key,e);if(!b || stream.offset>b->size) return Fail(e,"Vertex stream offset exceeds buffer");vertices[vertex_count++]={stream.stream,b->handle,b->offset+stream.offset};}
+  auto missing=resources_.Buffer(MissingVertex,e);if(!missing) return false;vertices[vertex_count++]={31,missing->handle,missing->offset};
   std::shared_ptr<BufferResource> indices;if(draw.indexed) {indices=resources_.Buffer(index_id,e);if(!indices || uint64_t(draw.first+uint64_t(draw.count))*4>indices->size) {e={"Index draw",VK_ERROR_INITIALIZATION_FAILED,"Draw exceeds captured buffer: first="+std::to_string(draw.first)+", count="+std::to_string(draw.count)+", bytes="+std::to_string(indices?indices->size:0)+", plan="+std::to_string(draw.indices.plan.size)+", format="+std::to_string(draw.indices.plan.format)+", action="+std::to_string(draw.indices.plan.action)+", serial="+std::to_string(draw.command_serial)};return false;}}
   VkViewport viewport{draw.viewport.x,draw.viewport.y,draw.viewport.width,draw.viewport.height,draw.viewport.min_depth,draw.viewport.max_depth};
   if(viewport.width<=0 || viewport.height<=0) viewport={0,0,float(pass->extent.width),float(pass->extent.height),0,1};
@@ -227,7 +229,7 @@ bool GameRenderer::Draw(const guest::DrawPacket& draw,VkCommandBuffer command,Er
   }
   if(bound_pipeline_!=pipeline->handle) {c_.f.vkCmdBindPipeline(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline->handle);bound_pipeline_=pipeline->handle;}
   c_.f.vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelines_.Layout(),0,4,descriptors->sets.data(),uint32_t(descriptors->dynamic_offsets.size()),descriptors->dynamic_offsets.data());
-  for(auto& b:vertices) if(std::any_of(pipeline->bindings.begin(),pipeline->bindings.end(),[&](const auto& binding){return binding.binding==b.slot;})) c_.f.vkCmdBindVertexBuffers(command,b.slot,1,&b.resource->handle,&b.offset);
+  for(uint32_t i=0;i<vertex_count;++i) {const auto& b=vertices[i];if(std::any_of(pipeline->bindings.begin(),pipeline->bindings.end(),[&](const auto& binding){return binding.binding==b.slot;})) c_.f.vkCmdBindVertexBuffers(command,b.slot,1,&b.handle,&b.offset);}
   c_.f.vkCmdSetViewport(command,0,1,&viewport);c_.f.vkCmdSetScissor(command,0,1,&scissor);c_.f.vkCmdSetBlendConstants(command,blend);c_.f.vkCmdSetStencilReference(command,VK_STENCIL_FACE_FRONT_AND_BACK,draw.registers[0x10d]&255);
   if(draw.indexed) {c_.f.vkCmdBindIndexBuffer(command,indices->handle,indices->offset,VK_INDEX_TYPE_UINT32);c_.f.vkCmdDrawIndexed(command,draw.count,1,draw.first,draw.base_vertex,0);}else c_.f.vkCmdDraw(command,draw.count,1,draw.first,0);
   if(!merge_passes_) ClosePass();
