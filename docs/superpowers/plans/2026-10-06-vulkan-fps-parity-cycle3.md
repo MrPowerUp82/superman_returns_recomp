@@ -2234,6 +2234,39 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 
 ---
 
+## Rodada 2: dieta da thread de gravação guiada pela investigação (Tarefas 7 a 9)
+
+Decisão do usuário (depois da Tarefa 4): mais uma rodada de dieta por draw, sem threads novas. A investigação (`.superpowers/sdd/c3-investigation-report.md`, números em ms por quadro, com ~2.900 draws) mostrou: os ~10 ms "sem fase" do perfil são um artefato (cada `Lap` trunca para µs); a gravação pode ir de ~47 para ~28–33 ms só com mudanças exatas e de baixo risco; um protótipo delas (`.superpowers/sdd/c3-prototype.diff`, **referência, não aplicar às cegas**: foi feito sem testes nem revisão) passou no gate, mas o FPS só foi para ~20, porque o worker de replay (~40 ms), a captura na thread do jogo (22–26 ms) e a GPU (32–35 ms) passam a mandar. Estas tarefas reimplementam o conjunto do protótipo limpo, testado e em três commits; o que sobra fora da thread de gravação fica para uma decisão do usuário.
+
+Restrições (as mesmas do plano): imagem idêntica; texturas exatas por quadro; todo recurso que um draw grava passa por `Hold` antes dos comandos; sem gravação em várias threads; gate de imagem `PASS` e os 15 fixtures + `hold-lifetime` + contrato continuam passando; custo medido em ns por draw com o `Lap` em nanossegundos (a partir da Tarefa 7 o perfil soma `record`).
+
+## Tarefa 7: Perfil em ns e buscas baratas (itens 14, 2, 1, 13 da investigação)
+
+**Arquivos:** `port/src/graphics/vulkan/game_renderer.h` (`Lap`, `RecordProfile`), `game_frame.cpp` (linha de log), `resources.h` (`buffers_`, `textures_`), `descriptor_sets.cpp` (`Shared`), `game_renderer.cpp` (`Draw`); testes em `tests/vulkan/test_resources.cpp`.
+
+- [ ] **Passo 1: `Lap` acumula nanossegundos.** `RecordProfile::us` passa a guardar nanossegundos de cada fase (renomeie para `ns`); a linha `Vulkan profile (ms/frame ...)` converte para ms com a mesma formatação. Critério: a soma das fases fica a ~1 ms de `record`.
+- [ ] **Passo 2: `ResourceStore::buffers_` e `textures_` viram `std::unordered_map`** (reserve inicial grande, ex. 4096). Nenhum código itera nesses mapas em ordem (confirme com `grep`); `FindBuffer`/`FindTexture` devolvem ponteiros para o valor, que continuam estáveis (nós). Teste: os testes existentes de `test_resources.cpp` seguem passando; acrescente um teste que insere/consulta/substitui/esquece ~5000 ids e confere os valores (cobre rehash).
+- [ ] **Passo 3: memo por dimensão em `DescriptorStore::Shared`.** Troque o memo de um id (`last_texture`) por um por dimensão (`last_id[3]`/`last_ptr[3]`), mantendo exatamente as mesmas palavras de chave e o mesmo hash. Critério: `descriptor_cache hits/misses` no perfil parecidos com antes; o fixture `hold-lifetime` continua passando.
+- [ ] **Passo 4: cópias evitáveis em `Draw`.** `const auto& capture=draw.textures[slot];` e sem cópia de `ShaderResult`/`shared_ptr` onde só se lê (passe, pipeline, `Texture()` quando só se usa o valor).
+- [ ] **Passo 5: testes, medição e commit.** Suíte de regressão Vulkan e os testes nativos; passo de medição com `<tag>` = `t7` (`-Profile -Gate check`). Critério: `uploads` + `descriptors` em ns/draw abaixo da linha de base `c3_t4` (esperado: uploads ~5,7→~3,5 ms, descriptors ~14→~9 ms por quadro); gate `PASS`. Commit: `perf(vulkan): nanosecond profile laps, hashed resource maps and a per-dimension descriptor key memo`.
+
+## Tarefa 8: Alias, pipeline e posse sem repetição (itens 3, 4, 12, 11 da investigação)
+
+**Arquivos:** `game_renderer.cpp` (`Draw`), `render_targets.h/.cpp` (`TargetStore::Aliases`, `PreparePass`), `game_pipeline.h/.cpp` (`GamePipelineStore::Acquire`), `resources.h` (se `Hold` precisar de ajuste); testes em `tests/vulkan/`.
+
+- [ ] **Passo 1: pular `Aliases` com o passe aberto.** Quando `open_pass_==pass` (o mesmo passe já aberto), `targets_.Aliases(*pass)` não é chamado: o invariante é que tudo que escreve num alvo (clear, resolve, alias de depth, outro passe) fecha o passe antes, então o plano é sempre vazio. Como a premissa é de runtime, acrescente a verificação de diagnóstico `SR_VULKAN_CHECK_ALIASES=1` (lida uma vez): com ela, `Aliases` roda mesmo assim e, se achar trabalho com o passe aberto, registra erro claro e falha o draw. Rode **um bench** com a variável ligada e confirme 0 violações no log; registre no relatório.
+- [ ] **Passo 2: memo de pipeline.** Em `GamePipelineStore::Acquire`, memo do último draw sobre as entradas brutas que `PlanGamePipeline` lê (lista no relatório da investigação, item 4: artefatos de VS/PS, `TargetPass*`, primitiva, indexado, restart, registradores 0x200/0x201/0x205/0x104/0x10d, bias/slope, inline e stride, atributos, strides dos streams). A lista de entradas tem de ser **completa**: em caso de dúvida sobre alguma entrada, não memoize. Acerto = mesmo `shared_ptr<GamePipeline>`; use `Hold` (com `held_serial` em `GamePipeline`) no lugar de `Keep` por draw. Teste unitário (sem GPU; aproveite o que `test_game_pipeline.cpp` já tiver) que prove: mesmas entradas → mesmo pipeline sem recalcular; mudar qualquer entrada da lista → recalcula.
+- [ ] **Passo 3: `Hold` em `TargetStore::PreparePass`/`TargetPass`** no lugar de `Keep` por draw, com `held_serial` (itens 12 e 11: fast path quando o plano mapeia no passe aberto, **só se** for trivial e exato).
+- [ ] **Passo 4: testes, medição e commit.** Regressão Vulkan; passo de medição `t8` (gate `PASS`). Critério: `targets` e `pipeline` em ns/draw abaixo da Tarefa 7 (esperado: targets ~5→~2 ms, pipeline ~4,8→~2,5 ms por quadro); a contagem de pipelines criados no log não muda. Commit: `perf(vulkan): skip alias planning on the open pass, memoize the last pipeline and hold targets once per submission`.
+
+## Tarefa 9: Bindings e comandos (itens 7, 10 da investigação)
+
+**Arquivos:** `descriptors.cpp` (`BuildBindings`), `game_renderer.cpp` (`Draw`); testes em `tests/vulkan/test_descriptors.cpp`.
+
+- [ ] **Passo 1: `BuildBindings` copia só o necessário.** Do bloco de 12 KB, copiar do pacote apenas `vs`, `ps` e `shared[256,512)`; `shared[0,256)` (índices de textura e de sampler) e `shared[512,4096)` (vertex fetch, 224×16 bytes) já são reescritos por inteiro logo depois. Teste (estende `build_bindings_writes_vs_ps_and_patches_shared_in_the_block`): preencha o bloco de saída com um padrão (ex. 0xCD) antes de chamar e confira que **todos** os 12.288 bytes resultantes são iguais aos do `BuildBindings` antigo (copie a implementação antiga para uma função de referência no teste), em pelo menos 3 pacotes diferentes (sem texturas/streams, com texturas e streams, com `inline_vertices`).
+- [ ] **Passo 2: um só `vkCmdBindDescriptorSets` quando os sets 1–3 mudam.** Com o filtro ligado: se `SetSharedSets` pede emissão, uma chamada `(0,4,...)` com os 3 offsets; senão a chamada de set 0 sozinha (como hoje). Com o filtro desligado, igual a hoje.
+- [ ] **Passo 3: testes, medição e commit.** Regressão Vulkan; passo de medição `t9` (gate `PASS`). Critério: `bindings` e `commands` em ns/draw abaixo da Tarefa 8. Em seguida, duas execuções seguidas e registre `record` (alvo: ≤ 33 ms) e o FPS. Commit: `perf(vulkan): copy only the constants a draw needs and bind descriptor sets in one call when the shared sets change`.
+
 ## Tarefa 6: Medição final e documentação
 
 **Arquivos:**
