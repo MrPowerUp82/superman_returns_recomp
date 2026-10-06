@@ -4,8 +4,8 @@
 Add-Type -AssemblyName System.Drawing
 
 # Limites calibrados com a variação natural entre execuções da build boa (veja tools\README.md).
-$script:GateMinPsnr = 18.0       # dB; abaixo disso a imagem é considerada diferente demais
-$script:GateMaxHistogram = 0.12  # 0 = histogramas iguais, 1 = disjuntos
+$script:GateMinPsnr = 30.0       # dB; abaixo disso a imagem é considerada diferente demais
+$script:GateMaxHistogram = 0.05  # 0 = histogramas iguais, 1 = disjuntos
 
 if (-not ([System.Management.Automation.PSTypeName]'SrImageGate').Type) {
   Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @"
