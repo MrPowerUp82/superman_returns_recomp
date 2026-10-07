@@ -8,7 +8,11 @@
 #include "checked_guest_memory.h"
 #include "guest_hash.h"
 #include "cpu_features.h"
+#if defined(__AVX2__) || defined(__x86_64__) || defined(_M_X64)
+#if defined(__AVX2__) || defined(__x86_64__) || defined(_M_X64)
 #include "xxh3_avx2.h"
+#endif
+#endif
 #include "texture_write_audit.h"
 #include "../graphics/guest/render_state.h"
 #include "../graphics/guest/edram_alias.h"
@@ -387,8 +391,12 @@ using Xxh3Fn=uint64_t(*)(const void*,size_t,uint64_t);
 Xxh3Fn TextureHash() {
   static const Xxh3Fn fn=[]() -> Xxh3Fn {
     const char* off=std::getenv("SR_NATIVE_HASH_NO_AVX2");
+    #if defined(__AVX2__) || defined(__x86_64__) || defined(_M_X64)
     const bool avx2=superman_returns::native::Avx2Available() && !(off && off[0] && off[0]!='0');
     return avx2?&superman_returns::native::Xxh3Avx2:&Xxh3Baseline;
+#else
+    return &Xxh3Baseline;
+#endif
   }();
   return fn;
 }
@@ -6828,3 +6836,5 @@ void Renderer::ExecOnSwap(uint8_t* base, uint32_t front_buffer_texture, uint64_t
 
 
 }  // namespace superman_returns::native
+
+
