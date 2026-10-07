@@ -148,6 +148,46 @@ SR_TEST(pixel_constant_writes_bump_only_the_ps_version) {
   SR_CHECK_EQ(m.vs_version, vs);
   SR_CHECK(m.ps_version > ps);
 }
+SR_TEST(rewriting_identical_constants_preserves_versions_but_tracks_zero_writes) {
+  Pm4Mirror m;
+  Stream vs, ps;
+  vs.Type0(Pm4Mirror::kAluConstantBase, {0, 0x3f800000});
+  ps.Type0(Pm4Mirror::kAluConstantBase + 0x400, {0, 0x40000000});
+  m.ScanCopy(nullptr, vs.bytes.data(), vs.size());
+  m.ScanCopy(nullptr, ps.bytes.data(), ps.size());
+  const auto vv=m.vs_version, pv=m.ps_version;
+  m.ScanCopy(nullptr, vs.bytes.data(), vs.size());
+  m.ScanCopy(nullptr, ps.bytes.data(), ps.size());
+  SR_CHECK_EQ(m.vs_version,vv);
+  SR_CHECK_EQ(m.ps_version,pv);
+  SR_CHECK(m.written(Pm4Mirror::kAluConstantBase));
+  SR_CHECK(m.written(Pm4Mirror::kAluConstantBase + 0x400));
+  Stream change;
+  change.Type0(Pm4Mirror::kAluConstantBase, {7});
+  m.ScanCopy(nullptr, change.bytes.data(), change.size());
+  SR_CHECK(m.vs_version>vv);
+  SR_CHECK_EQ(m.ps_version,pv);
+}
+SR_TEST(cached_float_constants_refresh_on_change_and_preserve_raw_mirror) {
+  Pm4Mirror m;
+  Stream values;
+  values.Type0(Pm4Mirror::kAluConstantBase, {0x7fc01234,0x7f800000,0x80000000,0x3f800000});
+  m.ScanCopy(nullptr,values.bytes.data(),values.size());
+  const auto& first=m.FloatConstants(false);
+  SR_CHECK_EQ(first[0],0u);
+  SR_CHECK_EQ(first[1],0x7f800000u);
+  SR_CHECK_EQ(first[2],0x80000000u);
+  SR_CHECK_EQ(m.reg(Pm4Mirror::kAluConstantBase),0x7fc01234u);
+  auto retained=first;
+  Stream change;
+  change.Type0(Pm4Mirror::kAluConstantBase+3,{0x40000000});
+  m.ScanCopy(nullptr,change.bytes.data(),change.size());
+  SR_CHECK_EQ(m.FloatConstants(false)[3],0x40000000u);
+  SR_CHECK_EQ(retained[3],0x3f800000u);
+  SR_CHECK_EQ(m.FloatConstants(true)[3],0u);
+  m=Pm4Mirror{};
+  SR_CHECK_EQ(m.FloatConstants(false)[3],0u);
+}
 
 SR_TEST(load_alu_constant_reads_guest_memory) {
   GuestMemory mem;

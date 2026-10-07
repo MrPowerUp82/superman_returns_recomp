@@ -20,6 +20,9 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $release = Join-Path $root 'artifacts\release'
 $zip = Join-Path $release 'superman_returns_win64.zip'
 if (-not (Test-Path $zip)) { throw "$zip is missing: run tools\package_release.ps1 first." }
+$python = (Get-Command python -ErrorAction Stop).Source
+& $python (Join-Path $root 'tools\release\verify_package.py') $zip
+if ($LASTEXITCODE -ne 0) { throw 'Release ZIP validation failed. Rebuild with tools\package_release.ps1.' }
 $info = Get-Content (Join-Path $release 'version.json') -Raw | ConvertFrom-Json
 if ($info.version -like '*-dirty') { throw "The package was built from uncommitted changes ($($info.version)). Commit, rebuild and package again." }
 $url = (git -C $root remote get-url $Remote).Trim()

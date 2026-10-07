@@ -1,7 +1,14 @@
 import { VULKAN_LIBRARY_NAME } from './vulkan-preshaders.js';
+import { D3D12_LIBRARY_NAME } from './d3d12-preshaders.js';
 
 export function generateVulkanShaders(files, onProgress = () => {}, signal) {
+  return generateShaders(files, onProgress, signal, 'vulkan');
+}
+
+export function generateShaders(files, onProgress = () => {}, signal, api = 'vulkan') {
   return new Promise((resolve, reject) => {
+    if (!['vulkan', 'd3d12'].includes(api)) { reject(new Error('Invalid shader API')); return; }
+    const libraryName = api === 'd3d12' ? D3D12_LIBRARY_NAME : VULKAN_LIBRARY_NAME;
     if (signal?.aborted) { reject(new DOMException('Cancelled', 'AbortError')); return; }
     const worker = new Worker(new URL('./vulkan-shader-worker.js', import.meta.url), { type: 'module' });
     let timer;
@@ -16,10 +23,10 @@ export function generateVulkanShaders(files, onProgress = () => {}, signal) {
         cleanup();
         const library = new Blob([data.bytes], { type: 'application/octet-stream' });
         const report = new Blob([JSON.stringify(data.report, null, 2)], { type: 'application/json' });
-        resolve({ library, report, summary: data.report, files: new Map([[VULKAN_LIBRARY_NAME, library], [`${VULKAN_LIBRARY_NAME}.report.json`, report]]) });
+        resolve({ library, report, summary: data.report, files: new Map([[libraryName, library], [`${libraryName}.report.json`, report]]) });
       } else if (data.type === 'error') { cleanup(); reject(new Error(data.message)); }
     };
     worker.onerror = (event) => { cleanup(); reject(new Error(event.message || 'WebAssembly shader worker failed')); };
-    timeout(); worker.postMessage({ files: [...files] });
+    timeout(); worker.postMessage({ files: [...files], api });
   });
 }

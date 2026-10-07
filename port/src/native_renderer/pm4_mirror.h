@@ -15,6 +15,7 @@
 #pragma once
 
 #include <cstdint>
+#include <array>
 #include <cstring>
 #include <functional>
 #include <span>
@@ -53,6 +54,9 @@ public:
     return index < kRegisterCount ? regs_[index] : 0;
   }
   const uint32_t *regs() const { return regs_; }
+  // Owned by the same recording thread as this mirror. Callers copy the bank
+  // into packets/uploads; the raw GPU register values remain untouched.
+  const std::array<uint32_t,1024>& FloatConstants(bool pixel) const;
   // Registers written at least once since startup (0x4000-0x4A00 range
   // tracked).
   bool written(uint32_t index) const {
@@ -74,7 +78,7 @@ public:
   uint32_t last_copy_dest_info = 0;
   uint32_t last_copy_dest_base = 0;
   uint64_t copy_draws = 0;
-  // Bumped on any VS / PS float constant write (constant buffer reuse).
+  // Bumped when VS / PS float constant contents change (buffer reuse).
   uint64_t vs_version = 1, ps_version = 1;
   uint64_t indirect_dwords = 0;
 
@@ -86,7 +90,7 @@ private:
   void Write(uint32_t index, uint32_t value) {
     if (index >= kRegisterCount)
       return;
-    if (index - kAluConstantBase < 0x800u) {
+    if (index - kAluConstantBase < 0x800u && regs_[index] != value) {
       ++(index < kAluConstantBase + 0x400 ? vs_version : ps_version);
     }
     regs_[index] = value;
@@ -96,6 +100,8 @@ private:
   }
   uint32_t regs_[kRegisterCount] = {};
   bool written_[kTrackedCount] = {};
+  mutable std::array<std::array<uint32_t,1024>,2> float_cache_{};
+  mutable std::array<uint64_t,2> float_cache_version_{};
 };
 
 } // namespace superman_returns::native

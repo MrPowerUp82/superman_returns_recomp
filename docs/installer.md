@@ -1,6 +1,19 @@
 # Instalador e builds pré-compilados
 
-O port pode ser distribuído **sem nenhum dado do jogo e sem nenhum shader traduzido**. O usuário monta o pacote em uma página (GitHub Pages) que roda inteira no navegador, a partir da própria cópia do jogo. A página pode gerar pré-shaders Vulkan com WebAssembly antes de salvar o pacote; shaders ausentes continuam sendo traduzidos no PC durante o jogo. Veja [pré-shaders Vulkan](vulkan-preshaders.md) para cobertura, geração local e ferramentas. O D3D12 mantém sua tradução própria em runtime. O fluxo foi inspirado pelo [`nfsmw-nx`](https://github.com/StevensND/nfsmw-nx).
+O port pode ser distribuído **sem nenhum dado do jogo e sem nenhum shader traduzido**. O usuário monta o pacote em uma página (GitHub Pages) que roda inteira no navegador, a partir da própria cópia do jogo. A página pode gerar pré-shaders Vulkan e D3D12 com WebAssembly antes de salvar o pacote; shaders ausentes continuam sendo traduzidos no PC durante o jogo. Veja [pré-shaders Vulkan](vulkan-preshaders.md) para cobertura, geração local e ferramentas. O fluxo foi inspirado pelo [`nfsmw-nx`](https://github.com/StevensND/nfsmw-nx).
+
+Marque as APIs desejadas no passo 2. D3D12 gera `superman_returns_shaders.srsl`
+(containers originais + DXIL); Vulkan gera `superman_returns_vulkan.srvk`
+(containers originais + SPIR-V). O pacote inclui as bibliotecas selecionadas e
+um relatório para cada API. **Salvar somente os pré-shaders selecionados** salva
+a biblioteca diretamente se houver uma API, ou um ZIP com as duas bibliotecas
+e relatórios se ambas estiverem marcadas. Extraia esse ZIP ao lado do executável.
+
+A geração D3D12 usa os mesmos perfis `vs_6_0`/`ps_6_0`, constantes em runtime,
+chaves XXH3-64 e formato SRSHLIB v1 do gerador nativo. O checksum do container
+DXIL reproduz `ComputeHashRetail` do DXC; os testes comparam a assinatura com
+o validador Microsoft `dxv.exe`. Só os containers não comprimidos nos `.AST`
+são cobertos; shaders do XEX e criados dinamicamente continuam no runtime.
 
 ## Peças
 
@@ -18,7 +31,9 @@ powershell -File tools\package_release.ps1          # compila em port\out\build\
 powershell -File tools\publish_release.ps1 -Confirm  # branch builds + release (exige o repositório sem alterações pendentes)
 ```
 
-O pacote sai em `artifacts/release/superman_returns_win64.zip` (~94 MB com o runtime do launcher) com `version.json` e o SHA-256. A compilação do launcher requer .NET 8 SDK. Para só empacotar builds existentes, gere o launcher com `tools/build_launcher.ps1` e use `-NoBuild`.
+O pacote sai em `artifacts/release/superman_returns_win64.zip` com `version.json` e o SHA-256. A compilação do launcher requer .NET 8 SDK e grava o executável na mesma pasta do build de distribuição. Para só empacotar builds existentes, gere o launcher com `tools/build_launcher.ps1 -OutDir <pasta-do-build>` e use `-NoBuild -BuildDir <pasta-do-build>`.
+
+O empacotamento e a publicação validam o ZIP com `tools/release/verify_package.py`: launcher, avisos do .NET, runtimes e ferramentas de shaders Vulkan precisam estar presentes e não vazios. O ZIP público não inclui as bibliotecas locais `.srsl`, `.pak` ou `.srvk`; gere os pré-shaders com `tools/shaders/build_corpus.ps1` para uso local ou pelo instalador no navegador.
 
 Para ativar a página: Settings → Pages → Deploy from a branch → `main` / `docs`.
 

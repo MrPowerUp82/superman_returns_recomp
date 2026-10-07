@@ -2,6 +2,13 @@
 
 Estes arquivos são ferramentas, não shaders traduzidos do jogo.
 
+O instalador usa estes emissores e o DXC para Vulkan (SPIR-V) e D3D12 (DXIL).
+As opções de compilação escolhem a saída; o nome `compileToSpirv` do wrapper
+também retorna DXIL quando `-spirv` não é passado. O checksum DXIL é calculado
+em `docs/js/dxil-container-hash.js`, conforme o algoritmo aberto do DXC.
+O bundle XXH3 em `docs/js/vendor/` reproduz as chaves das bibliotecas D3D12;
+procedência, versão, hash e licença estão no README dessa pasta.
+
 | Arquivos | Procedência | Licenças |
 | --- | --- | --- |
 | `hlsl.mjs`, `hlsl.wasm`, `shader_common.h` | XenosRecomp `339af41df2c23dbe3256c1c377716b81a0e0fe6b`, patches locais, `tools/shaders/build_wasm.ps1`, Emscripten 4.0.23 | XenosRecomp/fmt MIT; xxHash BSD-2-Clause |

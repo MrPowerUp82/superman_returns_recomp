@@ -46,9 +46,9 @@ SR_TEST(texture_upload_plan_keeps_cube_faces_and_volume_slices) {
 namespace {
 uint64_t next_handle=10;
 std::map<VkDeviceMemory,std::vector<uint8_t>> allocations;
-int copies=0,flushes=0,destroyed=0;
+int copies=0,flushes=0,destroyed=0,created=0;
 VkResult VKAPI_CALL FakeBuffer(VkDevice,const VkBufferCreateInfo*,const VkAllocationCallbacks*,VkBuffer* out) {
-  *out=reinterpret_cast<VkBuffer>(++next_handle);return VK_SUCCESS;
+  ++created;*out=reinterpret_cast<VkBuffer>(++next_handle);return VK_SUCCESS;
 }
 void VKAPI_CALL FakeRequirements(VkDevice,VkBuffer,VkMemoryRequirements* out) {*out={64,4,3};}
 VkResult VKAPI_CALL FakeAllocate(VkDevice,const VkMemoryAllocateInfo* info,const VkAllocationCallbacks*,VkDeviceMemory* out) {
@@ -105,6 +105,40 @@ SR_TEST(buffer_upload_flushes_staging_and_retains_replaced_version) {
     SR_CHECK_EQ(allocations.size(),before);
   }
   SR_CHECK(allocations.empty());SR_CHECK_EQ(destroyed,5);
+}
+SR_TEST(dynamic_upload_reuses_device_buffer_only_after_submission_retires) {
+  copies=flushes=destroyed=created=0;allocations.clear();
+  auto dispatch=ResourceFake();
+  // The staging arena is 8 MiB; provide its actual storage to the fake mapper.
+  dispatch.vkGetBufferMemoryRequirements=[](VkDevice,VkBuffer,VkMemoryRequirements* out) {
+    *out={8ull*1024*1024,4,3};
+  };
+  Context c(dispatch);c.device=reinterpret_cast<VkDevice>(1);
+  c.memory.memoryTypeCount=2;c.memory.memoryTypes[0].propertyFlags=VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+  c.memory.memoryTypes[1].propertyFlags=VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+  c.properties.limits.maxStorageBufferRange=4096;c.properties.limits.nonCoherentAtomSize=64;
+  std::weak_ptr<BufferResource> old;
+  {
+    ResourceStore store(c);Error e;std::array<std::byte,4> bytes{};
+    SR_CHECK(store.BeginSubmission(reinterpret_cast<VkCommandBuffer>(1),1,e));
+    SR_CHECK(store.UploadDynamicBuffer(1500,bytes,10,e));
+    auto first=store.Buffer(1500,e);const auto handle=first->handle;old=first;first.reset();
+    SR_CHECK(store.UploadDynamicBuffer(1500,bytes,10,e));SR_CHECK_EQ(copies,1);
+    SR_CHECK(!store.UploadDynamicBuffer(1500,bytes,9,e));
+    SR_CHECK(store.BeginSubmission(reinterpret_cast<VkCommandBuffer>(1),2,e));
+    SR_CHECK(store.UploadDynamicBuffer(1500,bytes,11,e));
+    auto pending=store.Buffer(1500,e);SR_CHECK(pending->handle!=handle);
+    const auto allocations_before=created;
+    store.Retire(1);
+    SR_CHECK(store.BeginSubmission(reinterpret_cast<VkCommandBuffer>(1),3,e));
+    SR_CHECK(store.UploadDynamicBuffer(1500,bytes,12,e));
+    auto reused=store.Buffer(1500,e);SR_CHECK_EQ(reused->handle,handle);
+    SR_CHECK_EQ(created,allocations_before);SR_CHECK_EQ(reused->version,12u);
+    SR_CHECK_EQ(pending->version,11u);SR_CHECK(pending->handle!=reused->handle);
+    SR_CHECK_EQ(copies,3);
+    store.Retire(3);
+  }
+  SR_CHECK(allocations.empty());SR_CHECK(old.expired());
 }
 SR_TEST(host_upload_reuses_only_completed_unreferenced_buffers) {
   allocations.clear();copies=flushes=destroyed=0;

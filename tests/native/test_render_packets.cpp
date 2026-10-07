@@ -12,6 +12,27 @@ SR_TEST(packet_check_cadence_limits_debug_capture) {
 #include <bit>
 #include <stdexcept>
 using namespace superman_returns::graphics::guest;
+SR_TEST(pm4_dependency_capture_preserves_caller_state_between_commands) {
+  WorkBatch batch;
+  // Type0 writes to VS c0.x, then PS c0.x in a later command.
+  batch.bytes = {0, 0, 0x40, 0, 0x3f, 0x80, 0, 0,
+                 0, 0, 0x44, 0, 0x40, 0, 0, 0};
+  WorkCmd cmd;
+  cmd.ring_bytes = 8;
+  superman_returns::native::Pm4Mirror mirror;
+  std::string error;
+  auto no_dependencies = [](uint32_t, uint32_t) -> std::span<const uint8_t> {
+    SR_CHECK(false); return {};
+  };
+  SR_CHECK(CapturePm4Dependencies(batch, cmd, no_dependencies, error, &mirror));
+  SR_CHECK_EQ(mirror.reg(mirror.kAluConstantBase), 0x3f800000u);
+  cmd.ring_offset = 8;
+  SR_CHECK(CapturePm4Dependencies(batch, cmd, no_dependencies, error, &mirror));
+  SR_CHECK_EQ(mirror.reg(mirror.kAluConstantBase), 0x3f800000u);
+  SR_CHECK_EQ(mirror.reg(mirror.kAluConstantBase + 1024), 0x40000000u);
+  SR_CHECK_EQ(mirror.packets, 2u);
+  SR_CHECK(batch.ranges.empty());
+}
 SR_TEST(pm4_dependency_capture_owns_nested_sources) {
   WorkBatch batch;
   batch.bytes = {0xc0, 0x01, 0x3f, 0, 0, 0, 2, 0, 0, 0, 0, 4};
@@ -187,6 +208,18 @@ SR_TEST(strip_and_ushort2_metadata_survive_packet) {
   VertexFetchMeta metadata;
   std::memcpy(&metadata, draw.constants.shared.data() + 512, sizeof(metadata));
   SR_CHECK_EQ(metadata.type, 0x2c2259);
+  // Reused guest addresses and later partial captures must invalidate/override
+  // cached declaration bytes without changing an already-owned packet.
+  batch.bytes[12+0x3b]=0x5f;
+  RenderPacket changed;
+  SR_CHECK(DecodeRenderPacket(batch,cmd,mirror,changed,error));
+  SR_CHECK_EQ(std::get<DrawPacket>(changed).vertex_fetch[0].type,0x2c225fu);
+  auto patch=uint32_t(batch.bytes.size());
+  batch.bytes.insert(batch.bytes.end(),{0,0x2c,0x22,0x59});
+  batch.ranges.push_back({0x3038,4,patch});++cmd.range_count;
+  SR_CHECK(DecodeRenderPacket(batch,cmd,mirror,changed,error));
+  SR_CHECK_EQ(std::get<DrawPacket>(changed).vertex_fetch[0].type,0x2c2259u);
+  SR_CHECK_EQ(draw.vertex_fetch[0].type,0x2c2259u);
 }
 SR_TEST(same_capture_decodes_identically_for_both_backends) {
   WorkBatch batch;
@@ -291,4 +324,37 @@ SR_TEST(shader_roles_follow_owned_container_stage_when_device_slots_are_reversed
   superman_returns::native::Pm4Mirror mirror;RenderPacket packet;std::string error;
   SR_CHECK(DecodeRenderPacket(batch,cmd,mirror,packet,error));const auto& draw=std::get<DrawPacket>(packet);
   SR_CHECK(draw.vertex_shader==vs);SR_CHECK(draw.pixel_shader==ps);
+}
+SR_TEST(contiguous_capture_fast_path_rejects_partial_overlays) {
+  WorkBatch batch;
+  batch.bytes={1,2,3,4,9,8};
+  batch.ranges={{0x1000,4,0},{0x1001,2,4}};
+  WorkCmd cmd;cmd.range_count=2;
+  CapturedMemory memory;std::string error;
+  SR_CHECK(CapturedMemory::Capture(batch,cmd,memory,error));
+  SR_CHECK(memory.ReadUnambiguous(0x1000,4).empty());
+  SR_CHECK_EQ(memory.ReadUnambiguous(0x1001,2)[0],9);
+  SR_CHECK_EQ(memory.Read(0x1000,4)[1],2);
+}
+SR_TEST(replayed_draw_keeps_latest_capture_and_pm4_constants_after_batch_reuse) {
+  WorkBatch batch;
+  // Primary PM4 writes VS c0.x; overlapping captures model a later guest write.
+  batch.bytes = {0, 0, 0x40, 0, 0x3f, 0x80, 0, 0, 1, 2, 3, 4, 9, 8};
+  batch.ranges = {{0x1000, 4, 8}, {0x1001, 2, 12}};
+  WorkCmd cmd;
+  cmd.op = Op::kDraw;
+  cmd.u[0] = 4;
+  cmd.ring_bytes = 8;
+  cmd.range_count = 2;
+  superman_returns::native::Pm4Mirror mirror;
+  RenderPacket packet;
+  std::string error;
+  SR_CHECK(ReplayCapturedRenderPacket(batch, cmd, mirror, packet, error));
+  batch.Clear();
+  batch.bytes.resize(1024, 0xff);
+  mirror = superman_returns::native::Pm4Mirror{};
+  const auto& draw = std::get<DrawPacket>(packet);
+  SR_CHECK_EQ(draw.constants.vs[0], 0x3f800000u);
+  SR_CHECK_EQ(draw.memory.Read(0x1001, 2)[0], 9);
+  SR_CHECK_EQ(draw.memory.Read(0x1000, 4)[1], 2);
 }

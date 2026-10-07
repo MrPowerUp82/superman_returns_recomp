@@ -81,7 +81,8 @@ bool GameRenderer::Upload(const guest::BufferUpdate& update,bool indices,uint64_
   if(source.size()!=end-begin) return Fail(e,"Buffer update payload length differs from range");
   std::memcpy(bytes.data()+begin,source.data(),source.size());
   if(profiling_) {++profile_.buffer_uploads;profile_.buffer_bytes+=bytes.size();}
-  return resources_.UploadBuffer(p.key,std::as_bytes(std::span(bytes)),version,e);
+  return p.action==1?resources_.UploadDynamicBuffer(p.key,std::as_bytes(std::span(bytes)),version,e)
+                    :resources_.UploadBuffer(p.key,std::as_bytes(std::span(bytes)),version,e);
 }
 bool GameRenderer::Record(const guest::RenderPacket& packet,VkCommandBuffer command,Error& e) {
   if(command!=command_ || !serial_) return Fail(e,"Packet command buffer differs from active submission");

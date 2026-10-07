@@ -26,6 +26,7 @@
 // regions into host textures registered by the destination's guest base
 // address; binding a texture at such an address uses the host copy.
 #pragma once
+#include "buffer_content.h"
 
 #include <atomic>
 #include <chrono>
@@ -225,8 +226,7 @@ class Renderer {
     uint64_t invalidation_stamp = 0;
     uint32_t watch_seq = 0, checked_seq = 0;  // physical write watch
     bool watched = false;
-    uint64_t content_hash = 0, hashed_frame = ~0ull;  // once per guest frame, small buffers
-    bool hash_valid = false;
+    BufferContent content;
   };
   static constexpr uint32_t kHashedBufferMax = 32 * 1024;
   uint64_t front_frame_ = 0;  // guest swaps seen by the front end

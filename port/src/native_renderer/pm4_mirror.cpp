@@ -5,6 +5,7 @@
 // docs/native-port-plan.md section 2.
 //
 #include "pm4_mirror.h"
+#include "../graphics/guest/constant_snapshot.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -13,6 +14,17 @@
 #endif
 
 namespace superman_returns::native {
+
+const std::array<uint32_t,1024>& Pm4Mirror::FloatConstants(bool pixel) const {
+  const uint32_t bank=pixel?1:0;
+  const uint64_t version=pixel?ps_version:vs_version;
+  if(float_cache_version_[bank]!=version) {
+    std::string error;
+    graphics::guest::CaptureFloatConstants({regs_+kAluConstantBase+bank*1024,1024},false,float_cache_[bank],error);
+    float_cache_version_[bank]=version;
+  }
+  return float_cache_[bank];
+}
 
 namespace {
 

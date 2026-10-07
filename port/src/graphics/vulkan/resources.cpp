@@ -237,6 +237,12 @@ std::shared_ptr<BufferResource> ResourceStore::UploadTransient(guest::ResourceId
   e={};return buffer;
 }
 bool ResourceStore::UploadBuffer(guest::ResourceId id,std::span<const std::byte> bytes,uint64_t version,Error& e) {
+  return UploadBufferImpl(id,bytes,version,false,e);
+}
+bool ResourceStore::UploadDynamicBuffer(guest::ResourceId id,std::span<const std::byte> bytes,uint64_t version,Error& e) {
+  return UploadBufferImpl(id,bytes,version,true,e);
+}
+bool ResourceStore::UploadBufferImpl(guest::ResourceId id,std::span<const std::byte> bytes,uint64_t version,bool dynamic,Error& e) {
   if(!Ready(e)) return false;
   if(!id || bytes.empty() || bytes.size()>c_.properties.limits.maxStorageBufferRange) return Fail(e,"Upload buffer","Invalid buffer ID or storage range");
   auto found=buffers_.find(id);
@@ -245,7 +251,22 @@ bool ResourceStore::UploadBuffer(guest::ResourceId id,std::span<const std::byte>
   auto staging_alignment=std::lcm<VkDeviceSize>(16,std::max<VkDeviceSize>(1,c_.properties.limits.nonCoherentAtomSize));
   auto upload=Suballocate(staging_,bytes.size(),staging_alignment,e);
   if(!upload || !Write(upload,bytes,e)) return false;
-  auto gpu=NewBuffer(bytes.size(),VK_BUFFER_USAGE_TRANSFER_DST_BIT|VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_VERTEX_BUFFER_BIT|VK_BUFFER_USAGE_INDEX_BUFFER_BIT,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,e);
+  std::shared_ptr<BufferResource> gpu;
+  if(dynamic) {
+    auto pool=dynamic_pool_.find(bytes.size());
+    if(pool!=dynamic_pool_.end()) for(auto& candidate:pool->second) {
+      // The pool must be the sole owner: current IDs, pending submissions and
+      // live descriptor leases all prevent overwriting an older version.
+      if(candidate.use_count()==1) {gpu=candidate;break;}
+    }
+  }
+  if(!gpu) {
+    gpu=NewBuffer(bytes.size(),VK_BUFFER_USAGE_TRANSFER_DST_BIT|VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_VERTEX_BUFFER_BIT|VK_BUFFER_USAGE_INDEX_BUFFER_BIT,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,e);
+    constexpr VkDeviceSize budget=64ull*1024*1024;
+    if(dynamic && gpu && gpu->allocation<=budget-dynamic_pool_bytes_) {
+      dynamic_pool_[bytes.size()].push_back(gpu);dynamic_pool_bytes_+=gpu->allocation;
+    }
+  }
   if(!gpu) return false;
   gpu->version=version;
   VkBufferCopy copy{upload->offset,0,bytes.size()};c_.f.vkCmdCopyBuffer(upload_?upload_:command_,upload->handle,gpu->handle,1,&copy);

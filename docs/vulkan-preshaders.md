@@ -30,10 +30,18 @@ o `.srvk`. A página e um build atualizado precisam ser publicados juntos.
 
 ## Geração local
 
-Após extrair o corpus e construir o emissor Vulkan:
+Para extrair o corpus, construir os emissores e gerar as bibliotecas D3D12 e
+Vulkan, instalando-as junto a cada executável em `port/out/build`:
 
 ```powershell
-powershell -File tools/build_vulkan_m2.ps1
+powershell -File tools/shaders/build_corpus.ps1
+```
+
+Use `-DumpDir <pasta>` para incluir dumps específicos. `-NoSpirv` pula a geração
+Vulkan. Para regenerar apenas a biblioteca Vulkan a partir de um corpus existente:
+
+```powershell
+powershell -File tools/build_vulkan_m2.ps1 -EmitterOnly
 python tools/shaders/make_vulkan_preshaders.py --install port/out/build/win-amd64-release
 python tools/shaders/verify_vulkan_preshaders.py artifacts/shaders/superman_returns_vulkan.srvk
 ```

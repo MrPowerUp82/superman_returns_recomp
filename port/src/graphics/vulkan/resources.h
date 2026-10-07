@@ -93,6 +93,8 @@ public:
   bool MapTransient(VkDeviceSize size,TransientSlice&,Error&);
   bool FlushTransient(const TransientSlice&,Error&);
   bool UploadBuffer(guest::ResourceId,std::span<const std::byte>,uint64_t version,Error&);
+  // Reuse device allocations only after submissions and descriptor leases release them.
+  bool UploadDynamicBuffer(guest::ResourceId,std::span<const std::byte>,uint64_t version,Error&);
   bool UploadTexture(guest::ResourceId,const guest::LinearTexture&,uint64_t version,Error&);
   // Tracked resolve images remain GPU-authoritative and preserve partial writes.
   // The supplied ImageState must outlive this store and descriptor leases.
@@ -117,6 +119,7 @@ public:
   void ForgetBuffer(guest::ResourceId id) {buffers_.erase(id);}
   void ForgetTexture(guest::ResourceId id) {textures_.erase(id);}
 private:
+  bool UploadBufferImpl(guest::ResourceId,std::span<const std::byte>,uint64_t version,bool dynamic,Error&);
   std::shared_ptr<BufferResource> NewBuffer(VkDeviceSize,VkBufferUsageFlags,VkMemoryPropertyFlags,Error&);
   bool Write(const std::shared_ptr<BufferResource>&,std::span<const std::byte>,Error&,VkDeviceSize offset=0);
   bool Ready(Error&);
@@ -140,6 +143,8 @@ private:
   struct HostPool {std::vector<std::shared_ptr<BufferResource>> buffers;size_t cursor=0;};
   std::map<VkDeviceSize,HostPool> host_pool_;
   VkDeviceSize host_pool_bytes_=0;
+  std::map<VkDeviceSize,std::vector<std::shared_ptr<BufferResource>>> dynamic_pool_;
+  VkDeviceSize dynamic_pool_bytes_=0;
   std::unordered_map<guest::ResourceId,std::shared_ptr<TextureResource>> textures_;
 };
 } // namespace superman_returns::graphics::vulkan

@@ -31,6 +31,9 @@ template <typename T> struct DefaultInitAllocator : std::allocator<T> {
 struct CaptureRange {
   uint32_t address, length, offset;
 };
+// Empty means that a bulk decode would hide a newer partial overlay (or miss).
+std::span<const uint8_t> FindUnambiguousCapture(std::span<const CaptureRange>,
+    std::span<const uint8_t>,uint32_t address,uint32_t length);
 
 struct BufferPlan {
   uint64_t key = 0;
@@ -104,6 +107,7 @@ public:
   static bool Capture(const WorkBatch &, const WorkCmd &, CapturedMemory &,
                       std::string &);
   std::span<const uint8_t> Read(uint32_t address, uint32_t length) const;
+  std::span<const uint8_t> ReadUnambiguous(uint32_t address,uint32_t length) const;
 
 private:
   struct Snapshot {

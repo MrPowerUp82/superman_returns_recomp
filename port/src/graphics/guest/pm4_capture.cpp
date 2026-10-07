@@ -2,6 +2,7 @@
 #include "../../native_renderer/pm4_mirror.h"
 #include <deque>
 #include <exception>
+#include <memory>
 #include <stdexcept>
 
 namespace superman_returns::graphics::guest {
@@ -24,8 +25,11 @@ bool CapturePm4Dependencies(WorkBatch &batch, const WorkCmd &cmd,
   const size_t initial_bytes = batch.bytes.size(),
                initial_ranges = batch.ranges.size();
   try {
-    native::Pm4Mirror local;
-    auto &scanner = mirror ? *mirror : local;
+    // Production capture supplies a persistent mirror. Keep the large fallback
+    // off its stack and construct it only for callers that need a fresh parser.
+    std::unique_ptr<native::Pm4Mirror> local;
+    if (!mirror) local = std::make_unique<native::Pm4Mirror>();
+    auto &scanner = mirror ? *mirror : *local;
     auto alu_before = scanner.unreadable_alu_loads;
     auto indirect_before = scanner.unreadable_indirect_buffers;
     uint32_t missing_address = 0, missing_length = 0;

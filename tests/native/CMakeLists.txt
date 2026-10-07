@@ -58,3 +58,13 @@ endif()
 
 enable_testing()
 add_test(NAME sr_native_tests COMMAND sr_native_tests)
+
+add_executable(sr_capture_budget test_capture_budget.cpp
+    "${SR_NATIVE_DIR}/../graphics/guest/render_packet.cpp"
+    "${SR_NATIVE_DIR}/../graphics/guest/captured_batch.cpp"
+    "${SR_NATIVE_DIR}/../graphics/guest/render_state.cpp"
+    "${SR_NATIVE_DIR}/../graphics/guest/constant_snapshot.cpp"
+    "${SR_NATIVE_DIR}/../graphics/guest/draw_state.cpp"
+    "${SR_NATIVE_DIR}/../graphics/guest/vertex_layout.cpp"
+    "${SR_NATIVE_DIR}/pm4_mirror.cpp")
+add_test(NAME sr_capture_budget COMMAND sr_capture_budget)

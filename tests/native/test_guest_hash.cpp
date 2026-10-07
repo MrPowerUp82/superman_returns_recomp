@@ -1,6 +1,7 @@
 #ifdef _WIN32
 #include "../../port/src/native_renderer/guest_hash.h"
 #include "test_main.h"
+#include "../../port/src/native_renderer/buffer_content.h"
 #include <vector>
 using superman_returns::native::HashGuestRange;
 namespace {
@@ -12,6 +13,20 @@ uint64_t Fnv(const void* data, size_t size, uint64_t seed) {
   return h;
 }
 }  // namespace
+SR_TEST(buffer_content_checks_page_writes_within_the_frame_and_ignores_neighbors) {
+  superman_returns::native::BufferContent content;
+  uint64_t bytes=10;int hashes=0;
+  auto hash=[&] {++hashes;return bytes;};
+  SR_CHECK(!content.Refresh(1,false,hash));SR_CHECK_EQ(hashes,1);
+  SR_CHECK(!content.Refresh(1,false,hash));SR_CHECK_EQ(hashes,1);
+  SR_CHECK(!content.Refresh(1,true,hash));SR_CHECK_EQ(hashes,2);
+  bytes=20;
+  SR_CHECK(content.Refresh(1,true,hash));SR_CHECK_EQ(hashes,3);
+  SR_CHECK(!content.Refresh(1,true,hash));SR_CHECK_EQ(hashes,4);
+  bytes=30; // A virtual-alias write can escape the physical page callback.
+  SR_CHECK(content.Refresh(2,false,hash));SR_CHECK_EQ(hashes,5);
+  SR_CHECK(!content.Refresh(3,false,hash));SR_CHECK_EQ(hashes,6);
+}
 SR_TEST(guest_hash_in_place_matches_hashing_a_copy) {
   for (uint32_t size : {1u, 7u, 4096u, 100003u}) {
     std::vector<uint8_t> bytes(size);

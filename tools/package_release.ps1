@@ -34,7 +34,7 @@ if (-not $NoBuild) {
     $env:SR_EMBED_SHADERS = $null
     $env:SR_VULKAN = $null
   }
-  & (Join-Path $root 'tools\build_launcher.ps1')
+  & (Join-Path $root 'tools\build_launcher.ps1') -OutDir $BuildDir
 }
 
 function Need($path, $hint) {
@@ -85,7 +85,7 @@ $vulkanTools = Join-Path $stage 'shader_tools\vulkan'
 New-Item -ItemType Directory -Force $vulkanTools | Out-Null
 # Keep the Vulkan ABI emitter separate from the D3D12 translator/header.
 # The browser pre-shaders use this exact patched tree too.
-& (Join-Path $root 'tools/build_vulkan_m2.ps1')
+& (Join-Path $root 'tools/build_vulkan_m2.ps1') -EmitterOnly
 if ($LASTEXITCODE -ne 0) { throw 'Vulkan shader emitter build failed' }
 Copy-Item (Need (Join-Path $root 'build/vulkan-m2/emitter-build/XenosRecompCorpus.exe') '') (Join-Path $vulkanTools 'sr_xenosrecomp.exe')
 Copy-Item (Need (Join-Path $root 'build/vulkan-m2/emitter-tree/src/XenosRecomp/shader_common.h') '') $vulkanTools
@@ -146,6 +146,8 @@ if (Test-Path $zip) { Remove-Item $zip -Force }
 $python = (Get-Command python).Source
 & $python (Join-Path $root 'tools\release\make_zip.py') $stage $zip
 if ($LASTEXITCODE -ne 0) { throw 'zip failed' }
+& $python (Join-Path $root 'tools\release\verify_package.py') $zip
+if ($LASTEXITCODE -ne 0) { throw 'Release ZIP validation failed; do not publish this package.' }
 $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
 "{0}  {1}" -f $hash, (Split-Path $zip -Leaf) | Set-Content (Join-Path $OutDir 'superman_returns_win64.zip.sha256')
 "{0} MB, version {1}" -f [math]::Round((Get-Item $zip).Length / 1MB, 1), $version

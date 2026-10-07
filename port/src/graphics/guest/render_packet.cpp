@@ -8,6 +8,11 @@
 #include <exception>
 #include <stdexcept>
 namespace superman_returns::graphics::guest {
+namespace {
+bool DecodeCapturedPacket(const WorkBatch&, const WorkCmd&,
+                          const native::Pm4Mirror&, const CapturedMemory&,
+                          RenderPacket&, std::string&);
+}
 bool ReplayCapturedRenderPacket(const WorkBatch& batch,const WorkCmd& cmd,native::Pm4Mirror& mirror,RenderPacket& packet,std::string& error) {
   error.clear();
   if(!cmd.pm4_capture_ok) {error="PM4 dependency capture failed";return false;}
@@ -20,7 +25,7 @@ bool ReplayCapturedRenderPacket(const WorkBatch& batch,const WorkCmd& cmd,native
     });
     if(!missing.empty() || mirror.unreadable_alu_loads!=alu || mirror.unreadable_indirect_buffers!=indirect) {error=missing.empty()?"Captured PM4 dependency could not be read":missing;return false;}
   }
-  return DecodeRenderPacket(batch,cmd,mirror,packet,error);
+  return DecodeCapturedPacket(batch,cmd,mirror,memory,packet,error);
 }
 namespace {
 uint32_t Address(uint32_t base, uint64_t offset) {
@@ -192,10 +197,37 @@ bool DecodeRenderPacket(const WorkBatch &batch, const WorkCmd &cmd,
     error = "PM4 dependency capture failed";
     return false;
   }
+  CapturedMemory memory;
+  if (!CapturedMemory::Capture(batch, cmd, memory, error))
+    return false;
+  return DecodeCapturedPacket(batch, cmd, mirror, memory, out, error);
+}
+const std::vector<VertexAttribute>& Declaration(const CapturedMemory& memory,uint32_t decl) {
+  static const std::vector<VertexAttribute> empty;
+  if(!decl) return empty;
+  const uint32_t count=std::min(U32(memory,Address(decl,0x18)),64u);
+  if(!count) return empty;
+  auto bytes=memory.ReadUnambiguous(Address(decl,0x34),count*12);
+  thread_local VertexDeclarationCache cache;
+  if(!bytes.empty()) return cache.Decode(bytes).attributes;
+  thread_local std::vector<VertexAttribute> fallback;
+  fallback.clear();
+  for(uint32_t i=0;i<count;++i) {
+    auto a=Address(decl,0x34+uint64_t(i)*12);
+    auto stream=U16(memory,a);if(stream==0xff) break;
+    fallback.push_back({stream,U16(memory,Address(a,2)),U32(memory,Address(a,4)),
+                       memory.Read(Address(a,9),1)[0],memory.Read(Address(a,10),1)[0]});
+  }
+  return fallback;
+}
+namespace {
+// Replay and decoding share the same owned snapshot. Packets retain it after
+// the worker recycles the source batch; no live guest reads are introduced.
+bool DecodeCapturedPacket(const WorkBatch &batch, const WorkCmd &cmd,
+                          const native::Pm4Mirror &mirror,
+                          const CapturedMemory &memory, RenderPacket &out,
+                          std::string &error) {
   try {
-    CapturedMemory memory;
-    if (!CapturedMemory::Capture(batch, cmd, memory, error))
-      return false;
     switch (cmd.op) {
     case Op::kDraw:
     case Op::kDrawIndexed:
@@ -217,14 +249,8 @@ bool DecodeRenderPacket(const WorkBatch &batch, const WorkCmd &cmd,
       d.first = d.indexed ? cmd.u[2] : (d.inline_vertices ? 0 : cmd.u[1]);
       d.count = d.indexed ? cmd.u[3] : cmd.u[2];
       d.base_vertex = d.indexed ? int32_t(cmd.u[1]) : 0;
-      if (!CaptureFloatConstants(
-              {mirror.regs() + native::Pm4Mirror::kAluConstantBase, 1024},
-              false, d.constants.vs, error) ||
-          !CaptureFloatConstants(
-              {mirror.regs() + native::Pm4Mirror::kAluConstantBase + 1024,
-               1024},
-              false, d.constants.ps, error))
-        return false;
+      d.constants.vs=mirror.FloatConstants(false);
+      d.constants.ps=mirror.FloatConstants(true);
       for (uint32_t i = 0; i < 8; ++i) {
         auto v = mirror.reg(native::Pm4Mirror::kBoolConstantBase + i);
         std::memcpy(d.constants.shared.data() + 256 + i * 4, &v, 4);
@@ -273,15 +299,10 @@ bool DecodeRenderPacket(const WorkBatch &batch, const WorkCmd &cmd,
         auto decl = s.buffer.decl;
         if (!decl)
           continue;
-        uint32_t count = std::min(U32(memory, Address(decl, 0x18)), 64u);
-        for (uint32_t e = 0; e < count; ++e) {
-          uint32_t a = Address(decl, 0x34 + uint64_t(e) * 12);
-          if (U16(memory, a) != s.stream)
-            continue;
-          uint32_t usage = memory.Read(Address(a, 9), 1)[0],
-                   index = memory.Read(Address(a, 10), 1)[0];
-          auto offset = U16(memory, Address(a, 2));
-          auto type = U32(memory, Address(a, 4));
+        for (const auto& attribute : Declaration(memory,decl)) {
+          if(attribute.stream!=s.stream) continue;
+          auto usage=attribute.usage,index=attribute.index;
+          auto offset=attribute.offset,type=attribute.type;
           d.attributes.push_back({s.stream, offset, type, usage, index});
           if (usage < 14 && index < 16)
             d.vertex_fetch[usage * 16 + index] = {
@@ -309,17 +330,9 @@ bool DecodeRenderPacket(const WorkBatch &batch, const WorkCmd &cmd,
           auto decl =
               U32(memory,
                   Address(cmd.device, native::profile::kDevice.vertex_decl));
-          uint32_t count =
-              decl ? std::min(U32(memory, Address(decl, 0x18)), 64u) : 0;
-          for (uint32_t i = 0; i < count; ++i) {
-            auto a = Address(decl, 0x34 + uint64_t(i) * 12);
-            auto stream = U16(memory, a);
-            if (stream == 0xff)
-              break;
-            auto offset = U16(memory, Address(a, 2));
-            auto type = U32(memory, Address(a, 4));
-            auto usage = memory.Read(Address(a, 9), 1)[0],
-                 index = memory.Read(Address(a, 10), 1)[0];
+          for (const auto& attribute : Declaration(memory,decl)) {
+            auto stream=attribute.stream,offset=attribute.offset,type=attribute.type;
+            auto usage=attribute.usage,index=attribute.index;
             d.attributes.push_back({stream, offset, type, usage, index});
             if (usage < 14 && index < 16)
               d.vertex_fetch[usage * 16 + index] = {stream, offset,
@@ -447,4 +460,5 @@ bool DecodeRenderPacket(const WorkBatch &batch, const WorkCmd &cmd,
     return false;
   }
 }
+} // namespace
 } // namespace superman_returns::graphics::guest
