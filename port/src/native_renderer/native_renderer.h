@@ -26,6 +26,7 @@
 // regions into host textures registered by the destination's guest base
 // address; binding a texture at such an address uses the host copy.
 #pragma once
+#include "native_frontend.h"
 #include "buffer_content.h"
 #include "shared_constants_cache.h"
 
@@ -104,7 +105,7 @@ bool ShaderCorpusAvailable(std::string* where);
 using graphics::guest::DefaultInitAllocator;
 using graphics::guest::CaptureRange;
 
-class Renderer {
+class Renderer : public NativeFrontend {
  public:
   static Renderer& Get();
   using PacketSink=std::function<bool(graphics::guest::RenderPacket&&,std::string&)>;
@@ -646,34 +647,11 @@ class Renderer {
   // Clears `s` if an overlapping surface was written after it (EDRAM aliasing).
   void ResolveEdramAliasing(HostSurface* s);
   uint64_t alias_clear_frame_ = ~0ull;
-  Pm4Mirror mirror_;
   // Development frontend capture uses the same parser; Vulkan will consume
   // frontend packets directly and will not rescan commands on its worker.
-  Pm4Mirror capture_mirror_;
-  uint64_t capture_serial_ = 0;
-  bool capture_tiling_active_ = false;
-  struct CapturedTextureEntry {
-    std::shared_ptr<const graphics::guest::TextureCapture> snapshot;
-    uint64_t content_hash=0, checked_frame=~0ull;
-    uint32_t watch_seq=0;
-    // Revalidation backoff for textures the write watch cannot see changing
-    // (guest-virtual writes): unchanged checks double the interval up to 16.
-    uint64_t next_check_frame=0;
-    uint32_t stable_checks=0;
-    // Frame of the last failed capture: an unreadable texture (often a resolve
-    // destination the backend never needs) is retried every 16 frames, not per draw.
-    uint64_t failed_frame=~0ull;std::string failure;
-  };
-  std::map<std::array<uint32_t,6>,CapturedTextureEntry> captured_textures_;
-  std::vector<uint32_t> mirror_snapshot_;  // mirror at sr_native_dump_swap (A/B check)
-  uint32_t ring_last_ = 0;
-  uint64_t ring_resyncs_ = 0;
   // Register value as the GPU sees it (mirror), falling back to the XDK shadow
   // at dev+shadow_offset for registers no packet has written yet.
   uint32_t GpuConstant(uint8_t* base, uint32_t dev, uint32_t reg, uint32_t shadow_offset) const;
-  uint64_t swap_number_ = 0;
-  uint32_t pass_draw_index_[32] = {};
-  uint32_t trace_draws_ = 0;
   std::string SurfaceName(const HostSurface* s) const;
 
   // Byte-swapped host copies of guest vertex/index buffers.
@@ -706,12 +684,8 @@ class Renderer {
   // The game records from more than one guest thread (render thread draws,
   // Swap/resolves from the presenting thread): one lock covers all recording.
   std::recursive_mutex mutex_;
-  struct RingConstants {
-    bool pixel;
-    uint32_t start, count, ring_ptr;
-  };
-  std::vector<RingConstants> pending_ring_constants_;
   void FlushRingConstants(uint8_t* base, uint32_t dev);
 };
 
 }  // namespace superman_returns::native
+
