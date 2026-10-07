@@ -27,6 +27,7 @@
 // address; binding a texture at such an address uses the host copy.
 #pragma once
 #include "buffer_content.h"
+#include "shared_constants_cache.h"
 
 #include <atomic>
 #include <chrono>
@@ -629,6 +630,7 @@ class Renderer {
   // constants are unchanged (valid within one frame's upload ring).
   uint64_t cb_vs_version_ = 0, cb_ps_version_ = 0;
   D3D12_GPU_VIRTUAL_ADDRESS cb_vs_gpu_ = 0, cb_ps_gpu_ = 0;
+  SharedConstantsCache shared_constants_cache_;
   // Per fetch slot: last fetch constant and its SRV index this frame.
   struct SlotCache {
     uint32_t fetch[6] = {};
