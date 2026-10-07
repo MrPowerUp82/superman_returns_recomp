@@ -76,7 +76,7 @@ namespace xenos = rex::graphics::xenos;
 namespace gpu = rex::graphics;
 
 namespace {
-std::atomic<NativeGraphicsSystem*> g_active_system{nullptr};
+std::atomic<D3D12NativeGraphicsSystem*> g_active_system{nullptr};
 
 // Windows graphics preferences can reorder EnumAdapters1 per executable.
 // Resolve the launcher's LUID inside this process before creating the provider.
@@ -114,33 +114,33 @@ bool ResolveLauncherGpu() {
 }
 }  // namespace
 
-NativeGraphicsSystem* ActiveNativeGraphicsSystem() { return g_active_system.load(); }
+INativeGraphicsSystem* ActiveNativeGraphicsSystem() { return g_active_system.load(); }
 
 uint64_t GpuProgressGeneration() {
-  NativeGraphicsSystem* system = g_active_system.load();
+  D3D12NativeGraphicsSystem* system = g_active_system.load();
   return system ? system->progress_generation() : 0;
 }
 
 void WaitForGpuProgress(uint64_t since, uint32_t timeout_us) {
-  if (NativeGraphicsSystem* system = g_active_system.load()) {
+  if (D3D12NativeGraphicsSystem* system = g_active_system.load()) {
     system->WaitProgress(since, timeout_us);
   }
 }
 
 void WaitForGpuCondition(const std::function<bool()>& done, uint32_t timeout_us) {
-  if (NativeGraphicsSystem* system = g_active_system.load()) {
+  if (D3D12NativeGraphicsSystem* system = g_active_system.load()) {
     system->WaitCondition(done, timeout_us);
   }
 }
 
-void NativeGraphicsSystem::WaitCondition(const std::function<bool()>& done,
+void D3D12NativeGraphicsSystem::WaitCondition(const std::function<bool()>& done,
                                          uint32_t timeout_us) {
   std::unique_lock<std::mutex> lock(progress_mutex_);
   progress_cv_.wait_for(lock, std::chrono::microseconds(timeout_us),
                         [&] { return !running_ || done(); });
 }
 
-void NativeGraphicsSystem::SignalGpuProgress() {
+void D3D12NativeGraphicsSystem::SignalGpuProgress() {
   {
     std::lock_guard<std::mutex> lock(progress_mutex_);
     progress_generation_.fetch_add(1);
@@ -148,14 +148,14 @@ void NativeGraphicsSystem::SignalGpuProgress() {
   progress_cv_.notify_all();
 }
 
-void NativeGraphicsSystem::WaitProgress(uint64_t since, uint32_t timeout_us) {
+void D3D12NativeGraphicsSystem::WaitProgress(uint64_t since, uint32_t timeout_us) {
   std::unique_lock<std::mutex> lock(progress_mutex_);
   progress_cv_.wait_for(lock, std::chrono::microseconds(timeout_us),
                         [&] { return progress_generation_.load() != since || !running_; });
 }
 
 // Reads PM4 dwords from a ring (wrapping) or a linear buffer.
-struct NativeGraphicsSystem::Reader {
+struct D3D12NativeGraphicsSystem::Reader {
   const uint8_t* base = nullptr;
   uint32_t capacity = 0;  // dwords
   uint32_t offset = 0;    // dwords
@@ -173,18 +173,18 @@ struct NativeGraphicsSystem::Reader {
   }
 };
 
-NativeGraphicsSystem::NativeGraphicsSystem(graphics::NativeApi api)
+D3D12NativeGraphicsSystem::D3D12NativeGraphicsSystem(graphics::NativeApi api)
     : native_api_(api),registers_(std::make_unique<std::atomic<uint32_t>[]>(kRegisterCount)) {
   for (uint32_t i = 0; i < kRegisterCount; ++i) registers_[i].store(0);
   write_event_ = rex::thread::Event::CreateAutoResetEvent(false);
   cp_wake_ = rex::thread::Event::CreateAutoResetEvent(false);
 }
 
-NativeGraphicsSystem::~NativeGraphicsSystem() = default;
+D3D12NativeGraphicsSystem::~D3D12NativeGraphicsSystem() = default;
 
-rex::ui::GraphicsProvider* NativeGraphicsSystem::provider() const { return provider_.get(); }
+rex::ui::GraphicsProvider* D3D12NativeGraphicsSystem::provider() const { return provider_.get(); }
 
-rex::X_STATUS NativeGraphicsSystem::SetupPresentation(rex::ui::WindowedAppContext* app_context) {
+rex::X_STATUS D3D12NativeGraphicsSystem::SetupPresentation(rex::ui::WindowedAppContext* app_context) {
   if (presenter_) return X_STATUS_SUCCESS;
   const bool vulkan=native_api_==graphics::NativeApi::kVulkan;
   if(vulkan) {
@@ -250,7 +250,7 @@ rex::X_STATUS NativeGraphicsSystem::SetupPresentation(rex::ui::WindowedAppContex
   return X_STATUS_SUCCESS;
 }
 
-rex::X_STATUS NativeGraphicsSystem::SetupGuestGpu(rex::runtime::FunctionDispatcher* function_dispatcher,
+rex::X_STATUS D3D12NativeGraphicsSystem::SetupGuestGpu(rex::runtime::FunctionDispatcher* function_dispatcher,
                                              rex::system::KernelState* kernel_state) {
   memory_ = function_dispatcher->memory();
   function_dispatcher_ = function_dispatcher;
@@ -288,7 +288,7 @@ rex::X_STATUS NativeGraphicsSystem::SetupGuestGpu(rex::runtime::FunctionDispatch
   return X_STATUS_SUCCESS;
 }
 
-void NativeGraphicsSystem::Shutdown() {
+void D3D12NativeGraphicsSystem::Shutdown() {
   g_active_system.store(nullptr);
   SignalGpuProgress();
   running_ = false;
@@ -313,26 +313,26 @@ void NativeGraphicsSystem::Shutdown() {
   provider_.reset();
 }
 
-bool NativeGraphicsSystem::GetGammaRamp256(uint32_t* out_entries) const {
+bool D3D12NativeGraphicsSystem::GetGammaRamp256(uint32_t* out_entries) const {
   if (!out_entries) return false;
   std::memcpy(out_entries, gamma_ramp_, sizeof(gamma_ramp_));
   return true;
 }
 
-void NativeGraphicsSystem::SetInterruptCallback(uint32_t callback, uint32_t user_data) {
+void D3D12NativeGraphicsSystem::SetInterruptCallback(uint32_t callback, uint32_t user_data) {
   interrupt_callback_ = callback;
   interrupt_callback_data_ = user_data;
   REXLOG_INFO("native graphics: interrupt callback {:08X} ({:08X})", callback, user_data);
 }
 
-void NativeGraphicsSystem::InitializeRingBuffer(uint32_t ptr, uint32_t size_log2) {
+void D3D12NativeGraphicsSystem::InitializeRingBuffer(uint32_t ptr, uint32_t size_log2) {
   ring_base_ = ptr;
   ring_dwords_ = (uint32_t(1) << (size_log2 + 3)) / 4;
   read_index_ = 0;
   REXLOG_INFO("native graphics: ring buffer {:08X} ({} dwords)", ptr, ring_dwords_);
 }
 
-void NativeGraphicsSystem::EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_size_log2) {
+void D3D12NativeGraphicsSystem::EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_size_log2) {
   (void)block_size_log2;
   read_ptr_writeback_ = ptr;
   REXLOG_INFO("native graphics: read pointer write-back {:08X}", ptr);
@@ -340,16 +340,16 @@ void NativeGraphicsSystem::EnableReadPointerWriteBack(uint32_t ptr, uint32_t blo
 
 // --- MMIO -------------------------------------------------------------------
 
-uint32_t NativeGraphicsSystem::ReadRegisterThunk(void*, void* context, uint32_t addr) {
-  return static_cast<NativeGraphicsSystem*>(context)->ReadMmioRegister(addr);
+uint32_t D3D12NativeGraphicsSystem::ReadRegisterThunk(void*, void* context, uint32_t addr) {
+  return static_cast<D3D12NativeGraphicsSystem*>(context)->ReadMmioRegister(addr);
 }
 
-void NativeGraphicsSystem::WriteRegisterThunk(void*, void* context, uint32_t addr,
+void D3D12NativeGraphicsSystem::WriteRegisterThunk(void*, void* context, uint32_t addr,
                                               uint32_t value) {
-  static_cast<NativeGraphicsSystem*>(context)->WriteMmioRegister(addr, value);
+  static_cast<D3D12NativeGraphicsSystem*>(context)->WriteMmioRegister(addr, value);
 }
 
-uint32_t NativeGraphicsSystem::ReadMmioRegister(uint32_t addr) {
+uint32_t D3D12NativeGraphicsSystem::ReadMmioRegister(uint32_t addr) {
   uint32_t r = (addr & 0xFFFF) / 4;
   switch (r) {
     case 0x0F00:  // RB_EDRAM_TIMING
@@ -374,7 +374,7 @@ uint32_t NativeGraphicsSystem::ReadMmioRegister(uint32_t addr) {
   }
 }
 
-void NativeGraphicsSystem::WriteMmioRegister(uint32_t addr, uint32_t value) {
+void D3D12NativeGraphicsSystem::WriteMmioRegister(uint32_t addr, uint32_t value) {
   uint32_t r = (addr & 0xFFFF) / 4;
   if (REXCVAR_GET(sr_native_gpu_trace) && r != 0x01C5) {
     static int logged = 0;
@@ -393,7 +393,7 @@ void NativeGraphicsSystem::WriteMmioRegister(uint32_t addr, uint32_t value) {
   }
 }
 
-void NativeGraphicsSystem::DispatchInterrupt(uint32_t source, uint32_t cpu) {
+void D3D12NativeGraphicsSystem::DispatchInterrupt(uint32_t source, uint32_t cpu) {
   if (!interrupt_callback_) return;
   auto* thread = rex::system::XThread::GetCurrentThread();
   if (!thread) return;
@@ -404,7 +404,7 @@ void NativeGraphicsSystem::DispatchInterrupt(uint32_t source, uint32_t cpu) {
 
 // --- Vblank -------------------------------------------------------------------
 
-void NativeGraphicsSystem::VsyncThreadMain() {
+void D3D12NativeGraphicsSystem::VsyncThreadMain() {
   // Conan presents every second vblank (D3DPRESENT_INTERVAL_TWO), so the
   // guest vblank rate is twice the frame rate limit. SR's cadence is
   // profile::kVblanksPerFrame (unconfirmed). Host present vsync is separate
@@ -436,7 +436,7 @@ void NativeGraphicsSystem::VsyncThreadMain() {
 
 // --- PM4 consumer -------------------------------------------------------------
 
-void NativeGraphicsSystem::CommandThreadMain() {
+void D3D12NativeGraphicsSystem::CommandThreadMain() {
   compat::RegisterSampledThread(1, "native_gpu_commands");
   while (running_) {
     uint32_t write_index = write_index_.load();
@@ -472,7 +472,7 @@ void NativeGraphicsSystem::CommandThreadMain() {
   }
 }
 
-void NativeGraphicsSystem::ExecuteBuffer(uint32_t address, uint32_t dwords, int depth) {
+void D3D12NativeGraphicsSystem::ExecuteBuffer(uint32_t address, uint32_t dwords, int depth) {
   if (!dwords || depth > 4) return;
   Reader reader;
   reader.base = memory_->TranslatePhysical<const uint8_t*>(address);
@@ -487,7 +487,7 @@ void NativeGraphicsSystem::ExecuteBuffer(uint32_t address, uint32_t dwords, int 
   }
 }
 
-bool NativeGraphicsSystem::ExecutePacket(Reader& reader) {
+bool D3D12NativeGraphicsSystem::ExecutePacket(Reader& reader) {
   uint32_t packet = reader.Read();
   if (packet == 0) return true;
   switch (packet >> 30) {
@@ -519,7 +519,7 @@ bool NativeGraphicsSystem::ExecutePacket(Reader& reader) {
   }
 }
 
-uint32_t NativeGraphicsSystem::ReadRegister(uint32_t index) const {
+uint32_t D3D12NativeGraphicsSystem::ReadRegister(uint32_t index) const {
   if (index >= kFirstUnusedRegister && index < kRegisterCount) {
     static std::atomic<bool> warned{false};
     if (!warned.exchange(true)) {
@@ -530,7 +530,7 @@ uint32_t NativeGraphicsSystem::ReadRegister(uint32_t index) const {
   return index < kRegisterCount ? registers_[index].load() : 0;
 }
 
-uint32_t NativeGraphicsSystem::LoadMemory(uint32_t address) const {
+uint32_t D3D12NativeGraphicsSystem::LoadMemory(uint32_t address) const {
   uint32_t v;
   std::memcpy(&v, memory_->TranslatePhysical<const uint8_t*>(address & ~3u), 4);
   // Like Xenia: the GPU reads host-order dwords and the low address bits select
@@ -538,18 +538,18 @@ uint32_t NativeGraphicsSystem::LoadMemory(uint32_t address) const {
   return xenos::GpuSwap(v, xenos::Endian(address & 3));
 }
 
-void NativeGraphicsSystem::StoreMemory(uint32_t address, uint32_t value) {
+void D3D12NativeGraphicsSystem::StoreMemory(uint32_t address, uint32_t value) {
   uint32_t v = xenos::GpuSwap(value, xenos::Endian(address & 3));
   std::memcpy(memory_->TranslatePhysical<uint8_t*>(address & ~3u), &v, 4);
   SignalGpuProgress();  // fences: wake guest threads waiting on the GPU
 }
 
-void NativeGraphicsSystem::StoreBigEndian(uint32_t address, uint32_t value) {
+void D3D12NativeGraphicsSystem::StoreBigEndian(uint32_t address, uint32_t value) {
   uint32_t v = __builtin_bswap32(value);
   std::memcpy(memory_->TranslatePhysical<uint8_t*>(address), &v, 4);
 }
 
-bool NativeGraphicsSystem::Compare(uint32_t func, uint32_t value, uint32_t ref) const {
+bool D3D12NativeGraphicsSystem::Compare(uint32_t func, uint32_t value, uint32_t ref) const {
   switch (func & 7) {
     case 0: return false;
     case 1: return value < ref;
@@ -562,7 +562,7 @@ bool NativeGraphicsSystem::Compare(uint32_t func, uint32_t value, uint32_t ref) 
   }
 }
 
-void NativeGraphicsSystem::WriteRegister(uint32_t index, uint32_t value) {
+void D3D12NativeGraphicsSystem::WriteRegister(uint32_t index, uint32_t value) {
   if (index >= kRegisterCount) return;
   // Fast path: render state and ALU/fetch/bool/loop constants (thousands per
   // frame) have no side effects here; a relaxed store is a plain mov instead of
@@ -631,7 +631,7 @@ void NativeGraphicsSystem::WriteRegister(uint32_t index, uint32_t value) {
   }
 }
 
-bool NativeGraphicsSystem::ExecuteType3(Reader& reader, uint32_t packet) {
+bool D3D12NativeGraphicsSystem::ExecuteType3(Reader& reader, uint32_t packet) {
   uint32_t opcode = (packet >> 8) & 0x7F;
   uint32_t count = ((packet >> 16) & 0x3FFF) + 1;
   if (reader.remaining < count) return false;
@@ -881,3 +881,4 @@ bool NativeGraphicsSystem::ExecuteType3(Reader& reader, uint32_t packet) {
 }
 
 }  // namespace superman_returns::native
+

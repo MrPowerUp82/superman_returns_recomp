@@ -46,25 +46,27 @@ class D3D12Provider;
 
 namespace superman_returns::native {
 
-class NativeGraphicsSystem;
+
 // The running native graphics system, or nullptr (Xenos / A/B mode).
-NativeGraphicsSystem* ActiveNativeGraphicsSystem();
+
 
 // GPU progress notification for guest threads that wait on the GPU (the XDK
 // polls fences and the read pointer in a busy loop). GpuProgressGeneration()
 // changes whenever the PM4 consumer writes memory (fences, write-backs) or
 // advances the read pointer; WaitForGpuProgress blocks until it differs from
 // `since` or the timeout expires. No-ops without the native graphics system.
-uint64_t GpuProgressGeneration();
-void WaitForGpuProgress(uint64_t since, uint32_t timeout_us);
+
+
 // Blocks until `done()` holds (re-checked on every GPU progress signal) or the
 // timeout expires.
 void WaitForGpuCondition(const std::function<bool()>& done, uint32_t timeout_us);
 
-class NativeGraphicsSystem : public rex::system::IGraphicsSystem {
+#include "native_graphics_system_interface.h"
+
+class D3D12NativeGraphicsSystem : public INativeGraphicsSystem {
  public:
-  explicit NativeGraphicsSystem(graphics::NativeApi api=graphics::NativeApi::kD3D12);
-  ~NativeGraphicsSystem() override;
+  explicit D3D12NativeGraphicsSystem(graphics::NativeApi api=graphics::NativeApi::kD3D12);
+  ~D3D12NativeGraphicsSystem() override;
 
   rex::X_STATUS SetupPresentation(rex::ui::WindowedAppContext* app_context) override;
   rex::X_STATUS SetupGuestGpu(rex::runtime::FunctionDispatcher* function_dispatcher,
@@ -151,3 +153,4 @@ class NativeGraphicsSystem : public rex::system::IGraphicsSystem {
 };
 
 }  // namespace superman_returns::native
+
