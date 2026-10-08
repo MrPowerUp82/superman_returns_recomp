@@ -2,8 +2,10 @@
 Roda tools\bench\bench.ps1 com os argumentos que o launcher passa para a API escolhida (janela 1280x720,
 limite de 30 FPS, opções de melhoria no padrão do jogo). O resultado vai para logs\bench_results.csv.
 
-Uso: tools\bench\bench_api.ps1 -Api vulkan|d3d12 -Name <rótulo> [-Profile] [-Gate record|check] [-Exe <caminho>]
+Uso: tools\bench\bench_api.ps1 -Api vulkan|d3d12 -Name <rótulo> [-Profile] [-Timeline] [-Gate record|check] [-Exe <caminho>]
   -Profile liga SR_VULKAN_PROFILE=1 e copia o log do jogo para logs\bench_<Name>.log.
+  -Timeline liga SR_FRAME_TIMELINE, grava logs\timeline_<Name>.csv e imprime a tabela do estágio limitante
+            (tools\analysis\frame_timeline_report.py), também salva em logs\timeline_<Name>.txt.
   -Gate    record grava a referência de imagem (build boa); check compara e falha se a imagem divergir (tools\bench\image_gate.ps1).
   -Exe     padrão: port\out\build\win-amd64-dist\superman_returns.exe
 #>
@@ -12,6 +14,7 @@ param(
   [Parameter(Mandatory)] [string]$Name,
   [string]$Exe = '',
   [switch]$Profile,
+  [switch]$Timeline,
   [ValidateSet('', 'record', 'check')] [string]$Gate = ''
 )
 $ErrorActionPreference = 'Stop'
@@ -25,8 +28,14 @@ $gameArgs = @(
   '--mnk_mode=true', '--mnk_mouse=true'
 ) -join ' '
 $prevProfile = $env:SR_VULKAN_PROFILE
+$prevTimeline = $env:SR_FRAME_TIMELINE
+$timelineCsv = "$root\logs\timeline_$Name.csv"
 try {
   if ($Profile) { $env:SR_VULKAN_PROFILE = '1' }
+  if ($Timeline) {
+    Remove-Item $timelineCsv -ErrorAction SilentlyContinue
+    $env:SR_FRAME_TIMELINE = $timelineCsv
+  }
   & "$PSScriptRoot\bench.ps1" -Name $Name -Exe $Exe -ExtraArgs $gameArgs -TitleTimeout 180 -WorldTimeout 200
   if ($Gate) { & "$PSScriptRoot\image_gate.ps1" -Name $Name -Mode $Gate }
 } finally {
@@ -35,5 +44,21 @@ try {
   if ($Profile -and (Test-Path "$root\logs\game.log")) {
     Copy-Item "$root\logs\game.log" "$root\logs\bench_$Name.log" -Force
   }
+  if ($Timeline -and (Test-Path $timelineCsv)) {
+    # O relatório tem acentos: força UTF-8 na saída do python e na leitura pelo PowerShell (5.1 usaria a página OEM).
+    $prevConsoleEnc = [Console]::OutputEncoding
+    $prevPyEnc = $env:PYTHONIOENCODING
+    try {
+      [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+      $env:PYTHONIOENCODING = 'utf-8'
+      $report = @(python "$root\tools\analysis\frame_timeline_report.py" $timelineCsv)
+    } finally {
+      [Console]::OutputEncoding = $prevConsoleEnc
+      if ($null -ne $prevPyEnc) { $env:PYTHONIOENCODING = $prevPyEnc } else { Remove-Item env:PYTHONIOENCODING -ErrorAction SilentlyContinue }
+    }
+    $report | Set-Content "$root\logs\timeline_$Name.txt" -Encoding UTF8
+    $report
+  }
+  if ($null -ne $prevTimeline) { $env:SR_FRAME_TIMELINE = $prevTimeline } else { Remove-Item env:SR_FRAME_TIMELINE -ErrorAction SilentlyContinue }
   if ($null -ne $prevProfile) { $env:SR_VULKAN_PROFILE = $prevProfile } else { Remove-Item env:SR_VULKAN_PROFILE -ErrorAction SilentlyContinue }
 }
