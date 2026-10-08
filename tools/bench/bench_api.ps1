@@ -39,26 +39,34 @@ try {
   & "$PSScriptRoot\bench.ps1" -Name $Name -Exe $Exe -ExtraArgs $gameArgs -TitleTimeout 180 -WorldTimeout 200
   if ($Gate) { & "$PSScriptRoot\image_gate.ps1" -Name $Name -Mode $Gate }
 } finally {
+  # O jogo já terminou: restaura as variáveis de ambiente primeiro, para que nenhuma falha abaixo
+  # deixe SR_FRAME_TIMELINE / SR_VULKAN_PROFILE vazarem para a sessão do chamador nem mascare o erro do bench.
+  if ($null -ne $prevTimeline) { $env:SR_FRAME_TIMELINE = $prevTimeline } else { Remove-Item env:SR_FRAME_TIMELINE -ErrorAction SilentlyContinue }
+  if ($null -ne $prevProfile) { $env:SR_VULKAN_PROFILE = $prevProfile } else { Remove-Item env:SR_VULKAN_PROFILE -ErrorAction SilentlyContinue }
   # Keep diagnostic evidence even when gameplay validation rejects the run.
   # The next invocation clears game.log before launching the game.
   if ($Profile -and (Test-Path "$root\logs\game.log")) {
     Copy-Item "$root\logs\game.log" "$root\logs\bench_$Name.log" -Force
   }
   if ($Timeline -and (Test-Path $timelineCsv)) {
-    # O relatório tem acentos: força UTF-8 na saída do python e na leitura pelo PowerShell (5.1 usaria a página OEM).
-    $prevConsoleEnc = [Console]::OutputEncoding
-    $prevPyEnc = $env:PYTHONIOENCODING
+    # Best-effort: uma falha no relatório não pode mascarar o resultado do bench nem abortar este finally.
     try {
-      [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-      $env:PYTHONIOENCODING = 'utf-8'
-      $report = @(python "$root\tools\analysis\frame_timeline_report.py" $timelineCsv)
-    } finally {
-      [Console]::OutputEncoding = $prevConsoleEnc
-      if ($null -ne $prevPyEnc) { $env:PYTHONIOENCODING = $prevPyEnc } else { Remove-Item env:PYTHONIOENCODING -ErrorAction SilentlyContinue }
+      # O relatório tem acentos: força UTF-8 na saída do python e na leitura pelo PowerShell (5.1 usaria a página OEM).
+      $prevConsoleEnc = [Console]::OutputEncoding
+      $prevPyEnc = $env:PYTHONIOENCODING
+      try {
+        [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+        $env:PYTHONIOENCODING = 'utf-8'
+        $report = @(python "$root\tools\analysis\frame_timeline_report.py" $timelineCsv)
+        if ($LASTEXITCODE -ne 0) { throw "frame_timeline_report.py terminou com codigo $LASTEXITCODE" }
+      } finally {
+        try { [Console]::OutputEncoding = $prevConsoleEnc } catch { }
+        if ($null -ne $prevPyEnc) { $env:PYTHONIOENCODING = $prevPyEnc } else { Remove-Item env:PYTHONIOENCODING -ErrorAction SilentlyContinue }
+      }
+      $report | Set-Content "$root\logs\timeline_$Name.txt" -Encoding UTF8
+      $report
+    } catch {
+      Write-Warning "Relatorio de timeline nao gerado: $($_.Exception.Message)"
     }
-    $report | Set-Content "$root\logs\timeline_$Name.txt" -Encoding UTF8
-    $report
   }
-  if ($null -ne $prevTimeline) { $env:SR_FRAME_TIMELINE = $prevTimeline } else { Remove-Item env:SR_FRAME_TIMELINE -ErrorAction SilentlyContinue }
-  if ($null -ne $prevProfile) { $env:SR_VULKAN_PROFILE = $prevProfile } else { Remove-Item env:SR_VULKAN_PROFILE -ErrorAction SilentlyContinue }
 }
