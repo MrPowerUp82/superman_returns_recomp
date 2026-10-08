@@ -14,7 +14,8 @@ from collections import defaultdict
 
 # capture and fe_flush nest inside fe_end, so fe_flush is not a FRONT_END_PARTS member (summing it would double count).
 FRONT_END_PARTS = ("fe_begin", "fe_ring", "fe_device", "fe_index", "fe_streams", "fe_end")
-STAGES = ("game", "game_guest", "game_other", "capture", "frontend", *FRONT_END_PARTS, "fe_flush",
+FRONT_END_SUB = ("fd_shaders", "fs_prep", "fs_plan", "fe_push")  # nest inside fe_device / fe_streams / fe_end: listed, never summed
+STAGES = ("game", "game_guest", "game_other", "capture", "frontend", *FRONT_END_PARTS, "fe_flush", *FRONT_END_SUB,
           "frontend_other", "front_wait", "worker", "record", "gpu")
 LIMITERS = ("game", "worker", "record", "gpu")  # stages that can bound the frame rate
 REQUIRED = ("game", "worker")  # a frame without these has unusable ids or a lost stage
@@ -80,7 +81,8 @@ def analyze(frames, last=1100, budget_ms=1000.0 / 30.0):
         }
 
     stages = {}
-    for name in ("game", "capture", "front_wait", "worker", "record", "gpu", "frontend", *FRONT_END_PARTS, "fe_flush"):
+    for name in ("game", "capture", "front_wait", "worker", "record", "gpu", "frontend", *FRONT_END_PARTS, "fe_flush",
+                 *FRONT_END_SUB):
         rows = [frames[i][name] for i in complete if name in frames[i]]
         if rows:
             stages[name] = _summary([r["busy_ns"] / 1e6 for r in rows], [r["blocked_ns"] / 1e6 for r in rows],

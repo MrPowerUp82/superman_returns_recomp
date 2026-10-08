@@ -171,3 +171,23 @@ def test_report_without_detail_has_no_front_end_rows(tmp_path):
     result = ftr.analyze(ftr.load(make(tmp_path)))
     for name in ("frontend", "game_guest", "frontend_other", "fe_device"):
         assert name not in result["stages"]
+
+
+def test_front_end_sub_stages_are_listed_after_fe_flush(tmp_path):
+    rows = []
+    for frame in range(1, 4):
+        rows += detail_rows(frame)
+        rows += [(frame, "fd_shaders", 0, 0, 1 * MS, 0), (frame, "fs_prep", 0, 0, 2 * MS, 0),
+                 (frame, "fs_plan", 0, 0, 1 * MS, 0), (frame, "fe_push", 0, 0, 1 * MS, 0)]
+    path = tmp_path / "sub.csv"
+    write_csv(path, rows)
+    result = ftr.analyze(ftr.load(path))
+    for name in ("fd_shaders", "fs_prep", "fs_plan", "fe_push"):
+        assert result["stages"][name]["samples"] == 3
+    assert result["stages"]["fs_prep"]["mean"] == pytest.approx(2.0)
+    lines = [line.split()[0] for line in ftr.render(result).splitlines()[5:] if line.strip()]
+    order = [name for name in ftr.STAGES if name in lines]
+    assert lines == order
+    assert lines.index("fd_shaders") > lines.index("fe_flush")
+    # sub-stages nest inside fe_device / fe_streams / fe_end: they must not change the derivations
+    assert result["stages"]["frontend_other"]["mean"] == pytest.approx(1.0)

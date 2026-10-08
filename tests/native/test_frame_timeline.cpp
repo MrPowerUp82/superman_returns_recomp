@@ -153,3 +153,16 @@ SR_TEST(timeline_detail_is_off_without_the_environment) {
   // The test process sets neither SR_FRAME_TIMELINE nor SR_FRAME_TIMELINE_DETAIL.
   SR_CHECK(!FrameTimeline::Detail());
 }
+
+SR_TEST(timeline_front_end_sub_stages_use_their_csv_names) {
+  FrameTimeline timeline("unused.csv");
+  timeline.RecordBusy(TimelineStage::kFdShaders, 4, 11);
+  timeline.RecordBusy(TimelineStage::kFsPrep, 4, 22);
+  timeline.RecordBusy(TimelineStage::kFsPlan, 4, 33);
+  timeline.RecordBusy(TimelineStage::kFePush, 4, 44);
+  const std::string rows = Rows(timeline, 4, 4);
+  SR_CHECK(rows.find("4,fd_shaders,0,0,11,0\n") != std::string::npos);
+  SR_CHECK(rows.find("4,fs_prep,0,0,22,0\n") != std::string::npos);
+  SR_CHECK(rows.find("4,fs_plan,0,0,33,0\n") != std::string::npos);
+  SR_CHECK(rows.find("4,fe_push,0,0,44,0\n") != std::string::npos);
+}
