@@ -17,7 +17,12 @@
 
 namespace superman_returns::graphics {
 
-enum class TimelineStage : uint8_t { kGame, kCapture, kFrontWait, kWorker, kRecord, kGpu, kCount };
+enum class TimelineStage : uint8_t {
+  kGame, kCapture, kFrontWait, kWorker, kRecord, kGpu,
+  // Front-end detail on the game thread (SR_FRAME_TIMELINE_DETAIL=1).
+  kFrontend, kFeBegin, kFeRing, kFeDevice, kFeIndex, kFeStreams, kFeEnd, kFeFlush,
+  kCount
+};
 
 inline const char* TimelineStageName(TimelineStage stage) {
   switch (stage) {
@@ -27,6 +32,14 @@ inline const char* TimelineStageName(TimelineStage stage) {
     case TimelineStage::kWorker: return "worker";
     case TimelineStage::kRecord: return "record";
     case TimelineStage::kGpu: return "gpu";
+    case TimelineStage::kFrontend: return "frontend";
+    case TimelineStage::kFeBegin: return "fe_begin";
+    case TimelineStage::kFeRing: return "fe_ring";
+    case TimelineStage::kFeDevice: return "fe_device";
+    case TimelineStage::kFeIndex: return "fe_index";
+    case TimelineStage::kFeStreams: return "fe_streams";
+    case TimelineStage::kFeEnd: return "fe_end";
+    case TimelineStage::kFeFlush: return "fe_flush";
     default: return "unknown";
   }
 }
@@ -50,6 +63,16 @@ class FrameTimeline {
     const char* value = std::getenv("SR_FRAME_TIMELINE");
     if (!value || !*value || std::string(value) == "0") return {};
     return value;
+  }
+  // Fine-grained front-end timers add a few clock reads per draw, so they are
+  // opt-in on top of SR_FRAME_TIMELINE.
+  static bool Detail() {
+    static const bool on = [] {
+      if (!Global().enabled()) return false;
+      const char* value = std::getenv("SR_FRAME_TIMELINE_DETAIL");
+      return value && *value && std::string(value) != "0";
+    }();
+    return on;
   }
 
   bool enabled() const { return enabled_; }

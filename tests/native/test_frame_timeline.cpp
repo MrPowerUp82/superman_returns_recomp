@@ -3,6 +3,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -126,4 +127,29 @@ SR_TEST(timeline_recording_a_frame_costs_microseconds) {
       timeline.RecordSpan(TimelineStage(stage), frame, frame, frame + 10, 1);
   const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
   SR_CHECK(elapsed.count() < 500);
+}
+
+SR_TEST(timeline_every_stage_has_a_distinct_name) {
+  std::set<std::string> names;
+  for (size_t stage = 0; stage < size_t(TimelineStage::kCount); ++stage) {
+    const std::string name = TimelineStageName(TimelineStage(stage));
+    SR_CHECK(name != "unknown");
+    SR_CHECK(names.insert(name).second);
+  }
+}
+
+SR_TEST(timeline_front_end_detail_stages_use_their_csv_names) {
+  FrameTimeline timeline("unused.csv");
+  timeline.RecordBusy(TimelineStage::kFrontend, 9, 100);
+  timeline.RecordBusy(TimelineStage::kFeStreams, 9, 123);
+  timeline.RecordBusy(TimelineStage::kFeFlush, 9, 7);
+  const std::string rows = Rows(timeline, 9, 9);
+  SR_CHECK(rows.find("9,frontend,0,0,100,0\n") != std::string::npos);
+  SR_CHECK(rows.find("9,fe_streams,0,0,123,0\n") != std::string::npos);
+  SR_CHECK(rows.find("9,fe_flush,0,0,7,0\n") != std::string::npos);
+}
+
+SR_TEST(timeline_detail_is_off_without_the_environment) {
+  // The test process sets neither SR_FRAME_TIMELINE nor SR_FRAME_TIMELINE_DETAIL.
+  SR_CHECK(!FrameTimeline::Detail());
 }
