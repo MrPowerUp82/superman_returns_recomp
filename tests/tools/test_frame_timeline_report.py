@@ -107,3 +107,49 @@ def test_cli_fails_when_no_frame_is_complete(tmp_path):
     path = tmp_path / "empty.csv"
     write_csv(path, [])
     assert ftr.main([str(path)]) == 1
+
+
+def detail_rows(frame):
+    rows = frame_rows(frame, skip=("record",))
+    rows += [
+        (frame, "frontend", 0, 0, 15 * MS, 0),
+        (frame, "fe_begin", 0, 0, 1 * MS, 0),
+        (frame, "fe_ring", 0, 0, 2 * MS, 0),
+        (frame, "fe_device", 0, 0, 4 * MS, 0),
+        (frame, "fe_index", 0, 0, 1 * MS, 0),
+        (frame, "fe_streams", 0, 0, 3 * MS, 0),
+        (frame, "fe_end", 0, 0, 3 * MS, 0),
+        (frame, "fe_flush", 0, 0, 1 * MS, 0),
+    ]
+    return rows
+
+
+def test_front_end_detail_derives_game_guest_and_frontend_other(tmp_path):
+    rows = []
+    for frame in range(1, 6):
+        rows += detail_rows(frame)
+    path = tmp_path / "detail.csv"
+    write_csv(path, rows)
+    stages = ftr.analyze(ftr.load(path))["stages"]
+    assert stages["frontend"]["mean"] == pytest.approx(15.0)
+    assert stages["fe_device"]["mean"] == pytest.approx(4.0)
+    assert stages["game_guest"]["mean"] == pytest.approx(5.0)       # game 20 - frontend 15
+    assert stages["frontend_other"]["mean"] == pytest.approx(1.0)   # 15 - (1+2+4+1+3+3)
+
+
+def test_front_end_derivations_are_clamped_at_zero(tmp_path):
+    rows = []
+    for frame in range(1, 4):
+        rows += frame_rows(frame, skip=("record",))
+        rows += [(frame, "frontend", 0, 0, 25 * MS, 0), (frame, "fe_device", 0, 0, 30 * MS, 0)]
+    path = tmp_path / "clamp.csv"
+    write_csv(path, rows)
+    stages = ftr.analyze(ftr.load(path))["stages"]
+    assert stages["game_guest"]["mean"] == 0.0       # game 20 < frontend 25
+    assert stages["frontend_other"]["mean"] == 0.0   # frontend 25 < parts 30
+
+
+def test_report_without_detail_has_no_front_end_rows(tmp_path):
+    result = ftr.analyze(ftr.load(make(tmp_path)))
+    for name in ("frontend", "game_guest", "frontend_other", "fe_device"):
+        assert name not in result["stages"]

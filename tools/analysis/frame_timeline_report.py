@@ -12,7 +12,9 @@ import math
 import sys
 from collections import defaultdict
 
-STAGES = ("game", "game_other", "capture", "front_wait", "worker", "record", "gpu")
+FRONT_END_PARTS = ("fe_begin", "fe_ring", "fe_device", "fe_index", "fe_streams", "fe_end")
+STAGES = ("game", "game_guest", "game_other", "capture", "frontend", *FRONT_END_PARTS, "fe_flush",
+          "frontend_other", "front_wait", "worker", "record", "gpu")
 LIMITERS = ("game", "worker", "record", "gpu")  # stages that can bound the frame rate
 REQUIRED = ("game", "worker")  # a frame without these has unusable ids or a lost stage
 
@@ -77,7 +79,7 @@ def analyze(frames, last=1100, budget_ms=1000.0 / 30.0):
         }
 
     stages = {}
-    for name in ("game", "capture", "front_wait", "worker", "record", "gpu"):
+    for name in ("game", "capture", "front_wait", "worker", "record", "gpu", "frontend", *FRONT_END_PARTS, "fe_flush"):
         rows = [frames[i][name] for i in complete if name in frames[i]]
         if rows:
             stages[name] = _summary([r["busy_ns"] / 1e6 for r in rows], [r["blocked_ns"] / 1e6 for r in rows],
@@ -86,6 +88,14 @@ def analyze(frames, last=1100, budget_ms=1000.0 / 30.0):
     if with_capture:  # the game thread's own work: game minus the capture hooks nested in it
         other = [(frames[i]["game"]["busy_ns"] - frames[i]["capture"]["busy_ns"]) / 1e6 for i in with_capture]
         stages["game_other"] = _summary(other, [0.0] * len(other), mean_interval, budget_ms)
+    with_frontend = [i for i in complete if "frontend" in frames[i]]
+    if with_frontend:  # game thread time outside the renderer hooks, and the hooks' unattributed rest
+        guest = [max(0, frames[i]["game"]["busy_ns"] - frames[i]["frontend"]["busy_ns"]) / 1e6 for i in with_frontend]
+        stages["game_guest"] = _summary(guest, [0.0] * len(guest), mean_interval, budget_ms)
+        rest = [max(0, frames[i]["frontend"]["busy_ns"]
+                    - sum(frames[i][part]["busy_ns"] for part in FRONT_END_PARTS if part in frames[i])) / 1e6
+                for i in with_frontend]
+        stages["frontend_other"] = _summary(rest, [0.0] * len(rest), mean_interval, budget_ms)
     result["stages"] = stages
 
     present = [name for name in LIMITERS if name in stages]
