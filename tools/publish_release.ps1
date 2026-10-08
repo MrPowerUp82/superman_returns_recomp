@@ -1,6 +1,7 @@
 <#
 Publishes the package made by tools\package_release.ps1:
-  1. the orphan `builds` branch (one commit, force-pushed, so the history never
+  1. the orphan `builds` branch (ZIP or verified parts below 100 MiB;
+     one commit, force-pushed, so the history never
      grows): raw.githubusercontent.com serves it with CORS headers, which is how
      the installer page (docs/) downloads the build in the browser;
   2. a GitHub release with the same zip (gh CLI, optional).
@@ -35,9 +36,10 @@ if (-not $Confirm) {
 $work = Join-Path ([IO.Path]::GetTempPath()) ("sr-builds-" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory $work | Out-Null
 try {
-  Copy-Item $zip $work
-  Copy-Item (Join-Path $release 'superman_returns_win64.zip.sha256') $work
-  Copy-Item (Join-Path $release 'version.json') $work
+  # Raw Git blobs are limited to 100 MiB. Keep the release ZIP unchanged and
+  # let the browser assemble verified parts when the package is larger.
+  & $python (Join-Path $root 'tools/release/stage_build.py') $zip (Join-Path $release 'version.json') $work
+  if ($LASTEXITCODE -ne 0) { throw 'Staging the installer download failed' }
   "Build for the installer page (docs/). Replaced on every release; see the Releases page for the same file.`n" |
     Set-Content (Join-Path $work 'README.md')
   git -C $work init -q -b builds
@@ -46,6 +48,9 @@ try {
   git -C $work push -f $url builds:builds
   if ($LASTEXITCODE -ne 0) { throw 'push to the builds branch failed' }
 } finally {
+  $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+  if (-not ([IO.Path]::GetFullPath($work).StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase)) -or
+      (Split-Path $work -Leaf) -notmatch '^sr-builds-[0-9a-f]{32}$') { throw 'Invalid temporary publishing directory' }
   Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 }
 

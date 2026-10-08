@@ -1,4 +1,5 @@
 import { CONFIG } from './config.js';
+import { downloadBuildZip } from './build-download.js';
 import { STRINGS, detectLanguage } from './i18n.js';
 import { openDisc } from './xdvdfs.js';
 import { inspectGame, writePackage, XEX_SHA256 } from './installer.js';
@@ -151,25 +152,12 @@ async function downloadBuild() {
   if (state.buildBlob && state.buildName === 'download') return state.buildBlob;
   state.buildError = false;
   try {
-    try {
-      const info = await (await fetch(CONFIG.versionUrl, { cache: 'no-cache' })).json();
-      state.buildVersion = info.version;
-    } catch { /* the version label is optional */ }
-    const response = await fetch(CONFIG.buildUrl, { cache: 'no-cache' });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const total = Number(response.headers.get('content-length')) || 0;
-    const reader = response.body.getReader();
-    const chunks = [];
-    let received = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      received += value.length;
+    const result = await downloadBuildZip({ ...CONFIG, onProgress(received, total) {
       setWriteStatus(t().downloading((received / 1e6).toFixed(1)));
       if (total) setProgress(received, total);
-    }
-    state.buildBlob = new Blob(chunks, { type: 'application/zip' });
+    } });
+    state.buildBlob = result.blob;
+    state.buildVersion = result.version;
     state.buildName = 'download';
   } catch (error) {
     state.buildBlob = null;

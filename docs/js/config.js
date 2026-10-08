@@ -1,6 +1,7 @@
 // Where the installer finds the port's build. The build lives on the orphan
 // `builds` branch (raw.githubusercontent.com answers with CORS headers; release
-// assets do not), the same zip is attached to the GitHub release.
+// assets do not). Large ZIPs use verified parts listed in version.json;
+// the complete, identical ZIP is attached to the GitHub release.
 const REPO = 'MrPowerUp82/superman_returns_recomp';
 
 export const CONFIG = {
