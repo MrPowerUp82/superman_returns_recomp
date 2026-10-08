@@ -36,9 +36,13 @@ Levar o renderer nativo, em **D3D12 e Vulkan**, a **30 FPS estáveis** (o limite
 ## Perguntas em aberto (a Fase 0 responde)
 
 - A thread do jogo (lógica, PM4 e captura) cabe em ~33 ms depois de reduzir o hash?
+  Resposta (Fase 0, 2026-10-08): no Vulkan não cabe: o `game` mede 34,99 e 36,67 ms em média (97% do intervalo, p99 de 48,3 e 49,1 ms) e é o estágio limitante em 73% e 72% dos quadros; a captura é só 6,59 e 7,16 ms disso (o `game_other` fica em 28,40 e 29,51 ms), então reduzir o hash sozinho não fecha a meta. No D3D12 a média cabe (32,76 e 30,86 ms), mas o p99 não (42,4 e 43,3 ms), e o limitador de 30 FPS faz o `game` ficar perto do intervalo por construção, então ele não prova gargalo. Detalhes e ressalvas em `docs/native-renderer-timeline.md`.
 - O replay worker (~40 ms) está no caminho crítico ou tem folga?
+  Resposta (Fase 0, 2026-10-08): não tem folga de p99 em nenhuma API. Vulkan: 29,32 e 31,55 ms de tempo ocupado (82% e 84%), limitante em 14% e 13% dos quadros, p99 de 43,7 e 43,8 ms. D3D12: 29,17 e 32,37 ms (87% e 97%), `bloq.` de 0,00 ms, limitante em 26% e 57% dos quadros, p99 de 47,6 e 43,5 ms; é o estágio de trabalho mais ocupado do D3D12. Uma execução extra com `--sr_native_render_scale=2` (GPU como gargalo) mostrou o `bloq.` do worker em 28,35 ms, então o caminho de espera de fence funciona.
 - O gargalo da GPU é compartilhado entre as APIs ou específico de uma?
+  Resposta (Fase 0, 2026-10-08): é específico do Vulkan. A GPU do Vulkan mede 29,75 e 31,93 ms (83% e 85% de `util.`, limitante em 8% e 9% dos quadros, p99 de 39,4 e 37,2 ms, acima do orçamento), 1,39x e 1,28x a do D3D12 (21,47 e 25,02 ms, 64% e 75%, limitante em 0% e 1%, folga p99 de +7,1 e +3,4 ms). O valor do Vulkan é limite superior (inclui fila atrás do quadro anterior, com 2 quadros em voo) e a cena varia entre execuções.
 - O Vulkan já tem timestamps de GPU por grupo de passes?
+  Resposta (Fase 0, 2026-10-08): não tinha. Esta fase adicionou só o tempo de GPU por quadro inteiro (do `TOP_OF_PIPE` do primeiro command buffer ao `BOTTOM_OF_PIPE` do fim do quadro). O agrupamento por passe ficou como decisão pendente: os ids de passe do perfil em `game_profile.h` são -1, então a medição por grupo de passes precisa de projeto antes do passo 2.
 
 ## Decision Log
 
