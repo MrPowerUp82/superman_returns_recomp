@@ -50,8 +50,14 @@ bool GameFrame::Initialize(const std::filesystem::path& cache,Error& e) {
     const uint32_t bits=c_.graphics_family<count?families[c_.graphics_family].timestampValidBits:0;
     if(bits) {
       VkQueryPoolCreateInfo info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};info.queryType=VK_QUERY_TYPE_TIMESTAMP;info.queryCount=uint32_t(kSlots*2);
-      if(!Check(c_.f.vkCreateQueryPool(c_.device,&info,nullptr,&timestamps_),"Game timestamp pool",e)) return false;
-      timestamp_mask_=bits>=64?~0ull:(1ull<<bits)-1;timestamp_period_ns_=c_.properties.limits.timestampPeriod;
+      if(c_.f.vkCreateQueryPool(c_.device,&info,nullptr,&timestamps_)==VK_SUCCESS) {
+        timestamp_mask_=bits>=64?~0ull:(1ull<<bits)-1;timestamp_period_ns_=c_.properties.limits.timestampPeriod;
+      } else {
+        timestamps_=VK_NULL_HANDLE;
+        c_.Log("SR_FRAME_TIMELINE: GPU timestamps unavailable, gpu rows will be missing");
+      }
+    } else {
+      c_.Log("SR_FRAME_TIMELINE: GPU timestamps unavailable, gpu rows will be missing");
     }
   }
   return true;
@@ -183,7 +189,7 @@ bool GameFrame::RecordFrame(std::vector<guest::RenderPacket>& packets_,const gue
   VkImageCopy copy{};copy.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.dstSubresource=copy.srcSubresource;copy.extent=source->extent;
   c_.f.vkCmdCopyImage(command_,source->handle,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,output->handle,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&copy);
   if(!renderer_.Images().Transition(command_,source->handle,range,ImageUsage::Sampled(),e) || !renderer_.Images().Transition(command_,output->handle,range,ImageUsage::Sampled(),e)) return fail();
-  if(timestamps_) {c_.f.vkCmdWriteTimestamp(command_,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,timestamps_,uint32_t(slot*2+1));slot_swap_[slot]=swap.guest_swap;}
+  if(timestamps_) {c_.f.vkCmdWriteTimestamp(command_,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,timestamps_,uint32_t(slot*2+1));}
   if(!Check(c_.f.vkEndCommandBuffer(upload_),"End game uploads",e) || !Check(c_.f.vkEndCommandBuffer(command_),"End game frame",e) || !Check(c_.f.vkResetFences(c_.device,1,&fence_),"Reset game fence",e)) return fail();
   const std::array<VkCommandBuffer,2> commands{upload_,command_};
   VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};submit.commandBufferCount=2;submit.pCommandBuffers=commands.data();
@@ -195,6 +201,7 @@ bool GameFrame::RecordFrame(std::vector<guest::RenderPacket>& packets_,const gue
     if(!Check(c_.f.vkQueueSubmit(c_.graphics_queue,1,&submit,fence_),"Submit game frame",e)) return fail();
   }
   slot_submitted_[slot]=true;slot_serial_[slot]=serial_;
+  if(timestamps_) slot_swap_[slot]=swap.guest_swap;
   // Loading frames stage hundreds of MB; keeping two of them in flight can
   // exhaust a shared-memory iGPU. Finish such a frame before recording more.
   if(kSlots>1 && renderer_.Resources().SubmissionBytes()>(64ull<<20) && !WaitSlot(slot,e)) return fail();

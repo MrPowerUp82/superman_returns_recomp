@@ -34,6 +34,7 @@ try {
   if ($Profile) { $env:SR_VULKAN_PROFILE = '1' }
   if ($Timeline) {
     Remove-Item $timelineCsv -ErrorAction SilentlyContinue
+    Remove-Item "$root\logs\timeline_$Name.txt" -ErrorAction SilentlyContinue
     $env:SR_FRAME_TIMELINE = $timelineCsv
   }
   & "$PSScriptRoot\bench.ps1" -Name $Name -Exe $Exe -ExtraArgs $gameArgs -TitleTimeout 180 -WorldTimeout 200
@@ -47,6 +48,9 @@ try {
   # The next invocation clears game.log before launching the game.
   if ($Profile -and (Test-Path "$root\logs\game.log")) {
     Copy-Item "$root\logs\game.log" "$root\logs\bench_$Name.log" -Force
+  }
+  if ($Timeline -and -not (Test-Path $timelineCsv)) {
+    Write-Warning "timeline csv ausente: $timelineCsv"
   }
   if ($Timeline -and (Test-Path $timelineCsv)) {
     # Best-effort: uma falha no relatório não pode mascarar o resultado do bench nem abortar este finally.
