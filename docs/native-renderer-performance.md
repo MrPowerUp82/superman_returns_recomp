@@ -1077,3 +1077,30 @@ Analysis: `build/summarize_watch_scan.py` -> `logs/watch_scan_comparison.json`;
 gates: `build/compare_watch_scan.ps1` (Windows PowerShell 5.1) ->
 `logs/watch_scan_image_gates.json`. Runtime artifacts/analysis helpers are
 local and ignored. Earlier changes retained; no commit or publication.
+
+## D3D12 fix: browser shader libraries are partial caches
+
+The installed D3D12 build could show psychedelic colors or skip draws because
+browser-generated libraries contain only the 160 original shader containers
+found in DATA/*.AST. The local benchmark instead supplied a 363-entry library,
+so it did not reproduce the installed shader coverage. The runtime incorrectly
+stopped translation whenever any library was loaded, and cached missing library
+entries as permanent failures. Library misses now fall through to the shader
+pack/runtime cache and runtime translation; pending translations remain retryable.
+Existing library hits keep their priority.
+
+The corrected distribution executable was tested with the user's actual game
+files and the unmodified 160-entry browser library. The benchmark-only RTV and
+float24 command-line overrides were removed. Cold-start logs confirm runtime
+translation (at least 50 shaders, zero reported failures). Gameplay, HUD and
+movement passed, with normal scene colors: 29.9 FPS idle, 30.0 FPS forward,
+20 seconds each, 1280x720 windowed, VSync and 30 FPS cap. The existing regional
+image gate passed against the earlier full-library D3D12 run at the same window
+position (29.00 dB / histogram 0.03084, all four regions passed). Native tests
+and the allocation budget passed. This does not validate extended play or every
+resolution/display mode.
+
+Local evidence: `logs/bench_user_install_shader_fallback*`,
+`logs/user_install_shader_fallback_image_gate.json`,
+`logs/user_install_original_game.log`. Source build:
+`partial_shader_fallback_build.log` in the isolated release checkout.

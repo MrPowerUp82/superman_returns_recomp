@@ -273,7 +273,8 @@ void DumpContainer(uint8_t* base, uint32_t container, const GuestShaderInfo& inf
 // library supplies the shader: the hash is then the creation hash of these
 // very bytes, which is what LoadShader will ask for.
 void OfferTranslation(uint8_t* base, uint32_t container, const GuestShaderInfo& info) {
-  if (Library().ok) return;
+  if (const ShaderLibrary* lib = PreShaderLibrary();
+      lib && lib->Find(info.container_hash, info.is_vertex)) return;
   ShaderTranslator& translator = ShaderTranslator::Get();
   if (!translator.Enabled()) return;
   static std::mutex mutex;
