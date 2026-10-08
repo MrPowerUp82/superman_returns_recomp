@@ -355,3 +355,248 @@ O `hash_ms` é ~7% do `textures_ms`. O resto (~3,6 ms) é trabalho por draw e po
 
 Ressalvas: são amostras de um quadro por 120 quadros, de builds anteriores à instrumentação da Fase 0 (a lógica de captura é a mesma), e não substituem uma medição com os contadores finos de hash por quadro.
 
+## Decomposição fina do front-end (Fase 1.1a)
+
+Plano: `superpowers/plans/2026-10-08-frontend-diet-measurement.md`. A Fase 0.5 deixou três blocos grandes sem decomposição no Vulkan: `fe_streams` (3,45 a 3,68 ms), o resto do `fe_end` além da captura (2,77 a 2,97 ms) e `fe_device` (1,37 a 1,48 ms). Esta fase acrescentou quatro estágios, todos na thread do jogo e só com `SR_FRAME_TIMELINE_DETAIL=1`: `fd_shaders` (as buscas de shader dentro do `CaptureDevice`), `fs_prep` (o preparo do `PlanStreams`: `DynamicVertexFetch` e a leitura da declaração de vértices), `fs_plan` (o ramo lento do `PlanStreams`, ver abaixo) e `fe_push` (só o `push_back` do `WorkCmd` em `EndCmd`). Não otimiza nada. Máquina e condições são as da Fase 0 (Intel UHD, i5-13420H, 1280x720, vsync, limite de 30 FPS), 2026-10-08, build release do front-end instrumentado (commit `efccf4f`).
+
+### Medições
+
+Quatro benches, todos Vulkan, um por vez, sem outra carga: `tl_fd1` e `tl_fd2` com `-Timeline -TimelineDetail`; `tl_fd3` e `tl_fd4` com `-Timeline -TimelineDetail -Profile` (o perfil acrescenta a linha `Vulkan profile`, que tem `draws=` por quadro). Nenhuma falha de infraestrutura. FPS do bench (média; mínimo entre parênteses):
+
+| Execução | Modo | parado | andando |
+| --- | --- | --- | --- |
+| `tl_fd1_vulkan` | detalhe | 26,7 (21,5) | 26,6 (25,7) |
+| `tl_fd2_vulkan` | detalhe | 27,1 (23,5) | 25,6 (23) |
+| `tl_fd3_vulkan` | detalhe + perfil | 23,2 (18,8) | 24,4 (23) |
+| `tl_fd4_vulkan` | detalhe + perfil | 25,6 (22,3) | 25,6 (24,5) |
+
+As quatro tabelas do relatório (janela dos últimos 1100 quadros, como nas fases anteriores):
+
+`tl_fd1_vulkan`:
+
+```
+Quadros analisados: 1100 (descartados por falta de estágio: 0)
+Intervalo médio 37.5 ms = 26.7 FPS | 1% low 19.7 FPS | mínimo 1.9 FPS
+Orçamento por quadro: 33.3 ms (tempos em ms)
+
+estágio           média     p50     p99   bloq.   util.  folga p99  limitante
+game              36.92   36.98   50.15    0.00     99%     -16.82        73%
+game_guest        19.34   19.35   26.75    0.00     52%       6.58          -
+game_other        30.36   30.51   38.05    0.00     81%      -4.71          -
+capture            6.56    6.20   14.36    0.00     18%      18.97          -
+frontend          17.58   17.71   27.54    0.00     47%       5.79          -
+fe_begin           0.40    0.41    0.62    0.00      1%      32.72          -
+fe_ring            0.28    0.25    0.63    0.00      1%      32.70          -
+fe_device          1.60    1.66    2.10    0.00      4%      31.23          -
+fe_index           1.27    1.26    1.87    0.00      3%      31.46          -
+fe_streams         3.73    3.84    5.51    0.00     10%      27.82          -
+fe_end             9.65    9.36   17.79    0.00     26%      15.54          -
+fe_flush           0.05    0.04    0.20    0.00      0%      33.14          -
+fd_shaders         0.46    0.46    0.65    0.00      1%      32.68          -
+fs_prep            0.37    0.37    0.51    0.00      1%      32.82          -
+fs_plan            3.03    3.11    4.66    0.00      8%      28.68          -
+fe_push            0.27    0.28    0.38    0.00      1%      32.95          -
+frontend_other     0.64    0.65    0.99    0.00      2%      32.35          -
+front_wait         0.50    0.00    0.01    0.00      1%      33.33          -
+worker            30.88   31.61   43.30    2.09     82%      -9.96        12%
+record            25.51   24.57   41.94    3.04     68%      -8.61         3%
+gpu               31.79   33.71   39.01    0.00     85%      -5.68        12%
+```
+
+`tl_fd2_vulkan`:
+
+```
+Quadros analisados: 1100 (descartados por falta de estágio: 0)
+Intervalo médio 37.6 ms = 26.6 FPS | 1% low 19.9 FPS | mínimo 2.0 FPS
+Orçamento por quadro: 33.3 ms (tempos em ms)
+
+estágio           média     p50     p99   bloq.   util.  folga p99  limitante
+game              37.10   36.96   49.41    0.00     99%     -16.08        77%
+game_guest        19.30   19.22   25.81    0.00     51%       7.52          -
+game_other        30.38   30.34   38.53    0.00     81%      -5.20          -
+capture            6.72    6.37   13.77    0.00     18%      19.57          -
+frontend          17.80   17.85   26.79    0.00     47%       6.55          -
+fe_begin           0.40    0.40    0.61    0.00      1%      32.73          -
+fe_ring            0.27    0.25    0.62    0.00      1%      32.72          -
+fe_device          1.59    1.65    2.13    0.00      4%      31.20          -
+fe_index           1.28    1.27    1.87    0.00      3%      31.47          -
+fe_streams         3.85    3.97    5.33    0.00     10%      28.00          -
+fe_end             9.76    9.52   17.14    0.00     26%      16.20          -
+fe_flush           0.06    0.05    0.21    0.00      0%      33.12          -
+fd_shaders         0.45    0.45    0.65    0.00      1%      32.69          -
+fs_prep            0.38    0.38    0.54    0.00      1%      32.80          -
+fs_plan            3.13    3.21    4.50    0.00      8%      28.83          -
+fe_push            0.28    0.28    0.41    0.00      1%      32.93          -
+frontend_other     0.65    0.65    0.97    0.00      2%      32.36          -
+front_wait         0.45    0.00    0.00    0.00      1%      33.33          -
+worker            31.02   31.54   43.92    1.56     82%     -10.59        11%
+record            25.93   25.22   40.55    2.30     69%      -7.22         3%
+gpu               31.14   33.32   38.06    0.00     83%      -4.73         8%
+```
+
+`tl_fd3_vulkan` (com `-Profile`):
+
+```
+Quadros analisados: 1100 (descartados por falta de estágio: 0)
+Intervalo médio 41.6 ms = 24.0 FPS | 1% low 17.3 FPS | mínimo 1.8 FPS
+Orçamento por quadro: 33.3 ms (tempos em ms)
+
+estágio           média     p50     p99   bloq.   util.  folga p99  limitante
+game              40.89   40.88   55.32    0.00     98%     -21.99        75%
+game_guest        20.52   20.46   26.84    0.00     49%       6.49          -
+game_other        32.92   32.83   42.50    0.00     79%      -9.17          -
+capture            7.98    7.63   14.63    0.00     19%      18.70          -
+frontend          20.37   20.23   29.66    0.00     49%       3.68          -
+fe_begin           0.53    0.53    0.77    0.00      1%      32.56          -
+fe_ring            0.32    0.29    0.62    0.00      1%      32.71          -
+fe_device          1.81    1.81    2.32    0.00      4%      31.02          -
+fe_index           1.61    1.57    2.45    0.00      4%      30.89          -
+fe_streams         4.03    3.98    5.66    0.00     10%      27.67          -
+fe_end            11.31   11.01   18.20    0.00     27%      15.14          -
+fe_flush           0.06    0.05    0.20    0.00      0%      33.13          -
+fd_shaders         0.53    0.53    0.74    0.00      1%      32.59          -
+fs_prep            0.42    0.42    0.59    0.00      1%      32.74          -
+fs_plan            3.23    3.17    4.65    0.00      8%      28.68          -
+fe_push            0.31    0.31    0.44    0.00      1%      32.89          -
+frontend_other     0.76    0.75    1.12    0.00      2%      32.21          -
+front_wait         0.62    0.00    4.65    0.00      1%      28.68          -
+worker            35.45   35.49   49.04    2.26     85%     -15.70        16%
+record            30.54   30.12   46.81    2.46     73%     -13.48         5%
+gpu               32.55   32.46   37.64    0.00     78%      -4.31         4%
+```
+
+`tl_fd4_vulkan` (com `-Profile`):
+
+```
+Quadros analisados: 1100 (descartados por falta de estágio: 0)
+Intervalo médio 39.3 ms = 25.4 FPS | 1% low 18.1 FPS | mínimo 2.0 FPS
+Orçamento por quadro: 33.3 ms (tempos em ms)
+
+estágio           média     p50     p99   bloq.   util.  folga p99  limitante
+game              38.67   38.58   52.04    0.00     98%     -18.71        78%
+game_guest        19.78   19.62   25.94    0.00     50%       7.39          -
+game_other        31.25   31.12   41.63    0.00     79%      -8.30          -
+capture            7.41    7.12   13.99    0.00     19%      19.35          -
+frontend          18.88   18.90   28.59    0.00     48%       4.74          -
+fe_begin           0.50    0.50    0.79    0.00      1%      32.54          -
+fe_ring            0.29    0.27    0.63    0.00      1%      32.71          -
+fe_device          1.64    1.67    2.26    0.00      4%      31.07          -
+fe_index           1.42    1.41    2.18    0.00      4%      31.15          -
+fe_streams         3.82    3.82    5.80    0.00     10%      27.53          -
+fe_end            10.51   10.30   17.48    0.00     27%      15.85          -
+fe_flush           0.06    0.04    0.21    0.00      0%      33.12          -
+fd_shaders         0.48    0.48    0.71    0.00      1%      32.62          -
+fs_prep            0.40    0.39    0.57    0.00      1%      32.76          -
+fs_plan            3.07    3.07    4.76    0.00      8%      28.57          -
+fe_push            0.29    0.29    0.42    0.00      1%      32.91          -
+frontend_other     0.69    0.68    1.06    0.00      2%      32.27          -
+front_wait         0.60    0.00    8.92    0.00      2%      24.41          -
+worker            33.01   33.25   48.07    1.91     84%     -14.74        16%
+record            28.67   27.97   48.86    1.95     73%     -15.52         5%
+gpu               30.76   31.92   38.74    0.00     78%      -5.41         2%
+```
+
+### Resíduos explícitos (o que ainda não tem escopo próprio)
+
+Todos são diferenças de médias de uma mesma tabela (ms por quadro, `tl_fd1`, `tl_fd2` / `tl_fd3`, `tl_fd4`):
+
+| Resíduo | Definição | fd1 | fd2 | fd3 | fd4 |
+| --- | --- | --- | --- | --- | --- |
+| `fs_other` | `fe_streams` − `fs_prep` − `fs_plan` | 0,33 | 0,34 | 0,38 | 0,35 |
+| `fd_other` | `fe_device` − `fd_shaders` | 1,14 | 1,14 | 1,28 | 1,16 |
+| `fe_end` fora da captura | `fe_end` − `capture` | 3,09 | 3,04 | 3,33 | 3,10 |
+| resto do `EndCmd` | `fe_end` − `capture` − `fe_push` | 2,82 | 2,76 | 3,02 | 2,81 |
+| `fs_plan` / `fe_streams` | fração | 81,2% | 81,3% | 80,1% | 80,4% |
+| `fd_shaders` / `fe_device` | fração | 28,8% | 28,3% | 29,3% | 29,3% |
+
+- **`fs_other`** (≈0,33 a 0,38 ms) é o que `fe_streams` tem fora de `fs_prep` e de `fs_plan`: por stream, as leituras de registradores do dispositivo (`Load32`/`Load8`), a consulta ao objeto do buffer de vértices, o teste do cache `FrontStreamCache` incluindo a **primeira** chamada de `RefreshTrackedBuffer` (ela está na condição do `if`, fora do escopo de `fs_plan`, mesmo quando devolve "sujo" e o ramo lento é tomado em seguida), o preenchimento do `StreamPlan` no ramo limpo, o `push_back` em `batch_->streams` e os testes dos cvars de depuração. O ramo "limpo e em cache" mais as leituras por stream estão aqui; os dados não separam uns dos outros.
+- **`fd_other`** (≈1,14 a 1,28 ms) é o que `fe_device` tem fora de `fd_shaders`: no código do `CaptureDevice` com `packet_check` ligado (sempre, no Vulkan), são 15 a 20 chamadas de `CaptureBytes` por draw (9 do bloco do `packet_check`: constantes de fetch, `vs_bools` até o registrador de sombra e 7 faixas de `kRegisterShadow`; mais 5 fixas; mais até 5 de render targets/depth-stencil; mais a declaração; a chamada de `kDevicePtrAddr` é pulada porque a constante é 0) e os laços dos render targets e da declaração. Cada `CaptureBytes` faz `bytes.resize` (que zera a memória nova), `memcpy` e `ranges.push_back`. Quantos bytes por draw isso copia não foi medido aqui.
+- **`fe_end` − `capture`** (3,04 a 3,33 ms; 2,76 a 3,02 ms depois de tirar `fe_push`) continua **em grande parte sem explicação**: `fe_push` (0,27 a 0,31 ms) responde por só ≈9% desse resto. Candidatos a olhar no código, nenhum medido: `checked_guest_reads.Reset()`; o tratamento do `capture_mirror_` (no Vulkan o `packet_check` fica ligado, então o segundo `if` do `EndCmd`, o `ScanCopyUsing`, é pulado; o bloco do `kResolve` só roda nos resolves); a marcação `resolve_copy_draw`; a decisão e a chamada do `FlushBatch` (o `fe_flush` mede 0,05 a 0,06 ms); as leituras de relógio de `steady_clock` em volta de `CapturePm4Dependencies` e de `CaptureTextures`; e a truncação para µs de cada uma dessas duas medições (ressalva 6 da Fase 0.5). Com a contagem de draws abaixo (≈2630 por quadro) essa truncação passa a ser verificável por aritmética, não por medida: são até 2 intervalos cronometrados por draw (o do PM4 só quando o comando tem bytes de anel; o das texturas só nos draws), então até ≈5 300 truncações por quadro, e a 0,5 µs perdidos em média por truncação (valor que supõe durações bem maiores que 1 µs; se as durações forem menores que 1 µs a perda por chamada é maior) seriam até ≈2,6 ms. Isso é da ordem do resto, mas é um limite superior por aritmética, o número de chamadas cronometradas por quadro não foi contado e os outros candidatos continuam possíveis. Os dados não decidem.
+- **`fe_index` − (parte do `PlanBuffer`)**: não foi separado. O `fe_index` (1,27 a 1,28 ms em fd1/fd2) cobre o bloco do buffer de índices dos draws indexados: o `PlanBuffer` do buffer de índices (que, diferente dos streams, não passa por um cache `FrontStreamCache`; ele sempre calcula a chave XXH3, busca em `tracked_` e chama `RefreshTrackedBuffer`), a leitura do cabeçalho do objeto de índices, o `reset_index` dos strips, e, nos `kQuadList`, a normalização dos índices em um `std::vector` com cópia para `batch_->bytes`. Quanto de cada parte, os dados não dizem.
+
+### O que `fs_plan` mede, e o que os dados não dizem sobre ele
+
+`fs_plan` é o **ramo lento** do `PlanStreams` (`native_renderer.cpp`): dentro do `else` do teste do cache de stream, o `range->Resolve()` (quando há `VertexRange`), o `PlanBuffer` (chave XXH3, busca em `tracked_`, `RefreshTrackedBuffer`, `align_range`, varredura de `clean`, `CaptureBytes` quando há captura nova), o segundo `tracked_.find(sp.buffer.key)` e o preenchimento do `FrontStreamCache`. Ele domina `fe_streams`: 3,03 a 3,23 ms de 3,73 a 4,03 ms, ou 80,1% a 81,3% nas quatro execuções (`fs_prep` fica em 0,37 a 0,42 ms).
+
+O que **leva** um stream ao ramo lento, lendo o código (o ramo rápido exige todas estas condições juntas): o cvar de depuração `sr_native_debug_buffers_always_dirty` desligado; `sc.tracked` não nulo; `sc.address`, `sc.size`, `sc.decl`, `sc.stride` e `sc.phase` iguais aos do stream atual; e `RefreshTrackedBuffer(*sc.tracked)` devolvendo falso. Qualquer uma falhando manda o stream para o ramo lento. Pontos que o código mostra:
+
+1. O `FrontStreamCache` tem **uma entrada por slot de stream** (17 entradas, indexadas pelo número do stream `s`). Se draws consecutivos usam buffers diferentes no mesmo slot, cada troca é um erro de cache (e a entrada é sobrescrita).
+2. `RefreshTrackedBuffer` devolve `t.dirty`. Ele vira `true` por: escrita de página detectada pelo write-watch; mudança do hash do conteúdo para buffers de até 32 KiB (`kHashedBufferMax`), conferido uma vez por quadro por buffer; `InvalidateGuestRange` (hooks de Unlock dos buffers); e o estouro de mais de 64 faixas em `clean`. Na leitura do código, **não há atribuição `dirty = false` em `port/src`, e `tracked_` nunca tem entradas removidas**: um `TrackedBuffer` que já ficou sujo uma vez continua devolvendo `true` em todo draw seguinte que o usa, e cada um desses draws vai ao ramo lento, onde o `PlanBuffer` consulta `clean` e pode não capturar nada (`action = 0`). Isso é uma leitura do código, não uma medida: quantos streams por draw estão nesse caso, e se é isso que domina, os dados **não** dizem.
+3. O `RefreshTrackedBuffer` roda **duas vezes** no ramo lento quando o cache acertou os campos mas o buffer estava sujo (uma na condição, outra dentro do `PlanBuffer`), e a busca em `tracked_` é repetida depois do `PlanBuffer` (`tracked_.find(sp.buffer.key)`; a chave já vem no plano).
+
+Os dados também não dizem: quantos streams por draw passam pelo ramo lento, qual dos motivos acima é o dominante, nem quanto de `fs_plan` é `Resolve` e quanto é `PlanBuffer`. **O contador por motivo é a próxima medição** (ver candidato 1 abaixo): contar por quadro os streams que entram no ramo lento por motivo (`tracked` nulo, endereço/tamanho/declaração/stride/fase diferentes, `RefreshTrackedBuffer` verdadeiro) e, para o último, o resultado do `PlanBuffer` (`action` 0, 1 ou 2).
+
+### Draws por quadro e µs por draw
+
+Os draws por quadro vêm do campo `draws=` das linhas `Vulkan profile (ms/frame over 120)` de `logs/bench_tl_fd3_vulkan.log` e `logs/bench_tl_fd4_vulkan.log` (cópias do `game.log` feitas com `-Profile`). Cada janela é a média de 120 quadros. Valores por janela:
+
+- `tl_fd3`: 1356, 1628, 1787, 1199, 68, 65, 65, 65, 65, 65 (menus e carregamento), depois **2218, 2903, 2979, 2780, 2898, 2914, 2593, 2534, 2547**.
+- `tl_fd4`: 1186, 1569, 2072, 1002, 66, 65, 65, 65, 65, 65, depois **2378** (fora da conta), **2857, 3034, 2761, 2028, 1915, 2611, 2598, 2530, 2639**.
+
+Usei as últimas 9 janelas de cada execução (1080 quadros, quase a janela de 1100 quadros do relatório): média de 2707 draws por quadro em `tl_fd3` e 2553 em `tl_fd4`, média das duas 2630. (Com só as últimas 3 janelas: 2558 e 2589.) As janelas individuais variam de 1915 a 3034 dentro dessa faixa, então a cena muda bastante; um µs por draw tirado de uma janela só poderia mudar em dezenas de por cento.
+
+**Como ler a tabela.** O µs por draw é a média do estágio (ms) × 1000 ÷ os draws por quadro das janelas do `-Profile` correspondentes. Os draws vêm de execuções **diferentes** das de `tl_fd1`/`tl_fd2` (que não têm a linha `Vulkan profile`), então a coluna "fd1/fd2" divide a média dessas duas execuções pela média dos draws de fd3 e fd4 (2630), e as colunas fd3 e fd4 dividem a média de cada execução pelos próprios draws. Os estágios por comando (`fe_end`, `fe_begin`, etc.) contam também os comandos que não são draws (resolves, clears, o swap; o campo `packets=` do perfil é 73 a 76 maior que o `draws=`), e `fe_index` só roda nos draws indexados: o divisor é sempre o `draws=`, então os µs por draw dos estágios por comando são ligeiramente superestimados e o de `fe_index` é por draw de qualquer tipo, não por draw indexado.
+
+| Estágio | fd1/fd2: média (ms) | µs/draw (÷2630) | fd3: ms | µs/draw (÷2707) | fd4: ms | µs/draw (÷2553) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `fe_device` | 1,60 | 0,61 | 1,81 | 0,67 | 1,64 | 0,64 |
+| `fd_shaders` | 0,46 | 0,17 | 0,53 | 0,20 | 0,48 | 0,19 |
+| `fd_other` (`fe_device` − `fd_shaders`) | 1,14 | 0,43 | 1,28 | 0,47 | 1,16 | 0,45 |
+| `fe_streams` | 3,79 | 1,44 | 4,03 | 1,49 | 3,82 | 1,50 |
+| `fs_prep` | 0,38 | 0,14 | 0,42 | 0,16 | 0,40 | 0,16 |
+| `fs_plan` | 3,08 | 1,17 | 3,23 | 1,19 | 3,07 | 1,20 |
+| `fs_other` (`fe_streams` − `fs_prep` − `fs_plan`) | 0,34 | 0,13 | 0,38 | 0,14 | 0,35 | 0,14 |
+| `fe_index` | 1,28 | 0,48 | 1,61 | 0,59 | 1,42 | 0,56 |
+| `fe_push` | 0,28 | 0,10 | 0,31 | 0,11 | 0,29 | 0,11 |
+| `fe_end` − `capture` | 3,07 | 1,17 | 3,33 | 1,23 | 3,10 | 1,21 |
+| `fe_end` − `capture` − `fe_push` | 2,79 | 1,06 | 3,02 | 1,12 | 2,81 | 1,10 |
+| `capture` (referência) | 6,64 | 2,52 | 7,98 | 2,95 | 7,41 | 2,90 |
+| `frontend` (referência) | 17,69 | 6,73 | 20,37 | 7,52 | 18,88 | 7,40 |
+
+(As médias de fd1/fd2 são as das duas tabelas, com os arredondamentos das tabelas: por exemplo `fs_prep` 0,37 e 0,38 → 0,375, mostrado como 0,38, e `fe_end` − `capture` 3,09 e 3,04 → 3,07 depois dos arredondamentos.)
+
+Duas leituras com cuidado: (1) em `fs_prep` (0,14 a 0,16 µs por draw) e `fe_push` (0,10 a 0,11 µs por draw) as duas leituras de relógio do próprio escopo podem ser uma fração visível do valor; o custo de uma leitura de relógio não foi medido aqui, então esses dois são limites superiores do trabalho que eles cobrem. (2) As colunas fd3 e fd4 saem de execuções com `-Profile` ligado, cujo `game` é maior (ver abaixo); por isso elas dão µs por draw entre ≈2% e ≈23% acima da coluna fd1/fd2, conforme o estágio (`frontend`: 6,73, 7,52 e 7,40), diferença que não separa o custo do perfil da variação de cena.
+
+### Custo do modo detalhado desta fase
+
+Comparação do `game` médio de `tl_fd1/2` com o de `tl_fe1/2` (Fase 0.5: mesmo modo detalhado, mas **sem** os quatro escopos novos, dos quais três ficam dentro de `fe_streams`, `fe_device` e `fe_end`):
+
+| Execução | `game` | `frontend` | Intervalo médio | FPS do bench (parado / andando) |
+| --- | ---: | ---: | ---: | --- |
+| `tl_fe1_vulkan` | 36,97 | 18,16 | 37,5 ms | 25,5 / 28,1 |
+| `tl_fe2_vulkan` | 36,19 | 17,05 | 36,9 ms | 26,0 / 27,9 |
+| média fe1/fe2 | 36,58 | 17,61 | 37,2 ms | 25,75 / 28,0 |
+| `tl_fd1_vulkan` | 36,92 | 17,58 | 37,5 ms | 26,7 / 26,6 |
+| `tl_fd2_vulkan` | 37,10 | 17,80 | 37,6 ms | 27,1 / 25,6 |
+| média fd1/fd2 | 37,01 | 17,69 | 37,55 ms | 26,9 / 26,1 |
+
+A diferença do `game` médio é +0,43 ms (fd contra fe) e a do `frontend` é +0,09 ms, abaixo do limite de ~1,5 ms por quadro que o plano usa como ressalva forte, mas abaixo também da variação entre as duas execuções de um mesmo conjunto (0,78 ms entre fe1 e fe2 no `game`; 0,18 ms entre fd1 e fd2). O intervalo médio subiu 0,35 ms. O FPS do bench não aponta uma direção: o "parado" subiu 1,15 FPS e o "andando" caiu 1,9 FPS. Por estágio, os que ganharam escopo subiram `fe_streams` +0,22 ms (3,57 → 3,79) e `fe_device` +0,17 ms (1,43 → 1,60), mas o `fe_index`, que não ganhou escopo, caiu 0,12 ms (1,39 → 1,28) e o `fe_end`, que ganhou o `fe_push`, caiu 0,18 ms (9,88 → 9,71): variações do mesmo tamanho nos dois sentidos, então o custo dos escopos novos não se separa da variação de cena nestes dados. A mudança de build entre `tl_fe` e `tl_fd` também está embutida na diferença (o custo da sonda não foi medido diretamente; ver o fim desta seção).
+
+As execuções com `-Profile` pesam mais: `game` médio de 40,89 e 38,67 ms (média 39,78) contra 37,01 ms em `tl_fd1/2`, +2,77 ms, e `frontend` de 20,37 e 18,88 ms contra 17,69, +1,94 ms. Isso é o custo do perfil mais a variação de cena e não foi separado (a faixa de draws por janela mostra que a cena variou). Por isso os µs por draw das colunas fd3/fd4 são um pouco maiores que os de fd1/fd2, e a coluna fd1/fd2 (sem perfil) é a que vale para ordenar candidatos.
+
+### Resumo e ressalvas desta fase
+
+- **`fe_streams`** (3,79 ms, 1,44 µs/draw): `fs_plan` 3,08 ms (81%), `fs_prep` 0,38 ms (10%), `fs_other` 0,34 ms (9%).
+- **`fe_device`** (1,60 ms, 0,61 µs/draw): `fd_shaders` 0,46 ms (28% a 29%), `fd_other` 1,14 ms (71%).
+- **`fe_end` fora da captura** (3,07 ms, 1,17 µs/draw): `fe_push` 0,28 ms (9%); o resto, 2,79 ms (1,06 µs/draw), sem atribuição; a truncação do `capture` é um candidato por aritmética (acima), não uma medida.
+- **`fe_index`** (1,28 ms, 0,48 µs/draw): não decomposto.
+- Soma dos quatro blocos de captura de estado (`fe_device` + `fe_streams` + `fe_index` + `fe_end` − `capture`): 9,7 ms na média de fd1/fd2, contra 17,69 ms de `frontend`. `fs_plan` (3,08 ms) e o resto de `fe_end` (3,07 ms) são os dois maiores, e só o primeiro é um estágio medido por escopo; o segundo é uma diferença de médias.
+- O front-end do Vulkan continua sendo cerca de metade do `game` (48% a 50% nas quatro execuções desta fase); o `game_guest` (19,3 a 19,4 ms em fd1/fd2) permanece sem decomposição, como na Fase 0.5. Nada aqui muda a conclusão da Fase 0.5 sobre ele.
+- Os valores absolutos valem para esta máquina e para duas execuções por modo; a cena varia entre execuções. Comparar razões e frações é mais seguro que comparar valores absolutos.
+- O custo da sonda não foi medido diretamente: cada escopo lê o relógio duas vezes (início e fim), e o número de escopos por draw não foi contado. Os estágios menores (`fs_prep`, `fe_push`) são os mais afetados.
+- A ressalva 3 da Fase 0.5 (partes aninhadas não se somam; `fe_begin`, `fe_ring` e `fe_end` incluem o comando de swap e o `SyncRing`) continua valendo. Os novos estágios aninham assim: `fd_shaders` dentro de `fe_device`; `fs_prep` e `fs_plan` dentro de `fe_streams`; `fe_push` dentro de `fe_end`.
+
+### Candidatos da Fase 1.1b (ordem proposta)
+
+O teto de cada item é a média do próprio estágio em fd1/fd2 (ms por quadro e µs por draw, tabela acima), que só seria alcançado se o estágio inteiro sumisse; nenhum ganho desse tamanho é esperado, e quanto vira FPS depende de `worker` e `gpu`, que estão perto do orçamento (30,9 a 31,0 ms e 31,1 a 31,8 ms nas execuções fd1/fd2). Todo item que muda comportamento (não os de medição) tem de preservar a **imagem bit a bit**, a **semântica do rastreamento de buffer sujo** (`dirty`/`clean`, write-watch, `InvalidateGuestRange`) e a **precedência de leitura dos bytes capturados** (a sobreposição de faixas que `FindUnambiguousCapture` e o shim de captura aplicam). Verificação comum: o custo do estágio por draw cai (mesmos 4 benches, mesma tabela de µs por draw); a suíte `tests/native` e `python -m pytest tests/tools -q` continuam passando; e o gate de imagem do bench (`-Gate record` na build antiga, `-Gate check` na nova).
+
+1. **Medir: contador por motivo do ramo lento do `PlanStreams` e sub-tempo do `fs_plan`** (estágio: `fs_plan`, teto 3,08 ms, 1,17 µs/draw). Contar, por quadro, os streams que entram no ramo lento por motivo (`sc.tracked` nulo; endereço, tamanho, declaração, stride ou fase diferentes; `RefreshTrackedBuffer` verdadeiro), o resultado do `PlanBuffer` (`action` 0, 1 ou 2) e subdividir o tempo em `Resolve` contra `PlanBuffer` contra o resto. Risco: nenhum no comportamento (só contadores e escopos no modo detalhado). Verificação: os contadores batem com os `draws=` do perfil; o `fs_plan` total não muda além da variação. Decide o tamanho real dos itens 3 e 4. (Medir também onde cai o hash de conteúdo de buffers de até 32 KiB, que `RefreshTrackedBuffer` faz uma vez por quadro por buffer, é só medição; a política de textura decidida na seção anterior não é tocada.)
+2. **Medir: sub-tempo do resto do `EndCmd`** (estágio: `fe_end` − `capture` − `fe_push`, teto 2,79 ms, 1,06 µs/draw). Escopos em volta de `checked_guest_reads.Reset()`, do tratamento do `capture_mirror_` e do `FlushBatch`, e acumular o `capture` em nanossegundos em vez de µs inteiros por chamada, para testar a hipótese da truncação (candidato por aritmética acima). Risco: nenhum no comportamento. Verificação: `capture` + resto fecha com `fe_end`; se o `capture` subir e o resto cair do mesmo tanto, a truncação explicava o resíduo.
+3. **Tirar trabalho repetido do ramo lento sem mudar o resultado** (estágio: `fs_plan`, teto 3,08 ms, 1,17 µs/draw; o ganho real depende do item 1). Exemplos que o código sugere: reaproveitar o iterador de `tracked_` que o `PlanBuffer` já obteve em vez de repetir a busca depois dele; evitar a segunda chamada de `RefreshTrackedBuffer` no mesmo draw. Risco: baixo, desde que o `PlanBuffer` devolva exatamente o mesmo `BufferPlan` (`key`, `action`, `begin`, `end`) e os mesmos bytes capturados; o ponto de atenção é não pular a chamada que arma o write-watch (`ArmTextureWatch`). Verificação: comparar o `BufferPlan` e as faixas capturadas contra a build antiga (testes de `tests/native` e o gate de imagem), e `fs_plan` por draw menor.
+4. **Ampliar o acerto do cache de stream** (estágio: `fs_plan`, mesmo teto; só vale se o item 1 mostrar que a maioria das entradas no ramo lento é "buffer sujo mas faixa já limpa" ou troca de buffer no slot). Exemplo: um cache com mais de uma entrada por slot, ou um acerto direto quando a faixa necessária já está em `clean`. Risco: **alto** no rastreamento de sujo (a faixa necessária exige o `Resolve` dos índices; um acerto que pule a captura quando devia capturar quebra a imagem); verificação: gate de imagem, testes de dirty-tracking, e a contagem de capturas (`action` 1 e 2, bytes capturados) idêntica à da build antiga. Não propor antes do item 1.
+5. **Reduzir o trabalho de `CaptureDevice` fora dos shaders** (estágio: `fd_other`, teto 1,14 ms, 0,43 µs/draw). Por exemplo juntar `CaptureBytes` de faixas vizinhas ou pular o que não mudou desde o draw anterior. Risco: médio. O worker e a captura de PM4 leem essas faixas por endereço, e a sobreposição de faixas tem uma regra de precedência; mudar o formato das faixas muda o que é lido. Verificação: os bytes que o worker enxerga por endereço têm de ser os mesmos (teste novo comparando as leituras por faixa), gate de imagem, `fd_other` por draw menor. O ganho é limitado pelo `memcpy` inerente, e o volume de bytes por draw não foi medido; medir isso primeiro.
+6. **Buscas de shader por draw** (estágio: `fd_shaders`, teto 0,46 ms, 0,17 µs/draw; as tomadas em `fs_prep`, teto 0,38 ms, entram no mesmo trabalho). Cada draw faz três tomadas do mutex global do registro de shaders (`TryRegisterInlineShaders` e dois `CaptureGuestShader`, estes com cópia de `shared_ptr`); o `DynamicVertexFetch`, em `fs_prep`, toma o mesmo mutex mais duas vezes por draw (`LookupGuestShader`). Se outra thread usa esse mutex, a contenção não foi medida. Uma tomada só ou uma memória do último par (vs, ps) reduziria isso. Risco: médio: endereços de objeto de shader podem ser reutilizados (o `OnCreateShader` apaga associações antigas), então a memória tem de ser invalidada em criação e remoção de shader; e o `CaptureGuestShader` tem de devolver o mesmo `ShaderCapture`. Verificação: `fd_shaders` por draw menor; imagem idêntica; um teste que recria um shader no mesmo endereço e confere que a captura nova é a devolvida.
+7. **Medir: `fe_index`** (estágio: `fe_index`, teto 1,28 ms, 0,48 µs/draw por draw de qualquer tipo): separar o `PlanBuffer` do buffer de índices da normalização de `kQuadList`. Só depois decidir se o buffer de índices merece um cache como o dos streams. Risco da mudança futura: o mesmo dos itens 3 e 4.
+8. **`fs_prep`, `fe_push`, `fs_other`** (0,38, 0,28 e 0,34 ms; 0,14, 0,10 e 0,13 µs/draw): tetos pequenos, na ordem de grandeza do custo dos relógios dos próprios escopos. Não são candidatos antes dos itens acima; listados só para registrar que foram medidos.
+
+**O que os dados não decidem.** Qual motivo domina o ramo lento do `PlanStreams`; quanto do `fs_plan` é `Resolve`, `PlanBuffer` ou o segundo `find`; quanto do resto do `EndCmd` é truncação do `capture`, leituras de relógio ou outro trabalho; quanto do `fe_index` é o `PlanBuffer` de índices; quantos bytes por draw o `CaptureDevice` copia; e quanto uma redução do `frontend` vira FPS (depende de `worker` e `gpu`). Os itens 1, 2 e 7 existem para responder isso antes de mudar código. Nada aqui mexe na política de hash/texturas decidida na seção anterior.
