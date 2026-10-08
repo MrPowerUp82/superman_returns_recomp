@@ -22,6 +22,7 @@
 #include "../graphics/guest/render_packet.h"
 #include "../graphics/guest/primitive_expansion.h"
 #include "../graphics/guest/pm4_capture.h"
+#include "../graphics/frame_timeline.h"
 
 #include <dxgi1_4.h>
 
@@ -6560,6 +6561,7 @@ uint64_t ElapsedUs(std::chrono::steady_clock::time_point since) {return uint64_t
 
 void Renderer::WorkerMain() {
   compat::RegisterSampledThread(4, "sr_native_worker");
+  auto& timeline = graphics::FrameTimeline::Global();
   for (;;) {
     std::unique_ptr<WorkBatch> batch;
     {
@@ -6571,6 +6573,8 @@ void Renderer::WorkerMain() {
       batch = std::move(work_queue_.front());
       work_queue_.pop_front();
     }
+    const uint64_t timeline_begin_ns = timeline.enabled() ? graphics::FrameTimeline::NowNs() : 0;
+    graphics::TakeTimelineBlockedNs();  // drop waits recorded outside a batch
     {
       std::lock_guard<std::recursive_mutex> lock(mutex_);
       for (const WorkCmd& cmd : batch->cmds) {
@@ -6594,6 +6598,19 @@ void Renderer::WorkerMain() {
         }
       }
     }
+    if (timeline.enabled()) {
+      // OnSwap flushes the batch right after the swap command, so a swap always ends its batch.
+      const uint64_t batch_end_ns = graphics::FrameTimeline::NowNs();
+      if (!timeline_worker_begin_ns_) timeline_worker_begin_ns_ = timeline_begin_ns;
+      timeline_worker_exec_ns_ += batch_end_ns - timeline_begin_ns;
+      timeline_worker_blocked_ns_ += graphics::TakeTimelineBlockedNs();
+      if (!batch->cmds.empty() && batch->cmds.back().op == Op::kSwap) {
+        const uint64_t blocked = std::min(timeline_worker_blocked_ns_, timeline_worker_exec_ns_);
+        timeline.Record(graphics::TimelineStage::kWorker, batch->cmds.back().u64, timeline_worker_begin_ns_,
+                        batch_end_ns, timeline_worker_exec_ns_ - blocked, blocked);
+        timeline_worker_begin_ns_ = timeline_worker_exec_ns_ = timeline_worker_blocked_ns_ = 0;
+      }
+    }
     batch->Clear();
     {
       std::lock_guard<std::mutex> lock(queue_mutex_);
@@ -6612,7 +6629,11 @@ void Renderer::Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd
     bool ok=graphics::guest::ReplayCapturedRenderPacket(batch,cmd,mirror_,packet,error);
     const bool swap=std::holds_alternative<graphics::guest::SwapPacket>(packet);
     const auto replayed=profile?std::chrono::steady_clock::now():started;
-    if(ok) ok=packet_sink_(std::move(packet),error);
+    if(ok) {
+      // The swap hand-off waits for the previous frame's recording; count it as blocked, not busy.
+      if(swap) {graphics::TimelineBlockScope blocked;ok=packet_sink_(std::move(packet),error);}
+      else ok=packet_sink_(std::move(packet),error);
+    }
     if(profile) {
       auto& p=g_sink_profile;++p.packets;p.replay_us+=uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(replayed-started).count());
       (swap?p.swap_us:p.sink_us)+=ElapsedUs(replayed);
@@ -7036,6 +7057,8 @@ void Renderer::ResyncRing(uint8_t* base, uint32_t dev) {
 
 void Renderer::OnSwap(uint8_t* base, uint32_t front_buffer_texture, uint64_t swap_number) {
   ++front_frame_;
+  auto& timeline = graphics::FrameTimeline::Global();
+  const uint64_t swap_entry_ns = timeline.enabled() ? graphics::FrameTimeline::NowNs() : 0;
   std::lock_guard<std::mutex> lock(front_mutex_);
   guest_base_ = base;
   BeginCmd(Op::kSwap);
@@ -7052,6 +7075,12 @@ void Renderer::OnSwap(uint8_t* base, uint32_t front_buffer_texture, uint64_t swa
   EndCmd(base);
   if(packet_sink_ && (capture_timings.pm4_us+capture_timings.textures_us>100000 || front_frame_%120==0))
     REXLOG_INFO("native Vulkan capture frame={} pm4_ms={} textures_ms={} reads={} bytes={} virtual_queries={} watch_ms={} read_ms={} hash_ms={} copy_ms={} new={} watch_dirty={} revalidated={} changed={} entries={} watch_scan_hits={} watch_scan_misses={}",front_frame_,capture_timings.pm4_us/1000,capture_timings.textures_us/1000,capture_timings.reads,capture_timings.bytes,capture_timings.queries,capture_timings.watch_us/1000,capture_timings.read_us/1000,capture_timings.hash_us/1000,capture_timings.copy_us/1000,capture_timings.new_entries,capture_timings.watch_dirty,capture_timings.revalidated,capture_timings.changed,captured_textures_.size(),capture_timings.watch_scan_hits,capture_timings.watch_scan_misses);
+  if (timeline.enabled()) {
+    timeline.RecordSpan(graphics::TimelineStage::kGame, swap_number,
+                        timeline_game_exit_ns_ ? timeline_game_exit_ns_ : swap_entry_ns, swap_entry_ns, 0);
+    timeline.RecordBusy(graphics::TimelineStage::kCapture, swap_number,
+                        (capture_timings.pm4_us + capture_timings.textures_us) * 1000);
+  }
   capture_timings={};
   if(front_frame_%120==0) {
     FlushTextureAudit(packet_sink_?"vulkan":"d3d12_capture",front_frame_);
@@ -7068,15 +7097,24 @@ void Renderer::OnSwap(uint8_t* base, uint32_t front_buffer_texture, uint64_t swa
       std::lock_guard<std::mutex> qlock(queue_mutex_);
       submitted = batches_submitted_;
     }
+    const uint64_t wait_begin_ns = timeline.enabled() ? graphics::FrameTimeline::NowNs() : 0;
     {
       CpuTimer cpu_timer(front_cpu_timings.wait_ns);
       WaitWorkerIdle(REXCVAR_GET(sr_native_worker_lag) ? prev_swap_batches_ : submitted);
     }
+    if (timeline.enabled())
+      timeline.RecordSpan(graphics::TimelineStage::kFrontWait, swap_number, wait_begin_ns,
+                          graphics::FrameTimeline::NowNs(), 0);
     prev_swap_batches_ = submitted;
   }
   if(CpuProfiling() && front_frame_%120==0) {
     REXLOG_INFO("native CPU frontend (ms/frame over 120): api={} capture={:.2f} worker_wait={:.2f}",packet_sink_?"vulkan":"d3d12",front_cpu_timings.capture_ns/120000000.0,front_cpu_timings.wait_ns/120000000.0);
     front_cpu_timings.capture_ns=front_cpu_timings.wait_ns=0;
+  }
+  if (timeline.enabled()) {
+    // The write happens before the exit stamp, so it is not charged to the next frame's game time.
+    if (swap_number % 60 == 0) timeline.Flush(swap_number);
+    timeline_game_exit_ns_ = graphics::FrameTimeline::NowNs();
   }
 }
 

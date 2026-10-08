@@ -218,6 +218,10 @@ class Renderer : public NativeFrontend {
   bool packet_sink_failed_=false;
   std::atomic<bool> worker_stop_{false};
   std::mutex front_mutex_;
+  // SR_FRAME_TIMELINE (graphics/frame_timeline.h). Game thread: timeline_game_exit_ns_
+  // (under front_mutex_). Worker thread: the three worker fields.
+  uint64_t timeline_game_exit_ns_ = 0;
+  uint64_t timeline_worker_begin_ns_ = 0, timeline_worker_exec_ns_ = 0, timeline_worker_blocked_ns_ = 0;
   std::unique_ptr<WorkBatch> batch_;
   WorkCmd cur_;
   uint8_t* guest_base_ = nullptr;
