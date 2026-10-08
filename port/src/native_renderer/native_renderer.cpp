@@ -373,8 +373,23 @@ struct CaptureTimings {
   uint64_t watch_us=0,read_us=0,hash_us=0,copy_us=0;
   uint64_t new_entries=0,watch_dirty=0,revalidated=0,changed=0;
   uint64_t watch_scan_hits=0,watch_scan_misses=0;
+  uint64_t fe_hook_ns=0,fe_begin_ns=0,fe_ring_ns=0,fe_device_ns=0,fe_index_ns=0,fe_streams_ns=0,fe_end_ns=0,fe_flush_ns=0;
 };
 thread_local CaptureTimings capture_timings;
+// SR_FRAME_TIMELINE_DETAIL=1: nanosecond accumulator for one front-end region of the game thread.
+// Reads no clock unless the detail mode is on.
+struct DetailScope {
+  uint64_t& total;
+  bool active = graphics::FrameTimeline::Detail();
+  uint64_t start = active ? graphics::FrameTimeline::NowNs() : 0;
+  explicit DetailScope(uint64_t& value) : total(value) {}
+  void Stop() {
+    if (active) {total += graphics::FrameTimeline::NowNs() - start;active = false;}
+  }
+  ~DetailScope() {Stop();}
+  DetailScope(const DetailScope&) = delete;
+  DetailScope& operator=(const DetailScope&) = delete;
+};
 thread_local CheckedGuestReads checked_guest_reads;
 bool TextureWatchScanCaching() {
   static const bool enabled=[] {
@@ -4877,6 +4892,7 @@ bool Renderer::DynamicVertexFetch(uint8_t* base, uint32_t dev) {
 // Guest side: the vertex streams of the current draw (guest state at draw time)
 // and their buffer plans.
 bool Renderer::PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRange* range) {
+  DetailScope scope(capture_timings.fe_streams_ns);
   if (!decl) return false;
   if (DynamicVertexFetch(base, dev)) range = nullptr;
   uint32_t streams_used = 0;
@@ -6264,6 +6280,7 @@ void Renderer::DumpFrameResources(const std::string& prefix, bool surfaces_only,
 // ---------------------------------------------------------------------------
 
 void Renderer::BeginCmd(Op op) {
+  DetailScope scope(capture_timings.fe_begin_ns);
   if(CpuProfiling()) front_cpu_timings.capture_start=std::chrono::steady_clock::now();
   if (!worker_mode_checked_ && !worker_stop_) {
     // This frontend is shared by D3D12 and the Vulkan packet sink. Initialize
@@ -6298,6 +6315,7 @@ void Renderer::BeginCmd(Op op) {
 }
 
 void Renderer::EndCmd(uint8_t* base) {
+  DetailScope scope(capture_timings.fe_end_ns);
   if(worker_stop_) return;
   checked_guest_reads.Reset();
   const auto capture_copies_before=capture_mirror_.copy_draws;
@@ -6488,6 +6506,7 @@ void Renderer::CaptureTextures(uint8_t* base) {
 // pointer, surface/shader/stream/index pointers and viewport, and the objects
 // they point to.
 void Renderer::CaptureDevice(uint8_t* base, uint32_t dev) {
+  DetailScope scope(capture_timings.fe_device_ns);
   cur_.device = dev;
   if (cur_.packet_check) {
     CaptureBytes(base, dev + kDev.fetch_constants, 32 * 24);
@@ -6518,6 +6537,7 @@ void Renderer::CaptureDevice(uint8_t* base, uint32_t dev) {
 // PM4 written since the last capture, copied with the command (parsed by
 // Execute; direct mode executes the same captured commands synchronously).
 void Renderer::CaptureRing(uint8_t* base, uint32_t dev) {
+  DetailScope scope(capture_timings.fe_ring_ns);
   if (!dev) return;
   // dev+48: last dword written into the current XDK command segment.
   uint32_t current = Load32(base, dev + kDev.ring_write) + 4;
@@ -6536,6 +6556,7 @@ void Renderer::CaptureRing(uint8_t* base, uint32_t dev) {
 }
 
 void Renderer::FlushBatch() {
+  DetailScope scope(capture_timings.fe_flush_ns);
   if (!batch_ || batch_->cmds.empty()) return;
   std::unique_ptr<WorkBatch> next;
   {
@@ -6768,6 +6789,7 @@ void Renderer::Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd
 
 void Renderer::DrawVertices(uint8_t* base, uint32_t prim, uint32_t start_vertex,
                             uint32_t vertex_count) {
+  DetailScope hook_scope(capture_timings.fe_hook_ns);
   if (!REXCVAR_GET(sr_native_draws)) return;
   std::lock_guard<std::mutex> lock(front_mutex_);
   guest_base_ = base;
@@ -6807,6 +6829,7 @@ void Renderer::DrawVertices(uint8_t* base, uint32_t prim, uint32_t start_vertex,
 
 void Renderer::DrawIndexedVertices(uint8_t* base, uint32_t prim, int32_t base_vertex,
                                    uint32_t start_index, uint32_t index_count) {
+  DetailScope hook_scope(capture_timings.fe_hook_ns);
   if (int32_t spin = REXCVAR_GET(sr_native_debug_spin_us)) {
     auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(spin);
     while (std::chrono::steady_clock::now() < until) {
@@ -6827,6 +6850,7 @@ void Renderer::DrawIndexedVertices(uint8_t* base, uint32_t prim, int32_t base_ve
   cur_.u[3] = index_count;
   // Vertex range referenced by the indices, scanned only if a dynamic vertex
   // buffer of this draw is dirty.
+  DetailScope index_scope(capture_timings.fe_index_ns);
   VertexRange draw_range;
   if (uint32_t ib_object = Load32(base, dev + kDev.index_buffer)) {
     uint32_t header = Load32(base, ib_object);
@@ -6887,12 +6911,14 @@ void Renderer::DrawIndexedVertices(uint8_t* base, uint32_t prim, int32_t base_ve
                            reinterpret_cast<const uint8_t*>(tris.data()) + tris.size() * 4);
     }
   }
+  index_scope.Stop();
   cur_.streams_ok = PlanStreams(base, dev, Load32(base, dev + kDevVertexDecl), &draw_range);
   EndCmd(base);
 }
 
 void Renderer::DrawInlineVertices(uint8_t* base, uint32_t prim, uint32_t data,
                                   uint32_t vertex_count, uint32_t stride) {
+  DetailScope hook_scope(capture_timings.fe_hook_ns);
   if (!REXCVAR_GET(sr_native_draws)) return;
   std::lock_guard<std::mutex> lock(front_mutex_);
   guest_base_ = base;
@@ -6912,6 +6938,7 @@ void Renderer::DrawInlineVertices(uint8_t* base, uint32_t prim, uint32_t data,
 void Renderer::Resolve(uint8_t* base, uint32_t flags, uint32_t src_rect, uint32_t dest_texture,
                        uint32_t dest_point, uint32_t clear_color, float clear_z,
                        uint32_t clear_stencil,uint32_t level,uint32_t slice) {
+  DetailScope hook_scope(capture_timings.fe_hook_ns);
   if (!REXCVAR_GET(sr_native_resolves)) return;
   std::lock_guard<std::mutex> lock(front_mutex_);
   guest_base_ = base;
@@ -6938,6 +6965,7 @@ void Renderer::Resolve(uint8_t* base, uint32_t flags, uint32_t src_rect, uint32_
 
 void Renderer::BeginTiling(uint8_t* base, uint32_t count, uint32_t rects, uint32_t clear_color,
                            float clear_z, uint32_t clear_stencil) {
+  DetailScope hook_scope(capture_timings.fe_hook_ns);
   std::lock_guard<std::mutex> lock(front_mutex_);
   guest_base_ = base;
   uint32_t dev = GuestDevice(base);
@@ -6958,6 +6986,7 @@ void Renderer::BeginTiling(uint8_t* base, uint32_t count, uint32_t rects, uint32
 
 void Renderer::Clear(uint8_t* base, uint32_t count, uint32_t rects, uint32_t flags,
                      const float color[4], float z, uint32_t stencil) {
+  DetailScope hook_scope(capture_timings.fe_hook_ns);
   std::lock_guard<std::mutex> lock(front_mutex_);
   guest_base_ = base;
   uint32_t dev = GuestDevice(base);
@@ -7033,6 +7062,7 @@ void Renderer::ExecClear(uint8_t* base, uint32_t count, uint32_t rects, uint32_t
 }
 
 void Renderer::EndTiling() {
+  DetailScope hook_scope(capture_timings.fe_hook_ns);
   std::lock_guard<std::mutex> lock(front_mutex_);
   if (!guest_base_) return;
   BeginCmd(Op::kEndTiling);
@@ -7040,6 +7070,7 @@ void Renderer::EndTiling() {
 }
 
 void Renderer::OnPassEnd(int pass) {
+  DetailScope hook_scope(capture_timings.fe_hook_ns);
   if (REXCVAR_GET(sr_native_dump_after_pass) < 0) return;  // debug dumps only
   std::lock_guard<std::mutex> lock(front_mutex_);
   if (!guest_base_) return;
@@ -7088,6 +7119,17 @@ void Renderer::OnSwap(uint8_t* base, uint32_t front_buffer_texture, uint64_t swa
     if (packet_sink_)
       timeline.RecordBusy(graphics::TimelineStage::kCapture, swap_number,
                           (capture_timings.pm4_us + capture_timings.textures_us) * 1000);
+    if (graphics::FrameTimeline::Detail()) {
+      const auto& t = capture_timings;
+      timeline.RecordBusy(graphics::TimelineStage::kFrontend, swap_number, t.fe_hook_ns);
+      timeline.RecordBusy(graphics::TimelineStage::kFeBegin, swap_number, t.fe_begin_ns);
+      timeline.RecordBusy(graphics::TimelineStage::kFeRing, swap_number, t.fe_ring_ns);
+      timeline.RecordBusy(graphics::TimelineStage::kFeDevice, swap_number, t.fe_device_ns);
+      timeline.RecordBusy(graphics::TimelineStage::kFeIndex, swap_number, t.fe_index_ns);
+      timeline.RecordBusy(graphics::TimelineStage::kFeStreams, swap_number, t.fe_streams_ns);
+      timeline.RecordBusy(graphics::TimelineStage::kFeEnd, swap_number, t.fe_end_ns);
+      timeline.RecordBusy(graphics::TimelineStage::kFeFlush, swap_number, t.fe_flush_ns);
+    }
   }
   capture_timings={};
   if(front_frame_%120==0) {
