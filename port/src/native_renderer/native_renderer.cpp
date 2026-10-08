@@ -374,6 +374,7 @@ struct CaptureTimings {
   uint64_t new_entries=0,watch_dirty=0,revalidated=0,changed=0;
   uint64_t watch_scan_hits=0,watch_scan_misses=0;
   uint64_t fe_hook_ns=0,fe_begin_ns=0,fe_ring_ns=0,fe_device_ns=0,fe_index_ns=0,fe_streams_ns=0,fe_end_ns=0,fe_flush_ns=0;
+  uint64_t fd_shaders_ns=0,fs_prep_ns=0,fs_plan_ns=0,fe_push_ns=0;
 };
 thread_local CaptureTimings capture_timings;
 // SR_FRAME_TIMELINE_DETAIL=1: nanosecond accumulator for one front-end region of the game thread.
@@ -4894,10 +4895,12 @@ bool Renderer::DynamicVertexFetch(uint8_t* base, uint32_t dev) {
 bool Renderer::PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRange* range) {
   DetailScope scope(capture_timings.fe_streams_ns);
   if (!decl) return false;
+  DetailScope prep_scope(capture_timings.fs_prep_ns);
   if (DynamicVertexFetch(base, dev)) range = nullptr;
   uint32_t streams_used = 0;
   for (const auto& attribute : ReadVertexDeclaration(base,decl))
     if(attribute.stream<16) streams_used|=1u<<attribute.stream;
+  prep_scope.Stop();
   for (uint32_t s = 0; s < 16; ++s) {
     if (!(streams_used & (1u << s))) continue;
     // Vertex fetch constant for stream s (XDK: slot 95 - s).
@@ -4940,6 +4943,7 @@ bool Renderer::PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRan
       sp.buffer.format = s << 8;
       sp.buffer.phase = phase;
     } else {
+      DetailScope plan_scope(capture_timings.fs_plan_ns);
       uint32_t need_begin = 0, need_end = ~0u;
       if (range) {
         range->Resolve();
@@ -6352,7 +6356,10 @@ void Renderer::EndCmd(uint8_t* base) {
   if(cur_.op==Op::kEndTiling) capture_tiling_active_=false;
   // The completed command belongs to the batch. Avoid copying its texture and
   // shader references (and diagnostic strings) for every draw on both APIs.
-  batch_->cmds.push_back(std::move(cur_));
+  {
+    DetailScope push_scope(capture_timings.fe_push_ns);
+    batch_->cmds.push_back(std::move(cur_));
+  }
   if(CpuProfiling()) front_cpu_timings.capture_ns+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-front_cpu_timings.capture_start).count());
   if (!worker_mode_) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -6514,9 +6521,12 @@ void Renderer::CaptureDevice(uint8_t* base, uint32_t dev) {
     for (const auto& range : profile::kRegisterShadow)
       CaptureBytes(base, dev + range.offset, range.count * 4);
     uint32_t vs = Load32(base, dev + kDev.shader_a), ps = Load32(base, dev + kDev.shader_b);
-    TryRegisterInlineShaders(base, vs, ps);
-    cur_.vertex_shader = CaptureGuestShader(vs);
-    cur_.pixel_shader = CaptureGuestShader(ps);
+    {
+      DetailScope shader_scope(capture_timings.fd_shaders_ns);
+      TryRegisterInlineShaders(base, vs, ps);
+      cur_.vertex_shader = CaptureGuestShader(vs);
+      cur_.pixel_shader = CaptureGuestShader(ps);
+    }
   }
   if (profile::kDevicePtrAddr) CaptureBytes(base, profile::kDevicePtrAddr, 4);
   CaptureBytes(base, dev, 8);
@@ -7129,6 +7139,10 @@ void Renderer::OnSwap(uint8_t* base, uint32_t front_buffer_texture, uint64_t swa
       timeline.RecordBusy(graphics::TimelineStage::kFeStreams, swap_number, t.fe_streams_ns);
       timeline.RecordBusy(graphics::TimelineStage::kFeEnd, swap_number, t.fe_end_ns);
       timeline.RecordBusy(graphics::TimelineStage::kFeFlush, swap_number, t.fe_flush_ns);
+      timeline.RecordBusy(graphics::TimelineStage::kFdShaders, swap_number, t.fd_shaders_ns);
+      timeline.RecordBusy(graphics::TimelineStage::kFsPrep, swap_number, t.fs_prep_ns);
+      timeline.RecordBusy(graphics::TimelineStage::kFsPlan, swap_number, t.fs_plan_ns);
+      timeline.RecordBusy(graphics::TimelineStage::kFePush, swap_number, t.fe_push_ns);
     }
   }
   capture_timings={};
