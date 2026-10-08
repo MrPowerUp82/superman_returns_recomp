@@ -12,6 +12,7 @@ import math
 import sys
 from collections import defaultdict
 
+# capture and fe_flush nest inside fe_end, so fe_flush is not a FRONT_END_PARTS member (summing it would double count).
 FRONT_END_PARTS = ("fe_begin", "fe_ring", "fe_device", "fe_index", "fe_streams", "fe_end")
 STAGES = ("game", "game_guest", "game_other", "capture", "frontend", *FRONT_END_PARTS, "fe_flush",
           "frontend_other", "front_wait", "worker", "record", "gpu")
@@ -115,7 +116,7 @@ def render(result):
                      f" | 1% low {interval['low1_fps']:.1f} FPS | mínimo {interval['min_fps']:.1f} FPS")
     lines.append(f"Orçamento por quadro: {result['budget_ms']:.1f} ms (tempos em ms)")
     lines.append("")
-    lines.append(f"{'estágio':<12}{'média':>8}{'p50':>8}{'p99':>8}{'bloq.':>8}{'util.':>8}{'folga p99':>11}{'limitante':>11}")
+    lines.append(f"{'estágio':<15}{'média':>8}{'p50':>8}{'p99':>8}{'bloq.':>8}{'util.':>8}{'folga p99':>11}{'limitante':>11}")
     share = result["limiting_share"]
     for name in STAGES:
         stage = result["stages"].get(name)
@@ -123,7 +124,7 @@ def render(result):
             continue
         util = f"{stage['util'] * 100:.0f}%" if stage["util"] is not None else "-"
         limiting = f"{share[name] * 100:.0f}%" if name in share else "-"
-        lines.append(f"{name:<12}{stage['mean']:>8.2f}{stage['p50']:>8.2f}{stage['p99']:>8.2f}"
+        lines.append(f"{name:<15}{stage['mean']:>8.2f}{stage['p50']:>8.2f}{stage['p99']:>8.2f}"
                      f"{stage['blocked_mean']:>8.2f}{util:>8}{stage['headroom_p99_ms']:>11.2f}{limiting:>11}")
     return "\n".join(lines)
 

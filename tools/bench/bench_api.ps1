@@ -7,8 +7,8 @@ Uso: tools\bench\bench_api.ps1 -Api vulkan|d3d12 -Name <rótulo> [-Profile] [-Ti
   -Timeline liga SR_FRAME_TIMELINE, grava logs\timeline_<Name>.csv e imprime a tabela do estágio limitante
             (tools\analysis\frame_timeline_report.py), também salva em logs\timeline_<Name>.txt.
   -TimelineDetail so tem efeito junto de -Timeline: liga SR_FRAME_TIMELINE_DETAIL=1, que acrescenta os contadores
-            finos do front-end da thread do jogo (frontend, fe_*, game_guest, frontend_other). Custa cerca de uma
-            leitura de relogio por hook/passo cronometrado (ver docs\native-renderer-timeline.md).
+            finos do front-end da thread do jogo (frontend, fe_*, game_guest, frontend_other). Custa duas
+            leituras de relogio (inicio e fim) por regiao cronometrada (ver docs\native-renderer-timeline.md).
   -Gate    record grava a referência de imagem (build boa); check compara e falha se a imagem divergir (tools\bench\image_gate.ps1).
   -Exe     padrão: port\out\build\win-amd64-dist\superman_returns.exe
 #>

@@ -149,6 +149,24 @@ def test_front_end_derivations_are_clamped_at_zero(tmp_path):
     assert stages["frontend_other"]["mean"] == 0.0   # frontend 25 < parts 30
 
 
+def test_render_with_detail_keeps_stage_order_and_columns_aligned(tmp_path):
+    rows = []
+    for frame in range(1, 6):
+        rows += detail_rows(frame)
+    path = tmp_path / "detail.csv"
+    write_csv(path, rows)
+    text = ftr.render(ftr.analyze(ftr.load(path)))
+    lines = text.splitlines()
+    for name in ("game_guest", "frontend", "frontend_other", "fe_flush"):
+        assert any(line.split()[0] == name for line in lines if line.strip())
+    stage_lines = [line for line in lines if line.split() and line.split()[0] in ftr.STAGES]
+    names = [line.split()[0] for line in stage_lines]
+    assert names == [name for name in ftr.STAGES if name in names]
+    assert "frontend_other" in names
+    for line in stage_lines:
+        assert len(line[15:].split()) == 7, line  # media, p50, p99, bloq., util., folga p99, limitante
+
+
 def test_report_without_detail_has_no_front_end_rows(tmp_path):
     result = ftr.analyze(ftr.load(make(tmp_path)))
     for name in ("frontend", "game_guest", "frontend_other", "fe_device"):
