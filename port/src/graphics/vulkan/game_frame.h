@@ -30,6 +30,7 @@ private:
   bool RecordFrame(std::vector<guest::RenderPacket>&,const guest::SwapPacket&,std::shared_ptr<TextureResource>&,Error&);
   void RecorderMain();
   bool WaitSlot(size_t slot,Error&);
+  void HarvestTimestamps(size_t slot);
   Context& c_;std::mutex& queue_mutex_;ShaderLookup shaders_;GameRenderer renderer_;
   std::vector<guest::RenderPacket> packets_;
   // Two frames in flight: frame N records while the GPU still runs frame N-1.
@@ -38,6 +39,8 @@ private:
   static constexpr size_t kSlots=2;
   std::array<VkCommandPool,kSlots> pools_{};std::array<VkCommandBuffer,kSlots> commands_{},uploads_{};std::array<VkFence,kSlots> fences_{};
   std::array<uint64_t,kSlots> slot_serial_{};std::array<bool,kSlots> slot_submitted_{};
+  // SR_FRAME_TIMELINE: two timestamps per slot bracket the frame's GPU work.
+  VkQueryPool timestamps_=VK_NULL_HANDLE;std::array<uint64_t,kSlots> slot_swap_{};uint64_t timestamp_mask_=0;double timestamp_period_ns_=0;
   VkCommandPool pool_=VK_NULL_HANDLE;VkCommandBuffer command_=VK_NULL_HANDLE,upload_=VK_NULL_HANDLE;
   // Presentation snapshots, reused once neither a mailbox nor a submission holds them.
   std::vector<std::shared_ptr<TextureResource>> snapshots_;

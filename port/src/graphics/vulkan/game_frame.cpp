@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <thread>
 #include <unordered_map>
+#include "../frame_timeline.h"
 namespace superman_returns::graphics::vulkan {
 namespace {
 // The service hashes and compares the whole container under a mutex on every
@@ -26,6 +27,8 @@ GameFrame::~GameFrame() {
   StopAsync();
   std::lock_guard lock(queue_mutex_);snapshots_.clear();
   if(slot_submitted_[0] || slot_submitted_[1]) {c_.f.vkDeviceWaitIdle(c_.device);renderer_.Retire(serial_);}
+  if(timestamps_) {for(size_t slot=0;slot<kSlots;++slot) HarvestTimestamps(slot);c_.f.vkDestroyQueryPool(c_.device,timestamps_,nullptr);}
+  FrameTimeline::Global().FlushAll();
   for(auto fence:fences_) if(fence) c_.f.vkDestroyFence(c_.device,fence,nullptr);
   for(auto pool:pools_) if(pool) c_.f.vkDestroyCommandPool(c_.device,pool,nullptr);
 }
@@ -41,6 +44,16 @@ bool GameFrame::Initialize(const std::filesystem::path& cache,Error& e) {
     uploads_[slot]=commands[0];commands_[slot]=commands[1];
     if(!Check(c_.f.vkCreateFence(c_.device,&fence,nullptr,&fences_[slot]),"Game fence",e)) return false;
   }
+  if(FrameTimeline::Global().enabled()) {
+    uint32_t count=0;c_.f.vkGetPhysicalDeviceQueueFamilyProperties(c_.physical,&count,nullptr);
+    std::vector<VkQueueFamilyProperties> families(count);c_.f.vkGetPhysicalDeviceQueueFamilyProperties(c_.physical,&count,families.data());
+    const uint32_t bits=c_.graphics_family<count?families[c_.graphics_family].timestampValidBits:0;
+    if(bits) {
+      VkQueryPoolCreateInfo info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};info.queryType=VK_QUERY_TYPE_TIMESTAMP;info.queryCount=uint32_t(kSlots*2);
+      if(!Check(c_.f.vkCreateQueryPool(c_.device,&info,nullptr,&timestamps_),"Game timestamp pool",e)) return false;
+      timestamp_mask_=bits>=64?~0ull:(1ull<<bits)-1;timestamp_period_ns_=c_.properties.limits.timestampPeriod;
+    }
+  }
   return true;
 }
 bool GameFrame::WaitSlot(size_t slot,Error& e) {
@@ -53,6 +66,14 @@ bool GameFrame::WaitSlot(size_t slot,Error& e) {
     if(result!=VK_TIMEOUT) return Check(result,"Game frame completion",e);
     if(cancelled_) {e={"Game frame",VK_ERROR_INITIALIZATION_FAILED,"Rendering cancelled"};return false;}
   }
+}
+// The slot's frame has completed (fence waited or device idle): convert its two timestamps to GPU time.
+void GameFrame::HarvestTimestamps(size_t slot) {
+  if(!timestamps_ || !slot_swap_[slot]) return;
+  uint64_t ticks[2]{};
+  if(c_.f.vkGetQueryPoolResults(c_.device,timestamps_,uint32_t(slot*2),2,sizeof(ticks),ticks,sizeof(uint64_t),VK_QUERY_RESULT_64_BIT)==VK_SUCCESS)
+    FrameTimeline::Global().RecordBusy(TimelineStage::kGpu,slot_swap_[slot],uint64_t(double((ticks[1]-ticks[0])&timestamp_mask_)*timestamp_period_ns_));
+  slot_swap_[slot]=0;
 }
 void GameFrame::Cancel() {
   cancelled_.store(true);{std::lock_guard lock(job_mutex_);}job_cv_.notify_all();
@@ -120,6 +141,7 @@ bool GameFrame::RecordFrame(std::vector<guest::RenderPacket>& packets_,const gue
   // Wait only for the frame that last used this slot (N-2).
   const size_t slot=(serial_+1)%kSlots;
   if(!WaitSlot(slot,e)) {failed_=true;return false;}
+  HarvestTimestamps(slot);
   pool_=pools_[slot];command_=commands_[slot];upload_=uploads_[slot];fence_=fences_[slot];
   const auto fence_ready=std::chrono::steady_clock::now();
   // This worker owns its command pool, descriptors, pipelines and mutable game
@@ -132,6 +154,7 @@ bool GameFrame::RecordFrame(std::vector<guest::RenderPacket>& packets_,const gue
   VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
   // Uploads record into upload_, submitted ahead of command_ in one batch.
   if(!Check(c_.f.vkBeginCommandBuffer(upload_,&begin),"Begin game uploads",e) || !Check(c_.f.vkBeginCommandBuffer(command_,&begin),"Begin game frame",e) || !renderer_.BeginSubmission(command_,++serial_,e,upload_)) return fail();
+  if(timestamps_) {c_.f.vkCmdResetQueryPool(upload_,timestamps_,uint32_t(slot*2),2);c_.f.vkCmdWriteTimestamp(upload_,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,timestamps_,uint32_t(slot*2));}
   // Diagnostics: SR_VULKAN_DUMP_FRAME=N [SR_VULKAN_DUMP_DIR=dir] dumps frame N.
   static const uint64_t dump_frame=[] {const char* v=std::getenv("SR_VULKAN_DUMP_FRAME");return v?std::strtoull(v,nullptr,10):0ull;}();
   static const char* dump_trigger=std::getenv("SR_VULKAN_DUMP_TRIGGER");
@@ -160,6 +183,7 @@ bool GameFrame::RecordFrame(std::vector<guest::RenderPacket>& packets_,const gue
   VkImageCopy copy{};copy.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.dstSubresource=copy.srcSubresource;copy.extent=source->extent;
   c_.f.vkCmdCopyImage(command_,source->handle,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,output->handle,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&copy);
   if(!renderer_.Images().Transition(command_,source->handle,range,ImageUsage::Sampled(),e) || !renderer_.Images().Transition(command_,output->handle,range,ImageUsage::Sampled(),e)) return fail();
+  if(timestamps_) {c_.f.vkCmdWriteTimestamp(command_,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,timestamps_,uint32_t(slot*2+1));slot_swap_[slot]=swap.guest_swap;}
   if(!Check(c_.f.vkEndCommandBuffer(upload_),"End game uploads",e) || !Check(c_.f.vkEndCommandBuffer(command_),"End game frame",e) || !Check(c_.f.vkResetFences(c_.device,1,&fence_),"Reset game fence",e)) return fail();
   const std::array<VkCommandBuffer,2> commands{upload_,command_};
   VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};submit.commandBufferCount=2;submit.pCommandBuffers=commands.data();
@@ -185,6 +209,11 @@ bool GameFrame::RecordFrame(std::vector<guest::RenderPacket>& packets_,const gue
     cache_checkpoint_=std::chrono::steady_clock::now();
   }
   const auto finished=std::chrono::steady_clock::now();
+  if(auto& timeline=FrameTimeline::Global();timeline.enabled()) {
+    // Waiting for shaders, the slot's fence and the queue lock is time spent on someone else.
+    const uint64_t blocked=FrameTimeline::ToNs(fence_ready)-FrameTimeline::ToNs(started)+FrameTimeline::ToNs(queue_ready)-FrameTimeline::ToNs(submit_started);
+    timeline.RecordSpan(TimelineStage::kRecord,swap.guest_swap,FrameTimeline::ToNs(started),FrameTimeline::ToNs(finished),blocked);
+  }
   auto ms=[](auto a,auto b) {return std::chrono::duration_cast<std::chrono::milliseconds>(b-a).count();};
   if(profiling_) {
     auto us=[](auto a,auto b) {return uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(b-a).count());};
