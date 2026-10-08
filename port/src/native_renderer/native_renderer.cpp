@@ -14,6 +14,7 @@
 #endif
 #endif
 #include "texture_write_audit.h"
+#include "texture_content.h"
 #include "../graphics/guest/render_state.h"
 #include "../graphics/guest/edram_alias.h"
 #include "../graphics/guest/render_packet.h"
@@ -368,9 +369,17 @@ struct CaptureTimings {
   uint64_t reads=0,bytes=0,queries=0,pm4_us=0,textures_us=0;
   uint64_t watch_us=0,read_us=0,hash_us=0,copy_us=0;
   uint64_t new_entries=0,watch_dirty=0,revalidated=0,changed=0;
+  uint64_t watch_scan_hits=0,watch_scan_misses=0;
 };
 thread_local CaptureTimings capture_timings;
 thread_local CheckedGuestReads checked_guest_reads;
+bool TextureWatchScanCaching() {
+  static const bool enabled=[] {
+    const char* value=std::getenv("SR_NATIVE_TEXTURE_WATCH_SCAN_CACHE");
+    return !value || !*value || *value!='0';
+  }();
+  return enabled;
+}
 // Ponteiro do host para uma faixa do jogo, ou nullptr se ela cai fora do espaço de endereços.
 const uint8_t* GuestSource(uint8_t* base, uint32_t address, uint32_t length) {
   if(uint64_t(address)+length>(uint64_t{1}<<32)) return nullptr;
@@ -765,7 +774,7 @@ bool Enabled() { return RendererActive(); }
 // command processor in sr_native_ab_mode (the kit read it through a
 // fork-only IGraphicsSystem::GetGammaRamp256).
 bool GuestGammaRamp256(uint32_t* out) {
-  if (NativeGraphicsSystem* system = ActiveNativeGraphicsSystem()) {
+  if (INativeGraphicsSystem* system = ActiveNativeGraphicsSystem()) {
     return system->GetGammaRamp256(out);
   }
   return GetSrXenosGammaRamp256(out);
@@ -3048,6 +3057,7 @@ std::pair<uint32_t, uint32_t> Renderer::OnPhysicalWrite(void* context, uint32_t 
   for (uint32_t p = first; p <= last; ++p) {
     self->page_write_seq_[p].store(seq, std::memory_order_release);
   }
+  self->completed_texture_writes_.fetch_add(1,std::memory_order_release);
   // Only the written pages are unwatched (and marked above).
   return {start, length};
 }
@@ -6126,8 +6136,21 @@ void Renderer::CaptureTextures(uint8_t* base) {
     bool notified=false;
     if(dirty) ++capture_timings.new_entries;
     if(entry.snapshot) {
-      for(const auto& range:entry.snapshot->ranges)
-        if(texture_watch_ && TextureWrittenSince(range.address,range.length,entry.watch_seq)) dirty=notified=true;
+      if(texture_watch_) {
+        const auto scan=[&] {
+          return TextureContentWritten(entry.snapshot->ranges,entry.watch_seq,
+              [this](uint32_t address,uint32_t size,uint32_t seq) {
+                return TextureWrittenSince(address,size,seq);
+              });
+        };
+        bool reused=false;
+        const bool written=TextureWatchScanCaching()
+            ? entry.watch_scan.Written(front_frame_,completed_texture_writes_.load(std::memory_order_acquire),
+                                       entry.watch_seq,scan,reused)
+            : scan();
+        if(reused) ++capture_timings.watch_scan_hits; else ++capture_timings.watch_scan_misses;
+        if(written) dirty=notified=true;
+      }
       if(dirty) ++capture_timings.watch_dirty;
       if(entry.checked_frame!=front_frame_) {
         uint64_t total=0;
@@ -6786,7 +6809,7 @@ void Renderer::OnSwap(uint8_t* base, uint32_t front_buffer_texture, uint64_t swa
   }
   EndCmd(base);
   if(packet_sink_ && (capture_timings.pm4_us+capture_timings.textures_us>100000 || front_frame_%120==0))
-    REXLOG_INFO("native Vulkan capture frame={} pm4_ms={} textures_ms={} reads={} bytes={} virtual_queries={} watch_ms={} read_ms={} hash_ms={} copy_ms={} new={} watch_dirty={} revalidated={} changed={} entries={}",front_frame_,capture_timings.pm4_us/1000,capture_timings.textures_us/1000,capture_timings.reads,capture_timings.bytes,capture_timings.queries,capture_timings.watch_us/1000,capture_timings.read_us/1000,capture_timings.hash_us/1000,capture_timings.copy_us/1000,capture_timings.new_entries,capture_timings.watch_dirty,capture_timings.revalidated,capture_timings.changed,captured_textures_.size());
+    REXLOG_INFO("native Vulkan capture frame={} pm4_ms={} textures_ms={} reads={} bytes={} virtual_queries={} watch_ms={} read_ms={} hash_ms={} copy_ms={} new={} watch_dirty={} revalidated={} changed={} entries={} watch_scan_hits={} watch_scan_misses={}",front_frame_,capture_timings.pm4_us/1000,capture_timings.textures_us/1000,capture_timings.reads,capture_timings.bytes,capture_timings.queries,capture_timings.watch_us/1000,capture_timings.read_us/1000,capture_timings.hash_us/1000,capture_timings.copy_us/1000,capture_timings.new_entries,capture_timings.watch_dirty,capture_timings.revalidated,capture_timings.changed,captured_textures_.size(),capture_timings.watch_scan_hits,capture_timings.watch_scan_misses);
   capture_timings={};
   if(front_frame_%120==0) FlushTextureAudit(packet_sink_?"vulkan":"d3d12_capture",front_frame_);
   if (worker_mode_) {

@@ -428,3 +428,72 @@ Local artifacts (ignored by Git):
   unconditional-cache binary measured above.
 - Final opt-in build: `port/out/build/win-amd64-release/superman_returns.exe`,
   SHA-256 `a9a766362b64e54d01ceb3c25ea0f55c35826c7808318b2b1132dc881547ac26`.
+
+## Gameplay optimization: reuse clean texture page scans
+
+Vulkan capture repeatedly scanned the same texture's watched pages for many
+draws in one frame. It now memoizes only a *clean page scan*, keyed by frontend
+frame, texture watch baseline and a completed-notification counter. A frame
+change, changed baseline or completed physical-write notification forces a
+fresh page scan. Dirty results are never memoized. Periodic content hashing,
+backoff, alias handling and snapshot/upload policies are unchanged. This is
+not a content cache or a hash bypass.
+
+The notification counter is published after all per-page notifications, and
+sampled before scanning. A notification that finishes during a scan changes
+the next lookup's key. The existing `write_seq_` is incremented before pages
+are published, so using it for this shortcut would be incorrect. The new
+counter describes notification publication, not completion of guest data
+writes. Cached scans have a valid observation point before any later callback
+completion; the next lookup observes the new counter and rescans.
+
+The optimization is on by default; `SR_NATIVE_TEXTURE_WATCH_SCAN_CACHE=0`
+selects the original repeated scan for same-binary comparisons. Both modes
+include the completion counter and profiling. Handoff/texture/source/replay
+audits and the shared-constants experiment were off during FPS sampling.
+The D3D12 scan/hash policy was not changed; it only publishes the additional
+notification counter and was not benchmarked in this comparison.
+
+Three new tests exercise clean-result reuse, invalidation by frame/baseline/
+completion, repeated dirty results, and notification completion during a scan.
+The original benchmark build passed the native, allocation-budget, Vulkan,
+profile Python and SDK texture suites. The release excludes the experimental
+diagnostic hooks and range-coalescing changes; it is built and validated
+separately from the committed source. No builds/heavy tests
+overlapped the gameplay measurement windows.
+
+Same-binary Vulkan comparison, in OFF/ON/ON/OFF order, with the existing
+1280x720 / VSync / 30 FPS / native scale 1 benchmark settings. Each idle and
+forward window lasted 20 seconds and passed the final gameplay assertion:
+
+| Run | Idle FPS | Forward FPS | Capture CPU ms/frame |
+| --- | ---: | ---: | ---: |
+| OFF 1 | 22.2 | 23.8 | 23.065 |
+| ON 1 | 25.1 | 25.7 | 18.470 |
+| ON 2 | 22.3 | 23.6 | 20.635 |
+| OFF 2 | 19.8 | 22.5 | 24.585 |
+
+Capture CPU figures are medians of the last six 120-frame profile windows
+per run: reductions of 19.9% and 16.1% in the adjacent pairs. Average idle
+FPS across repeats rose from 21.0 to 23.7; forward from 23.15 to 24.65.
+The mean of the four scenario averages rose from 22.075 to 24.175 FPS
+(9.5%). Both adjacent pairs improved in both scenarios, including the
+reversed ordering. These are local observed gains, not a guarantee for
+other scenes, machines or uncapped settings; the between-run variation is
+visible in the table.
+
+The last six sampled capture frames per run corroborate the mechanism:
+OFF has no reused scans; ON 1 reuses 168458 of 186330 (90.4%), ON 2 reuses
+174311 of 191875 (90.8%). The median texture-capture time of those individual
+sampled frames falls from 9/12 ms to 4/4 ms. These sampled-frame figures
+are separate from the 120-frame CPU profile averages above. All original
+content checks remain scheduled; no producer identity or new write-coverage
+assumption is used to skip a hash.
+
+Image gates passed for ON 1 versus OFF 1 (34.45 dB / histogram 0.02903) and
+ON 2 versus OFF 2 (35.53 / 0.00628). Scene/HUD manually inspected in both
+ON runs. These checks apply to this optimization, not to other renderer experiments.
+
+
+Benchmark evidence (local, ignored): `logs/bench_watch_scan_{off1,on1,on2,off2}_vulkan.*`,
+`logs/watch_scan_comparison.json` and `logs/watch_scan_image_gates.json`.

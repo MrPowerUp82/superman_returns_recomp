@@ -567,6 +567,8 @@ class Renderer : public NativeFrontend {
   bool TextureWrittenSince(uint32_t base, uint32_t size, uint32_t seq) const;
   std::unique_ptr<std::atomic<uint32_t>[]> page_write_seq_;
   std::atomic<uint32_t> write_seq_{1};
+  // Published after page_write_seq_: used only to reuse clean frontend scans.
+  std::atomic<uint64_t> completed_texture_writes_{0};
   bool texture_watch_ = false;
   uint32_t CreateTexture(const uint32_t fetch[6], TextureEntry& entry);
   void RetireSrvIndex(uint32_t index);

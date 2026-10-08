@@ -27,6 +27,7 @@
 #include <memory>
 #include <mutex>
 #include "../graphics/backend_selection.h"
+#include "native_graphics_system_interface.h"
 
 #include <rex/system/interfaces/graphics.h>
 #include <rex/system/xobject.h>
@@ -61,8 +62,6 @@ namespace superman_returns::native {
 // timeout expires.
 void WaitForGpuCondition(const std::function<bool()>& done, uint32_t timeout_us);
 
-#include "native_graphics_system_interface.h"
-
 class D3D12NativeGraphicsSystem : public INativeGraphicsSystem {
  public:
   explicit D3D12NativeGraphicsSystem(graphics::NativeApi api=graphics::NativeApi::kD3D12);
@@ -76,8 +75,8 @@ class D3D12NativeGraphicsSystem : public INativeGraphicsSystem {
   rex::ui::Presenter* presenter() const override { return presenter_.get(); }
   // Not IGraphicsSystem overrides: the stock SDK interface has neither (they
   // are additions of the kit's SDK fork). The renderer calls them directly.
-  uint32_t guest_frame_counter() const { return counter_.load(); }
-  bool GetGammaRamp256(uint32_t* out_entries) const;
+  uint32_t guest_frame_counter() const override { return counter_.load(); }
+  bool GetGammaRamp256(uint32_t* out_entries) const override;
   void SetInterruptCallback(uint32_t callback, uint32_t user_data) override;
   void InitializeRingBuffer(uint32_t ptr, uint32_t size_log2) override;
   void EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_size_log2) override;
@@ -134,9 +133,9 @@ class D3D12NativeGraphicsSystem : public INativeGraphicsSystem {
   // (vblank, MMIO register writes) instead of spinning.
   std::unique_ptr<rex::thread::Event> cp_wake_;
  public:
-  void SignalGpuProgress();
-  uint64_t progress_generation() const { return progress_generation_.load(); }
-  void WaitProgress(uint64_t since, uint32_t timeout_us);
+  void SignalGpuProgress() override;
+  uint64_t progress_generation() const override { return progress_generation_.load(); }
+  void WaitProgress(uint64_t since, uint32_t timeout_us) override;
   void WaitCondition(const std::function<bool()>& done, uint32_t timeout_us);
  private:
   std::atomic<uint64_t> progress_generation_{0};
@@ -151,6 +150,9 @@ class D3D12NativeGraphicsSystem : public INativeGraphicsSystem {
   rex::system::object_ref<rex::system::XHostThread> command_thread_;
   rex::system::object_ref<rex::system::XHostThread> vsync_thread_;
 };
+
+// Preserve existing factory callers while the graphics-system split is in progress.
+using NativeGraphicsSystem = D3D12NativeGraphicsSystem;
 
 }  // namespace superman_returns::native
 

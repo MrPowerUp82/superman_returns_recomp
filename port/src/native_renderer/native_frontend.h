@@ -7,6 +7,7 @@
 #include <string>
 #include <memory>
 #include "pm4_mirror.h"
+#include "texture_content.h"
 #include "../graphics/guest/texture_capture.h"
 
 namespace superman_returns::native {
@@ -15,6 +16,7 @@ struct CapturedTextureEntry {
   std::shared_ptr<const graphics::guest::TextureCapture> snapshot;
   uint64_t content_hash=0, checked_frame=~0ull;
   uint32_t watch_seq=0;
+  CleanTextureWatchScan watch_scan;
   uint64_t next_check_frame=0;
   uint32_t stable_checks=0;
   uint64_t failed_frame=~0ull;

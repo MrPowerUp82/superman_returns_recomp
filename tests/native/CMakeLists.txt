@@ -14,6 +14,7 @@ add_executable(sr_native_tests
     test_checked_guest_memory.cpp
     test_guest_hash.cpp
     test_shared_constants_cache.cpp
+    test_texture_content.cpp
     "${SR_NATIVE_DIR}/../graphics/backend_selection.cpp"
     test_shader_requirements.cpp
     test_guest_state.cpp
