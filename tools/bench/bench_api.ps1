@@ -2,7 +2,7 @@
 Roda tools\bench\bench.ps1 com os argumentos que o launcher passa para a API escolhida (janela 1280x720,
 limite de 30 FPS, opções de melhoria no padrão do jogo). O resultado vai para logs\bench_results.csv.
 
-Uso: tools\bench\bench_api.ps1 -Api vulkan|d3d12 -Name <rótulo> [-Profile] [-Timeline] [-Gate record|check] [-Exe <caminho>]
+Uso: tools\bench\bench_api.ps1 -Api vulkan|d3d12 -Name <rótulo> [-Profile] [-Timeline] [-TimelineDetail] [-Gate record|check] [-Exe <caminho>]
   -Profile liga SR_VULKAN_PROFILE=1 e copia o log do jogo para logs\bench_<Name>.log.
   -Timeline liga SR_FRAME_TIMELINE, grava logs\timeline_<Name>.csv e imprime a tabela do estágio limitante
             (tools\analysis\frame_timeline_report.py), também salva em logs\timeline_<Name>.txt.
@@ -15,6 +15,7 @@ param(
   [string]$Exe = '',
   [switch]$Profile,
   [switch]$Timeline,
+  [switch]$TimelineDetail,
   [ValidateSet('', 'record', 'check')] [string]$Gate = ''
 )
 $ErrorActionPreference = 'Stop'
@@ -29,6 +30,7 @@ $gameArgs = @(
 ) -join ' '
 $prevProfile = $env:SR_VULKAN_PROFILE
 $prevTimeline = $env:SR_FRAME_TIMELINE
+$prevTimelineDetail = $env:SR_FRAME_TIMELINE_DETAIL
 $timelineCsv = "$root\logs\timeline_$Name.csv"
 try {
   if ($Profile) { $env:SR_VULKAN_PROFILE = '1' }
@@ -36,13 +38,15 @@ try {
     Remove-Item $timelineCsv -ErrorAction SilentlyContinue
     Remove-Item "$root\logs\timeline_$Name.txt" -ErrorAction SilentlyContinue
     $env:SR_FRAME_TIMELINE = $timelineCsv
+    if ($TimelineDetail) { $env:SR_FRAME_TIMELINE_DETAIL = '1' }
   }
   & "$PSScriptRoot\bench.ps1" -Name $Name -Exe $Exe -ExtraArgs $gameArgs -TitleTimeout 180 -WorldTimeout 200
   if ($Gate) { & "$PSScriptRoot\image_gate.ps1" -Name $Name -Mode $Gate }
 } finally {
   # O jogo já terminou: restaura as variáveis de ambiente primeiro, para que nenhuma falha abaixo
-  # deixe SR_FRAME_TIMELINE / SR_VULKAN_PROFILE vazarem para a sessão do chamador nem mascare o erro do bench.
+  # deixe SR_FRAME_TIMELINE / SR_FRAME_TIMELINE_DETAIL / SR_VULKAN_PROFILE vazarem para a sessão do chamador nem mascare o erro do bench.
   if ($null -ne $prevTimeline) { $env:SR_FRAME_TIMELINE = $prevTimeline } else { Remove-Item env:SR_FRAME_TIMELINE -ErrorAction SilentlyContinue }
+  if ($null -ne $prevTimelineDetail) { $env:SR_FRAME_TIMELINE_DETAIL = $prevTimelineDetail } else { Remove-Item env:SR_FRAME_TIMELINE_DETAIL -ErrorAction SilentlyContinue }
   if ($null -ne $prevProfile) { $env:SR_VULKAN_PROFILE = $prevProfile } else { Remove-Item env:SR_VULKAN_PROFILE -ErrorAction SilentlyContinue }
   # Keep diagnostic evidence even when gameplay validation rejects the run.
   # The next invocation clears game.log before launching the game.

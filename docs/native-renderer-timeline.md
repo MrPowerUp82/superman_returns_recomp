@@ -8,6 +8,7 @@ Ferramenta da Fase 0 do ciclo 4 (design: `superpowers/specs/2026-10-08-native-re
 - `tools\bench\bench_api.ps1 -Api vulkan|d3d12 -Name <nome> -Timeline` roda o bench e imprime a tabela.
 - `python tools\analysis\frame_timeline_report.py <arquivo.csv> [--last N] [--json]` analisa um CSV.
 - Colunas, estágios e o significado de `busy_ns`/`blocked_ns`: `docs/superpowers/plans/2026-10-08-frame-timeline-phase0.md`.
+- `-Timeline -TimelineDetail` (variável `SR_FRAME_TIMELINE_DETAIL=1`, só junto de `SR_FRAME_TIMELINE`) liga também os contadores finos do front-end da thread do jogo (estágios `frontend`, `fe_*` e os derivados `game_guest`, `frontend_other`); ver "Decomposição do front-end da thread do jogo (Fase 0.5)" no fim deste documento.
 
 ## Como ler a tabela
 
@@ -151,4 +152,190 @@ O `bloq.` do worker sobe de 0,00 para 28,35 ms, o `front_wait` do jogo sobe para
 3. **Passo 2, itens de GPU bit a bit: terceiro, e só no Vulkan.** No D3D12 a GPU não está entre os limitantes (0% e 1%, folga p99 positiva), então o passo não entra lá. No Vulkan a GPU tem p99 acima do orçamento, mas é limitante em só 8% a 9% dos quadros, o `util.` é limite superior, e esta fase não mediu por grupo de passes, então não dá para escolher os itens do passo 2 sem uma medição por passe.
 4. **Passo 4, estabilidade do 1% low: necessário qualquer que seja a ordem.** O 1% low ficou entre 18,0 e 22,5 FPS e o mínimo entre 1,8 e 11,9 FPS nas quatro execuções; `game`, `worker`, `record` e `gpu` no Vulkan e `game` e `worker` no D3D12 têm p99 acima de 33,3 ms. Mesmo no D3D12, com a média em 29,3 a 30 FPS, os mínimos do bench ficaram entre 25,8 e 29,7 FPS.
 
-**O que os dados não decidem.** Entre os passos 2 e 3 no Vulkan, `worker` (13% a 14% dos quadros), `gpu` (8% a 9%) e `record` (5% a 6%) estão próximos e todos têm p99 acima do orçamento; colocar o 3 antes do 2 vem da ressalva de limite superior da GPU e da falta de dados por passe, não de uma diferença clara de custo. Também não está medido quanto do `game_other` (28,40 e 29,51 ms) é lógica do jogo e quanto é espera da thread do jogo fora do renderer (por exemplo vblank ou outra sincronização); a execução de D3D12 limitada pela GPU mostra que o `game` pode ter boa parte de espera (23,47 ms ali, contra 32,76 ms quando o limitador de 30 FPS manda). Por isso o `game` do Vulkan, com `util.` e `limitante` inflados por construção, não prova que a thread do jogo é o gargalo; só a média do `game` sem a captura (~28 a 30 ms, abaixo de 33,3 ms) e o p99 (37,85 e 37,69 ms no `game_other`, acima) estão medidos.
+**O que os dados não decidem.** Entre os passos 2 e 3 no Vulkan, `worker` (13% a 14% dos quadros), `gpu` (8% a 9%) e `record` (5% a 6%) estão próximos e todos têm p99 acima do orçamento; colocar o 3 antes do 2 vem da ressalva de limite superior da GPU e da falta de dados por passe, não de uma diferença clara de custo. Também não está medido quanto do `game_other` (28,40 e 29,51 ms) é lógica do jogo e quanto é espera da thread do jogo fora do renderer (por exemplo vblank ou outra sincronização; a Fase 0.5, no fim deste documento, mediu a parte que é código do renderer na thread do jogo, cerca de um terço do `game_other` no Vulkan, e o restante, o `game_guest`, continua sem separação entre lógica, driver e espera); a execução de D3D12 limitada pela GPU mostra que o `game` pode ter boa parte de espera (23,47 ms ali, contra 32,76 ms quando o limitador de 30 FPS manda). Por isso o `game` do Vulkan, com `util.` e `limitante` inflados por construção, não prova que a thread do jogo é o gargalo; só a média do `game` sem a captura (~28 a 30 ms, abaixo de 33,3 ms) e o p99 (37,85 e 37,69 ms no `game_other`, acima) estão medidos.
+
+## Decomposição do front-end da thread do jogo (Fase 0.5)
+
+Plano: `superpowers/plans/2026-10-08-frame-timeline-frontend-breakdown.md`. A pergunta que a Fase 0 deixou aberta: de que é feito o `game_other` (≈29 a 30 ms no Vulkan)? Esta fase mede quanto dele é trabalho do próprio renderer dentro da thread do jogo e deixa o resto como `game_guest`. Não otimiza nada.
+
+### Como ligar e o que cada estágio mede
+
+`tools\bench\bench_api.ps1 -Api vulkan|d3d12 -Name <nome> -Timeline -TimelineDetail`. A opção define `SR_FRAME_TIMELINE_DETAIL=1`, que só tem efeito junto de `SR_FRAME_TIMELINE`; sem as duas variáveis nenhum relógio extra é lido. Os estágios abaixo são acumulados em nanossegundos por quadro, na thread do jogo, e gravados no `OnSwap`.
+
+| Estágio | O que mede |
+| --- | --- |
+| `frontend` | tempo total dentro dos hooks `DrawVertices`, `DrawIndexedVertices`, `DrawInlineVertices`, `Resolve`, `BeginTiling`, `Clear`, `EndTiling` e `OnPassEnd` (inclui a espera do `front_mutex_`) |
+| `fe_begin` | `BeginCmd` |
+| `fe_ring` | `CaptureRing` |
+| `fe_device` | `CaptureDevice` |
+| `fe_index` | bloco do buffer de índices no `DrawIndexedVertices` |
+| `fe_streams` | `PlanStreams` |
+| `fe_end` | `EndCmd` inteiro (aninha a captura PM4, as texturas e o `fe_flush`) |
+| `fe_flush` | `FlushBatch` |
+| `frontend_other` | derivado: `frontend` menos `fe_begin`, `fe_ring`, `fe_device`, `fe_index`, `fe_streams` e `fe_end` (resíduo, ver ressalvas) |
+| `game_guest` | derivado: `game` menos `frontend` |
+
+O relatório imprime `game_guest` e `frontend_other` quando o CSV tem os estágios de detalhe. Todos os valores abaixo são médias em ms por quadro (janela dos últimos 1100 quadros, como na Fase 0).
+
+### Tabelas impressas pelo relatório
+
+Execução `tl_fe1_vulkan` (bench: parado 25,5 FPS, andando 28,1 FPS):
+
+```
+Quadros analisados: 1100 (descartados por falta de estágio: 0)
+Intervalo médio 37.5 ms = 26.7 FPS | 1% low 20.3 FPS | mínimo 1.9 FPS
+Orçamento por quadro: 33.3 ms (tempos em ms)
+
+estágio        média     p50     p99   bloq.   util.  folga p99  limitante
+game           36.97   36.60   48.19    0.00     99%     -14.85        78%
+game_guest     18.81   18.64   24.07    0.00     50%       9.26          -
+game_other     29.78   29.48   37.08    0.00     79%      -3.75          -
+capture         7.20    6.79   14.13    0.00     19%      19.20          -
+frontend       18.16   17.76   26.05    0.00     48%       7.29          -
+fe_begin        0.41    0.41    0.59    0.00      1%      32.74          -
+fe_ring         0.29    0.27    0.60    0.00      1%      32.73          -
+fe_device       1.48    1.46    1.84    0.00      4%      31.49          -
+fe_index        1.44    1.41    2.05    0.00      4%      31.29          -
+fe_streams      3.68    3.64    4.99    0.00     10%      28.35          -
+fe_end         10.17    9.78   17.32    0.00     27%      16.02          -
+fe_flush        0.06    0.05    0.22    0.00      0%      33.12          -
+frontend_other    0.69    0.67    0.96    0.00      2%      32.38          -
+front_wait      0.47    0.00    0.00    0.00      1%      33.33          -
+worker         31.68   31.55   42.27    1.79     85%      -8.94        10%
+record         26.46   25.82   43.32    2.49     71%      -9.99         3%
+gpu            32.26   31.71   38.81    0.00     86%      -5.47         9%
+```
+
+Execução `tl_fe2_vulkan` (bench: parado 26 FPS, andando 27,9 FPS):
+
+```
+Quadros analisados: 1100 (descartados por falta de estágio: 0)
+Intervalo médio 36.9 ms = 27.1 FPS | 1% low 19.2 FPS | mínimo 1.9 FPS
+Orçamento por quadro: 33.3 ms (tempos em ms)
+
+estágio        média     p50     p99   bloq.   util.  folga p99  limitante
+game           36.19   35.74   49.11    0.00     98%     -15.78        84%
+game_guest     19.14   18.79   27.20    0.00     52%       6.13          -
+game_other     29.38   28.95   38.97    0.00     80%      -5.64          -
+capture         6.82    6.48   14.73    0.00     18%      18.60          -
+frontend       17.05   16.85   26.12    0.00     46%       7.21          -
+fe_begin        0.39    0.38    0.62    0.00      1%      32.72          -
+fe_ring         0.26    0.25    0.56    0.00      1%      32.77          -
+fe_device       1.37    1.37    1.91    0.00      4%      31.42          -
+fe_index        1.34    1.31    2.01    0.00      4%      31.32          -
+fe_streams      3.45    3.47    5.05    0.00      9%      28.28          -
+fe_end          9.59    9.30   17.90    0.00     26%      15.44          -
+fe_flush        0.07    0.05    0.25    0.00      0%      33.09          -
+frontend_other    0.64    0.63    0.97    0.00      2%      32.36          -
+front_wait      0.65    0.00    3.75    0.00      2%      29.58          -
+worker         29.89   29.87   43.18    1.52     81%      -9.84         8%
+record         25.37   24.57   43.26    2.05     69%      -9.93         4%
+gpu            29.89   30.62   38.73    0.00     81%      -5.39         4%
+```
+
+Execução `tl_fe1_d3d12` (bench: parado 30 FPS, andando 29,7 FPS):
+
+```
+Quadros analisados: 1100 (descartados por falta de estágio: 0)
+Intervalo médio 33.5 ms = 29.8 FPS | 1% low 22.1 FPS | mínimo 12.9 FPS
+Orçamento por quadro: 33.3 ms (tempos em ms)
+
+estágio        média     p50     p99   bloq.   util.  folga p99  limitante
+game           32.52   32.55   42.73    0.00     97%      -9.40        57%
+game_guest     24.98   25.06   34.20    0.00     75%      -0.87          -
+frontend        7.53    7.52   10.85    0.00     22%      22.49          -
+fe_begin        0.41    0.40    0.58    0.00      1%      32.75          -
+fe_ring         0.29    0.26    0.58    0.00      1%      32.75          -
+fe_device       0.58    0.58    0.73    0.00      2%      32.60          -
+fe_index        1.72    1.64    3.07    0.00      5%      30.26          -
+fe_streams      3.46    3.41    5.09    0.00     10%      28.24          -
+fe_end          0.34    0.34    0.47    0.00      1%      32.86          -
+fe_flush        0.03    0.02    0.14    0.00      0%      33.20          -
+frontend_other    0.74    0.73    1.03    0.00      2%      32.31          -
+front_wait      0.96    0.00   14.79    0.00      3%      18.54          -
+worker         31.78   31.40   47.06    0.00     95%     -13.72        43%
+gpu            23.23   23.76   26.36    0.00     69%       6.97         0%
+```
+
+Execução `tl_fe2_d3d12` (bench: parado 29,8 FPS, andando 29,7 FPS):
+
+```
+Quadros analisados: 1100 (descartados por falta de estágio: 0)
+Intervalo médio 33.6 ms = 29.7 FPS | 1% low 20.4 FPS | mínimo 8.4 FPS
+Orçamento por quadro: 33.3 ms (tempos em ms)
+
+estágio        média     p50     p99   bloq.   util.  folga p99  limitante
+game           32.15   32.43   42.28    0.00     96%      -8.95        62%
+game_guest     25.07   25.36   33.91    0.00     75%      -0.58          -
+frontend        7.07    6.94   10.74    0.00     21%      22.59          -
+fe_begin        0.38    0.37    0.63    0.00      1%      32.71          -
+fe_ring         0.26    0.23    0.59    0.00      1%      32.74          -
+fe_device       0.54    0.55    0.73    0.00      2%      32.60          -
+fe_index        1.73    1.59    3.50    0.00      5%      29.84          -
+fe_streams      3.14    3.07    4.97    0.00      9%      28.36          -
+fe_end          0.32    0.32    0.47    0.00      1%      32.86          -
+fe_flush        0.04    0.03    0.12    0.00      0%      33.21          -
+frontend_other    0.69    0.68    1.09    0.00      2%      32.24          -
+front_wait      1.43    0.00   18.06    0.00      4%      15.28          -
+worker         30.11   29.79   48.07    0.00     90%     -14.74        38%
+gpu            21.22   22.37   27.80    0.00     63%       5.53         0%
+```
+
+### Resumo (ms médios por quadro e fração do `game`)
+
+Cada célula é `ms (fração do game)`. As colunas `capture`, `fe_device`, `fe_streams`, `fe_end`, `fe_begin`, `fe_ring` e `fe_index` são partes do `frontend` (e `capture` está dentro de `fe_end`), então as frações dessas colunas não somam com `game_guest`. `capture` só existe no Vulkan (n/d no D3D12).
+
+| Execução | game | frontend | game_guest | capture | fe_device | fe_streams | fe_end | fe_begin | fe_ring | fe_index | frontend_other |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `tl_fe1_vulkan` | 36,97 | 18,16 (49,1%) | 18,81 (50,9%) | 7,20 (19,5%) | 1,48 (4,0%) | 3,68 (10,0%) | 10,17 (27,5%) | 0,41 (1,1%) | 0,29 (0,8%) | 1,44 (3,9%) | 0,69 (1,9%) |
+| `tl_fe2_vulkan` | 36,19 | 17,05 (47,1%) | 19,14 (52,9%) | 6,82 (18,8%) | 1,37 (3,8%) | 3,45 (9,5%) | 9,59 (26,5%) | 0,39 (1,1%) | 0,26 (0,7%) | 1,34 (3,7%) | 0,64 (1,8%) |
+| `tl_fe1_d3d12` | 32,52 | 7,53 (23,2%) | 24,98 (76,8%) | n/d | 0,58 (1,8%) | 3,46 (10,6%) | 0,34 (1,0%) | 0,41 (1,3%) | 0,29 (0,9%) | 1,72 (5,3%) | 0,74 (2,3%) |
+| `tl_fe2_d3d12` | 32,15 | 7,07 (22,0%) | 25,07 (78,0%) | n/d | 0,54 (1,7%) | 3,14 (9,8%) | 0,32 (1,0%) | 0,38 (1,2%) | 0,26 (0,8%) | 1,73 (5,4%) | 0,69 (2,1%) |
+
+Conferências a partir das tabelas: `game_guest` + `frontend` = `game`; `frontend` = soma de `fe_begin`, `fe_ring`, `fe_device`, `fe_index`, `fe_streams`, `fe_end` e `frontend_other`, onde o `frontend_other` é o resíduo (por construção), positivo nas quatro execuções (0,64 a 0,74 ms). A fração do `fe_end` no `frontend` do Vulkan é 56,0% e 56,2% (10,17 ÷ 18,16 e 9,59 ÷ 17,05). `fe_streams` + `fe_device` + `fe_index` somam 6,60 e 6,16 ms no Vulkan (36,3% e 36,1% do `frontend`) e 5,76 e 5,41 ms no D3D12 (76,5% nas duas execuções). O `fe_flush` fica em 0,03 a 0,07 ms e está dentro do `fe_end`.
+
+### Quanto do `game_other` do Vulkan é trabalho do renderer
+
+O `game_other` da Fase 0 é `game` menos `capture`. Como `capture` está dentro do `frontend`, o `frontend` menos o `capture` é o trabalho do renderer na thread do jogo que o `game_other` já continha: 10,96 e 10,23 ms nas duas execuções, que são 36,8% e 34,8% do `game_other` (29,78 e 29,38 ms). O restante, o `game_guest` (18,81 e 19,14 ms), é 63,2% e 65,1% do `game_other`. Ou seja, cerca de um terço do `game_other` é código do renderer medido por hook, e cerca de dois terços não são. Isso responde só a metade da pergunta da Fase 0: o que o `game_guest` contém continua sem medida (ver "O que os dados ainda não decidem" abaixo). A divisão entre `capture` e o resto do `frontend` depende da ressalva 6; o `game_guest` (63% a 65%) não depende dela.
+
+### Custo do modo detalhado
+
+Comparação do `game` médio das execuções com detalhe (`tl_fe1/2`) com o das execuções da Fase 0 (`tl_on1/2`, mesma API). As execuções da Fase 0 vieram de uma build anterior aos escopos de detalhe, então a diferença abaixo inclui tudo o que mudou entre as builds, não só o modo detalhado ligado. A ordem das execuções não foi alternada e a cena varia entre execuções, então a diferença também não separa o custo da sonda da variação de cena:
+
+| API | `game` Fase 0 (on1, on2 / média) | `game` detalhe (fe1, fe2 / média) | Diferença da média (por par) | Intervalo médio Fase 0 → detalhe | FPS do bench, médias das 2 execuções (Fase 0 → detalhe) |
+| --- | --- | --- | --- | --- | --- |
+| Vulkan | 34,99 e 36,67 / 35,83 | 36,97 e 36,19 / 36,58 | +0,75 ms (+1,98 e -0,48) | 36,8 → 37,2 ms | parado 26,35 → 25,75; andando 28,35 → 28,0 |
+| D3D12 | 32,76 e 30,86 / 31,81 | 32,52 e 32,15 / 32,34 | +0,53 ms (-0,24 e +1,29) | 33,45 → 33,55 ms | parado 29,75 → 29,9; andando 29,9 → 29,7 |
+
+A diferença média do `game` é de +0,75 ms (Vulkan) e +0,53 ms (D3D12), abaixo do limite de ~1,5 ms por quadro que o plano usa para uma ressalva forte. Mas a precisão é baixa: entre as duas execuções da Fase 0 de uma mesma API o `game` já variava 1,68 ms (Vulkan) e 1,90 ms (D3D12), mais que a diferença medida, e um dos pares do Vulkan (fe1 contra on1) passa de 1,5 ms (+1,98). No D3D12 o `game` inclui a espera do limitador de 30 FPS (ressalva 2 da Fase 0), que absorve parte de qualquer custo extra, então a diferença do `game` ali pode subestimar o custo da sonda; o FPS não mudou de forma distinguível (diferenças de -0,2 a +0,15 FPS). No Vulkan o FPS médio ficou 0,35 a 0,6 FPS menor com o detalhe ligado, na direção de um custo, mas dentro da variação entre execuções. O custo do modo detalhado portanto é da ordem de 0,5 a 0,8 ms por quadro na média, sem separação possível da variação de cena com duas execuções por célula. O custo da sonda não foi medido diretamente: os números finos incluem a própria sonda (por exemplo, o `frontend_other` de 0,64 a 0,74 ms é o resíduo do `frontend`, e contém o custo dos relógios do escopo do hook além de qualquer código dos hooks fora das partes cronometradas).
+
+### Ressalvas
+
+1. **`game_guest` é "game menos hooks", não "lógica do jogo".** Ele mistura a lógica do próprio jogo, o código do driver XDK recompilado que monta o PM4 antes de o nosso hook rodar e as esperas do kernel (vblank, semáforos etc.). Este detalhamento não separa essas três coisas. No D3D12 ele também inclui a espera do limitador de 30 FPS (ressalva 2 da Fase 0), então os 24,98 e 25,07 ms do D3D12 não são todos trabalho; no Vulkan o intervalo (36,9 a 37,5 ms) é maior que 33,3 ms, mas isso por si só não prova que o `game_guest` do Vulkan não contém esperas.
+2. **As partes aninham e não se somam.** `capture` está dentro de `fe_end`, e `fe_flush` também está dentro de `fe_end`; nenhum dos dois acrescenta algo a ele. Somar as colunas do resumo duplicaria tempo. Só `fe_begin`, `fe_ring`, `fe_device`, `fe_index`, `fe_streams`, `fe_end` e `frontend_other` fecham com o `frontend`.
+3. **"Partes ≤ `frontend`" não vale quadro a quadro.** `fe_begin`, `fe_ring` e `fe_end` também incluem o `BeginCmd`/`CaptureRing`/`EndCmd` do próprio comando de swap no `OnSwap`, que não está dentro do `frontend` (alguns µs). O `FlushBatch` chamado no `OnSwap` cai no `fe_flush` do quadro seguinte (um flush entre os vários por quadro, desprezível). Nas médias o resíduo `frontend_other` ficou positivo nas quatro execuções, mas num quadro isolado ele pode sair levemente negativo.
+4. **Modo direto contra modo worker.** Se o renderer rodasse em modo direto (sem worker), o `fe_end` incluiria também a renderização (`Execute`). O D3D12 roda em modo worker por padrão aqui: o `game.log` da execução `tl_fe1_d3d12` tem a linha "native: recording worker enabled" (junto de "write watch enabled (api=d3d12)") e o `fe_end` do D3D12 é de só 0,34 e 0,32 ms nas duas execuções, compatível com isso. O log só foi conferido para essa execução (o `game.log` é sobrescrito a cada execução); para as outras três o modo worker não foi verificado no log.
+5. **Cronômetros por thread.** Os contadores são `thread_local` na thread do jogo que emite os draws; draws emitidos por outras threads do guest não seriam contados em `frontend` nem em `fe_*` (e ficariam em `game_guest`). Não foi verificado se existe emissão de draws fora da thread principal.
+6. **O `capture` (Fase 0) trunca para µs por chamada; os `fe_*` não.** O `capture` soma `pm4_us` + `textures_us`, acumulados em microssegundos inteiros por chamada, enquanto os `fe_*` são em nanossegundos. No Vulkan o `fe_end` menos o `capture` dá 2,97 e 2,77 ms (no D3D12 o `fe_end` inteiro é 0,34 e 0,32 ms). Esses ~2,8 a 3,0 ms do Vulkan não foram atribuídos: parte pode ser o `capture` subestimado pela truncação (até ≈1 µs por chamada cronometrada, vezes o número de comandos por quadro, que não foi medido aqui) e parte trabalho do `EndCmd` fora desses dois cronômetros; os dados não decidem qual. Isso muda a divisão entre `capture` e "resto do `fe_end`", não o `frontend` total.
+7. **Uma máquina, cena variável, duas execuções por API.** Notebook Intel UHD, i5-13420H; a cena muda entre execuções (as duas execuções de uma API diferem em `game` por 0,78 ms no Vulkan e 0,37 ms no D3D12). Vale comparar razões e frações, não os valores absolutos.
+8. **Custo do modo detalhado**: ver a seção acima (≈0,5 a 0,8 ms por quadro na média, dentro da variação entre execuções).
+
+### Conclusão da Fase 0.5
+
+**Vulkan.** O `frontend` (hooks do renderer na thread do jogo) é 18,16 e 17,05 ms por quadro, 49,1% e 47,1% do `game`; o `game_guest` é 18,81 e 19,14 ms, 50,9% e 52,9%. A parte dominante do `frontend` é o `fe_end` (10,17 e 9,59 ms, 56% do `frontend` e 27,5% e 26,5% do `game`), dentro do qual a captura (`capture`) mede 7,20 e 6,82 ms (19,5% e 18,8% do `game`). Depois vêm `fe_streams` (3,68 e 3,45 ms, 10,0% e 9,5% do `game`), `fe_device` (1,48 e 1,37 ms) e `fe_index` (1,44 e 1,34 ms); `fe_begin` + `fe_ring` somam 0,70 e 0,65 ms. Nenhum bloco do renderer sozinho se aproxima do `game_guest` (o maior, `fe_end`, é cerca de metade dele), mas o `frontend` inteiro tem tamanho parecido com o `game_guest`.
+
+**D3D12.** O `frontend` é 7,53 e 7,07 ms, 23,2% e 22,0% do `game`. O `fe_end` é desprezível (0,34 e 0,32 ms, compatível com a renderização no worker) e a parte dominante é o `fe_streams` (3,46 e 3,14 ms, 45,9% e 44,4% do `frontend`, 10,6% e 9,8% do `game`), seguido do `fe_index` (1,72 e 1,73 ms) e do `fe_device` (0,58 e 0,54 ms); `fe_streams` + `fe_device` + `fe_index` são 76,5% do `frontend`. O `game_guest` (24,98 e 25,07 ms, 76,8% e 78,0% do `game`) é o maior bloco, mais de três vezes o `frontend`, mas inclui a espera do limitador de 30 FPS, então não dá para ler quanto dele é trabalho.
+
+**Primeiro alvo da Fase 1.**
+
+- **O maior bloco do `game` não é o front-end do renderer, em nenhuma das duas APIs.** No Vulkan o `game_guest` (≈19 ms) é de tamanho parecido com o `frontend` (17 a 18 ms); no D3D12 é mais de três vezes maior. As mudanças previstas na Fase 1 (hash paralelo, pipeline entre estágios, itens de GPU) não atuam diretamente no `game_guest`.
+- **No Vulkan, o primeiro alvo da Fase 0 continua sendo o melhor apoiado: o passo 1 (hash paralelo exato da captura).** A captura é o maior bloco isolado do renderer na thread do jogo (6,8 a 7,2 ms, ≈19% do `game`) e está dentro do `fe_end`, o maior pedaço do `frontend`. O teto continua o mesmo: tirar a captura inteira deixaria o `game` em ≈29 a 30 ms (o `game_other`), e tirar o `frontend` inteiro o deixaria em ≈19 ms (o `game_guest`; limite teórico, não meta). Como `worker` (31,68 e 29,89 ms) e `gpu` (32,26 e 29,89 ms, limite superior) já estão perto do orçamento de 33,3 ms nas execuções com detalhe, o ganho no intervalo do quadro não deve passar do que esses estágios permitem; os dados não dizem quanto de uma redução do `game` viraria FPS.
+- **Segundo candidato, compartilhado pelas duas APIs: a captura de estado por draw (`fe_streams`, `fe_device`, `fe_index`).** Ele não corresponde a nenhum dos quatro passos da ordem recomendada da Fase 0; seria um passo novo, a ser avaliado. A soma das três partes é 6,60 e 6,16 ms no Vulkan (≈36% do `frontend`) e 5,76 e 5,41 ms no D3D12 (76,5% do `frontend`). No D3D12 é a única parte do front-end com tamanho relevante, mas o D3D12 está preso ao limitador de 30 FPS e o estágio de trabalho mais ocupado é o `worker` (31,78 e 30,11 ms, 95% e 90% de `util.`), então reduzir só o `frontend` do D3D12 não é suportado pelos dados como ganho de FPS.
+- **O passo 3 (pipeline) para o D3D12 não muda**: o `worker` continua sendo o estágio de trabalho mais ocupado (esta fase só mediu a thread do jogo).
+
+**O que os dados ainda não decidem.**
+
+- O que o `game_guest` contém: lógica do jogo, código do driver XDK recompilado ou esperas do kernel. Este detalhamento só diz que ele é 51% a 53% do `game` no Vulkan e 77% a 78% no D3D12 (neste último com a espera do limitador). O próximo passo para separá-lo seria um profiler de amostragem na thread do jogo (por exemplo, ETW/WPA ou outro profiler de CPU, atribuindo o tempo às funções recompiladas do jogo, às do driver e às esperas) ou cronometrar as chamadas D3D e as esperas do kernel no nível das camadas de compatibilidade do guest. Nenhum dos dois foi feito.
+- Para onde vão os ~2,8 a 3,0 ms do `fe_end` do Vulkan que não são `capture` (ressalva 6): truncação do `capture` ou trabalho não cronometrado.
+- Quanto de uma redução do `frontend` vira FPS: depende de `worker` e `gpu`, que não foram medidos aqui em função da redução.
+- Se há draws emitidos por outras threads do guest (ressalva 5) e se o modo worker valia nas três execuções cujo `game.log` não foi conferido (ressalva 4).
