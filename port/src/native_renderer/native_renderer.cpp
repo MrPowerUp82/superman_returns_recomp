@@ -2415,11 +2415,13 @@ bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_fo
 bool PackShaderLookup(uint64_t hash, bool vertex, const void** data, size_t* size) {
   if (!REXCVAR_GET(sr_native_shader_dir).empty()) return false;
   if (const ShaderLibrary* lib = PreShaderLibrary()) {
-    const PreShader* s = lib->Find(hash, vertex);
-    if (!s) return false;
-    *data = s->dxil.data();
-    *size = s->dxil.size();
-    return true;
+    if (const PreShader* s = lib->Find(hash, vertex)) {
+      *data = s->dxil.data();
+      *size = s->dxil.size();
+      return true;
+    }
+    // Browser-generated libraries cover only shaders found in DATA/*.AST.
+    // A miss must still consult the embedded pack and the runtime cache.
   }
   const ShaderPackView& pack = EmbeddedShaderPack();
   ShaderPackEntry e;
@@ -2481,13 +2483,12 @@ const std::vector<uint8_t>* Renderer::LoadShader(uint64_t hash, bool vertex) {
   if (lib) {
     if (const PreShader* s = lib->Find(hash, vertex)) {
       data = std::make_unique<std::vector<uint8_t>>(s->dxil);
-    } else {
-      REXLOG_WARN("native: shader {} not in the pre-shader library", name);
-      LogUnsupportedOnce("shader missing from the pre-shader library", hash, name);
+      auto* result = data.get();
+      shader_bytecode_[hash] = std::move(data);
+      return result;
     }
-    auto* result = data.get();
-    shader_bytecode_[hash] = std::move(data);
-    return result;
+    // A partial library is a cache, not a complete shader corpus. Let the
+    // runtime translator supply missing shaders; pending results stay open.
   }
   // Embedded pack unless sr_native_shader_dir points at loose files.
   const ShaderPackView& pack = EmbeddedShaderPack();
