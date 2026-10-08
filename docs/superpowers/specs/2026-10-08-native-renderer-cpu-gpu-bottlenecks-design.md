@@ -142,3 +142,11 @@ Os passos 1 a 3 podem trocar de ordem conforme a Fase 0. O passo 4 garante "est�
 - Abordagem A aceita.
 - Suposições e riscos documentados.
 - Decision Log completo.
+
+## Atualização pós-Fase 0.5 (2026-10-08): política de texturas decidida
+
+- **Fato medido depois do design:** em 74 amostras de captura do Vulkan (um quadro a cada 120, `frame >= 600`, cinco logs com `SR_VULKAN_PROFILE` das builds de 08/10: `bench_release_8b1f78c_vulkan`, `bench_watch_scan_{on1,on2,off1,off2}_vulkan`), `hash_ms` tem média 0,28 ms (máx. 5), `textures_ms` média 3,89 ms (máx. 16), `pm4_ms` média 1,78 ms; `watch_ms`, `read_ms` e `copy_ms` ficam em ~0. Os valores são ms inteiros truncados por quadro, então as médias estão subestimadas em até ~0,5 ms cada.
+- **Causa:** o padrão `sr_native_texture_watch=true` ativa o monitor de escrita, e então texturas sem mudança são revalidadas com backoff exponencial de 2 a 16 quadros (`native_renderer.cpp`, em `CaptureTextures`). O design assumiu hash exato de ~170 MB por quadro, o que não descreve o Vulkan atual.
+- **Decisão do usuário (2026-10-08):** aceitar o padrão atual (monitor de escrita com backoff). A restrição "textura exata a cada quadro, sem backoff" **não vale mais para o Vulkan** nesta frente; o que o backoff pode atrasar (por exemplo, escritas por alias virtual, como o decodificador de vídeo) fica como risco aceito e conhecido. O D3D12 não foi reavaliado aqui.
+- **Efeito na Fase 1:** o passo 1 (hash paralelo exato) deixa de ser o primeiro alvo no Vulkan, porque o teto de ganho é ~0,3 a 1 ms. O foco passa a ser a dieta do front-end da thread do jogo: estado por draw (`fe_streams` + `fe_device` + `fe_index`, 6,2 a 6,6 ms), o que sobra do `EndCmd` fora da captura (2,8 a 3,0 ms) e os ~3,6 ms de `textures_ms` que não são hash, leitura nem cópia. O hash do D3D12 (7,5 a 8 ms, no `worker`) continua sendo candidato próprio.
+

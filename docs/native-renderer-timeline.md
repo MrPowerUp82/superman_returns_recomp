@@ -339,3 +339,19 @@ A diferença média do `game` é de +0,75 ms (Vulkan) e +0,53 ms (D3D12), abaixo
 - Para onde vão os ~2,8 a 3,0 ms do `fe_end` do Vulkan que não são `capture` (ressalva 6): truncação do `capture`, trabalho não cronometrado ou as leituras de relógio da própria sonda.
 - Quanto de uma redução do `frontend` vira FPS: depende de `worker` e `gpu`, que não foram medidos aqui em função da redução.
 - Se há draws emitidos por outras threads do guest (ressalva 5) e se alguma configuração do usuário alterou os padrões de `sr_native_worker`/`sr_native_pm4_mirror` na `tl_fe2_d3d12`, cujo `game.log` não foi conferido (ressalva 4).
+
+## Atualização: o hash quase não pesa na captura do Vulkan atual
+
+Amostras de um quadro a cada 120 (`frame >= 600`) em cinco logs do Vulkan com `SR_VULKAN_PROFILE` das builds de 08/10 (`bench_release_8b1f78c_vulkan`, `bench_watch_scan_{on1,on2,off1,off2}_vulkan`; 74 amostras, ms inteiros truncados por quadro, então as médias estão subestimadas em até ~0,5 ms):
+
+| Campo | Média (ms) | Máximo (ms) |
+| --- | ---: | ---: |
+| `pm4_ms` | 1,78 | 5 |
+| `textures_ms` | 3,89 | 16 |
+| `hash_ms` | 0,28 | 5 |
+| `watch_ms`, `read_ms`, `copy_ms` | ~0 | 0 a 1 |
+
+O `hash_ms` é ~7% do `textures_ms`. O resto (~3,6 ms) é trabalho por draw e por slot de textura que não é hash, leitura nem cópia. A causa do hash pequeno é a política padrão: com `sr_native_texture_watch=true`, texturas sem mudança são revalidadas com backoff de 2 a 16 quadros. Isso corrige a leitura anterior deste documento de que o hash paralelo exato seria o primeiro alvo da Fase 1: no Vulkan atual o teto desse ganho é ~0,3 a 1 ms. Em 2026-10-08 o usuário aceitou manter essa política (watch com backoff) para o Vulkan; o risco aceito é o atraso de até 16 quadros em texturas escritas por alias virtual (vídeo, por exemplo). O hash do D3D12 (7,5 a 8 ms no `worker`, medido antes) não foi reavaliado.
+
+Ressalvas: são amostras de um quadro por 120 quadros, de builds anteriores à instrumentação da Fase 0 (a lógica de captura é a mesma), e não substituem uma medição com os contadores finos de hash por quadro.
+
