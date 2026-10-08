@@ -282,6 +282,7 @@ class Renderer : public NativeFrontend {
   const uint64_t* ts_cpu_ = nullptr;
   uint64_t ts_frequency_ = 0;
   bool ts_pending_[3] = {};
+  uint64_t ts_frame_[3] = {};  // swap number of the frame measured in each slot (SR_FRAME_TIMELINE)
   bool ts_open_ = false;
   double ts_accum_ms_ = 0.0;
   // Per-pass split (sr_native_gpu_pass_timing): timestamps at pass changes.

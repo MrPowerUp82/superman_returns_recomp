@@ -1749,6 +1749,9 @@ void Renderer::BeginFrameTimestamp() {
     uint32_t n = ts_count_[frame_index_];
     if (n >= 2 && t[n - 1] > t[0]) {
       ts_accum_ms_ += double(t[n - 1] - t[0]) * 1000.0 / double(ts_frequency_);
+      graphics::FrameTimeline::Global().RecordBusy(
+          graphics::TimelineStage::kGpu, ts_frame_[frame_index_],
+          uint64_t(double(t[n - 1] - t[0]) * 1e9 / double(ts_frequency_)));
       ++ts_frames_;
       for (uint32_t i = 0; i + 1 < n; ++i) {
         if (t[i + 1] >= t[i]) {
@@ -1804,6 +1807,7 @@ void Renderer::EndFrameTimestamp() {
   command_list_->ResolveQueryData(ts_heap_.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
                                   kTsPerFrame * frame_index_, n, ts_readback_.Get(),
                                   8 * kTsPerFrame * frame_index_);
+  ts_frame_[frame_index_] = swap_number_;
   ts_pending_[frame_index_] = true;
 }
 
@@ -1826,6 +1830,7 @@ bool Renderer::BeginFrame() {
     }
   } wait_timer{wait_start, &stats_.gpu_wait_us};
   if (wait_value && fence_->GetCompletedValue() < wait_value) {
+    graphics::TimelineBlockScope gpu_blocked;
     fence_->SetEventOnCompletion(wait_value, fence_event_);
     if (WaitForSingleObject(fence_event_, 2000) != WAIT_OBJECT_0) {
       HRESULT reason = device_->GetDeviceRemovedReason();
@@ -1841,6 +1846,7 @@ bool Renderer::BeginFrame() {
   }
   if (present_fence_ && present_fence_values_[frame_index_] &&
       present_fence_->GetCompletedValue() < present_fence_values_[frame_index_]) {
+    graphics::TimelineBlockScope present_blocked;
     present_fence_->SetEventOnCompletion(present_fence_values_[frame_index_], nullptr);
   }
   allocators_[frame_index_]->Reset();
@@ -7078,8 +7084,10 @@ void Renderer::OnSwap(uint8_t* base, uint32_t front_buffer_texture, uint64_t swa
   if (timeline.enabled()) {
     timeline.RecordSpan(graphics::TimelineStage::kGame, swap_number,
                         timeline_game_exit_ns_ ? timeline_game_exit_ns_ : swap_entry_ns, swap_entry_ns, 0);
-    timeline.RecordBusy(graphics::TimelineStage::kCapture, swap_number,
-                        (capture_timings.pm4_us + capture_timings.textures_us) * 1000);
+    // The capture stage is Vulkan-only (packet_sink_ is the Vulkan discriminator).
+    if (packet_sink_)
+      timeline.RecordBusy(graphics::TimelineStage::kCapture, swap_number,
+                          (capture_timings.pm4_us + capture_timings.textures_us) * 1000);
   }
   capture_timings={};
   if(front_frame_%120==0) {
