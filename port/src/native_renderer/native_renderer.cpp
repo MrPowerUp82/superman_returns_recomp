@@ -15,6 +15,8 @@
 #endif
 #include "texture_write_audit.h"
 #include "texture_content.h"
+#include "texture_hash_replay.h"
+#include "texture_source_probe.h"
 #include "../graphics/guest/render_state.h"
 #include "../graphics/guest/edram_alias.h"
 #include "../graphics/guest/render_packet.h"
@@ -408,6 +410,215 @@ Xxh3Fn TextureHash() {
 #endif
   }();
   return fn;
+}
+bool TextureHashReplayEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("SR_NATIVE_TEXTURE_REPLAY");
+    return value && *value && *value != '0';
+  }();
+  return enabled;
+}
+uint64_t TextureHashReplayStartFrame() {
+  static const uint64_t frame = [] {
+    const char* value = std::getenv("SR_NATIVE_TEXTURE_REPLAY_START_FRAME");
+    if (!value || !*value) return uint64_t(1800);
+    char* end = nullptr;
+    const uint64_t parsed = std::strtoull(value, &end, 10);
+    return end != value && !*end && parsed <= 1000000 ? parsed : uint64_t(1800);
+  }();
+  return frame;
+}
+struct TextureReplayCorpus {
+  bool done = false;
+  uint64_t first_frame = 0, bytes = 0;
+  uint32_t first_guest_protect = 0, first_snapshot_protect = 0;
+  bool mixed_guest_protection = false;
+  std::set<std::array<uint32_t, 6>> seen;
+  std::vector<std::shared_ptr<const graphics::guest::TextureCapture>> owners;
+  std::vector<TextureHashReplayCase> cases;
+};
+thread_local TextureReplayCorpus texture_replay;
+void FinishTextureHashReplay(const char* api, uint64_t frame) {
+  auto& corpus = texture_replay;
+  if (corpus.done || corpus.cases.empty()) return;
+  corpus.done = true;
+  uint64_t level_bytes = 0, union_bytes = 0, level_ranges = 0, union_ranges = 0;
+  uint32_t overlap_cases = 0;
+  for (const auto& sample : corpus.cases) {
+    uint64_t before = 0, after = 0;
+    for (auto bytes : sample.levels) before += bytes.size();
+    for (auto bytes : sample.united) after += bytes.size();
+    level_bytes += before;
+    union_bytes += after;
+    level_ranges += sample.levels.size();
+    union_ranges += sample.united.size();
+    overlap_cases += before > after;
+  }
+  const auto result = ReplayTextureHashes(corpus.cases, TextureHash());
+  // Identical-policy control estimates timing/order noise on this same corpus.
+  auto control = corpus.cases;
+  for (auto& sample : control) sample.levels = sample.united;
+  const auto noise = ReplayTextureHashes(control, TextureHash());
+  REXLOG_INFO("native texture replay: api={} frame={} first_frame={} cases={} overlap_cases={} level_ranges={} union_ranges={} level_kb={} union_kb={} repetitions=4 trials=9 level_us={:.3f} union_us={:.3f} control_a_us={:.3f} control_b_us={:.3f} stable={} hash={} first_guest_protect={:X} first_snapshot_protect={:X} mixed_guest_protection={}",
+      api, frame, corpus.first_frame, corpus.cases.size(), overlap_cases,
+      level_ranges, union_ranges, level_bytes / 1024, union_bytes / 1024,
+      result.level_ns / 1000, result.union_ns / 1000,
+      noise.level_ns / 1000, noise.union_ns / 1000,
+      result.stable && noise.stable && noise.level_digest == noise.union_digest,
+      TextureHash() == &Xxh3Baseline ? "baseline" : "avx2", corpus.first_guest_protect,
+      corpus.first_snapshot_protect, corpus.mixed_guest_protection);
+  // Each digest belongs to its own range partition, not a cross-policy equality test.
+  REXLOG_INFO("native texture replay digests: api={} level={:016X} union={:016X} control_a={:016X} control_b={:016X}",
+      api, result.level_digest, result.union_digest, noise.level_digest, noise.union_digest);
+  corpus.cases.clear();
+  corpus.owners.clear();
+}
+void MaybeReplayTextureHash(std::span<const uint32_t, 6> fetch, uint64_t frame,
+    const char* api, std::shared_ptr<const graphics::guest::TextureCapture> snapshot = {}) {
+  auto& corpus = texture_replay;
+  if (corpus.done || frame < TextureHashReplayStartFrame()) return;
+  try {
+    if (!corpus.cases.empty() && (corpus.cases.size() >= 256 ||
+        corpus.bytes >= (64u << 20) || frame >= corpus.first_frame + 120 || corpus.seen.size() >= 512)) {
+      FinishTextureHashReplay(api, frame);
+      return;
+    }
+    std::array<uint32_t, 6> key;
+    std::copy(fetch.begin(), fetch.end(), key.begin());
+    if (corpus.seen.size() >= 512 || !corpus.seen.insert(key).second) return;
+    std::vector<graphics::guest::TextureRange> ranges;
+    std::string error;
+    if (!graphics::guest::DescribeTextureRanges(fetch, ranges, error)) return;
+    const uint64_t bytes = TextureContentBytes(ranges);
+    if (!bytes || bytes > (4u << 20)) return;
+    if (corpus.bytes + bytes > (64u << 20)) { FinishTextureHashReplay(api, frame); return; }
+    if (!snapshot) {
+      // Local checked reads and the resulting capture are diagnostic-only.
+      // They never replace content hashes, GPU resources or frontend snapshots.
+      CheckedGuestReads reads;
+      if (!graphics::guest::CaptureTexture(fetch, frame,
+          [&reads](uint32_t address, uint32_t length) {
+            return reads.Read(REX_KERNEL_MEMORY()->TranslatePhysical<const uint8_t*>(address & 0x1fffffffu), length);
+          }, snapshot, error)) return;
+    }
+    TextureHashReplayCase sample;
+    graphics::guest::LinearTexture decoded;
+    if (!graphics::guest::DecodeTextureLayoutUsing(fetch,
+        [&](uint32_t address, uint32_t length) {
+          auto data = snapshot->memory.Read(address, length);
+          sample.levels.push_back(data);
+          return data;
+        }, decoded, error)) return;
+    for (const auto& range : snapshot->ranges)
+      sample.united.push_back(snapshot->memory.Read(0xa0000000u + range.address, range.length));
+    for (const auto& range : snapshot->ranges) {
+      MEMORY_BASIC_INFORMATION info{};
+      auto* source = REX_KERNEL_MEMORY()->TranslatePhysical<const uint8_t*>(range.address);
+      if (VirtualQuery(source, &info, sizeof(info))) {
+        if (!corpus.first_guest_protect) corpus.first_guest_protect = info.Protect;
+        else if (info.Protect != corpus.first_guest_protect) corpus.mixed_guest_protection = true;
+      }
+    }
+    if (corpus.cases.empty()) {
+      corpus.first_frame = frame;
+      MEMORY_BASIC_INFORMATION info{};
+      if (VirtualQuery(sample.united.front().data(), &info, sizeof(info)))
+        corpus.first_snapshot_protect = info.Protect;
+    }
+    corpus.bytes += bytes;
+    corpus.owners.push_back(std::move(snapshot));
+    corpus.cases.push_back(std::move(sample));
+  } catch (const std::exception& error) {
+    corpus.done = true;
+    corpus.cases.clear();
+    corpus.owners.clear();
+    REXLOG_WARN("native texture replay failed: api={} error={}", api, error.what());
+  }
+}
+bool TextureSourceProbing() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("SR_NATIVE_TEXTURE_SOURCE_PROBE");
+    return value && *value && *value != '0';
+  }();
+  return enabled;
+}
+struct TextureSourceProbeStats {
+  bool done = false;
+  uint64_t checks = 0, selected = 0, stable = 0, changed = 0, unreadable = 0, excluded = 0;
+  uint64_t copied_bytes = 0, stable_bytes = 0;
+  double original_ns = 0, guest_ns = 0, owned_ns = 0, copy_ns = 0;
+  uint32_t guest_protect = 0, owned_protect = 0;
+  std::set<uint32_t> addresses;
+};
+thread_local TextureSourceProbeStats texture_source_probe;
+bool SelectTextureSourceProbe(const char* api, uint64_t frame, uint64_t bytes) {
+  auto& s = texture_source_probe;
+  if (s.done || frame < TextureHashReplayStartFrame()) return false;
+  if (frame >= TextureHashReplayStartFrame() + 120 || s.selected >= 1024 ||
+      s.copied_bytes >= (256u << 20)) {
+    s.done = true;
+    REXLOG_INFO("native texture source probe: api={} frame={} checks={} selected={} stable={} changed={} unreadable={} excluded={} unique_bases={} copied_kb={} stable_kb={} original_ms={:.3f} guest_ms={:.3f} owned_ms={:.3f} copy_ms={:.3f} guest_protect_or={:X} owned_protect_or={:X} stride=32",
+        api, frame, s.checks, s.selected, s.stable, s.changed, s.unreadable, s.excluded,
+        s.addresses.size(), s.copied_bytes / 1024, s.stable_bytes / 1024,
+        s.original_ns / 1e6, s.guest_ns / 1e6, s.owned_ns / 1e6, s.copy_ns / 1e6,
+        s.guest_protect, s.owned_protect);
+    return false;
+  }
+  if ((s.checks++ % 32) != 0) return false;
+  if (!bytes || bytes > (4u << 20) || s.copied_bytes + bytes > (256u << 20)) {
+    ++s.excluded;
+    return false;
+  }
+  ++s.selected;
+  return true;
+}
+template <typename Source>
+void MeasureTextureSource(std::span<const graphics::guest::TextureRange> ranges,
+    Source&& source, uint64_t seed, uint64_t expected, double original_ns) {
+  auto& s = texture_source_probe;
+  try {
+    CheckedGuestReads reads;
+    std::vector<std::span<const uint8_t>> owned;
+    owned.reserve(ranges.size());
+    const auto started = std::chrono::steady_clock::now();
+    for (const auto& range : ranges) {
+      auto bytes = reads.Read(source(range.address, range.length), range.length);
+      if (bytes.size() != range.length) { ++s.unreadable; return; }
+      owned.push_back(bytes);
+      s.copied_bytes += bytes.size();
+    }
+    const double copy_ns = std::chrono::duration<double, std::nano>(
+        std::chrono::steady_clock::now() - started).count();
+    auto guest_hash = [&](uint64_t& value) {
+      value = seed;
+      for (const auto& range : ranges)
+        if (!HashGuestRange(source(range.address, range.length), range.length, value, TextureHash(), value)) return false;
+      return true;
+    };
+    auto owned_hash = [&](uint64_t& value) {
+      value = seed;
+      for (auto bytes : owned)
+        if (!HashGuestRange(bytes.data(), uint32_t(bytes.size()), value, TextureHash(), value)) return false;
+      return true;
+    };
+    const auto result = ProbeTextureSource(expected, (s.selected & 1) != 0, guest_hash, owned_hash);
+    if (!result.readable) { ++s.unreadable; return; }
+    if (!result.stable) { ++s.changed; return; }
+    ++s.stable;
+    s.stable_bytes += TextureContentBytes(ranges);
+    s.original_ns += original_ns;
+    s.guest_ns += result.guest_ns;
+    s.owned_ns += result.owned_ns;
+    s.copy_ns += copy_ns;
+    s.addresses.insert(ranges.front().address);
+    MEMORY_BASIC_INFORMATION info{};
+    if (VirtualQuery(source(ranges.front().address, ranges.front().length), &info, sizeof(info)))
+      s.guest_protect |= info.Protect;
+    if (VirtualQuery(owned.front().data(), &info, sizeof(info))) s.owned_protect |= info.Protect;
+  } catch (const std::exception& error) {
+    s.done = true;
+    REXLOG_WARN("native texture source probe failed: error={}", error.what());
+  }
 }
 std::span<const uint8_t> ReadCommittedGuest(uint8_t* base, uint32_t address, uint32_t length) {
   ++capture_timings.reads;capture_timings.bytes+=length;
@@ -2970,23 +3181,32 @@ uint32_t Renderer::GetTextureSrvIndex(uint8_t* base, const uint32_t fetch[6]) {
   auto it = textures_.find(key);
   if (it != textures_.end()) {
     TextureEntry& entry = it->second;
-    if (entry.checked_frame != frame_count_ && entry.guest_size) {
+    if (entry.checked_frame != frame_count_ && !entry.guest_ranges.empty()) {
       entry.checked_frame = frame_count_;
       // With write watches: guest physical writes trigger a check immediately.
       // Dynamic movie and UI textures (up to 4MB) are revalidated each frame
       // because guest virtual CPU writes (video codecs) bypass physical write watches.
       // Larger unwatched textures are checked every 30 frames.
+      const auto written_since = [this](uint32_t address, uint32_t size, uint32_t seq) {
+        return TextureWrittenSince(address, size, seq);
+      };
+      const auto hash_content = [&entry] {
+        return HashTextureContent(entry.guest_ranges, [](uint32_t address) {
+          return REX_KERNEL_MEMORY()->TranslatePhysical<const uint8_t*>(address);
+        }, TextureHash());
+      };
       CpuTimer watch_timer(cpu_timings.texture_watch_ns);
       const bool written = texture_watch_ &&
-          TextureWrittenSince(entry.guest_base, entry.guest_size, entry.watch_seq);
+          TextureContentWritten(entry.guest_ranges, entry.watch_seq, written_since);
       watch_timer.Stop();
+      // Preserve the existing base-level threshold; adding mip coverage must
+      // not move an existing per-frame texture into the slower policy.
       bool check = entry.guest_size <= (4096u << 10) ||
                    (texture_watch_ ? written : frame_count_ - entry.hashed_frame >= 30);
       if (REXCVAR_GET(sr_native_debug_texture_format) >= 0 &&
           int32_t(fetch[1] & 0x3F) == REXCVAR_GET(sr_native_debug_texture_format)) {
         static int logged = 0;
-        uint64_t h = TextureHash()(
-            REX_KERNEL_MEMORY()->TranslatePhysical<const uint8_t*>(entry.guest_base), entry.guest_size, 0);
+        uint64_t h = hash_content();
         if (logged < 400 && (check || h != entry.content_hash)) {
           ++logged;
           REXLOG_INFO("native dbg tex check {:08X} frame {} written {} hash {} now {} seq {} global {}",
@@ -3003,23 +3223,34 @@ uint32_t Renderer::GetTextureSrvIndex(uint8_t* base, const uint32_t fetch[6]) {
         // write racing with this hash remains newer than entry.watch_seq.
         if (written) {
           CpuTimer rearm_timer(cpu_timings.texture_watch_ns);
-          entry.watch_seq = ArmTextureWatch(entry.guest_base, entry.guest_size);
+          entry.watch_seq = write_seq_.load(std::memory_order_acquire);
+          for (const auto& range : entry.guest_ranges)
+            ArmTextureWatch(range.address, range.length);
           if (CpuProfiling()) ++cpu_timings.texture_watch_rearms;
         }
-        const uint8_t* src =
-            REX_KERNEL_MEMORY()->TranslatePhysical<const uint8_t*>(entry.guest_base);
+        const bool probe = TextureSourceProbing() &&
+            SelectTextureSourceProbe("d3d12", frame_count_, entry.guest_hash_bytes);
         CpuTimer hash_timer(cpu_timings.texture_hash_ns);
-        uint64_t hash = TextureHash()(src, entry.guest_size, 0);
+        const auto probe_start = probe ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        uint64_t hash = hash_content();
+        const double probe_ns = probe ? std::chrono::duration<double, std::nano>(
+            std::chrono::steady_clock::now() - probe_start).count() : 0;
         hash_timer.Stop();
-        if(CpuProfiling()) {cpu_timings.texture_hash_bytes+=entry.guest_size;++cpu_timings.texture_hash_checks;}
+        if (probe) MeasureTextureSource(entry.guest_ranges,
+            [](uint32_t address, uint32_t) { return REX_KERNEL_MEMORY()->TranslatePhysical<const uint8_t*>(address); },
+            0, hash, probe_ns);
+        if(CpuProfiling()) {cpu_timings.texture_hash_bytes+=entry.guest_hash_bytes;++cpu_timings.texture_hash_checks;}
         if(TextureAuditing()) {
+          ObserveTextureValidationForUnlockAudit(fetch,entry.guest_ranges);
           // A write may have arrived during hashing, after the pre-hash test
           // or rearm. Include it before classifying an unobserved change.
           const bool notified=written || (texture_watch_ &&
-              TextureWrittenSince(entry.guest_base,entry.guest_size,entry.watch_seq));
-          AuditTextureHash("d3d12",frame_count_,entry.guest_base,entry.guest_size,
+              TextureContentWritten(entry.guest_ranges,entry.watch_seq,written_since));
+          AuditTextureHash("d3d12",frame_count_,entry.guest_base,entry.guest_hash_bytes,
               entry.guest_format,hash!=entry.content_hash,notified,texture_watch_);
         }
+        if (TextureHashReplayEnabled())
+          MaybeReplayTextureHash(std::span<const uint32_t, 6>(fetch, 6), frame_count_, "d3d12");
         if (hash != entry.content_hash) {
           if (CpuProfiling()) ++cpu_timings.texture_hash_changes;
           ++stats_.textures_reloaded;
@@ -3082,14 +3313,18 @@ uint32_t Renderer::CreateTexture(const uint32_t fetch[6], TextureEntry& entry) {
   // Watch before reading: arm, hash, then decode. A guest write after arming
   // (e.g. a streaming loader filling the texture while the worker decodes it)
   // is always seen by the next revalidation.
-  uint32_t pre_base = 0, pre_size = 0, pre_seq = 0;
-  uint64_t pre_hash = 0;
-  bool pre_armed = texture_watch_ && GetTextureBaseRange(fetch, pre_base, pre_size);
-  if (pre_armed) {
-    pre_seq = ArmTextureWatch(pre_base, pre_size);
-    pre_hash = TextureHash()(REX_KERNEL_MEMORY()->TranslatePhysical<const uint8_t*>(pre_base),
-                             pre_size, 0);
-  }
+  std::vector<graphics::guest::TextureRange> ranges;
+  std::string range_error;
+  if (!graphics::guest::DescribeTextureRanges(std::span<const uint32_t, 6>(fetch, 6),
+                                             ranges, range_error)) return 0;
+  const uint32_t pre_seq = write_seq_.load(std::memory_order_acquire);
+  if (texture_watch_)
+    for (const auto& range : ranges) ArmTextureWatch(range.address, range.length);
+  // Hash before decode even without watches. Hashing only afterwards could
+  // accept a newer hash while keeping pixels decoded before a concurrent write.
+  const uint64_t pre_hash = HashTextureContent(ranges, [](uint32_t address) {
+    return REX_KERNEL_MEMORY()->TranslatePhysical<const uint8_t*>(address);
+  }, TextureHash());
   DecodedTexture decoded;
   const char* reason = nullptr;
   bool decoded_ok = DecodeTexture(fetch, decoded, &reason);
@@ -3267,19 +3502,10 @@ uint32_t Renderer::CreateTexture(const uint32_t fetch[6], TextureEntry& entry) {
   entry.guest_base = decoded.base_address;
   entry.guest_size = decoded.base_size;
   entry.guest_format = decoded.guest_format;
-  if (pre_armed && pre_base == entry.guest_base && pre_size == entry.guest_size) {
-    entry.watch_seq = pre_seq;
-    entry.content_hash = pre_hash;
-  } else {
-    if (texture_watch_ && entry.guest_size) {
-      entry.watch_seq = ArmTextureWatch(entry.guest_base, entry.guest_size);
-    }
-    entry.content_hash =
-        entry.guest_size
-            ? TextureHash()(REX_KERNEL_MEMORY()->TranslatePhysical<const uint8_t*>(entry.guest_base),
-                            entry.guest_size, 0)
-            : 0;
-  }
+  entry.guest_ranges = std::move(ranges);
+  entry.guest_hash_bytes = TextureContentBytes(entry.guest_ranges);
+  entry.watch_seq = pre_seq;
+  entry.content_hash = pre_hash;
   entry.checked_frame = entry.hashed_frame = frame_count_;
   ++stats_.textures_created;
   return entry.srv_index;
@@ -6122,6 +6348,7 @@ void Renderer::CaptureBytes(uint8_t* base, uint32_t address, uint32_t length) {
 }
 
 void Renderer::CaptureTextures(uint8_t* base) {
+  const bool replay_textures = TextureHashReplayEnabled();
   for (uint32_t slot=0;slot<32;++slot) {
     std::array<uint32_t,6> fetch{};
     for(uint32_t i=0;i<6;++i) {
@@ -6174,6 +6401,9 @@ void Renderer::CaptureTextures(uint8_t* base) {
         continue;
       }
       uint64_t hash=0xcbf29ce484222325ull;
+      const bool probe = packet_sink_ && TextureSourceProbing() &&
+          SelectTextureSourceProbe("vulkan", front_frame_, TextureContentBytes(ranges));
+      double probe_ns = 0;
       entry.watch_seq=write_seq_.load(std::memory_order_acquire);
       for(const auto& range:ranges) {
         auto started=std::chrono::steady_clock::now();
@@ -6185,12 +6415,21 @@ void Renderer::CaptureTextures(uint8_t* base) {
         started=std::chrono::steady_clock::now();
         const bool hashed=HashGuestRange(GuestSource(base,0xa0000000u+range.address,range.length),range.length,hash,
             TextureHash(),hash);
-        capture_timings.hash_us+=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-started).count();
+        const auto elapsed = std::chrono::steady_clock::now()-started;
+        capture_timings.hash_us+=std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
+        if (probe) probe_ns += std::chrono::duration<double, std::nano>(elapsed).count();
         if(!hashed) {error="Texture memory is not readable";break;}
       }
-      if(!error.empty()) {entry.failed_frame=front_frame_;entry.failure=error;cur_.texture_errors.emplace_back(slot,std::move(error));continue;}
+      if(!error.empty()) {
+        if (probe) ++texture_source_probe.unreadable;
+        entry.failed_frame=front_frame_;entry.failure=error;cur_.texture_errors.emplace_back(slot,std::move(error));continue;
+      }
+      if (probe) MeasureTextureSource(ranges,
+          [base](uint32_t address, uint32_t length) { return GuestSource(base, 0xa0000000u + address, length); },
+          0xcbf29ce484222325ull, hash, probe_ns);
       const bool unchanged=entry.snapshot && hash==entry.content_hash;
       if(TextureAuditing() && entry.snapshot) {
+        ObserveTextureValidationForUnlockAudit(fetch.data(),ranges);
         uint64_t bytes=0;
         for(const auto& range:ranges) {
           bytes+=range.length;
@@ -6223,6 +6462,8 @@ void Renderer::CaptureTextures(uint8_t* base) {
         capture_timings.copy_us+=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-started).count();
       }
     }
+    if (packet_sink_ && entry.snapshot && replay_textures)
+      MaybeReplayTextureHash(fetch, front_frame_, "vulkan", entry.snapshot);
     cur_.textures[slot]=entry.snapshot;
   }
   // Commands retain ownership even when the frontend cache is pruned.
@@ -6811,7 +7052,10 @@ void Renderer::OnSwap(uint8_t* base, uint32_t front_buffer_texture, uint64_t swa
   if(packet_sink_ && (capture_timings.pm4_us+capture_timings.textures_us>100000 || front_frame_%120==0))
     REXLOG_INFO("native Vulkan capture frame={} pm4_ms={} textures_ms={} reads={} bytes={} virtual_queries={} watch_ms={} read_ms={} hash_ms={} copy_ms={} new={} watch_dirty={} revalidated={} changed={} entries={} watch_scan_hits={} watch_scan_misses={}",front_frame_,capture_timings.pm4_us/1000,capture_timings.textures_us/1000,capture_timings.reads,capture_timings.bytes,capture_timings.queries,capture_timings.watch_us/1000,capture_timings.read_us/1000,capture_timings.hash_us/1000,capture_timings.copy_us/1000,capture_timings.new_entries,capture_timings.watch_dirty,capture_timings.revalidated,capture_timings.changed,captured_textures_.size(),capture_timings.watch_scan_hits,capture_timings.watch_scan_misses);
   capture_timings={};
-  if(front_frame_%120==0) FlushTextureAudit(packet_sink_?"vulkan":"d3d12_capture",front_frame_);
+  if(front_frame_%120==0) {
+    FlushTextureAudit(packet_sink_?"vulkan":"d3d12_capture",front_frame_);
+    FlushResourceUnlockAudit(front_frame_);
+  }
   if (worker_mode_) {
     FlushBatch();
     // sr_native_worker_lag 0: the frame is recorded before the guest continues.

@@ -87,6 +87,9 @@ constexpr int kPassRenderHud = profile::kPassHud;
 // Last guest D3DDevice pointer seen in a hooked D3D call's r3 (used when the
 // profile has no device global).
 void NoteGuestDevice(uint32_t dev);
+void FlushResourceUnlockAudit(uint64_t frame);
+void ObserveTextureValidationForUnlockAudit(const uint32_t* fetch,
+    std::span<const graphics::guest::TextureRange> ranges);
 
 // Records an unsupported case once per (category, key) in the log; returns
 // true the first time. The renderer keeps the kit's policy for the draw
@@ -547,10 +550,12 @@ class Renderer : public NativeFrontend {
   struct TextureEntry {
     Microsoft::WRL::ComPtr<ID3D12Resource> resource;
     uint32_t srv_index = 0;
-    // Content validation: guest base level range and its hash. Dynamic
+    // Content validation: all decoder source ranges and their combined hash. Dynamic
     // textures (fog tables, CPU-written lookup tables) are rewritten in place.
     uint32_t guest_base = 0;
     uint32_t guest_size = 0;
+    std::vector<graphics::guest::TextureRange> guest_ranges;
+    uint64_t guest_hash_bytes = 0;
     uint64_t content_hash = 0;
     uint64_t checked_frame = 0;
     uint64_t hashed_frame = 0;

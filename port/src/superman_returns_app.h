@@ -133,3 +133,4 @@ class SupermanReturnsApp : public rex::ReXApp {
   // void OnShutdown() override {}
   // void OnConfigurePaths(rex::PathConfig& paths) override {}
 };
+

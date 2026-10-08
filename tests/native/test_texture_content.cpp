@@ -31,6 +31,29 @@ SR_TEST(clean_watch_scan_rechecks_a_write_completed_during_the_previous_scan) {
   SR_CHECK(cache.Written(1,completed,1,[] {return true;},reused));
   SR_CHECK(!reused);
 }
+namespace {
+uint64_t Hash(const uint8_t* bytes, size_t size, uint64_t seed) {
+  uint64_t value = seed;
+  for (size_t i = 0; i < size; ++i) value = (value ^ bytes[i]) * 1099511628211ull;
+  return value;
+}
+}
+SR_TEST(texture_content_hash_detects_mip_only_changes_without_hashing_the_gap) {
+  std::array<uint8_t, 128> memory{};
+  const std::array<TextureRange, 2> ranges{{{0, 16}, {96, 32}}};
+  auto read = [&](uint32_t address) { return memory.data() + address; };
+  const uint64_t original = HashTextureContent(ranges, read, Hash);
+  SR_CHECK_EQ(TextureContentBytes(ranges), 48u);
+  memory[64] = 7;  // Gap between the base level and its separately allocated mip tail.
+  SR_CHECK_EQ(HashTextureContent(ranges, read, Hash), original);
+  for (uint32_t i = 96; i < 128; ++i) {
+    memory[i] = 1;
+    SR_CHECK(HashTextureContent(ranges, read, Hash) != original);
+    memory[i] = 0;
+  }
+  memory[15] = 1;
+  SR_CHECK(HashTextureContent(ranges, read, Hash) != original);
+}
 SR_TEST(texture_content_watch_detects_a_write_confined_to_the_mip_tail) {
   const std::array<TextureRange, 2> ranges{{{0x1000, 0x1000}, {0x9000, 0x2000}}};
   auto written = [](uint32_t address, uint32_t length, uint32_t sequence) {
@@ -39,4 +62,14 @@ SR_TEST(texture_content_watch_detects_a_write_confined_to_the_mip_tail) {
   SR_CHECK(!TextureContentWritten(std::span(ranges).first(1), 7, written));
   SR_CHECK(TextureContentWritten(ranges, 7, written));
   SR_CHECK(!TextureContentWritten(ranges, 8, written));
+}
+SR_TEST(texture_content_hash_covers_all_slices_and_handles_wide_byte_totals) {
+  std::array<uint8_t, 96> memory{};
+  const std::array<TextureRange, 1> ranges{{{0, 96}}}; // Six 16-byte cube faces.
+  auto read = [&](uint32_t address) { return memory.data() + address; };
+  const auto original = HashTextureContent(ranges, read, Hash);
+  memory.back() = 1;
+  SR_CHECK(HashTextureContent(ranges, read, Hash) != original);
+  const std::array<TextureRange, 2> wide{{{0, 0xffffffffu}, {0, 0xffffffffu}}};
+  SR_CHECK_EQ(TextureContentBytes(wide), 0x1fffffffeull);
 }

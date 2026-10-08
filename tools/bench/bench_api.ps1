@@ -28,8 +28,12 @@ $prevProfile = $env:SR_VULKAN_PROFILE
 try {
   if ($Profile) { $env:SR_VULKAN_PROFILE = '1' }
   & "$PSScriptRoot\bench.ps1" -Name $Name -Exe $Exe -ExtraArgs $gameArgs -TitleTimeout 180 -WorldTimeout 200
-  if ($Profile) { Copy-Item "$root\logs\game.log" "$root\logs\bench_$Name.log" -Force }
   if ($Gate) { & "$PSScriptRoot\image_gate.ps1" -Name $Name -Mode $Gate }
 } finally {
+  # Keep diagnostic evidence even when gameplay validation rejects the run.
+  # The next invocation clears game.log before launching the game.
+  if ($Profile -and (Test-Path "$root\logs\game.log")) {
+    Copy-Item "$root\logs\game.log" "$root\logs\bench_$Name.log" -Force
+  }
   if ($null -ne $prevProfile) { $env:SR_VULKAN_PROFILE = $prevProfile } else { Remove-Item env:SR_VULKAN_PROFILE -ErrorAction SilentlyContinue }
 }

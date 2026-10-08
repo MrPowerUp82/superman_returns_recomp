@@ -110,6 +110,20 @@
 #define SR_CONFIRMED_INDEX_BUFFER_UNLOCK 1
 #define SR_ABSENT_INDEX_BUFFER_UNLOCK 0
 
+// Shared unlock helper: both confirmed buffer wrappers tail-call this exact
+// entry. Decrements the resource lock count, flushes base/mip cache ranges.
+// Texture-shaped wrappers 820FFCC8 / 821002F8 also tail-call it. Observing
+// this helper does not establish complete texture write-producer coverage.
+#define SR_ADDR_RESOURCE_UNLOCK 820F3C18  // CONFIRMED: shared tail target of both confirmed buffer unlocks
+#define SR_CONFIRMED_RESOURCE_UNLOCK 1
+#define SR_ABSENT_RESOURCE_UNLOCK 0
+
+// Four-instruction dispatch thunk called by the three-plane update 8235CA48.
+// C11 runtime observed vtable+72 -> 8247E9D0 -> vtable+76 -> 82480D80.
+#define SR_ADDR_FRAME_HANDOFF 824707B0  // CONFIRMED: exact dispatch shape and C11 runtime targets
+#define SR_CONFIRMED_FRAME_HANDOFF 1
+#define SR_ABSENT_FRAME_HANDOFF 0
+
 // XDK shader object creators: sub_820F5148 (vertex) and sub_820F4D90 (pixel).
 // r3 = the finished container (virtualSize / physicalSize set, both parts
 // contiguous), the new shader object comes back in r3 with the container
@@ -174,6 +188,8 @@ inline constexpr HookRole kHookRoles[] = {
     SR_ROLE("Swap", SWAP),
     SR_ROLE("BlockOnFence", BLOCK_ON_FENCE),
     SR_ROLE("PollGpuProgress", POLL_GPU_PROGRESS),
+    SR_ROLE("ResourceUnlock", RESOURCE_UNLOCK),
+    SR_ROLE("FrameHandoff", FRAME_HANDOFF),
 };
 
 #undef SR_ROLE

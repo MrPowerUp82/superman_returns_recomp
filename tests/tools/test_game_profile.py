@@ -34,6 +34,8 @@ ROLE_TO_TSV = {
     "SWAP": None,  # project evidence (frame_stats.cpp), the TSV has no candidate
     "BLOCK_ON_FENCE": "D3D_BlockOnFence(dev,fence)",
     "POLL_GPU_PROGRESS": "D3D_PollGpuProgress(BlockOnFence poll)",
+    "RESOURCE_UNLOCK": None,  # shared target of the two confirmed buffer unlock wrappers
+    "FRAME_HANDOFF": None,  # statically inspected dispatch, runtime targets in checkpoint14
 }
 
 

@@ -21,11 +21,26 @@ struct CleanTextureWatchScan {
     return written;
   }
 };
+// Keep validation on precisely the same physical ranges as the decoder,
+// including noncontiguous mip tails and all array/cube slices.
+inline uint64_t TextureContentBytes(std::span<const graphics::guest::TextureRange> ranges) {
+  uint64_t bytes = 0;
+  for (const auto& range : ranges) bytes += range.length;
+  return bytes;
+}
 template <typename Written>
 bool TextureContentWritten(std::span<const graphics::guest::TextureRange> ranges,
                            uint32_t sequence, Written&& written) {
   for (const auto& range : ranges)
     if (written(range.address, range.length, sequence)) return true;
   return false;
+}
+template <typename Read, typename Hash>
+uint64_t HashTextureContent(std::span<const graphics::guest::TextureRange> ranges,
+                            Read&& read, Hash&& hash) {
+  uint64_t value = 0;
+  for (const auto& range : ranges)
+    value = hash(read(range.address), range.length, value);
+  return value;
 }
 }  // namespace superman_returns::native

@@ -22,8 +22,13 @@
 //    which forwards to native_bridge.cpp (OnFrameStatsSwap).
 
 #include <cstring>
+#include <algorithm>
+#include <cstdlib>
+#include <map>
+#include <mutex>
 
 #include <rex/ppc.h>
+#include <rex/logging.h>
 
 #include "game_profile.h"
 #include "hang_watchdog.h"
@@ -31,10 +36,191 @@
 #include "native_graphics_system.h"
 #include "native_renderer.h"
 #include "sdk_compat.h"
+#include "checked_guest_memory.h"
+#include "resource_unlock_audit.h"
 
 namespace {
 
 namespace native = superman_returns::native;
+
+bool ResourceUnlockAuditing() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("SR_NATIVE_RESOURCE_UNLOCK_AUDIT");
+    return value && *value && *value != '0';
+  }();
+  return enabled;
+}
+struct UnlockAuditCounters {
+  uint64_t calls=0, candidates=0, unreadable=0, invalid_fetch=0, other=0, dropped_callers=0;
+  uint64_t details=0;
+  uint64_t validation_checks=0, matched_checks=0, matched_fetches=0, dropped_fetches=0;
+  uint64_t matched_range_checks=0, matched_range_sets=0, dropped_range_sets=0;
+  std::map<uint32_t, std::array<uint64_t,2>> callers;
+  std::map<std::array<uint32_t,6>, bool> fetches;
+  std::map<native::UnlockRangeKey,bool> range_sets;
+  std::map<std::array<uint32_t,4>,uint64_t> producers;
+  uint64_t producer_unreadable=0, producer_dropped=0;
+};
+UnlockAuditCounters unlock_audit;
+std::mutex unlock_audit_mutex;
+struct HandoffObservation {
+  uint64_t sequence=0;
+  uint32_t object=0, descriptor_address=0, caller=0, target=0, next_target=0;
+  native::FrameHandoffDescriptor descriptor{};
+  bool readable=false;
+};
+struct PendingHandoff {
+  HandoffObservation observation{};
+  uint32_t result=0, mask=0;
+  bool active=false;
+};
+thread_local PendingHandoff pending_handoff;
+thread_local uint32_t handoff_depth=0;
+thread_local bool handoff_nested=false;
+struct HandoffCounters {
+  uint64_t calls=0, returns=0, nonnegative=0, negative=0, unreadable=0, unsupported=0;
+  uint64_t nested=0, abandoned=0, plane_matches=0, plane_misses=0, unattributed=0, groups=0;
+} handoff_audit;
+
+std::span<const uint8_t> ReadAuditGuest(native::CheckedGuestReads& reads,
+    uint8_t* base, uint32_t address, uint32_t size) {
+  if(!address || uint64_t(address)+size>(uint64_t{1}<<32)) return {};
+  return reads.Read(base+address,size);
+}
+uint32_t AuditWord(std::span<const uint8_t> bytes, size_t offset) {
+  return (uint32_t(bytes[offset])<<24)|(uint32_t(bytes[offset+1])<<16)|
+         (uint32_t(bytes[offset+2])<<8)|bytes[offset+3];
+}
+HandoffObservation BeginHandoff(uint8_t* base, uint32_t object,
+                                uint32_t descriptor, uint32_t caller) {
+  HandoffObservation observation;
+  observation.object=object; observation.descriptor_address=descriptor; observation.caller=caller;
+  native::CheckedGuestReads reads;
+  const auto header=ReadAuditGuest(reads,base,object,4);
+  const auto table=header.size()==4 ? ReadAuditGuest(reads,base,AuditWord(header,0),80)
+                                   : std::span<const uint8_t>{};
+  const auto data=ReadAuditGuest(reads,base,descriptor,48);
+  observation.readable=table.size()==80 && native::ReadFrameHandoffDescriptor(data,observation.descriptor);
+  if(observation.readable) {
+    observation.target=AuditWord(table,72); observation.next_target=AuditWord(table,76);
+  }
+  std::lock_guard lock(unlock_audit_mutex);
+  observation.sequence=++handoff_audit.calls;
+  if(pending_handoff.active) ++handoff_audit.abandoned;
+  pending_handoff={};
+  if(observation.sequence<=12)
+    REXLOG_INFO("native frame handoff entry: seq={} object={:08X} descriptor={:08X} caller={:08X} target={:08X} next_target={:08X} readable={} kind={} destinations={:08X},{:08X},{:08X} strides={},{},{}",
+        observation.sequence,object,descriptor,caller,observation.target,observation.next_target,
+        observation.readable,observation.descriptor.kind,observation.descriptor.destinations[0],
+        observation.descriptor.destinations[1],observation.descriptor.destinations[2],
+        observation.descriptor.strides[0],observation.descriptor.strides[1],observation.descriptor.strides[2]);
+  return observation;
+}
+void EndHandoff(const HandoffObservation& observation, uint32_t result, bool nested) {
+  std::lock_guard lock(unlock_audit_mutex);
+  auto& s=handoff_audit;
+  ++s.returns;
+  if(int32_t(result)<0) ++s.negative; else ++s.nonnegative;
+  if(nested) ++s.nested;
+  else if(!observation.readable) ++s.unreadable;
+  else if(observation.caller!=0x8235cb5cu || observation.descriptor.kind!=1 ||
+          observation.target!=0x8247e9d0u || observation.next_target!=0x82480d80u) ++s.unsupported;
+  else pending_handoff={observation,result,0,true};
+  if(nested) pending_handoff={};
+  if(observation.sequence<=12)
+    REXLOG_INFO("native frame handoff return: seq={} result={:08X} nested={} pending={}",
+        observation.sequence,result,nested,pending_handoff.active);
+}
+void ObserveHandoffUnlock(uint32_t caller, uint32_t base_page, uint32_t object) {
+  // Call only while holding unlock_audit_mutex. Failure-path unlocks have no
+  // completed handoff and must not consume a previous call's observation.
+  uint32_t plane=3;
+  if(caller==0x8235cbd4u) plane=0;
+  else if(caller==0x8235cbe0u) plane=1;
+  else if(caller==0x8235cbecu) plane=2;
+  else if(caller==0x8235cb7cu || caller==0x8235cb88u || caller==0x8235cb94u) {
+    if(pending_handoff.active) ++handoff_audit.abandoned;
+    pending_handoff={};
+    return;
+  } else return;
+  if(!pending_handoff.active) { ++handoff_audit.unattributed; return; }
+  auto& p=pending_handoff;
+  if(!native::ConsumeHandoffPlane(p.observation.descriptor,plane,base_page,p.mask)) {
+    ++handoff_audit.plane_misses;
+    return;
+  }
+  ++handoff_audit.plane_matches;
+  if(p.observation.sequence<=12)
+    REXLOG_INFO("native frame handoff unlock: seq={} plane={} object={:08X} base={:08X} result={:08X} mask={}",
+        p.observation.sequence,plane,object,base_page,p.result,p.mask);
+  if(p.mask==7) { ++handoff_audit.groups; p.active=false; }
+}
+void ObserveResourceUnlock(uint8_t* base, uint32_t object, uint32_t base_page,
+                           uint32_t mip_page, uint32_t caller) {
+  std::lock_guard lock(unlock_audit_mutex);
+  auto& s=unlock_audit;
+  ++s.calls;
+  ObserveHandoffUnlock(caller,base_page,object);
+  native::CheckedGuestReads reads;
+  // Only the three successful return sites of the statically inspected
+  // planar update. Read the current producer after its call has returned;
+  // this is a sampled vtable target, not proof of the call's actual target.
+  if (caller==0x8235cbd4u || caller==0x8235cbe0u || caller==0x8235cbecu) {
+    auto read_word=[&](uint32_t address, uint32_t& value) {
+      if (!address || uint64_t(address)+4>(uint64_t{1}<<32)) return false;
+      const auto data=reads.Read(base+address,4);
+      if (data.size()!=4) return false;
+      value=(uint32_t(data[0])<<24)|(uint32_t(data[1])<<16)|(uint32_t(data[2])<<8)|data[3];
+      return true;
+    };
+    uint32_t producer=0, vtable=0, target=0, next_target=0;
+    if (!read_word(0x829761d4u,producer) || !read_word(producer,vtable) ||
+        uint64_t(vtable)+76+4>(uint64_t{1}<<32) || !read_word(vtable+72,target) ||
+        !read_word(vtable+76,next_target)) {
+      ++s.producer_unreadable;
+    } else {
+      const std::array<uint32_t,4> key{producer,vtable,target,next_target};
+      auto found=s.producers.find(key);
+      if (found==s.producers.end() && s.producers.size()<16) {
+        found=s.producers.emplace(key,0).first;
+        REXLOG_INFO("native texture producer sampled: object={:08X} vtable={:08X} target={:08X} next_target={:08X} caller={:08X} plane={:08X}",producer,vtable,target,next_target,caller,object);
+      }
+      if (found!=s.producers.end()) ++found->second;
+      else ++s.producer_dropped;
+    }
+  }
+  auto bytes = object && uint64_t(object)+52 <= (uint64_t{1}<<32)
+      ? reads.Read(base+object,52) : std::span<const uint8_t>{};
+  std::array<uint32_t,6> fetch{};
+  bool candidate=false, fresh_fetch=false;
+  std::vector<superman_returns::graphics::guest::TextureRange> ranges;
+  std::string error;
+  if (bytes.empty()) ++s.unreadable;
+  else if (!native::ReadUnlockTextureFetch(bytes,base_page,mip_page,fetch)) ++s.other;
+  else if (!native::NormalizeUnlockTextureFetch(fetch) ||
+           !superman_returns::graphics::guest::DescribeTextureRanges(fetch,ranges,error)) ++s.invalid_fetch;
+  else {
+    candidate=true; ++s.candidates;
+    if (s.fetches.contains(fetch) || s.fetches.size()<1024) fresh_fetch=s.fetches.try_emplace(fetch,false).second;
+    else ++s.dropped_fetches;
+    native::UnlockRangeKey key;
+    if (native::MakeUnlockRangeKey(ranges,key)) {
+      if (s.range_sets.contains(key) || s.range_sets.size()<1024) s.range_sets.try_emplace(key,false);
+      else ++s.dropped_range_sets;
+    } else ++s.dropped_range_sets;
+  }
+  auto it=s.callers.find(caller);
+  if (it==s.callers.end() && s.callers.size()<64) it=s.callers.emplace(caller,std::array<uint64_t,2>{}).first;
+  if (it!=s.callers.end()) { ++it->second[0]; it->second[1]+=candidate; }
+  else ++s.dropped_callers;
+  if (candidate && fresh_fetch && s.details<256) {
+    ++s.details;
+    uint64_t size=0;
+    for (const auto& range:ranges) size+=range.length;
+    REXLOG_INFO("native resource unlock candidate: object={:08X} caller={:08X} base={:08X} mip={:08X} bytes={} ranges={} fetch={:08X},{:08X},{:08X},{:08X},{:08X},{:08X}",
+        object,caller,base_page,mip_page,size,ranges.size(),fetch[0],fetch[1],fetch[2],fetch[3],fetch[4],fetch[5]);
+  }
+}
 
 inline uint32_t GuestLoad32(uint8_t* base, uint32_t address) {
   uint32_t v;
@@ -63,12 +249,81 @@ thread_local uint32_t t_fence_dev = 0, t_fence_value = 0;
 
 }  // namespace
 
+void superman_returns::native::FlushResourceUnlockAudit(uint64_t frame) {
+  if (!ResourceUnlockAuditing()) return;
+  std::lock_guard lock(unlock_audit_mutex);
+  const auto& s=unlock_audit;
+  const auto& h=handoff_audit;
+  REXLOG_INFO("native frame handoff audit: frame={} calls={} returns={} nonnegative={} negative={} unreadable={} unsupported={} nested={} abandoned={} plane_matches={} plane_misses={} unattributed={} groups={} cumulative=true",
+      frame,h.calls,h.returns,h.nonnegative,h.negative,h.unreadable,h.unsupported,h.nested,
+      h.abandoned,h.plane_matches,h.plane_misses,h.unattributed,h.groups);
+  for (const auto& [key,count]:s.producers)
+    REXLOG_INFO("native texture producer audit: frame={} object={:08X} vtable={:08X} target={:08X} next_target={:08X} samples={} unreadable={} dropped={} cumulative=true",frame,key[0],key[1],key[2],key[3],count,s.producer_unreadable,s.producer_dropped);
+  REXLOG_INFO("native resource unlock audit: frame={} calls={} candidates={} unreadable={} invalid_fetch={} other={} callers={} dropped_callers={} details={} fetches={} dropped_fetches={} validation_checks={} matched_checks={} matched_fetches={} range_sets={} dropped_range_sets={} matched_range_checks={} matched_range_sets={} cumulative=true",
+      frame,s.calls,s.candidates,s.unreadable,s.invalid_fetch,s.other,s.callers.size(),s.dropped_callers,s.details,
+      s.fetches.size(),s.dropped_fetches,s.validation_checks,s.matched_checks,s.matched_fetches,
+      s.range_sets.size(),s.dropped_range_sets,s.matched_range_checks,s.matched_range_sets);
+  for (const auto& [caller,counts]:s.callers)
+    REXLOG_INFO("native resource unlock caller: frame={} caller={:08X} calls={} candidates={} cumulative=true",
+        frame,caller,counts[0],counts[1]);
+}
+
+void superman_returns::native::ObserveTextureValidationForUnlockAudit(const uint32_t* words,
+    std::span<const graphics::guest::TextureRange> ranges) {
+  if (!ResourceUnlockAuditing()) return;
+  std::array<uint32_t,6> fetch;
+  std::copy_n(words,6,fetch.begin());
+  std::lock_guard lock(unlock_audit_mutex);
+  auto& s=unlock_audit;
+  ++s.validation_checks;
+  // Physical coverage is a separate observation from exact fetch identity.
+  // Equal ranges may still belong to reused allocations; neither match is an
+  // authoritative invalidation/version signal.
+  UnlockRangeKey key;
+  if (MakeUnlockRangeKey(ranges,key)) {
+    const auto found=s.range_sets.find(key);
+    if (found!=s.range_sets.end()) {
+      ++s.matched_range_checks;
+      if (!found->second) {
+        found->second=true;
+        ++s.matched_range_sets;
+        if (s.matched_range_sets<=32)
+          REXLOG_INFO("native resource unlock validated ranges: base={:08X} mip={:08X} ranges={} fetch={:08X},{:08X},{:08X},{:08X},{:08X},{:08X}",
+              fetch[1]&0xfffff000u,fetch[5]&0xfffff000u,ranges.size(),fetch[0],fetch[1],fetch[2],fetch[3],fetch[4],fetch[5]);
+      }
+    }
+  }
+  const auto it=s.fetches.find(fetch);
+  if (it==s.fetches.end()) return;
+  ++s.matched_checks;
+  if (!it->second) {
+    it->second=true;
+    ++s.matched_fetches;
+    if (s.matched_fetches<=32)
+      REXLOG_INFO("native resource unlock validated fetch: base={:08X} mip={:08X} fetch={:08X},{:08X},{:08X},{:08X},{:08X},{:08X}",
+          fetch[1]&0xfffff000u,fetch[5]&0xfffff000u,fetch[0],fetch[1],fetch[2],fetch[3],fetch[4],fetch[5]);
+  }
+}
+
 #define SR_DEFINE_HOOK_(addr) \
   REX_EXTERN(__imp__sub_##addr); \
   extern "C" REX_FUNC(sub_##addr)
 #define SR_DEFINE_HOOK(addr) SR_DEFINE_HOOK_(addr)
 #define SR_ORIGINAL_(addr) __imp__sub_##addr
 #define SR_ORIGINAL(addr) SR_ORIGINAL_(addr)
+
+#if SR_HOOK_ENABLED(FRAME_HANDOFF)
+// Observe arguments before the dispatch thunk and the actual returned result.
+// No lock spans guest execution; the original is called in both modes.
+SR_DEFINE_HOOK(SR_ADDR_FRAME_HANDOFF) {
+  if(!ResourceUnlockAuditing()) { SR_ORIGINAL(SR_ADDR_FRAME_HANDOFF)(ctx,base); return; }
+  if(handoff_depth++==0) handoff_nested=false; else handoff_nested=true;
+  const auto observation=BeginHandoff(base,ctx.r3.u32,ctx.r4.u32,uint32_t(ctx.lr));
+  SR_ORIGINAL(SR_ADDR_FRAME_HANDOFF)(ctx,base);
+  EndHandoff(observation,ctx.r3.u32,handoff_nested);
+  --handoff_depth;
+}
+#endif
 
 // ---- Draws -------------------------------------------------------------------
 
@@ -296,6 +551,15 @@ SR_DEFINE_HOOK(SR_ADDR_INDEX_BUFFER_UNLOCK) {
 #endif
 
 // ---- Frame boundary and GPU waits ----------------------------------------------
+
+#if SR_HOOK_ENABLED(RESOURCE_UNLOCK)
+SR_DEFINE_HOOK(SR_ADDR_RESOURCE_UNLOCK) {
+  const uint32_t object=ctx.r3.u32, base_page=ctx.r4.u32, mip_page=ctx.r5.u32;
+  const uint32_t caller=uint32_t(ctx.lr);
+  SR_ORIGINAL(SR_ADDR_RESOURCE_UNLOCK)(ctx,base);
+  if (ResourceUnlockAuditing()) ObserveResourceUnlock(base,object,base_page,mip_page,caller);
+}
+#endif
 
 #if SR_HOOK_ENABLED(SWAP) && SR_HEX(SR_ADDR_SWAP) != SR_FRAME_STATS_SWAP_HOOK
 // D3DDevice_Swap(dev, pFrontBuffer, pParameters) when it is not the function

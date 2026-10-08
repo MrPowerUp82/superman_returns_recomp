@@ -429,7 +429,581 @@ Local artifacts (ignored by Git):
 - Final opt-in build: `port/out/build/win-amd64-release/superman_returns.exe`,
   SHA-256 `a9a766362b64e54d01ceb3c25ea0f55c35826c7808318b2b1132dc881547ac26`.
 
+## Sixth pass: cover mip-only writes in D3D12 (2026-10-08)
+
+The writer-coverage investigation found a concrete validation gap: D3D12
+decoded all available mip levels but watched and hashed only the base-level
+range. A write confined to a separately allocated mip tail could leave a
+cached GPU texture stale even though its base hash remained unchanged.
+This was established by code inspection and a synthetic regression case,
+not by attributing a specific gameplay artifact to the gap.
+
+D3D12 entries now retain the ranges produced by `DescribeTextureRanges`, the
+same source description used by the Vulkan capture path. The renderer arms
+watches for all ranges before reading, takes a sequence before arming any
+range, and hashes those ranges in order before decoding. Revalidation and
+audit checks cover the entire range list, including post-hash notification
+checks. A changed hash still retires the old GPU resource and descriptor
+through the existing fence lifetime before installing the replacement.
+The original base-size threshold and checking cadence remain unchanged;
+this pass does not remove hashes or enable the shared-constants experiment.
+
+Hash byte counters now include mip ranges. Packed mip ranges can overlap and
+are currently hashed individually, just as in the capture description. This
+adds correctness coverage and may increase CPU cost; it is not an FPS
+optimization. Coalescing these ranges and proving writer coverage remain
+separate work.
+
+Build validation also exposed existing graphics-system split errors. The
+interface include was moved outside the project namespace, existing factory
+callers retain a compatibility alias for the renamed implementation, and the
+renderer accepts the common interface pointer. The explicit syntax-error test
+marker was removed. The separate Vulkan stub was not made the active factory;
+the existing implementation still handles the selected API and guest GPU
+synchronization. Other pre-existing working changes were preserved.
+
+Local Release binary SHA-256:
+`3715567a248da2e8aa1b33638188145b7addae7781999f32db57098af5a318f0`.
+Build diagnostics are in `build/native_c6_build.log`; runtime audit/profile
+logs and screenshots use `logs/bench_native_c6_{d3d12,vulkan}.*`.
+
+Validation passed: 107 native cases, allocation budget, 88 Vulkan cases and
+12 SDK-backed texture layout cases. The latter target was built with
+`SR_GUEST_TEXTURE_TESTS=ON` and run directly as `sr_guest_texture_tests.exe`;
+it is not registered in CTest. Its new packed-mip regression checks the actual
+SDK-generated ranges, demonstrates an unchanged base hash alongside a changed
+full hash, and verifies the mip-only write predicate. Other tests cover all
+mip-tail bytes, the final cube face, gaps between allocations and wide byte totals.
+
+Both APIs completed idle/forward gameplay with audit enabled, at the same
+1280x720 / 30 FPS capped settings. D3D12 reported 27.9/27.9 FPS, Vulkan
+22.9/23.9. These runs have no same-state paired baseline, audit adds overhead,
+and the runner needed different numbers of opening skips. No performance gain
+or precise regression magnitude is established. D3D12 now checks more source
+bytes and should not be treated as equivalent work to the base-only baseline.
+
+| API | Completed audit intervals | Hash checks | Hashed KiB | Changes | Unnotified changes |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| D3D12 | 32 | 2320249 | 347885964 | 790 | 0 |
+| Vulkan capture | 21 | 117974 | 21598224 | 743 | 0 |
+
+These observations still do not prove complete write-producer coverage.
+The existing coarse start-image gate against the C5 audit images passed,
+but scene/effect timing differed considerably: D3D12 PSNR 20.00 dB /
+histogram 0.17687, Vulkan 19.98 dB / 0.16423. Manual inspection confirmed
+gameplay/HUD; these screenshots are insufficient to certify fine visual
+equivalence. The deterministic mip regression provides the targeted evidence.
+Summaries: `logs/native_c6_texture_audit_summary.json`,
+`logs/native_c6_image_gates.json`, `logs/native_c6_guest_texture_tests.log`.
+Reproduction scripts: `build/summarize_native_c6_audit.ps1` and
+`build/compare_native_c6.ps1` (Windows PowerShell 5.1).
+
+## Seventh pass: union overlapping texture source ranges (2026-10-08)
+
+Packed mip levels can request the same physical allocation multiple times.
+The sixth pass covered these bytes in D3D12, but hashed each level's range
+separately. Vulkan likewise repeated hashing, watch setup and snapshot copies
+for overlapping source ranges.
+
+`DescribeTextureRanges` now returns the sorted union of its validated physical
+ranges. Overlap and adjacency are merged; gaps remain excluded. This shared
+description supplies D3D12 validation and Vulkan hashing/capture. The actual
+decoder retains its private per-level range list, since source size and mip
+number cannot be indexed through the merged list. Snapshots contain the full
+union, and each original decoder request remains contained in one captured
+range. No mip pixels, checking cadence, graphics setting or resource lifetime
+are removed by this change. The hash value changes with range boundaries,
+but these hashes are process-local and rebuilt on startup.
+
+The Vulkan backoff size now counts unique bytes rather than duplicate mip
+requests. If this moves a texture below the existing 4 MiB threshold, it
+receives more conservative periodic validation; this change never uses that
+threshold to defer a previously eligible small texture.
+
+Validation passed: Release build, 110 native cases plus allocation budget,
+88 Vulkan cases, and 13 SDK-backed texture cases. The packed-mip SDK fixture
+requires four level reads totaling 28672 bytes; the owned capture now requires
+two union reads totaling 24576 bytes (14.3% fewer bytes, 50% fewer reads), with
+identical decoded pixels. Additional SDK comparisons cover cube, volume and
+linear mip layouts and decoding after live source mutation. The pure union
+tests check duplicates, nesting, overlap, adjacency, allocation gaps, arena
+end bounds, idempotence and exact byte coverage over 256 varied input sets.
+
+The same-session benchmark uses the sixth-pass binary as its reference,
+SHA-256 `3715567a248da2e8aa1b33638188145b7addae7781999f32db57098af5a318f0`,
+saved as `artifacts/native-renderer-performance/native_c7_before.exe`.
+The changed Release binary has SHA-256
+`1bb9dcbe86aeebd0f6e6c32048ae63c07ab45e3dd8e0ae130373025a7cb4c7e0`.
+Both run 1280x720, 100% scale, VSync and the 30 FPS cap on the same
+i5-13420H / Intel UHD Graphics. CPU profiling is on; texture audit and the
+shared-constants experiment are off. No compilation ran during FPS sampling.
+
+| API / build | Idle FPS | Forward FPS |
+| --- | ---: | ---: |
+| D3D12 reference | 28.0 | 27.2 |
+| D3D12 union | 28.2 | 28.9 |
+| Vulkan reference | 20.9 | 21.3 |
+| Vulkan union | 19.9 | 21.2 |
+
+Final three 120-swap profiling windows (nested CPU timings):
+
+| Measurement | Reference | Union |
+| --- | ---: | ---: |
+| D3D12 worker execute (ms/frame) | 35.917 | 32.103 |
+| D3D12 constants (ms/frame) | 17.387 | 16.620 |
+| D3D12 texture hash (ms/frame) | 7.973 | 8.160 |
+| D3D12 hashed KiB/frame | 108430 | 86717.3 |
+| D3D12 hash checks/frame | 751.7 | 772.0 |
+| D3D12 draws/frame | 2897.0 | 2448.3 |
+| Vulkan frontend capture (ms/frame) | 26.323 | 25.470 |
+| Vulkan worker execute (ms/frame) | 39.960 | 39.687 |
+
+The D3D12 run hashed about 20% fewer bytes per frame (22% fewer per check),
+but submitted 15.5% fewer draws. Hash time did not improve. Lower worker time
+and the forward FPS increase therefore do not establish a speedup from range
+union; Vulkan FPS also did not improve. The proven result is removing duplicate
+source coverage while retaining identical decoded pixels in deterministic
+tests. Repeated pairs or replaying identical captured texture inputs are
+needed to establish a CPU/FPS gain. Different opening skips and traffic remain
+confounders; no reduction of graphics quality was used.
+
+Paired start-image gates passed: D3D12 PSNR 33.69 dB / histogram distance
+0.02383; Vulkan 36.36 dB / 0.01038. Manual inspection confirmed gameplay/HUD in
+both candidates. The pixel-for-pixel SDK comparisons cover the targeted range
+change; neither the screenshots nor these fixtures certify the entire game.
+
+Local artifacts (ignored): `logs/bench_native_c7_{before,after}_{d3d12,vulkan}.log`,
+their start/idle/forward PNGs, CSV rows, `logs/native_c7_profile_summary.json`,
+`logs/native_c7_image_gates.json`, `logs/native_c7_guest_texture_tests.log`,
+and `build/native_c7_build.log`. Summaries reproduce with
+`build/summarize_native_c7.ps1` and `build/compare_native_c7.ps1` (Windows
+PowerShell 5.1). Both benchmark executables are preserved in
+`artifacts/native-renderer-performance/native_c7_{before,after}.exe` and need
+the release runtime dependencies beside them when launched.
+
+## Eighth pass: replay identical texture hash inputs (2026-10-08)
+
+The seventh-pass gameplay samples varied in draw count and texture traffic.
+An opt-in diagnostic now compares per-level hashing with union hashing on
+the same immutable, owned texture snapshots. `SR_NATIVE_TEXTURE_REPLAY=1`
+enables it; `SR_NATIVE_TEXTURE_REPLAY_START_FRAME` selects the first eligible
+frame (default 1800). It is disabled by default and does not replace texture
+validation or GPU resources. D3D12 makes checked diagnostic captures; Vulkan
+retains existing frontend captures. No captured texture payload is written
+to disk.
+
+Each thread collects unique six-word fetch descriptors, at most 256 accepted
+textures / 64 MiB, with a 4 MiB source limit per texture. Collection finishes
+after 120 frames from the first accepted sample or 512 examined descriptors
+if it has any accepted samples. The decoder's read requests supply the old
+per-level spans; the snapshot ranges supply the union spans. Decoding,
+allocation and span resolution happen outside the timed hash loops. Owned
+snapshots are released after replay. These limits describe retained source
+bytes, not peak process memory including temporary decode/capture buffers.
+
+`texture_hash_replay.h` runs nine alternating AB/BA trials, four corpus passes
+per policy per trial, and reports the median time per corpus pass. It checks
+every timed digest against that policy's untimed digest. Different range
+boundaries intentionally produce different chained hashes; cross-policy
+equality would be an invalid correctness condition. A second run assigns
+union spans to both policies as an identical-policy timing control.
+
+Both real-game corpora completed at frame 1800, with 256 cases each, using
+runtime-selected AVX2. These are separate corpora and must not be compared
+across APIs as equivalent workloads.
+
+| Capture path | Level / union KiB per pass | Bytes removed | Level / union median ms | Time reduction observed | Identical-control spread |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| D3D12 | 52424 / 42240 | 19.43% | 2.896 / 2.795 | 3.49% | 3.91% |
+| Vulkan | 69316 / 59100 | 14.74% | 4.016 / 3.728 | 7.18% | 3.21% |
+
+Both had 1964 level ranges and 256 union ranges; 199 D3D12 and 198 Vulkan
+cases had overlapping bytes. All timed outputs were stable. Union and both
+control digests matched within each corpus:
+
+| Capture path | Level digest | Union / control digest |
+| --- | --- | --- |
+| D3D12 | `C93174AFCF7F94B4` | `FDB9083E01EF26DD` |
+| Vulkan | `D3A4C70623F1D141` | `4BC32B6035BF7C56` |
+
+The byte reduction is established on real inputs. D3D12's observed timing
+difference is smaller than the identical-control spread; Vulkan's larger
+difference is encouraging but only comes from one corpus/run. The control
+spread is a descriptive noise check, not a confidence interval. Neither
+result establishes an FPS improvement or justifies removing validation.
+Snapshots use owned heap storage, and repeated passes warm CPU caches; the
+corpus is unique-descriptor weighted rather than draw-frequency weighted.
+Original and snapshot first-range pages reported protection `0x4` in both
+captures, with no differing original first-range flags observed. This does
+not establish equal cache residency or check every page/alias.
+
+Release build passed, with 113 native cases plus allocation budget, 88 Vulkan
+cases and 13 SDK texture cases. New replay cases cover distinct partition
+digests, input mutation during timing and invalid/empty requests. No build or
+heavy tests ran during gameplay measurement. The diagnostic gameplay runs
+completed both idle/forward scenarios; their FPS is not a paired speedup test.
+
+Image comparison against C7 passed for D3D12 (21.17 dB / histogram 0.05992).
+Vulkan failed the existing character-region chromaticity gate (0.070 versus
+0.05), despite global 21.52 dB / 0.02130. Manual inspection shows different
+character/cape poses, with the scene and HUD present in both images; this
+does not turn the failed gate into a visual-equivalence pass. Thresholds
+were not relaxed. A matched-pose comparison remains needed for that claim.
+
+Reproduce using the Release binary and `tools/bench/bench_api.ps1 -Profile`,
+with the two environment variables above, API `d3d12` or `vulkan` and name
+`native_c8_replay_<api>`. Audit and shared-constants cache were disabled.
+Local logs/screenshots use `logs/bench_native_c8_replay_*`; summaries are
+`logs/native_c8_texture_replay_summary.json` and `logs/native_c8_image_gates.json`.
+Scripts `build/summarize_native_c8_replay.ps1` and `build/compare_native_c8.ps1`
+run in Windows PowerShell 5.1; the latter intentionally returns failure for
+this Vulkan gate. Build log: `build/native_c8_build_final.log`.
+
+Release executable and preserved `artifacts/native-renderer-performance/native_c8_replay.exe`
+SHA-256: `ccd84cf529a4466e9737e755567599a3696aa4de3d3ac360e70ee0d095a42f43`.
+The next investigation should measure original guest-memory hash reads with
+matched descriptor frequencies, and establish writer/alias/resolve coverage
+before making versions authoritative. The current replay measures hashing
+alone, not the cost of capture or full rendering.
+
+## Ninth pass: sample original guest-memory hash reads (2026-10-08)
+
+`SR_NATIVE_TEXTURE_SOURCE_PROBE=1` enables an immediate source-cost diagnostic,
+disabled by default. It shares the start-frame setting
+`SR_NATIVE_TEXTURE_REPLAY_START_FRAME` (default 1800), but is independent of
+the C8 replay switch. Every 32nd actual hash check is selected, retaining
+repeated textures rather than deduplicating fetch descriptors. D3D12 samples
+cached-entry revalidation; Vulkan samples dirty/revalidation checks including
+initial loads. Limits are 1024 selected checks, 256 MiB cumulative copied
+source bytes, 4 MiB per texture and 120 frames after the configured start.
+Checked copies are released after each sample; no payload is saved to disk.
+
+The diagnostic records the original production hash duration, then copies the
+same union ranges with `CheckedGuestReads`. It alternates guest/owned hash
+order across selected checks and finishes with another guest hash. The same
+partition and API-specific production seed are used throughout. Timings enter
+the stable totals only when the paired guest hash, owned hash and final guest
+hash all match the original production hash. Failed reads and observed changes
+are counted separately. Matching hashes do not provide atomic snapshots or
+prove complete writer coverage. Paired reads use the same SEH hash wrapper;
+the original D3D12 hash retains its existing direct path.
+
+| API | Sample window | Observed checks | Stable samples | Distinct stable base addresses | Stable KiB |
+| --- | --- | ---: | ---: | ---: | ---: |
+| D3D12 | 1800–1843 | 32737 | 1024 | 470 | 123844 |
+| Vulkan | 1800–1920 | 7241 | 227 | 200 | 30064 |
+
+No samples were rejected for observed changes, failed reads or size. The
+first range's source and owned page protection flags ORed to `0x4` for both
+APIs. This does not inspect all pages or prove alias/cache equivalence.
+
+Mean microseconds per stable sampled check (sums divided by stable count):
+
+| API | Original guest hash | Guest hash after copy | Owned hash | Checked allocation/copy | (Copy + owned hash) / original |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| D3D12 | 8.459 | 3.413 | 3.149 | 33.377 | 4.32× |
+| Vulkan | 11.833 | 5.872 | 5.119 | 54.379 | 5.03× |
+
+The original reads were slower than both subsequent reads. Cache warming
+and intervening scheduling are plausible explanations, not isolated causes:
+copying necessarily reads the source before the pair. A fast owned replay
+therefore cannot be substituted for the original production hash time.
+The checked-copy implementation costs substantially more than the original
+hash on these inputs. Copy timing includes per-range allocation, zeroing and
+`ReadProcessMemory`, but excludes destruction and later upload. This does not
+measure an optimized reusable scratch-buffer implementation. No copy path
+was enabled for normal validation.
+
+These are short, differently weighted windows from one run per API. D3D12
+exhausted the sample count before the benchmark's visible-gameplay detection;
+Vulkan's window overlapped visible gameplay. Deterministic stride sampling can
+also correlate with traversal order. The figures describe these samples,
+not a representative whole-game distribution, confidence interval or FPS gain.
+Both APIs completed idle/forward gameplay, with no concurrent build/tests.
+
+The external comparison was revisited in the primary
+[UnleashedRecomp video implementation](https://github.com/hedge-dev/UnleashedRecomp/blob/main/UnleashedRecomp/gpu/video.cpp#L2005).
+Its texture lock/unlock hooks expose mapped storage and enqueue an upload on
+unlock; the render thread copies that storage to the GPU. This supplies a
+concrete producer-driven design to investigate. Our confirmed profile has
+vertex/index buffer unlock hooks, but no corresponding identified texture
+unlock hook. Adapting the approach requires establishing Superman Returns'
+actual texture writers and lifetimes; those hook addresses and object layouts
+cannot be transferred from Sonic Unleashed. No external source code was copied.
+
+Validation: Release build, 116 native cases plus allocation budget, 88 Vulkan
+cases and 13 SDK texture cases passed. New tests exercise AB/BA callback order,
+the final guest bracket, disagreement at every hash observation and read
+failures. Image gates against C8 passed: D3D12 30.43 dB / histogram 0.06189;
+Vulkan 36.45 dB / 0.00865. Manual inspection confirmed scene/HUD. Rechecking
+against C7 passed D3D12 (21.46 / 0.04699), but Vulkan still failed the character
+chromaticity region (0.065 > 0.05; global 21.53 / 0.02220). The earlier C7
+comparison remains unresolved; a C8-relative pass does not override it.
+
+Logs/screenshots: `logs/bench_native_c9_source_{d3d12,vulkan}.*`.
+Reproduce with `tools/bench/bench_api.ps1 -Profile`, the source-probe switch
+above, start frame 1800, and names `native_c9_source_<api>`. C8 replay,
+texture audit and shared-constants cache were off. The tracked summarizer
+`tools/bench/summarize_texture_source_probe.ps1 -NamePrefix native_c9_source`
+checks completed counts and writes `logs/native_c9_source_summary.json`.
+Image results: `logs/native_c9_image_gates.json`, from
+`build/compare_native_c9.ps1` (Windows PowerShell 5.1, nonzero exit because of
+the C7 Vulkan failure). Build: `build/native_c9_build_final.log`.
+
+Release and preserved `artifacts/native-renderer-performance/native_c9_source_probe.exe`
+SHA-256: `2cbf1a740c5d92773afcf73152c57d192eeb21e1cf4bccb8f9aadb0c6b9cd8c7`.
+Next: identify and audit texture write producers, using the lock/unlock path
+as a concrete lead. Retain content validation until aliases, video writes,
+allocation reuse and resolves are covered. No optimization is enabled by
+these diagnostics.
+
+## Tenth pass: identify and observe resource unlock producers (2026-10-08)
+
+The producer-driven route suggested by
+[UnleashedRecomp's texture lock/unlock implementation](https://github.com/hedge-dev/UnleashedRecomp/blob/main/UnleashedRecomp/gpu/video.cpp#L2005)
+now has concrete observation points in this game's generated code. No external
+implementation or address was copied. The static report reproduces with
+`python tools/analysis/texture_unlock_candidates.py --out logs/native_c10_unlock_candidates.json`.
+It records instruction-comment hashes and callers and rejects changes to the
+two short unlock wrapper shapes.
+
+| Guest address | Evidence / role |
+| --- | --- |
+| `820F3C18` | Common unlock; exact tail target of both confirmed buffer unlocks. Decrements resource lock count and calls `82106F98`, whose code contains cache-line `dcbf` loops and `sync`. |
+| `820FFCC8` | Texture-shaped unlock: reads object words at offsets 32/48, masks page addresses and tail-calls the common helper. |
+| `821002F8` | Surface-shaped unlock: obtains the texture through object+24, then performs the same page extraction. |
+| `820FFCB0` | Level-zero texture lock candidate; shifts arguments and tail-calls `820FF530`. |
+| `821002D8` | Surface lock candidate through object+24; tail-calls `820FF5C0`. |
+| `8235CA48` | Locks three outputs, supplies their addresses/strides to `824707B0`, unlocks the outputs and binds three textures. |
+| `824707B0` | Four-instruction indirect thunk through the object's vtable at offset 72; actual target and codec identity remain unresolved. |
+
+Only the common helper was added as a confirmed profile role and hooked.
+Its original always executes. `SR_NATIVE_RESOURCE_UNLOCK_AUDIT=1` enables
+checked, read-only observation of 52 object-header bytes afterward. The
+classifier requires texture type, page arguments matching the header and
+successful SDK source-range description. These remain structural candidates,
+not a general resource-type or write-coverage guarantee. The audit is off by
+default. It retains at most 64 callers, 1024 descriptors and 1024 range sets,
+emits at most 256 distinct-descriptor details and 32 first-match details, and
+reports cumulative counters every 120 frontend swaps. It copies no texture
+payload. Diagnostic allocation/locking means its FPS is not a speedup test.
+
+Object-header pages are CPU aliases, while source ranges for rendering use
+physical pages. The common helper's arithmetic masks to 29 bits and adds
+4 KiB for E/F aliases. The audit now performs that normalization before SDK
+range description, preserving the low descriptor bits and rejecting arena-end
+overflow. Example: object page `EBDC9000` maps to `0BDCA000`, not `0BDC9000`.
+This changes audit metadata only; normal renderer address translation was
+not changed.
+
+With `SR_NATIVE_TEXTURE_AUDIT=1` also enabled, real revalidation checks compare
+both the entire normalized six-word descriptor and the exact sorted physical
+range partition against earlier observed unlocks. Those are separate metrics.
+All hashes, validation cadence, backoff and GPU uploads remain unchanged.
+
+Final run, last completed cumulative unlock summaries:
+
+| API | Frontend frame | Unlock calls | Texture candidates | Stored range sets | Matched range sets | Matching validation checks | Full-descriptor matches |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| D3D12 | 3120 | 19365 | 516 | 148 | 50 | 46104 | 0 |
+| Vulkan | 2160 | 14931 | 2483 | 148 | 49 | 6296 | 0 |
+
+Both observed 18 callers, with no failed header reads, invalid fetch layouts
+or dropped callers/descriptors/range sets. Overall validation-check counters
+were 2055746 and 79677. Different opening skips and backend policies mean
+these are independent workloads. Exact descriptors still differed even after
+page normalization; equality of physical coverage is the established result.
+Allocation reuse or alternate views can share these ranges, so a range match
+does not establish object identity, a write since the last hash or lifetime.
+
+The three-plane path's actual return PCs `8235CBD4`, `8235CBE0`, `8235CBEC`
+were observed 84 times each in D3D12 and 740 times each in Vulkan. Its live
+descriptors have dimensions 1280×720 and two 640×360 outputs, consistent with
+a planar video producer (an inference, not confirmed codec identity). The
+texture-object globals read by this routine are `829761E4/E8/EC`; the object
+passed to the producer thunk comes from `829761D4`. The current aggregate
+does not prove that every one of these three planes matched a bound range,
+nor attribute each hash change to one specific unlock.
+
+Completed content-audit windows saw D3D12 2056864 checks / 238 changes and
+Vulkan 79677 checks / 1960 changes, with zero unnotified changes under the
+existing physical-watch definition. These windows and unlock snapshots have
+different boundaries. No event-by-event coverage percentage is established,
+and zero unnotified changes does not prove that unlock notifications alone
+would cover writes.
+
+Validation: Release, 120 native cases plus allocation budget, three profile
+consistency Python tests, 88 Vulkan cases and 13 SDK texture cases passed.
+New tests cover big-endian header extraction, unrelated/short objects, exact
+range partitions, alias normalization and arena-end rejection. Profile role
+checks now include the project's common helper alongside the original 21
+kit roles. Both APIs completed idle/forward gameplay. No builds or heavy
+tests ran during FPS sampling.
+
+Image gates against C9 passed: D3D12 33.40 dB / histogram 0.01844, Vulkan
+37.65 dB / 0.00510. Manual inspection confirmed scene/HUD. This comparison
+does not resolve the older C7 Vulkan gate failure or certify all game visuals.
+
+Reproduce with both audit environment variables above and
+`tools/bench/bench_api.ps1 -Api <api> -Name native_c10_ranges_<api> -Profile`.
+C8 replay, source probe and shared-constants cache were off. Run
+`tools/bench/summarize_resource_unlock_audit.ps1 -NamePrefix native_c10_ranges`
+for `logs/native_c10_ranges_summary.json`. It checks category and caller totals
+and requires at least one physical-range correlation. Logs/screenshots:
+`logs/bench_native_c10_ranges_{d3d12,vulkan}.*`. The first descriptor-only
+pilot is retained as `logs/bench_native_c10_unlock_*`; it is not a performance
+reference. Gates: `build/compare_native_c10.ps1` (Windows PowerShell 5.1),
+`logs/native_c10_image_gates.json`. Build: `build/native_c10_ranges_build.log`.
+
+Release and preserved `artifacts/native-renderer-performance/native_c10_unlock_audit.exe`
+SHA-256: `53a6711b57552767a427f7a57b527ad709d643377d4430d5148ea3b99030a9e6`.
+Next: resolve the three-plane thunk's actual vtable target at runtime; record
+per-resource unlock sequences and content-change checks across initialization,
+playback, skipping, destruction and allocation reuse. That evidence is needed
+before any producer-based version can replace content validation. No FPS
+improvement or authoritative invalidation policy is claimed by this pass.
+
+## Eleventh pass: identify the planar frame handoff (C11)
+
+The common-unlock audit now samples the producer object at `829761D4`
+after the three successful plane-unlock return sites (`8235CBD4/E0/EC`).
+Checked guest reads follow the current object's vtable and slots +72/+76.
+This remains behind `SR_NATIVE_RESOURCE_UNLOCK_AUDIT=1`, with a 16-tuple
+limit and unreadable/overflow counters. Hash validation and uploads are
+unchanged. Sampling after return does not trace the actual indirect call
+or establish object identity across reuse or concurrent writes.
+
+Both APIs observed vtable `82050038`, slot +72 `8247E9D0`, slot +76
+`82480D80`. Static inspection of the owner's generated PPC establishes:
+
+- `824707B0` dispatches through slot +72.
+- `8247E9D0` is a seven-instruction adapter: r6 keeps the descriptor,
+  r4 receives descriptor word 1, r5 points to descriptor+8, then slot +76.
+- `82480D80` has 717 instructions. Its planar branch (descriptor word 0
+  equals 1) obtains a source buffer through another object, copies to
+  descriptor pointers +12/+16/+20, and handles contiguous versus row-strided
+  output (+36/+40/+44). Width/height come from object+232/+236; chroma is
+  half-size in both dimensions. A separate branch for value 255 performs
+  vector conversion to packed output. The routine is a frame handoff/copy,
+  not a confirmed codec decoder and not a safe whole-function memcpy target.
+
+`texture_unlock_candidates.py` now verifies the seven-instruction adapter's
+shape and reports both sampled targets; optional `--target HEX` adds other
+observed functions. The runtime summarizer checks that producer samples plus
+read failures/overflow equal the three successful plane callers' totals.
+`bench_api.ps1 -Profile` now preserves the game log in `finally`, including
+failed gameplay/image checks, before another invocation clears `game.log`.
+
+Per-cache-entry unlock/hash sequencing is still pending. A single global
+range baseline would confuse views and reused allocations. The next step
+is to observe the handoff's entry/exit, descriptor and return result, then
+classify first observation, content change, intervening unlock, concurrent
+unlock and reuse separately for each cache entry/API. No hash bypass or
+FPS gain is claimed. Checkpoint 14 records validation and artifacts.
+
+Final runs: D3D12 2247 producer samples at frontend frame 3720; Vulkan
+2211 at 2280. Each API retained one tuple, with zero failed reads/drops;
+caller totals matched. These are unlock-site samples, not decoded-frame
+counts. D3D12 was already at 2247 by frame 2160; this route's activity was
+concentrated before the end of gameplay, so no gameplay bottleneck is
+established. Texture audits retained all hashes: D3D12 1992072 checks /
+1962 changes, Vulkan 87375 / 1952, zero physically unnotified changes.
+There is still no event-by-event proof that unlocks cover those changes.
+
+Release and existing native/allocation, Vulkan, profile and SDK texture
+suites passed. Final idle/forward gameplay runs passed both APIs. The first
+Vulkan attempt failed its final HUD assertion and was discarded; its images
+are retained as `bench_native_c11_chain_vulkan_failed_*` and
+`vulkan_not_gameplay.png`. The old script lost that attempt's log; the new
+`finally` preservation fixes this for future runs. No builds/heavy tests
+overlapped FPS sampling. Image gates against C9 passed: D3D12 34.09 dB /
+0.02725 histogram, Vulkan 39.26 / 0.00865; scene/HUD manually inspected.
+The old C7 Vulkan image-gate failure remains unresolved.
+
+Logs: `logs/bench_native_c11_chain_{d3d12,vulkan}.*`; summary command
+`tools/bench/summarize_resource_unlock_audit.ps1 -NamePrefix native_c11_chain`.
+Static report: `logs/native_c11_unlock_candidates.json`; image gates:
+`build/compare_native_c11.ps1`, `logs/native_c11_image_gates.json`.
+Build: `build/native_c11_producer_build.log`. Preserved Release:
+`artifacts/native-renderer-performance/native_c11_producer_audit.exe`, SHA-256
+`8c9c641dddfe58cedadde132773c3df1be2f612b5d7f39e4a8e5b944048e927e`.
+
+## Twelfth pass: correlate handoff returns with their three unlocks (C12)
+
+The four-instruction `824707B0` dispatch thunk now has an observation hook,
+appended as profile role `FRAME_HANDOFF` (23 roles total, old indices kept).
+The static report verifies its exact shape. With resource-unlock auditing
+off, the hook delegates directly to the original. With auditing on, it
+checks the object, current vtable slots +72/+76 and 48-byte output descriptor
+before calling the original, then records the actual returned r3. No mutex
+spans guest execution; no guest register, memory or hash policy is changed.
+
+Each entry receives a unique increasing identifier. Eligible planar calls
+from `8235CB5C` with the C11 target pair are retained per thread after return.
+The three sites `8235CBD4/E0/EC` each consume their designated destination
+once, requiring page agreement between the locked output pointer and the
+resource's base page (including CPU aliases). Mask 7 completes the group.
+Failure-path sites clear pending state; a replacement entry counts an
+abandoned group. Nested calls invalidate associations. Duplicate planes,
+wrong destinations and unattributed unlocks are counted separately. Storage
+is one pending observation per thread and detailed logs cover only the first
+12 identifiers. Return sign is counted separately: nonnegative does not
+prove that a frame's bytes changed.
+
+The identifier orders entries, not completed writes: different threads can
+return in a different order. Page agreement also does not establish resource
+identity across reuse. This pass establishes observed call/unlock ordering,
+not complete producer coverage or hash-change attribution. Existing hashes
+remain active. The next step is per-cache-entry/API validation baselines,
+capturing producer/unlock state on both sides of each content check and
+classifying first observation, concurrent writes, views and reuse explicitly.
+No FPS improvement or hash/upload optimization is claimed.
+
+Three new native tests cover descriptor endian/length/strides, alias and
+arena-boundary page agreement, and rejection of duplicate/wrong/packed planes.
+The summarizer checks return categories and the three plane callers' totals
+against complete/partial/missing associations. Checkpoint 15 records runtime
+results, images and reproducible artifacts.
+
+Final D3D12 journal at frame 3720: 268 entries/returns, 268 complete groups,
+804 matched planes. Vulkan at frame 2400: 262 entries/returns, 262 groups,
+786 planes. Both had zero failed reads, unsupported calls, nesting,
+abandonment, destination mismatches or unattributed successful-site unlocks.
+All returns were nonnegative. Initial detailed sequences record individual
+destinations matching the three resources and strides 1280/768/768; half-size
+chroma must not be assumed to have a 640-byte stride. Texture auditing still
+hashed content: D3D12 2309192 checks / 790 changes, Vulkan 110693 / 770,
+zero physically unnotified changes. These aggregates do not attribute each
+hash change to a specific handoff.
+
+Release, 123 native cases plus allocation budget, 88 Vulkan cases, three
+profile Python tests and 13 SDK texture cases passed. Static shape checks and
+PowerShell parsing passed. Both APIs completed idle/forward gameplay without
+builds or heavy tests overlapping FPS sampling. Gates against C9 passed:
+D3D12 32.36 dB / histogram 0.05854, Vulkan 37.45 / 0.01023; scene/HUD manually
+inspected. The C7 Vulkan gate failure remains unresolved. The initial D3D12
+attempt closed its window before any producer entry and was discarded;
+its log is `bench_native_c12_handoff_d3d12_closed.log`. Retrying the same build
+passed; the discarded log does not record a hook crash.
+
+Reproduce with both resource-unlock and texture audits on, other experiments
+off. Logs/images: `logs/bench_native_c12_handoff_{d3d12,vulkan}.*`; run
+`tools/bench/summarize_resource_unlock_audit.ps1 -NamePrefix native_c12_handoff`.
+Static report: `logs/native_c12_unlock_candidates.json`; gates:
+`build/compare_native_c12.ps1`, `logs/native_c12_image_gates.json`.
+Build: `build/native_c12_handoff_build.log`. Preserved Release:
+`artifacts/native-renderer-performance/native_c12_handoff_audit.exe`, SHA-256
+`60d5f042a0c3afad50e38e115604bfb282838d484b01656706be13c78ea99008`.
+
 ## Gameplay optimization: reuse clean texture page scans
+
+The planar-video investigation is closed for gameplay optimization. In C12,
+handoff counters stayed unchanged throughout the gameplay measurement while
+D3D12 still spent roughly 7.5–8.1 ms/frame hashing textures, and Vulkan spent
+roughly 10 ms in texture capture even in sampled frames with negligible hash
+time. The identified video producer does not justify replacing general
+texture validation. No further checkpoint or producer-version policy was
+added. Existing diagnostic hooks remain off by default.
 
 Vulkan capture repeatedly scanned the same texture's watched pages for many
 draws in one frame. It now memoizes only a *clean page scan*, keyed by frontend
@@ -456,10 +1030,8 @@ notification counter and was not benchmarked in this comparison.
 
 Three new tests exercise clean-result reuse, invalidation by frame/baseline/
 completion, repeated dirty results, and notification completion during a scan.
-The original benchmark build passed the native, allocation-budget, Vulkan,
-profile Python and SDK texture suites. The release excludes the experimental
-diagnostic hooks and range-coalescing changes; it is built and validated
-separately from the committed source. No builds/heavy tests
+Release, 126 native cases plus allocation budget, 88 Vulkan cases, three
+profile Python tests and 13 SDK texture cases passed. No builds/heavy tests
 overlapped the gameplay measurement windows.
 
 Same-binary Vulkan comparison, in OFF/ON/ON/OFF order, with the existing
@@ -492,8 +1064,16 @@ assumption is used to skip a hash.
 
 Image gates passed for ON 1 versus OFF 1 (34.45 dB / histogram 0.02903) and
 ON 2 versus OFF 2 (35.53 / 0.00628). Scene/HUD manually inspected in both
-ON runs. These checks apply to this optimization, not to other renderer experiments.
+ON runs. This does not resolve the older C7 Vulkan image-gate failure.
 
-
-Benchmark evidence (local, ignored): `logs/bench_watch_scan_{off1,on1,on2,off2}_vulkan.*`,
-`logs/watch_scan_comparison.json` and `logs/watch_scan_image_gates.json`.
+Current executable: `port/out/build/win-amd64-release/superman_returns.exe`.
+Preserved copy: `artifacts/native-renderer-performance/native_texture_watch_scan_cache.exe`;
+SHA-256 `e2c181e5a7f5d4a5212c04401533270cb2c5cdc5c682bbc8c174989b9fc8daab`.
+Use the Release runtime dependencies. No distribution executable was replaced.
+Build log: `build/texture_watch_scan_build.log`; SDK tests:
+`logs/texture_watch_scan_guest_tests.log`. Benchmark logs/images:
+`logs/bench_watch_scan_{off1,on1,on2,off2}_vulkan.*`, CSV `logs/bench_results.csv`.
+Analysis: `build/summarize_watch_scan.py` -> `logs/watch_scan_comparison.json`;
+gates: `build/compare_watch_scan.ps1` (Windows PowerShell 5.1) ->
+`logs/watch_scan_image_gates.json`. Runtime artifacts/analysis helpers are
+local and ignored. Earlier changes retained; no commit or publication.

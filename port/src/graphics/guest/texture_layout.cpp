@@ -5,6 +5,7 @@
 // docs/native-port-plan.md section 2.
 //
 #include "texture_layout.h"
+#include "texture_ranges.h"
 #include "../../native_renderer/xenos_tiling.h"
 #include <exception>
 #include <stdexcept>
@@ -122,6 +123,11 @@ uint32_t ComponentCount(LinearFormat f) {
 
 } // namespace
 
+// Decoder requests remain per-level; the public range description is the
+// union used for capture/validation and must never be indexed by mip number.
+static bool DescribeTextureLevelRanges(std::span<const uint32_t, 6>,
+                                      std::vector<TextureRange>&, std::string&);
+
 bool DecodeTextureLayoutUsing(std::span<const uint32_t, 6> fetch_dwords,
                               const GuestMemoryReader &read,
                               LinearTexture &result, std::string &error) {
@@ -160,7 +166,7 @@ bool DecodeTextureLayoutUsing(std::span<const uint32_t, 6> fetch_dwords,
     const FormatInfo *fi = info.format_info();
     const uint32_t bpb = fi->bytes_per_block();
     std::vector<TextureRange> ranges;
-    if (!DescribeTextureRanges(fetch_dwords, ranges, error))
+    if (!DescribeTextureLevelRanges(fetch_dwords, ranges, error))
       return false;
 
     out = LinearTexture{};
@@ -312,7 +318,7 @@ bool DecodeTextureLayoutUsing(std::span<const uint32_t, 6> fetch_dwords,
   }
 }
 
-bool DescribeTextureRanges(std::span<const uint32_t, 6> words,
+static bool DescribeTextureLevelRanges(std::span<const uint32_t, 6> words,
                            std::vector<TextureRange> &result,
                            std::string &error) {
   error.clear();
@@ -362,6 +368,16 @@ bool DescribeTextureRanges(std::span<const uint32_t, 6> words,
     }
     ranges.push_back({address, uint32_t(size)});
   }
+  result = std::move(ranges);
+  return true;
+}
+bool DescribeTextureRanges(std::span<const uint32_t, 6> words,
+                           std::vector<TextureRange>& result, std::string& error) {
+  std::vector<TextureRange> ranges;
+  if (!DescribeTextureLevelRanges(words, ranges, error)) return false;
+  // Packed levels may share the same allocation. Capture/hash/watch each
+  // physical byte once while keeping every decoder request inside a range.
+  CoalesceTextureRanges(ranges);
   result = std::move(ranges);
   return true;
 }

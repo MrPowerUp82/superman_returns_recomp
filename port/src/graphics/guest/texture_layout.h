@@ -43,7 +43,8 @@ struct LinearTexture {
 struct TextureRange {
   uint32_t address, length;
 };
-// Addresses are physical. CapturedMemory reads use the guest cached view.
+// Sorted union of source bytes, not one entry per mip. Addresses are physical;
+// CapturedMemory reads use the guest cached view. Decoder levels stay separate.
 bool DescribeTextureRanges(std::span<const uint32_t, 6>,
                            std::vector<TextureRange> &, std::string &);
 bool DecodeTextureLayout(std::span<const uint32_t, 6>, const CapturedMemory &,

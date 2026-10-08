@@ -1,7 +1,9 @@
 #include "../../port/src/graphics/guest/texture_capture.h"
 #include "../../port/src/graphics/guest/texture_layout.h"
 #include "../../port/src/native_renderer/xenos_tiling.h"
+#include "../../port/src/native_renderer/texture_content.h"
 #include "test_main.h"
+#include <algorithm>
 #include <cstring>
 #include <rex/graphics/xenos.h>
 using namespace superman_returns::graphics::guest;
@@ -213,12 +215,121 @@ SR_TEST(packed_mips_keep_distinct_small_levels) {
   std::string error;
   SR_CHECK(CapturedMemory::Capture(batch, cmd, memory, error));
   LinearTexture out;
-  SR_CHECK(DecodeTextureLayout(words, memory, out, error));
+  uint64_t raw_bytes = 0;
+  uint32_t raw_reads = 0;
+  SR_CHECK(DecodeTextureLayoutUsing(words, [&](uint32_t address, uint32_t size) {
+    ++raw_reads;
+    raw_bytes += size;
+    return memory.Read(address, size);
+  }, out, error));
   SR_CHECK_EQ(out.levels.size(), 4u);
   for (uint32_t mip = 1; mip <= 3; ++mip) {
     SR_CHECK_EQ(out.data[out.levels[mip].offset], mip + 1);
     SR_CHECK_EQ(out.levels[mip].width, 64u >> mip);
   }
+  uint64_t copied_bytes = 0;
+  uint32_t reads = 0;
+  std::shared_ptr<const TextureCapture> capture;
+  SR_CHECK(CaptureTexture(words, 7, [&](uint32_t address, uint32_t size) {
+    ++reads;
+    copied_bytes += size;
+    return memory.Read(address, size);
+  }, capture, error));
+  if (!capture) return;
+  SR_CHECK_EQ(reads, 2u);
+  SR_CHECK_EQ(copied_bytes, 24576u); // Base + union of the three mip requests.
+  SR_CHECK_EQ(raw_reads, 4u);
+  SR_CHECK(copied_bytes < raw_bytes);
+  std::printf("packed mip capture: raw_reads=%u raw_bytes=%llu union_reads=%u union_bytes=%llu\n",
+              raw_reads, static_cast<unsigned long long>(raw_bytes), reads,
+              static_cast<unsigned long long>(copied_bytes));
+  LinearTexture coalesced;
+  SR_CHECK(DecodeTextureLayout(words, capture->memory, coalesced, error));
+  SR_CHECK(coalesced.data == out.data);
+  SR_CHECK_EQ(coalesced.levels.size(), out.levels.size());
+}
+
+SR_TEST(coalesced_texture_capture_matches_live_decode_for_cube_volume_and_linear_mips) {
+  for (uint32_t variant = 0; variant < 3; ++variant) {
+    auto words = Fetch(64, 64, variant != 2);
+    xenos::xe_gpu_texture_fetch_t fetch{};
+    std::memcpy(&fetch, words.data(), sizeof(fetch));
+    fetch.mip_address = 0x100;
+    fetch.mip_max_level = 3;
+    fetch.packed_mips = 1;
+    if (variant == 0) {
+      fetch.dimension = xenos::DataDimension::kCube;
+      fetch.size_2d.stack_depth = 5;
+    } else if (variant == 1) {
+      fetch.dimension = xenos::DataDimension::k3D;
+      fetch.size_3d.width = 31;
+      fetch.size_3d.height = 31;
+      fetch.size_3d.depth = 4;
+    }
+    std::memcpy(words.data(), &fetch, sizeof(fetch));
+    std::vector<uint8_t> source(2u << 20);
+    for (size_t i = 0; i < source.size(); ++i)
+      source[i] = uint8_t(i ^ (i >> 5) ^ (i >> 12));
+    auto read = [&](uint32_t address, uint32_t size) -> std::span<const uint8_t> {
+      const uint32_t physical = address & 0x1fffffffu;
+      if (uint64_t(physical) + size > source.size()) return {};
+      return std::span(source).subspan(physical, size);
+    };
+    LinearTexture direct, captured;
+    std::string error;
+    SR_CHECK(DecodeTextureLayoutUsing(words, read, direct, error));
+    std::shared_ptr<const TextureCapture> snapshot;
+    SR_CHECK(CaptureTexture(words, 1, read, snapshot, error));
+    if (!snapshot) continue;
+    std::fill(source.begin(), source.end(), 0); // Decoder must use owned bytes.
+    SR_CHECK(DecodeTextureLayout(words, snapshot->memory, captured, error));
+    SR_CHECK(captured.data == direct.data);
+    SR_CHECK_EQ(captured.levels.size(), direct.levels.size());
+    SR_CHECK_EQ(captured.depth, direct.depth);
+    SR_CHECK_EQ(captured.mip_levels, direct.mip_levels);
+    uint64_t previous_end = 0;
+    for (const auto& range : snapshot->ranges) {
+      SR_CHECK(range.address >= previous_end);
+      previous_end = uint64_t(range.address) + range.length;
+    }
+  }
+}
+
+SR_TEST(texture_validation_detects_changes_in_sdk_described_packed_mips) {
+  auto words = Fetch(64, 64, true);
+  xenos::xe_gpu_texture_fetch_t fetch{};
+  std::memcpy(&fetch, words.data(), sizeof(fetch));
+  fetch.mip_address = 0x100;
+  fetch.mip_max_level = 3;
+  fetch.packed_mips = 1;
+  std::memcpy(words.data(), &fetch, sizeof(fetch));
+  std::vector<TextureRange> ranges;
+  std::string error;
+  SR_CHECK(DescribeTextureRanges(words, ranges, error));
+  SR_CHECK_EQ(ranges.size(), 2u);
+  if (ranges.size() != 2) return;
+  uint64_t end = 0;
+  for (const auto& range : ranges) end = std::max(end, uint64_t(range.address) + range.length);
+  std::vector<uint8_t> memory(size_t(end), 0);
+  auto read = [&](uint32_t address) { return memory.data() + address; };
+  auto hash = [](const uint8_t* data, size_t size, uint64_t seed) {
+    for (size_t i = 0; i < size; ++i) seed = (seed ^ data[i]) * 1099511628211ull;
+    return seed;
+  };
+  using superman_returns::native::HashTextureContent;
+  using superman_returns::native::TextureContentWritten;
+  const auto before = HashTextureContent(ranges, read, hash);
+  const auto base_before = HashTextureContent(std::span(ranges).first(1), read, hash);
+  const auto mip_address = ranges.back().address;
+  SR_CHECK(mip_address >= ranges.front().address + ranges.front().length);
+  memory[mip_address] = 0xff;
+  SR_CHECK(HashTextureContent(ranges, read, hash) != before);
+  SR_CHECK_EQ(HashTextureContent(std::span(ranges).first(1), read, hash), base_before);
+  auto written = [=](uint32_t address, uint32_t size, uint32_t) {
+    return address <= mip_address && uint64_t(address) + size > mip_address;
+  };
+  SR_CHECK(TextureContentWritten(ranges, 1, written));
+  SR_CHECK(!TextureContentWritten(std::span(ranges).first(1), 1, written));
 }
 
 SR_TEST(compressed_blocks_keep_payload_and_endian) {
