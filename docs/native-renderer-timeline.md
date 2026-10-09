@@ -1138,3 +1138,263 @@ Itens que precisam de decisão de política do usuário: **o 7** (hash de buffer
 ### Suítes
 
 `python -m pytest tests/tools -q`: 67 passaram. `build\tests-vulkan\sr_vulkan_tests.exe`: 88 testes, 0 falhas (o executável é de 16:30, não foi recompilado nesta tarefa; a mudança não toca o código dele). `ctest --test-dir build/tests-native`: 2 de 2 passaram. Nenhuma dessas suítes exercita o front-end do `PlanStreams` (que precisa do SDK); a segurança vem da equivalência estrutural, do desligador no mesmo binário e do gate de imagem (grosseiro).
+
+## Sondas do PM4 e experimento rejeitado (Fase 1.2)
+
+Plano: `docs/superpowers/plans/2026-10-09-texture-fetch-and-pm4-probe.md`. Esta fase fez duas coisas. (1) Acrescentou sondas que decompõem o `fe_pm4` (commit `ed6355c`) e as mediu em três execuções do Vulkan. (2) Testou, por A/B no mesmo binário, uma leitura preguiçosa dos fetch constants de textura (`SR_NATIVE_LAZY_FETCH`); o resultado foi **inconclusivo e a mudança não foi adotada**: o código dela não está na árvore. **Nenhuma otimização foi adotada nesta fase**; ela só mediu.
+
+### O que cada sonda mede
+
+Pelo código de `CapturePm4Dependencies` (`port/src/graphics/guest/pm4_capture.cpp`) e do `EndCmd`. As sondas só existem com `-TimelineDetail` (sem o detalhe, o ponteiro da sonda é nulo e nenhum relógio extra é lido).
+
+| Estágio | O que mede |
+| --- | --- |
+| `fe_pm4` | a chamada inteira de `CapturePm4Dependencies` dentro do `EndCmd`, uma por chamada do `EndCmd` com verificação de pacotes e bytes de anel (já existia) |
+| `fp_primary` | a cópia dos bytes do anel do comando para um `std::vector` novo (`primary`), uma por chamada |
+| `fp_read` | cada chamada do leitor de memória do guest (`ReadCommittedGuest`: tradução do endereço e `CheckedGuestReads::Read`, que aloca um vetor e chama `ReadProcessMemory`, ou seja, uma chamada de sistema por dependência lida) |
+| `fp_copy` | a cópia da leitura para `sources` (um `std::deque` de vetores), mais o `batch.bytes.insert` e o `batch.ranges.push_back` |
+| `fp_scan` | **derivado** pelo relatório, por quadro: `max(0, fe_pm4 − fp_primary − fp_read − fp_copy)`. É um resíduo, não uma medida direta |
+
+Além dos estágios, a linha de log `native front-end stream plan (per frame over 120)` ganhou `pm4 deps: reads=… kb=…`: leituras de dependência bem-sucedidas e KiB copiados para o arena, médias por quadro em janelas de 120 (divisões inteiras feitas pelo jogo, então o KiB é truncado).
+
+### Medições
+
+Três execuções do Vulkan com o mesmo binário (`superman_returns.exe` de 09/10, 09:07, mais novo que todos os fontes do commit `ed6355c`), todas com `-Timeline -TimelineDetail -Profile`, uma por vez, sem outra compilação em paralelo (outra carga na máquina não foi medida nem controlada): `pp_smoke_vulkan` (a execução de fumaça da tarefa anterior), `pp1_vulkan` e `pp2_vulkan`. Nenhuma das duas executadas aqui falhou e nenhuma foi repetida. Nas três: 1100 quadros analisados, 0 descartados.
+
+| Execução | parado (mínimo) | andando (mínimo) | Intervalo médio do relatório |
+| --- | --- | --- | --- |
+| `pp_smoke_vulkan` | 23,7 (18,1) | 27,5 (25,6) | 39,3 ms (25,4 FPS) |
+| `pp1_vulkan` | 27 (23,1) | 24,9 (21,2) | 38,2 ms (26,1 FPS) |
+| `pp2_vulkan` | 29,3 (27,4) | 27,6 (24,2) | 34,9 ms (28,6 FPS) |
+
+(FPS do `bench_results.csv`, média e mínimo.) A `pp2` é uma cena visivelmente mais leve (ver os draws abaixo), com FPS mais alto; as três não são comparáveis em valor absoluto.
+
+Tabelas impressas pelo relatório (`logs/timeline_pp_smoke_vulkan.txt`, `logs/timeline_pp1_vulkan.txt`, `logs/timeline_pp2_vulkan.txt`):
+
+Execução `pp_smoke_vulkan`:
+
+```
+Quadros analisados: 1100 (descartados por falta de estágio: 0)
+Intervalo médio 39.3 ms = 25.4 FPS | 1% low 19.0 FPS | mínimo 1.8 FPS
+Orçamento por quadro: 33.3 ms (tempos em ms)
+
+estágio           média     p50     p99   bloq.   util.  folga p99  limitante
+game              38.78   38.47   50.94    0.00     99%     -17.61        80%
+game_guest        19.30   19.21   25.31    0.00     49%       8.02          -
+game_other        31.00   30.83   39.49    0.00     79%      -6.16          -
+capture            7.77    7.18   15.26    0.00     20%      18.07          -
+frontend          19.47   18.98   27.97    0.00     50%       5.36          -
+fe_begin           0.46    0.45    0.68    0.00      1%      32.66          -
+fe_ring            0.29    0.27    0.64    0.00      1%      32.70          -
+fe_device          1.67    1.67    2.13    0.00      4%      31.20          -
+fe_index           1.66    1.63    2.35    0.00      4%      30.98          -
+fe_streams         3.56    3.54    4.78    0.00      9%      28.56          -
+fe_end            11.17   10.58   19.23    0.00     28%      14.11          -
+fe_flush           0.07    0.05    0.21    0.00      0%      33.13          -
+fd_shaders         0.47    0.46    0.65    0.00      1%      32.68          -
+fs_prep            0.39    0.39    0.53    0.00      1%      32.81          -
+fs_plan            2.76    2.74    3.81    0.00      7%      29.52          -
+fe_push            0.29    0.29    0.40    0.00      1%      32.93          -
+fe_pm4             4.20    4.15    6.05    0.00     11%      27.28          -
+fe_textures        5.94    5.20   13.24    0.00     15%      20.09          -
+fs_resolve         0.00    0.00    0.01    0.00      0%      33.33          -
+fs_buffer          2.61    2.58    3.63    0.00      7%      29.71          -
+fb_refresh         3.05    3.02    4.05    0.00      8%      29.28          -
+fb_hash            1.59    1.57    2.26    0.00      4%      31.07          -
+fp_primary         0.69    0.67    1.06    0.00      2%      32.28          -
+fp_read            0.72    0.70    1.09    0.00      2%      32.25          -
+fp_copy            0.15    0.14    0.32    0.00      0%      33.02          -
+frontend_other     0.67    0.65    0.98    0.00      2%      32.35          -
+fe_end_rest        0.74    0.73    1.02    0.00      2%      32.32          -
+fp_scan            2.64    2.61    3.75    0.00      7%      29.58          -
+front_wait         0.49    0.00    0.00    0.00      1%      33.33          -
+worker            33.38   33.05   45.20    1.72     85%     -11.87        13%
+record            29.44   28.82   44.44    1.95     75%     -11.10         5%
+gpu               31.34   31.17   37.74    0.00     80%      -4.40         2%
+```
+
+Execução `pp1_vulkan`:
+
+```
+Quadros analisados: 1100 (descartados por falta de estágio: 0)
+Intervalo médio 38.2 ms = 26.1 FPS | 1% low 19.2 FPS | mínimo 1.9 FPS
+Orçamento por quadro: 33.3 ms (tempos em ms)
+
+estágio           média     p50     p99   bloq.   util.  folga p99  limitante
+game              37.59   37.83   49.02    0.00     98%     -15.69        83%
+game_guest        19.51   19.43   25.62    0.00     51%       7.71          -
+game_other        30.40   30.55   38.17    0.00     79%      -4.84          -
+capture            7.19    6.99   13.83    0.00     19%      19.51          -
+frontend          18.08   18.47   26.64    0.00     47%       6.69          -
+fe_begin           0.44    0.44    0.64    0.00      1%      32.69          -
+fe_ring            0.28    0.27    0.63    0.00      1%      32.71          -
+fe_device          1.56    1.62    2.02    0.00      4%      31.32          -
+fe_index           1.48    1.46    2.15    0.00      4%      31.18          -
+fe_streams         3.35    3.54    4.87    0.00      9%      28.46          -
+fe_end            10.34   10.29   17.77    0.00     27%      15.56          -
+fe_flush           0.06    0.05    0.19    0.00      0%      33.15          -
+fd_shaders         0.44    0.44    0.63    0.00      1%      32.70          -
+fs_prep            0.38    0.38    0.54    0.00      1%      32.79          -
+fs_plan            2.58    2.72    3.92    0.00      7%      29.41          -
+fe_push            0.28    0.28    0.39    0.00      1%      32.94          -
+fe_pm4             3.95    3.98    5.61    0.00     10%      27.72          -
+fe_textures        5.43    5.08   11.93    0.00     14%      21.40          -
+fs_resolve         0.00    0.00    0.01    0.00      0%      33.33          -
+fs_buffer          2.44    2.56    3.75    0.00      6%      29.58          -
+fb_refresh         2.78    2.88    3.99    0.00      7%      29.35          -
+fb_hash            1.47    1.52    2.33    0.00      4%      31.00          -
+fp_primary         0.64    0.64    1.00    0.00      2%      32.33          -
+fp_read            0.69    0.69    1.04    0.00      2%      32.29          -
+fp_copy            0.14    0.14    0.22    0.00      0%      33.12          -
+frontend_other     0.63    0.64    0.95    0.00      2%      32.39          -
+fe_end_rest        0.68    0.69    0.95    0.00      2%      32.38          -
+fp_scan            2.48    2.49    3.57    0.00      6%      29.77          -
+front_wait         0.59    0.00    6.23    0.00      2%      27.11          -
+worker            31.18   31.97   43.34    1.68     82%     -10.00         9%
+record            27.67   27.33   45.11    2.02     72%     -11.78         4%
+gpu               30.01   31.34   37.66    0.00     78%      -4.33         3%
+```
+
+Execução `pp2_vulkan`:
+
+```
+Quadros analisados: 1100 (descartados por falta de estágio: 0)
+Intervalo médio 34.9 ms = 28.6 FPS | 1% low 20.3 FPS | mínimo 3.5 FPS
+Orçamento por quadro: 33.3 ms (tempos em ms)
+
+estágio           média     p50     p99   bloq.   util.  folga p99  limitante
+game              34.36   34.17   47.14    0.00     98%     -13.81        80%
+game_guest        20.25   19.49   33.49    0.00     58%      -0.16          -
+game_other        28.82   28.81   37.67    0.00     83%      -4.33          -
+capture            5.54    5.40   12.66    0.00     16%      20.67          -
+frontend          14.11   14.36   24.28    0.00     40%       9.05          -
+fe_begin           0.34    0.35    0.61    0.00      1%      32.72          -
+fe_ring            0.22    0.21    0.56    0.00      1%      32.78          -
+fe_device          1.26    1.31    1.97    0.00      4%      31.37          -
+fe_index           1.07    1.05    1.91    0.00      3%      31.42          -
+fe_streams         2.64    2.77    4.58    0.00      8%      28.75          -
+fe_end             8.08    8.08   16.10    0.00     23%      17.24          -
+fe_flush           0.05    0.04    0.18    0.00      0%      33.15          -
+fd_shaders         0.35    0.36    0.61    0.00      1%      32.73          -
+fs_prep            0.28    0.29    0.49    0.00      1%      32.84          -
+fs_plan            2.04    2.14    3.74    0.00      6%      29.60          -
+fe_push            0.22    0.22    0.36    0.00      1%      32.97          -
+fe_pm4             3.03    3.07    5.47    0.00      9%      27.86          -
+fe_textures        4.29    4.06   10.93    0.00     12%      22.40          -
+fs_resolve         0.00    0.00    0.01    0.00      0%      33.33          -
+fs_buffer          1.93    2.01    3.56    0.00      6%      29.78          -
+fb_refresh         2.11    2.13    3.71    0.00      6%      29.62          -
+fb_hash            1.16    1.19    2.26    0.00      3%      31.07          -
+fp_primary         0.51    0.51    0.96    0.00      1%      32.38          -
+fp_read            0.46    0.44    0.93    0.00      1%      32.40          -
+fp_copy            0.09    0.09    0.19    0.00      0%      33.15          -
+frontend_other     0.51    0.51    0.87    0.00      1%      32.46          -
+fe_end_rest        0.54    0.55    0.95    0.00      2%      32.38          -
+fp_scan            1.96    2.03    3.52    0.00      6%      29.81          -
+front_wait         0.49    0.00    6.56    0.00      1%      26.77          -
+worker            24.78   25.48   40.58    2.50     71%      -7.25         7%
+record            23.95   24.06   46.84    2.19     69%     -13.51         8%
+gpu               25.87   26.92   35.33    0.00     74%      -2.00         5%
+```
+
+### Draws por quadro, µs por draw, leituras e KiB
+
+Os draws vêm do campo `draws=` das linhas `Vulkan profile (ms/frame over 120)` de `logs/bench_pp_smoke_vulkan.log`, `logs/bench_pp1_vulkan.log` e `logs/bench_pp2_vulkan.log` (cópias do `game.log` feitas com `-Profile`), **últimas 9 janelas de 120 quadros** (1080 quadros, quase a janela de 1100 do relatório), como nas fases anteriores; as linhas `pm4 deps` do mesmo log são pareadas com as janelas pela posição. Draws por janela:
+
+- `pp_smoke`: 2882, 2945, 2932, 2791, 2975, 2675, 2525, 2414, 2427 (média 2729,6).
+- `pp1`: 2835, 2959, 2794, 2143, 1882, 2374, 2625, 2550, 2563 (média 2525,0).
+- `pp2`: 2171, 2498, 2228, 2096, 2067, 1955, 1195, 1573, 2893 (média 2075,1).
+
+As janelas variam muito dentro de uma mesma execução (1195 a 2893 na `pp2`), então os µs por draw abaixo (média do estágio em ms × 1000 ÷ média dos draws da mesma execução) herdam essa variação de cena. Os estágios por comando contam também comandos que não são draws (cerca de 3% dos draws, ver a Fase 1.1a); o divisor é sempre `draws=`.
+
+| Execução | `fe_pm4` ms (µs/draw) | `fp_primary` | `fp_read` | `fp_copy` | `fp_scan` (derivado) | `fp_scan` ÷ `fe_pm4` |
+| --- | --- | --- | --- | --- | --- | ---: |
+| `pp_smoke` (÷2729,6) | 4,20 (1,539) | 0,69 (0,253) | 0,72 (0,264) | 0,15 (0,055) | 2,64 (0,967) | 62,9% |
+| `pp1` (÷2525,0) | 3,95 (1,564) | 0,64 (0,253) | 0,69 (0,273) | 0,14 (0,055) | 2,48 (0,982) | 62,8% |
+| `pp2` (÷2075,1) | 3,03 (1,460) | 0,51 (0,246) | 0,46 (0,222) | 0,09 (0,043) | 1,96 (0,945) | 64,7% |
+| média das três | **3,73 (1,521)** | **0,61 (0,251)** | **0,62 (0,253)** | **0,13 (0,051)** | **2,36 (0,965)** | 63,5% |
+
+Os valores em ms são as médias do relatório, arredondadas a duas casas (a soma das quatro partes fecha com o `fe_pm4` dentro desse arredondamento, por construção do `fp_scan`). `fe_pm4` é 21,5% a 21,8% do `frontend` e 8,8% a 10,8% do `game` nas três execuções. Em ms o `fp_scan` varia de 1,96 a 2,64 entre execuções (cenas diferentes); por draw varia de 0,945 a 0,982, mais estável que o valor por quadro, o que é compatível com um custo que acompanha o número de comandos, mas três execuções e janelas de draws de outras partes da mesma execução não bastam para afirmar proporcionalidade.
+
+Leituras e KiB das dependências do PM4 (linhas `pm4 deps`, média e faixa das 9 janelas):
+
+| Execução | leituras por quadro | KiB por quadro | leituras por draw | bytes por leitura | `fp_read` por leitura | `fp_copy` por leitura |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| `pp_smoke` | 694,6 (569 a 801) | 53,3 (43 a 63) | 0,254 | 78,6 | 1,04 µs | 0,22 µs |
+| `pp1` | 651,2 (545 a 766) | 51,0 (43 a 60) | 0,258 | 80,2 | 1,06 µs | 0,22 µs |
+| `pp2` | 426,4 (274 a 763) | 31,8 (20 a 59) | 0,205 | 76,4 | 1,08 µs | 0,21 µs |
+
+(Bytes por leitura = KiB médios × 1024 ÷ leituras médias; os KiB são truncados por janela, então subestimam em até 1 KiB por janela, ≈2% de 50. As colunas por leitura dividem a média do estágio pela média das leituras, não leitura por leitura.)
+
+### O que as sondas dizem, e o que não dizem
+
+- **As dependências do PM4 são poucas e pequenas.** ≈430 a ≈695 leituras por quadro (≈0,2 a ≈0,26 por draw) de ≈76 a ≈80 bytes em média, ou seja, 32 a 53 KiB por quadro.
+- **`fp_read`, `fp_copy` e `fp_primary` somam 1,06 a 1,56 ms** (média 1,36 ms) dos 3,03 a 4,20 ms do `fe_pm4`; **o resíduo `fp_scan` é 63% a 65% do `fe_pm4`** (1,96 a 2,64 ms; média das três 2,36 ms, 0,965 µs/draw), nas três execuções. Os dados **não dividem** o `fp_scan` entre o analisador e o resto.
+- **O que o `fp_scan` contém, pelo código:** a varredura do `Pm4Mirror::ScanCopyUsing` (o analisador), o despacho por `std::function` de cada leitura, a construção e a destruição do `std::deque` `sources` e do `unique_ptr` do espelho local, a destruição do `primary` e de cada vetor de `sources` no fim da função (cerca de uma liberação por leitura mais uma por chamada), e o custo de relógio das próprias sondas que cai fora dos intervalos (cada leitura de relógio cai em parte dentro e em parte fora do intervalo que ela delimita). **Não** é o custo do analisador sozinho.
+- **O `fp_primary` provavelmente está inflado pelo overhead.** São dois relógios por chamada de `CapturePm4Dependencies`; o número de chamadas por quadro **não foi contado** (o campo `packets=` do perfil mostrou 2484 a 3059 nas 9 janelas da `pp_smoke`, mas não foi contado quantos desses comandos têm bytes de anel). Se for da ordem de 2500 chamadas, o `fp_primary` de 0,5 a 0,7 ms dá ≈0,2 a ≈0,28 µs por chamada, do mesmo tamanho que um par de leituras de relógio mais uma alocação; a parte que é cópia de fato **não foi separada**.
+- **Custo do modo detalhado.** Cada leitura inclui ≈4 leituras de relógio das sondas (início e fim de `fp_read` e de `fp_copy`) e cada chamada, 2 (`fp_primary`), ou seja, algo como 7000 a 8000 leituras por quadro na `pp_smoke` se as chamadas forem ≈2500 (suposição); a 20 a 30 ns por leitura (suposição de seções anteriores, **não medida**) são ≈0,14 a ≈0,24 ms por quadro. O valor absoluto do `fe_pm4` e dos `fp_*` no modo detalhado é maior que o de produção por essa conta; o valor fora do modo detalhado **não foi medido**. Os relógios do `fe_pm4` (duas leituras por chamada) e de `capture_timings.pm4_us` (duas por chamada, sempre ligado) já existiam antes das sondas.
+- **Nenhuma sonda cobre o tamanho do anel.** Quantos bytes e quantas palavras do anel o analisador varre por draw e por quadro é a pergunta que falta para interpretar o `fp_scan` (a varredura do anel é o que o analisador faz; a leitura das dependências é só uma parte dele).
+
+### Correção sobre o número antigo de leituras e bytes por quadro
+
+O texto do plano desta fase citava "≈490 leituras e ≈5,6 MB por quadro (máx. 42 MB)" dos logs de captura. Esses números vêm das linhas `native Vulkan capture frame=… reads=… bytes=…`, impressas **a cada 120 quadros (e em quadros com mais de 100 ms de captura) e com os valores de um único quadro** (o `capture_timings` é zerado a cada quadro). O `reads` e o `bytes` desse contador são incrementados em dois lugares: em `ReadCommittedGuest` (que serve a captura PM4, a varredura que mantém o espelho atualizado nos comandos sem verificação de pacotes e a cópia de texturas que mudaram) e no laço de hash de `CaptureTextures` (`++capture_timings.reads; capture_timings.bytes += range.length`, uma vez por faixa hasheada). Ou seja, **não são só PM4**; os bytes são dominados pela leitura das texturas.
+
+Refeito com as linhas das três execuções (63 amostras de um quadro; média simples, indicativa): 475 leituras e 5,77 MB (MB = 10^6 bytes) por amostra (por execução: `pp_smoke` 588 leituras e 12,0 MB, com máximo de 43,8 MB; `pp1` 408 e 1,98 MB; `pp2` 421 e 2,84 MB). Isso reproduz a ordem do número antigo e mostra que ele varia de 0,03 MB a 43,8 MB por amostra; não é um valor estável por quadro. Nas mesmas 9 janelas usadas acima (uma amostra de quadro contra a média de 120 quadros do `pm4 deps`, então a comparação é só indicativa): `pp_smoke` 913,8 leituras e ≈25 600 KiB contra 694,6 leituras e 53,3 KiB do PM4; `pp1` 656 e ≈1700 KiB contra 651,2 e 51,0; `pp2` 469,8 e ≈3480 KiB contra 426,4 e 31,8. Em **leituras**, o PM4 é a maior parte do contador (na `pp1` quase tudo); em **bytes**, o PM4 é da ordem de 0,2% a 3% do contador. A conclusão da tarefa anterior ("o 5,6 MB era leitura de textura, não PM4") se sustenta, com a ressalva de que a comparação é de uma amostra contra uma média.
+
+### O que as sondas dizem sobre mudanças candidatas
+
+- **Remover a cópia redundante `sources` ou a alocação intermediária não vale a pena.** O `fp_copy` inteiro é 0,09 a 0,15 ms (0,043 a 0,055 µs/draw), e ele contém também o `batch.bytes.insert` e o `batch.ranges.push_back`, que são necessários; o que daria para remover é só uma parte disso, abaixo da resolução do A/B (ver o experimento rejeitado abaixo). Pela leitura do código, o `CheckedGuestReads` mantém cada cópia viva até o `Reset()` do início do próximo `EndCmd`, o que sugere que `sources` seja redundante hoje, mas o contrato de `GuestMemoryReader` (que é uma `std::function` genérica que não promete o tempo de vida do `span`) é a razão da cópia; não verifiquei se algum outro leitor depende dela, e o teto não paga esse risco.
+- **O `fp_read` (0,46 a 0,72 ms; ≈1,04 a 1,08 µs por leitura, incluindo duas leituras de relógio) é o único bloco de leitura com teto visível**, mas contém a leitura necessária; o que seria evitável é a chamada de sistema e a alocação por dependência, e o contrato (`CheckedGuestReads` existe para devolver vazio em vez de falhar quando a página não está confirmada) tem de ser mantido. A parte evitável **não foi medida**.
+- **A pergunta aberta é o resíduo `fp_scan`** (média 2,36 ms, 0,965 µs/draw, 63% do `fe_pm4`): o analisador, a configuração por chamada ou o overhead das sondas. Sem separar isso, nenhuma mudança no `fe_pm4` tem teto confiável além dos ≈1,36 ms de `fp_primary` + `fp_read` + `fp_copy`, que também incluem overhead.
+
+**Próxima medição (sem alterar comportamento).** (a) Contar por quadro as chamadas de `CapturePm4Dependencies` e os bytes e palavras do anel varridos (por draw e por quadro). (b) Cronometrar o **bloco PM4 inteiro com um par de relógios por quadro** em vez de um por chamada (por exemplo, amostrando uma chamada em N, ou re-executando a varredura dos anéis do quadro num espelho descartável, fora do caminho normal, num laço cronometrado uma vez; o desenho exato **não foi decidido** e tem de não alterar o estado do espelho nem o arena), e comparar com a soma dos escopos por chamada: a diferença é o overhead de relógio; o que sobra é o custo do analisador e do resto. Só depois disso faz sentido escolher uma mudança.
+
+### Resultado negativo: leitura preguiçosa dos fetch constants (`SR_NATIVE_LAZY_FETCH`)
+
+**O que foi tentado.** Em `Renderer::CaptureTextures` (chamada a cada draw), o laço percorre os 32 slots de textura e monta, para cada um, as 6 palavras do fetch constant (`capture_mirror_.written(reg) ? capture_mirror_.reg(reg) : Load32(...)`), e só depois testa `IsTextureBound(fetch[0])`: 192 leituras de registrador por chamada, a maior parte para slots não ligados e descartadas. A mudança lia só `fetch[0]` antes do teste e as outras 5 palavras só depois dele (`SR_NATIVE_LAZY_FETCH=0` restaurava a leitura completa, para o A/B no mesmo binário).
+
+**Verificação da premissa (feita e correta).** Reli o laço na árvore: depois do `continue` do teste de ligado, a primeira utilização do array é a chave de `captured_textures_[fetch]`, e `fetch[1..5]` de um slot não ligado nunca são consumidos; `written()` e `reg()` do espelho são leituras sem efeito colateral, `Load32` também (uma busca nas faixas capturadas da thread, um `memcpy` e um `bswap`), e `IsTextureBound` é puro. Logo a mudança não alteraria `cur_.textures`, `cur_.texture_errors` nem `captured_textures_`: seria equivalente por construção. O que ficou em aberto é só o ganho.
+
+**A/B (Vulkan, mesmo binário, ordem OFF, ON, ON, OFF, todas com `-Timeline -TimelineDetail -Profile`).** Números refeitos agora a partir de `logs/timeline_lf_*_vulkan.txt` e `logs/bench_lf_*_vulkan.log` (draws = média das últimas 9 janelas `Vulkan profile`; µs por draw = ms × 1000 ÷ draws):
+
+| Execução | Modo | `fe_textures` ms | draws | `fe_textures` µs/draw | Intervalo médio | FPS do bench: parado (mín.) / andando (mín.) |
+| --- | --- | ---: | ---: | ---: | --- | --- |
+| `lf_off1` | OFF (leitura completa) | 6,02 | 2719,4 | **2,214** | 39,8 ms (25,1 FPS) | 25,1 (19,2) / 25,1 (24,1) |
+| `lf_on1` | ON (preguiçoso) | 6,24 | 2759,6 | **2,261** | 41,5 ms (24,1 FPS) | 22,7 (17,7) / 25,7 (24,4) |
+| `lf_on2` | ON | 6,56 | 2843,9 | **2,307** | 43,6 ms (22,9 FPS) | 22,8 (17,7) / 23,2 (22,4) |
+| `lf_off2` | OFF | 6,75 | 2822,9 | **2,391** | 43,1 ms (23,2 FPS) | 22,4 (16,2) / 23,9 (22,4) |
+
+- **Os pares discordam no sinal.** Par 1 (`on1` − `off1`): **+0,048 µs/draw** (+2,2%, pior). Par 2 (`on2` − `off2`): **−0,084 µs/draw** (−3,5%, melhor). Média ON 2,284 contra OFF 2,302 µs/draw (−0,018, −0,8%).
+- **Os controles se moveram tanto quanto o efeito.** Nos mesmos pares, estágios que a mudança não toca variaram de −0,030 (`fe_streams`) a +0,113 µs/draw (`fe_pm4`) no par 1 (faixa de 0,143) e de −0,010 a +0,038 no par 2 (`fe_streams`, `fe_device`, `fe_index`, `fe_pm4`); o `fe_index` foi de +0,090 e +0,038.
+- **Deriva.** O intervalo médio foi de 39,8 ms (`off1`) para 43,1 ms (`off2`), +8,3%, no **mesmo modo**; o `fe_textures` por draw OFF subiu de 2,214 para 2,391 (+0,177 µs/draw, +8,0%), mais que qualquer par. A ordem OFF, ON, ON, OFF cancela uma deriva linear nas médias por modo, mas não outras formas, e dois pares são pouca coisa.
+- **Decisão: rejeitar como inconclusivo.** A regra de aceitação (o estágio caiu por draw, nos dois pares) não foi atendida. Não afirmo que a mudança não ajuda; afirmo que este A/B não mostra efeito.
+
+**O tamanho esperado do efeito não é conhecido, e uma estimativa anterior dele não se sustenta.** Os relatórios da tarefa estimaram ≈0,01 µs/draw ("dezenas de microssegundos"), o que pareceria dezenas de vezes abaixo do ruído. Refazendo a conta pelo código: cada chamada lê 192 palavras e a mudança pula 5 por slot não ligado, ou seja, ≥120 leituras por draw se ao menos 24 dos 32 slots estiverem desligados (**o número de slots ligados por draw não foi contado**). Em ≈2700 draws por quadro são ≥324 000 leituras por quadro; a 1 a 3 ns por leitura (suposição, **não medida**) são ≈0,12 a ≈0,5 µs/draw (o limite superior supõe os 32 slots desligados, 160 leituras), ou ≈0,3 a ≈1,3 ms por quadro. Isso está na ordem da resolução do A/B, não dezenas de vezes abaixo dela. Os números do A/B (média −0,018, pares +0,048 e −0,084) não mostram um efeito dessa grandeza, mas a deriva e o desvio dos controles (±0,1) impedem excluí-lo para o valor mais baixo da faixa. Conclusão honesta: **o ganho é desconhecido**, não "desprezível".
+
+**A lição.** Com uma deriva de execução para execução de ≈±8% (no intervalo e em estágios individuais), efeitos por draw abaixo de ≈0,1 µs/draw (≈0,3 ms por quadro a ≈2700 draws) **não se resolvem** por A/B de bench, com ou sem pares adjacentes: o ruído medido (controles, deriva dentro do mesmo modo) é dessa grandeza. Candidatos cujo teto é desse tamanho precisam de uma **micro-medida** (um escopo cronometrado só em volta do trecho, como foi feito com as sondas do PM4) ou de um desenho pareado mais longo (mais pares, execuções mais longas, intercaladas), antes de se escrever a mudança. Aqui isso significa um `DetailScope` em volta do laço de montagem dos fetch constants (um par de relógios por chamada, igual nos dois modos): se der menos de ≈0,3 ms por quadro, a ideia está encerrada; se der mais, a mudança (já conhecida, equivalente por construção) volta a valer um A/B mais longo. **A mudança não foi adotada.**
+
+### Candidatos da próxima fase (ordem proposta)
+
+Tetos: média das três execuções desta fase (ms por quadro e µs por draw, cada execução dividida pelos seus draws; a `pp2` é uma cena mais leve, então as médias não são as de um único cenário). Só seriam alcançados se o estágio inteiro sumisse; incluem o custo dos relógios das sondas; tetos aninhados não se somam (`fp_*` ⊂ `fe_pm4`; `fb_hash` ⊂ `fb_refresh`, que está espalhado por `fs_buffer`, `fs_other` e `fe_index`); e o quanto vira FPS depende de `worker` e `gpu`, perto do orçamento. **Resolução do A/B de bench: ≈0,3 ms por quadro (≈0,1 µs/draw)**; abaixo disso a mudança não se verifica por bench e exige micro-medida. Todo item que muda comportamento tem de preservar a **imagem bit a bit**, a **semântica do rastreamento de buffer sujo**, a **precedência de leitura dos bytes capturados** e, nos do PM4, o **contrato de `GuestMemoryReader`** (tempo de vida dos `span`, falha por memória não legível sem travar). Verificação comum: `tests/native` e `python -m pytest tests/tools -q` passam e o gate de imagem (`-Gate check` contra a referência local; é grosseiro).
+
+Esta lista reordena a da Fase 1.1c: o item 1 dela ("decomposição de `fe_textures` e `fe_pm4`") foi feito para o `fe_pm4` (as sondas acima) e segue aberto para o `fe_textures` (item 6 abaixo); os itens 2, 3, 4 e 7 dela seguem válidos e são os itens 7, 8, 9 e 10 abaixo; o item 5 dela (custo do relógio) segue aberto e é o item 2 abaixo; os itens 6 e 8 dela seguem como estavam (dependem de medidas) e não são repetidos aqui.
+
+1. **Medir: o analisador do PM4 e o overhead das sondas** (estágio `fp_scan`, teto 2,36 ms, 0,965 µs/draw; acima da resolução). O desenho está na seção das sondas: contar chamadas e bytes/palavras do anel por draw e por quadro; cronometrar o bloco PM4 com um par de relógios por quadro. Risco: nenhum no comportamento. Verificação: as chamadas contadas são compatíveis com o campo `packets=` do perfil (que também conta comandos sem bytes de anel), e a diferença entre a soma dos escopos por chamada e o bloco cronometrado uma vez estima o overhead. Sem decisão do usuário.
+2. **Medir: custo de uma leitura de relógio** (sem teto próprio; item 5 da 1.1c). Várias estimativas deste documento usam 20 a 30 ns por leitura sem medida (as sondas do PM4, os escopos `fb_*`, a sonda do `fs_resolve`). Risco: nenhum. Verificação: um microbenchmark isolado da leitura de `steady_clock`. Sem decisão do usuário.
+3. **Reaproveitar os buffers por chamada do PM4, só depois do item 1** (estágio `fp_primary`, teto 0,61 ms, 0,251 µs/draw; o teto está acima da resolução, mas contém a cópia, que é necessária, e dois relógios por chamada, então o ganho esperado **não é conhecido** e provavelmente é bem menor). Ideia: reutilizar um vetor por thread em vez de um vetor novo por chamada. Risco médio: o `primary` tem de ficar estável durante toda a varredura, inclusive nos callbacks aninhados, porque o arena cresce (é a razão do comentário no código); a função não pode ser reentrante com o mesmo buffer. Verificação: o teste de equivalência existente (`pm4_capture_probe_counts_reads_and_changes_nothing`, que compara `batch.bytes` e `batch.ranges` com e sem sonda) estendido a chamadas repetidas de tamanhos diferentes e ao caso de falha com reversão; micro-medida antes do A/B. Sem decisão do usuário.
+4. **Reduzir o custo por dependência lida** (estágio `fp_read`, teto 0,62 ms, 0,253 µs/draw, ≈1,05 µs por leitura; acima da resolução como teto, mas contém a leitura necessária; só depois do item 1). Alvo: a chamada de sistema e a alocação por dependência. Risco **alto** no contrato: `CheckedGuestReads` existe para devolver vazio (e não falhar) com páginas não confirmadas; qualquer alternativa tem de manter isso e o tempo de vida dos `span` durante os callbacks aninhados. Verificação: os testes de memória ilegível existentes, gate de imagem, contagem de leituras idêntica. Sem decisão do usuário se o contrato for preservado; **não foi desenhado**.
+5. **Remover a cópia `sources`** (estágio `fp_copy`, teto 0,13 ms, 0,051 µs/draw; **abaixo da resolução**). Não é candidato: o teto é pequeno, contém trabalho necessário e o risco é o do contrato de tempo de vida. Fica registrado para não ser reproposto sem dados novos.
+6. **Medir: decomposição do `fe_textures` fora do hash** (estágio `fe_textures`, teto 5,22 ms, 2,13 µs/draw; acima da resolução). A primeira sub-região é o laço de montagem dos fetch constants (encerra ou revive o experimento rejeitado); as demais, a busca em `captured_textures_`, a consulta de escrita (watch) e o resto do trabalho por slot ligado, **sem alterar a política de watch e de hash das texturas** (a "Atualização: o hash quase não pesa" mostrou o hash em ≈7% do `textures_ms`; o resto, ≈3,6 ms nas amostras daquela seção, não foi decomposto). Risco: nenhum. Verificação: as sub-regiões fecham com o estágio. Sem decisão do usuário (a política de texturas já foi decidida).
+7. **Medir: `fb_refresh` por ponto de chamada e desfecho** (estágios `fb_refresh`, teto 2,65 ms, 1,078 µs/draw; `fb_hash`, 1,41 ms, 0,575 µs/draw; acima da resolução). Como o item 2 da 1.1c: chamadas por ponto de chamada, hashes por motivo, quantas vezes o hash dá "mudou", e o `fb_refresh` sem o hash por ponto de chamada. Risco: nenhum. Verificação: as somas fecham com `calls` e `hashes`. Sem decisão do usuário.
+8. **Medir: repetição de buffers por slot e desfecho do `PlanBuffer`** (estágios `fs_plan`, teto 2,46 ms, 1,005 µs/draw; `fs_buffer`, 2,33 ms, 0,951 µs/draw; acima da resolução). É o item 3 da 1.1c, ainda aberto: endereços-base distintos por slot, simulação de caches de 2 e 4 entradas, `action` 0, 1 ou 2 e se o `tracked_` achado está sujo. Risco: nenhum. Verificação: as contagens fecham com `evaluated`, `fast` e `slow`. Sem decisão do usuário.
+9. **Medir: `fe_index` e `fd_other`** (`fe_index`, teto 1,40 ms, 0,570 µs/draw; `fd_other` = `fe_device` − `fd_shaders`, 1,08 ms, 0,441 µs/draw; acima da resolução). Item 4 da 1.1c. Risco: nenhum. Verificação: as sub-regiões fecham com os estágios. Sem decisão do usuário.
+10. **Política do hash de conteúdo de buffers rastreados** (estágio `fb_hash`, teto 1,41 ms, 0,575 µs/draw; acima da resolução). **Exige decisão do usuário** e não é proposta aqui: é o mecanismo de correção contra escritas por aliases virtuais, e para buffers **não existe** decisão equivalente à das texturas (até 16 quadros). Antes de levá-la ao usuário: o item 7, um teste que force uma escrita por alias virtual e conte os quadros com dado velho, e a definição de quantos quadros de atraso são aceitáveis. Qualquer ideia que mude quando ou se o hash roda, ou onde ele roda, está nessa categoria.
+11. **Tetos pequenos, não candidatos** (`fs_prep`, 0,35 ms, 0,143 µs/draw; `fe_push`, 0,26 ms, 0,108 µs/draw; `fe_end_rest`, 0,65 ms, 0,267 µs/draw): o `fs_prep` está no limite da resolução e o `fe_push`, abaixo; o relógio do próprio escopo é parte relevante deles. O `fe_end_rest` é um resíduo sem escopo próprio, não um alvo.
+
+**Acima da resolução (teto ≥ ≈0,3 ms):** 1, 3, 4, 6, 7, 8, 9, 10 (o teto do 3 e do 4 é frouxo, ver cada item). **Sem teto próprio:** 2. **Abaixo ou no limite:** 5 e 11. Precisam de decisão de política do usuário: **só o 10**. Os itens 1, 2, 6, 7, 8 e 9 só medem.
+
+**O que os dados não decidem.** O custo do analisador do PM4 sozinho (o `fp_scan` é um resíduo); quantas chamadas de `CapturePm4Dependencies` e quantos bytes de anel há por quadro; o custo de uma leitura de relógio na máquina (as estimativas desta seção usam 20 a 30 ns, não medido); o tamanho do ganho do experimento rejeitado (a estimativa anterior, ≈0,01 µs/draw, não se sustenta; a faixa de ≈0,12 a ≈0,5 µs/draw acima depende de 1 a 3 ns por leitura e de pelo menos 24 slots desligados por draw, ambos não medidos); quanto de qualquer redução vira FPS. Três execuções do PM4 em uma máquina, uma delas de cena diferente das outras; quatro execuções do A/B, com deriva de ≈8%.
+
+### Suítes desta fase
+
+`python -m pytest tests/tools -q`: 69 passaram. Esta fase não altera código (só este documento); as suítes de C++ foram executadas na tarefa das sondas (`ctest --test-dir build/tests-native`: 2 de 2) e não foram repetidas aqui.
