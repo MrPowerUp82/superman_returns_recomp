@@ -375,6 +375,7 @@ struct CaptureTimings {
   uint64_t watch_scan_hits=0,watch_scan_misses=0;
   uint64_t fe_hook_ns=0,fe_begin_ns=0,fe_ring_ns=0,fe_device_ns=0,fe_index_ns=0,fe_streams_ns=0,fe_end_ns=0,fe_flush_ns=0;
   uint64_t fd_shaders_ns=0,fs_prep_ns=0,fs_plan_ns=0,fe_push_ns=0;
+  uint64_t fe_pm4_ns=0,fe_textures_ns=0,fs_resolve_ns=0,fs_buffer_ns=0;
 };
 thread_local CaptureTimings capture_timings;
 // SR_FRAME_TIMELINE_DETAIL=1: nanosecond accumulator for one front-end region of the game thread.
@@ -391,6 +392,13 @@ struct DetailScope {
   DetailScope(const DetailScope&) = delete;
   DetailScope& operator=(const DetailScope&) = delete;
 };
+// SR_FRAME_TIMELINE_DETAIL=1: why PlanStreams takes its slow path (first failing reason per stream),
+// accumulated on the guest thread and logged every 120 frames. Counts only; no timing.
+struct StreamPlanCounters {
+  uint64_t evaluated=0,fast=0,slow=0;
+  uint64_t untracked=0,address=0,size=0,decl=0,stride=0,phase=0,dirty=0;
+};
+thread_local StreamPlanCounters stream_plan_counters;
 thread_local CheckedGuestReads checked_guest_reads;
 bool TextureWatchScanCaching() {
   static const bool enabled=[] {
@@ -4932,8 +4940,10 @@ bool Renderer::PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRan
     sp.size = size;
     sp.stride = stride;
     FrontStreamCache& sc = front_stream_cache_[s];
+    if (graphics::FrameTimeline::Detail()) ++stream_plan_counters.evaluated;
     if (!REXCVAR_GET(sr_native_debug_buffers_always_dirty) && sc.tracked && sc.address == buffer_base && sc.size == buffer_size && sc.decl == decl &&
         sc.stride == stride && sc.phase == phase && !RefreshTrackedBuffer(*sc.tracked)) {
+      if (graphics::FrameTimeline::Detail()) ++stream_plan_counters.fast;
       // Clean and cached: no lookup, no range needed.
       sp.buffer.key = sc.key;
       sp.buffer.address = buffer_base;
@@ -4944,9 +4954,20 @@ bool Renderer::PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRan
       sp.buffer.phase = phase;
     } else {
       DetailScope plan_scope(capture_timings.fs_plan_ns);
+      if (graphics::FrameTimeline::Detail()) {
+        auto& c = stream_plan_counters;
+        ++c.slow;
+        if (!sc.tracked) ++c.untracked;
+        else if (sc.address != buffer_base) ++c.address;
+        else if (sc.size != buffer_size) ++c.size;
+        else if (sc.decl != decl) ++c.decl;
+        else if (sc.stride != stride) ++c.stride;
+        else if (sc.phase != phase) ++c.phase;
+        else ++c.dirty;  // every cached field matched: RefreshTrackedBuffer reported a dirty buffer
+      }
       uint32_t need_begin = 0, need_end = ~0u;
       if (range) {
-        range->Resolve();
+        {DetailScope resolve_scope(capture_timings.fs_resolve_ns);range->Resolve();}
         if (range->end != ~0u) {
           uint64_t b = uint64_t(offset) + uint64_t(range->first) * stride;
           uint64_t e = uint64_t(offset) + uint64_t(range->end) * stride;
@@ -4955,8 +4976,11 @@ bool Renderer::PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRan
         }
       }
       bool ok = false;
-      sp.buffer = PlanBuffer(base, buffer_base, buffer_size, decl, stride, s << 8, phase,
-                             need_begin, need_end, ok);
+      {
+        DetailScope buffer_scope(capture_timings.fs_buffer_ns);
+        sp.buffer = PlanBuffer(base, buffer_base, buffer_size, decl, stride, s << 8, phase,
+                               need_begin, need_end, ok);
+      }
       if (!ok) return false;
       auto it = tracked_.find(sp.buffer.key);
       sc.address = buffer_base;
@@ -6326,11 +6350,13 @@ void Renderer::EndCmd(uint8_t* base) {
   if (cur_.packet_check && cur_.ring_bytes) {
     const auto started=std::chrono::steady_clock::now();
     std::string capture_error;
+    DetailScope pm4_scope(capture_timings.fe_pm4_ns);
     cur_.pm4_capture_ok = graphics::guest::CapturePm4Dependencies(*batch_, cur_,
         [base](uint32_t address, uint32_t length) {
           return ReadCommittedGuest(base,address,length);
         }, capture_error, &capture_mirror_);
     capture_timings.pm4_us+=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-started).count();
+    pm4_scope.Stop();
     if (!cur_.pm4_capture_ok)
       REXLOG_WARN("native PM4 capture: {}", capture_error);
   }
@@ -6343,8 +6369,10 @@ void Renderer::EndCmd(uint8_t* base) {
   if (cur_.packet_check && cur_.device &&
       (cur_.op==Op::kDraw || cur_.op==Op::kDrawIndexed || cur_.op==Op::kDrawInline)) {
     const auto started=std::chrono::steady_clock::now();
+    DetailScope textures_scope(capture_timings.fe_textures_ns);
     CaptureTextures(base);
     capture_timings.textures_us+=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-started).count();
+    textures_scope.Stop();
   }
   if(cur_.op==Op::kResolve && cur_.packet_check) {
     cur_.resolve_copy_draw=capture_mirror_.copy_draws!=capture_copies_before;
@@ -7143,6 +7171,18 @@ void Renderer::OnSwap(uint8_t* base, uint32_t front_buffer_texture, uint64_t swa
       timeline.RecordBusy(graphics::TimelineStage::kFsPrep, swap_number, t.fs_prep_ns);
       timeline.RecordBusy(graphics::TimelineStage::kFsPlan, swap_number, t.fs_plan_ns);
       timeline.RecordBusy(graphics::TimelineStage::kFePush, swap_number, t.fe_push_ns);
+      timeline.RecordBusy(graphics::TimelineStage::kFePm4, swap_number, t.fe_pm4_ns);
+      timeline.RecordBusy(graphics::TimelineStage::kFeTextures, swap_number, t.fe_textures_ns);
+      timeline.RecordBusy(graphics::TimelineStage::kFsResolve, swap_number, t.fs_resolve_ns);
+      timeline.RecordBusy(graphics::TimelineStage::kFsBuffer, swap_number, t.fs_buffer_ns);
+      if (swap_number % 120 == 0) {
+        auto& c = stream_plan_counters;
+        REXLOG_INFO("native front-end stream plan (per frame over 120): evaluated={} fast={} slow={} | slow reasons: "
+                    "untracked={} address={} size={} decl={} stride={} phase={} dirty={}",
+                    c.evaluated/120,c.fast/120,c.slow/120,c.untracked/120,c.address/120,c.size/120,c.decl/120,
+                    c.stride/120,c.phase/120,c.dirty/120);
+        c={};
+      }
     }
   }
   capture_timings={};
