@@ -234,3 +234,30 @@ def test_buffer_refresh_stages_are_listed_and_not_summed(tmp_path):
     assert result["stages"]["frontend_other"]["mean"] == pytest.approx(1.0)  # unchanged by the new stages
     text = ftr.render(result)
     assert "fb_refresh" in text and "fb_hash" in text
+
+
+def test_fp_scan_is_derived_from_the_pm4_probe_parts(tmp_path):
+    rows = []
+    for frame in range(1, 4):
+        rows += detail_rows(frame)
+        rows += [(frame, "fe_pm4", 0, 0, 4 * MS, 0), (frame, "fp_primary", 0, 0, 0, 0),
+                 (frame, "fp_read", 0, 0, 1 * MS, 0), (frame, "fp_copy", 0, 0, 1 * MS, 0)]
+    path = tmp_path / "pm4.csv"
+    write_csv(path, rows)
+    stages = ftr.analyze(ftr.load(path))["stages"]
+    assert stages["fp_read"]["mean"] == pytest.approx(1.0)
+    assert stages["fp_scan"]["mean"] == pytest.approx(2.0)   # 4 - 0 - 1 - 1
+    assert stages["frontend_other"]["mean"] == pytest.approx(1.0)  # unchanged
+
+
+def test_fp_scan_is_clamped_and_absent_without_the_probe(tmp_path):
+    rows = []
+    for frame in range(1, 4):
+        rows += detail_rows(frame)
+        rows += [(frame, "fe_pm4", 0, 0, 1 * MS, 0), (frame, "fp_read", 0, 0, 2 * MS, 0)]
+    path = tmp_path / "clamp3.csv"
+    write_csv(path, rows)
+    assert ftr.analyze(ftr.load(path))["stages"]["fp_scan"]["mean"] == 0.0
+    plain = tmp_path / "plain3.csv"
+    write_csv(plain, [r for f in range(1, 4) for r in detail_rows(f)])
+    assert "fp_scan" not in ftr.analyze(ftr.load(plain))["stages"]

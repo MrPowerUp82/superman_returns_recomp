@@ -377,6 +377,7 @@ struct CaptureTimings {
   uint64_t fd_shaders_ns=0,fs_prep_ns=0,fs_plan_ns=0,fe_push_ns=0;
   uint64_t fe_pm4_ns=0,fe_textures_ns=0,fs_resolve_ns=0,fs_buffer_ns=0;
   uint64_t fb_refresh_ns=0,fb_hash_ns=0;
+  uint64_t fp_primary_ns=0,fp_read_ns=0,fp_copy_ns=0;
 };
 thread_local CaptureTimings capture_timings;
 // SR_FRAME_TIMELINE_DETAIL=1: nanosecond accumulator for one front-end region of the game thread.
@@ -399,6 +400,7 @@ struct StreamPlanCounters {
   uint64_t evaluated=0,fast=0,slow=0;
   uint64_t untracked=0,address=0,size=0,decl=0,stride=0,phase=0,dirty=0;
   uint64_t refresh_calls=0,refresh_hashes=0,refresh_hash_bytes=0;
+  uint64_t pm4_reads=0,pm4_bytes=0;
 };
 thread_local StreamPlanCounters stream_plan_counters;
 thread_local CheckedGuestReads checked_guest_reads;
@@ -6378,12 +6380,20 @@ void Renderer::EndCmd(uint8_t* base) {
     const auto started=std::chrono::steady_clock::now();
     std::string capture_error;
     DetailScope pm4_scope(capture_timings.fe_pm4_ns);
+    graphics::guest::Pm4CaptureProbe pm4_probe;
     cur_.pm4_capture_ok = graphics::guest::CapturePm4Dependencies(*batch_, cur_,
         [base](uint32_t address, uint32_t length) {
           return ReadCommittedGuest(base,address,length);
-        }, capture_error, &capture_mirror_);
+        }, capture_error, &capture_mirror_, graphics::FrameTimeline::Detail() ? &pm4_probe : nullptr);
     capture_timings.pm4_us+=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-started).count();
     pm4_scope.Stop();
+    if (graphics::FrameTimeline::Detail()) {
+      capture_timings.fp_primary_ns += pm4_probe.primary_ns;
+      capture_timings.fp_read_ns += pm4_probe.read_ns;
+      capture_timings.fp_copy_ns += pm4_probe.copy_ns;
+      stream_plan_counters.pm4_reads += pm4_probe.reads;
+      stream_plan_counters.pm4_bytes += pm4_probe.bytes;
+    }
     if (!cur_.pm4_capture_ok)
       REXLOG_WARN("native PM4 capture: {}", capture_error);
   }
@@ -7204,12 +7214,16 @@ void Renderer::OnSwap(uint8_t* base, uint32_t front_buffer_texture, uint64_t swa
       timeline.RecordBusy(graphics::TimelineStage::kFsBuffer, swap_number, t.fs_buffer_ns);
       timeline.RecordBusy(graphics::TimelineStage::kFbRefresh, swap_number, t.fb_refresh_ns);
       timeline.RecordBusy(graphics::TimelineStage::kFbHash, swap_number, t.fb_hash_ns);
+      timeline.RecordBusy(graphics::TimelineStage::kFpPrimary, swap_number, t.fp_primary_ns);
+      timeline.RecordBusy(graphics::TimelineStage::kFpRead, swap_number, t.fp_read_ns);
+      timeline.RecordBusy(graphics::TimelineStage::kFpCopy, swap_number, t.fp_copy_ns);
       if (swap_number % 120 == 0) {
         auto& c = stream_plan_counters;
         REXLOG_INFO("native front-end stream plan (per frame over 120): evaluated={} fast={} slow={} | slow reasons: "
-                    "untracked={} address={} size={} decl={} stride={} phase={} dirty={} | buffer refresh: calls={} hashes={} hash_kb={}",
+                    "untracked={} address={} size={} decl={} stride={} phase={} dirty={} | buffer refresh: calls={} hashes={} hash_kb={} | pm4 deps: reads={} kb={}",
                     c.evaluated/120,c.fast/120,c.slow/120,c.untracked/120,c.address/120,c.size/120,c.decl/120,
-                    c.stride/120,c.phase/120,c.dirty/120,c.refresh_calls/120,c.refresh_hashes/120,c.refresh_hash_bytes/120/1024);
+                    c.stride/120,c.phase/120,c.dirty/120,c.refresh_calls/120,c.refresh_hashes/120,c.refresh_hash_bytes/120/1024,
+                    c.pm4_reads/120,c.pm4_bytes/120/1024);
         c={};
       }
     }

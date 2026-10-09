@@ -64,6 +64,72 @@ SR_TEST(pm4_dependency_capture_owns_nested_sources) {
                        });
   SR_CHECK_EQ(mirror.reg(mirror.kAluConstantBase), 0x3f800000u);
 }
+// Same ring as pm4_dependency_capture_owns_nested_sources: an indirect buffer
+// (16 bytes) that in turn loads a 4-byte ALU constant, so two guest reads.
+SR_TEST(pm4_capture_probe_counts_reads_and_changes_nothing) {
+  const std::vector<uint8_t> ring = {0xc0, 0x01, 0x3f, 0, 0, 0, 2, 0, 0, 0, 0, 4};
+  const std::vector<uint8_t> indirect = {0xc0, 0x02, 0x2f, 0, 0, 0, 1, 0,
+                                         0,    0,    0,    0, 0, 0, 0, 1};
+  const std::vector<uint8_t> constant = {0x3f, 0x80, 0, 0};
+  auto reader = [&](uint32_t address, uint32_t length) -> std::span<const uint8_t> {
+    if (address == 0xa0000200 && length == 16) return indirect;
+    if (address == 0xa0000100 && length == 4) return constant;
+    return {};
+  };
+  WorkCmd cmd;
+  cmd.ring_bytes = uint32_t(ring.size());
+
+  WorkBatch plain;
+  plain.bytes.assign(ring.begin(), ring.end());
+  std::string plain_error;
+  const bool plain_ok = CapturePm4Dependencies(plain, cmd, reader, plain_error);
+
+  WorkBatch probed;
+  probed.bytes.assign(ring.begin(), ring.end());
+  std::string probed_error;
+  Pm4CaptureProbe probe;
+  const bool probed_ok =
+      CapturePm4Dependencies(probed, cmd, reader, probed_error, nullptr, &probe);
+
+  SR_CHECK(plain_ok);
+  SR_CHECK_EQ(probed_ok, plain_ok);
+  SR_CHECK(plain_error == probed_error);
+  SR_CHECK(plain.bytes == probed.bytes);
+  SR_CHECK_EQ(plain.ranges.size(), 2u);
+  SR_CHECK_EQ(probed.ranges.size(), plain.ranges.size());
+  for (size_t i = 0; i < plain.ranges.size(); ++i) {
+    SR_CHECK_EQ(probed.ranges[i].address, plain.ranges[i].address);
+    SR_CHECK_EQ(probed.ranges[i].length, plain.ranges[i].length);
+    SR_CHECK_EQ(probed.ranges[i].offset, plain.ranges[i].offset);
+  }
+  SR_CHECK_EQ(probe.reads, 2u);
+  SR_CHECK_EQ(probe.bytes, 20u);
+  SR_CHECK(probe.copy_ns > 0 || probe.read_ns > 0 || probe.primary_ns > 0);
+
+  // A failing dependency: same error and rollback with and without the probe;
+  // only successful reads are counted.
+  auto missing_constant = [&](uint32_t address, uint32_t length) -> std::span<const uint8_t> {
+    if (address == 0xa0000200 && length == 16) return indirect;
+    return {};
+  };
+  WorkBatch plain_fail, probed_fail;
+  plain_fail.bytes.assign(ring.begin(), ring.end());
+  probed_fail.bytes.assign(ring.begin(), ring.end());
+  std::string plain_fail_error, probed_fail_error;
+  Pm4CaptureProbe fail_probe;
+  const bool plain_fail_ok =
+      CapturePm4Dependencies(plain_fail, cmd, missing_constant, plain_fail_error);
+  const bool probed_fail_ok = CapturePm4Dependencies(
+      probed_fail, cmd, missing_constant, probed_fail_error, nullptr, &fail_probe);
+  SR_CHECK(!plain_fail_ok);
+  SR_CHECK_EQ(probed_fail_ok, plain_fail_ok);
+  SR_CHECK(!plain_fail_error.empty());
+  SR_CHECK(plain_fail_error == probed_fail_error);
+  SR_CHECK(plain_fail.bytes == probed_fail.bytes);
+  SR_CHECK_EQ(plain_fail.ranges.size(), probed_fail.ranges.size());
+  SR_CHECK_EQ(fail_probe.reads, 1u);
+  SR_CHECK_EQ(fail_probe.bytes, 16u);
+}
 SR_TEST(captured_memory_owns_bytes_after_source_reuse) {
   WorkBatch batch;
   batch.bytes = {1, 2, 3, 4, 5, 6};
