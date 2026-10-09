@@ -22,6 +22,7 @@ Ferramenta da Fase 0 do ciclo 4 (design: `superpowers/specs/2026-10-08-native-re
 4. **Uma máquina, cena variável.** Tudo vem de um notebook (Intel UHD, i5-13420H) e de uma cena que muda de uma execução para outra. Compare as razões entre as duas execuções de cada API, não os valores absolutos.
 5. **Janela.** O relatório usa `--last 1100`, que é a janela dos últimos 1100 quadros (cerca de 37 s a 30 FPS; no Vulkan, com intervalos de 36–38 ms, cerca de 40 s), que cobre a fase andando e o fim da fase parado, e pode alcançar antes da fase parado. Por isso o intervalo médio do relatório pode diferir do FPS médio impresso pelo bench, que mede só a janela de 20 s de cada cenário.
 6. **O tempo ocupado do `worker` pode esconder esperas.** Esperas que não estão envolvidas por um bloco de escopo próprio entram como trabalho (ocupado), não em `bloq.`. Casos conhecidos: a aquisição de `mutex_`, o `RefreshGuestOutput` do apresentador e, no Vulkan, o `WaitSlot` depois do submit, que conta como ocupado do `record`. Por isso um `bloq.` de 0,00 ms (como no D3D12) não prova que o estágio nunca espera.
+7. **O aninhamento dos estágios `fs_*` e `fb_*` depende do modo do resolve do intervalo de vértices.** Com o resolve preguiçoso (padrão desde a Fase 1.1c; `SR_NATIVE_LAZY_RESOLVE=0` restaura o modo antigo), o `fs_resolve` fica **dentro** do `fs_buffer`; no modo antigo (ansioso) os dois eram irmãos dentro do `fs_plan`. Logo o `fs_buffer` não é comparável entre os dois modos. Os estágios `fb_refresh` e `fb_hash` aninham em vários pais e não se somam a nada (ver a Fase 1.1c no fim deste documento). As seções anteriores descrevem o aninhamento do modo ansioso e ficam como estão.
 
 ## Custo da instrumentação (ligada contra desligada)
 
@@ -769,6 +770,8 @@ gpu               30.60   31.72   38.61    0.00     77%      -5.28         1%
 
 Como nas fases anteriores, `fd_shaders`, `fs_prep`, `fs_plan`, `fe_push`, `fe_pm4`, `fe_textures`, `fs_resolve` e `fs_buffer` aninham nos estágios maiores (`fe_pm4`, `fe_textures` e `fe_push` dentro de `fe_end`; `fs_resolve` e `fs_buffer` dentro de `fs_plan`, que está dentro de `fe_streams`) e não se somam às colunas maiores. `fe_end_rest` é um derivado do relatório (`fe_end` menos `fe_pm4`, `fe_textures` e `fe_push`, com piso em zero por quadro).
 
+*Nota da Fase 1.1c (o texto acima descreve o modo ansioso, o único que existia na 1.1b):* desde o resolve preguiçoso o `fs_resolve` aninha dentro do `fs_buffer`, não ao lado dele; ver a ressalva 7 do início do documento e a seção "Resolve preguiçoso (Fase 1.1c)".
+
 **Draws por quadro e janelas dos contadores.** Os draws vêm do campo `draws=` das linhas `Vulkan profile (ms/frame over 120)` de `logs/bench_tl_fp1_vulkan.log` a `bench_tl_fp4_vulkan.log` (cópias do `game.log` feitas com `-Profile`); os contadores vêm das linhas `native front-end stream plan (per frame over 120)` do mesmo log. Como na Fase 1.1a, usei as **últimas 9 janelas de 120 quadros** de cada execução (1080 quadros, quase a janela de 1100 do relatório), pareando a janela do contador com a do perfil pela posição. Média de `draws=` nessas janelas: 2886 (`fp1`), 2554 (`fp2`), 2887 (`fp3`) e 2529 (`fp4`); por janela, de 1869 a 3074, então a cena variou bastante dentro das execuções (por exemplo, 1869 e 2118 em `fp2`, 1971 e 1999 em `fp4`). Os contadores por quadro são divisões inteiras por 120 feitas pelo jogo, então os campos de uma linha podem não fechar com o total por 1 ou 2 e os valores abaixo (médias de 9 janelas) saem com decimais. Os logs e os CSVs ficam em `logs/` (não versionado); as tabelas acima são cópias.
 
 ### Pergunta 1: por que o `PlanStreams` toma o ramo lento
@@ -849,3 +852,285 @@ O teto de cada item é a média do próprio estágio nas quatro execuções (ms 
 9. **Tetos pequenos, nos quais a sonda pesa uma fração apreciável** (`fs_prep`, `fs_other`, `fe_push`), **com `fe_end_rest` acima dele:** `fs_prep` 0,41 ms (≈0,15 µs/draw), `fs_other` 0,37 ms (≈0,14 µs/draw) e `fe_push` 0,305 ms (≈0,11 µs/draw; as quatro tabelas dão 0,31, 0,28, 0,33 e 0,30). Pela contabilidade desta seção (≈1 leitura de relógio dentro do intervalo do próprio escopo e ≈1 fora, no pai; 20 a 30 ns por leitura, **não medido**), por escopo cronometrado: o `fs_prep` (2530 a 2890 draws por quadro) custa ≈0,10 a 0,17 ms no total (2 leituras × 2530 a 2890 × 20 a 30 ns), dos quais ≈0,05 a 0,09 ms dentro do `fs_prep` (cerca de um oitavo a um quinto do seu 0,41 ms: 12% a 21%) e ≈0,05 a 0,09 ms fora dele, no `fs_other`. O `fs_other` também recebe a leitura de fora do `fs_plan` (≈1 por avaliação lenta, 2098 a 2480 por quadro, ≈0,04 a 0,07 ms), o que dá ≈0,09 a 0,16 ms de sonda no `fs_other` (25% a 44% do seu 0,37 ms; sem contar as leituras do próprio `fe_streams`, que não foram contadas). O `fe_push` tem um escopo por comando; tomando o `packets=` dos logs (2647 a 3038 na última linha de cada execução) como a contagem de comandos, o que não foi verificado, são ≈0,05 a 0,09 ms dentro do `fe_push` (17% a 30% do seu 0,305 ms) e outro tanto fora dele, no `fe_end_rest`. Esses números sustentam apenas que, por essa estimativa, a sonda pode ser de cerca de um oitavo a pouco mais de dois quintos (12% a 44%) de cada um dos três tetos, e que o restante (a maior parte, mas não medida em cada um) é trabalho não decomposto; como cada teto é de no máximo 0,41 ms, eles não são candidatos antes dos itens acima. O `fe_end_rest` (0,75 ms, 0,28 µs/draw) está acima dela (a parte de leituras de relógio que ele contém é ≈0,10 a 0,18 ms nas contas da pergunta 2, 13% a 24% do seu valor, mais as leituras de fora do `fe_push` acima); só vale abri-lo se o item 2 mostrar que o relógio explica pouco dele.
 
 **O que os dados não decidem.** Quantos buffers distintos cada slot vê por quadro e se os mesmos buffers voltam (item 1); o desfecho do `PlanBuffer` nos desvios lentos, quantos deles chegam a um `tracked_` sujo (a parcela de buffers sujos entre as avaliações `address` é desconhecida) e quantos `Resolve` são consumidos (item 1); quanto da diferença de 2,2 a 2,5 ms entre os cronômetros em µs e em ns é truncação e quanto é relógio (item 2), embora a estimativa de relógio fique abaixo de um terço dela; onde está o tempo dentro de `fe_textures` e `fe_pm4` (item 3); quanto do `fe_end_rest` é cada parte; quanto do `fe_index` é o `PlanBuffer` de índices; e quanto uma redução do `frontend` vira FPS (depende de `worker` e `gpu`). Também continuam sem medida o custo de uma leitura de relógio e o custo do hash de conteúdo de buffers de até 32 KiB dentro do `RefreshTrackedBuffer`.
+
+## Resolve preguiçoso (Fase 1.1c)
+
+Plano: `superpowers/plans/2026-10-08-lazy-vertex-range.md`. A Fase 1.1b mostrou que o `fs_resolve` (≈0,95 ms por quadro) varria os índices de todo desvio lento com `VertexRange`, mas que o `PlanBuffer` só lê o intervalo quando acha o buffer em `tracked_` **e** ele está sujo. Esta fase muda o código: o `PlanBuffer` recebe o `VertexRange` e chama o `Resolve()` só nesse ramo (commit `0e458e9`). O desligador `SR_NATIVE_LAZY_RESOLVE=0` restaura o `Resolve()` ansioso no `PlanStreams` no mesmo binário, o que permite o A/B abaixo. A mesma fase acrescenta (commit `bed8aa8`) os estágios `fb_refresh` (todo o `RefreshTrackedBuffer`) e `fb_hash` (só o hash de conteúdo dentro dele) e, na linha `native front-end stream plan`, os contadores `buffer refresh: calls= hashes= hash_kb=`. Máquina e condições são as da Fase 0 (Intel UHD, i5-13420H, 1280x720, vsync, limite de 30 FPS), 2026-10-08, build release, Vulkan.
+
+**Procedência da build.** Não houve recompilação nesta tarefa. O `superman_returns.exe` tem data de modificação 22:14:27; os arquivos C++ dos commits `0e458e9` e `bed8aa8` têm data anterior a ela (o mais novo, `native_renderer.cpp`, 22:14:02; `frame_timeline.h`, 22:13:33), o commit `bed8aa8` foi criado às 22:16:48, a árvore de trabalho estava limpa no início e o executável contém as cadeias `fb_refresh`, `buffer refresh: calls=` e `SR_NATIVE_LAZY_RESOLVE`. A árvore do executável foi assumida idêntica à do commit, sem teste de árvore limpa (mesma ressalva das fases anteriores).
+
+### Medições (A/B no mesmo binário, ordem OFF, ON, ON, OFF)
+
+OFF é `SR_NATIVE_LAZY_RESOLVE=0` (resolve ansioso, o comportamento da 1.1b); ON é o padrão (preguiçoso). Quatro benches Vulkan, um por vez, sem outra carga, todos com `-Timeline -TimelineDetail -Profile` (`lz_off1`, `lz_on1`, `lz_on2`, `lz_off2`). Nenhuma falha de infraestrutura e nenhuma repetição. FPS do bench, média (mínimo), e intervalo médio do relatório:
+
+| Execução | Modo | parado | andando | Intervalo médio do relatório |
+| --- | --- | --- | --- | --- |
+| `lz_off1_vulkan` | OFF | 26,4 (22,7) | 27,1 (26,1) | 37,4 ms (26,7 FPS) |
+| `lz_on1_vulkan` | ON | 26,1 (21,4) | 25,1 (23,9) | 38,9 ms (25,7 FPS) |
+| `lz_on2_vulkan` | ON | 24,7 (20,9) | 23,8 (21,5) | 41,3 ms (24,2 FPS) |
+| `lz_off2_vulkan` | OFF | 22,5 (18) | 24,6 (22,9) | 42,8 ms (23,4 FPS) |
+
+As quatro tabelas do relatório (janela dos últimos 1100 quadros):
+
+`lz_off1_vulkan` (OFF):
+
+```
+Quadros analisados: 1100 (descartados por falta de estágio: 0)
+Intervalo médio 37.4 ms = 26.7 FPS | 1% low 19.6 FPS | mínimo 1.8 FPS
+Orçamento por quadro: 33.3 ms (tempos em ms)
+
+estágio           média     p50     p99   bloq.   util.  folga p99  limitante
+game              36.85   36.74   49.68    0.00     99%     -16.35        80%
+game_guest        18.63   18.40   26.18    0.00     50%       7.16          -
+game_other        30.13   29.96   38.92    0.00     81%      -5.59          -
+capture            6.72    6.51   13.15    0.00     18%      20.18          -
+frontend          18.23   18.17   26.67    0.00     49%       6.66          -
+fe_begin           0.45    0.44    0.65    0.00      1%      32.68          -
+fe_ring            0.27    0.25    0.60    0.00      1%      32.74          -
+fe_device          1.51    1.52    2.06    0.00      4%      31.27          -
+fe_index           1.45    1.43    2.18    0.00      4%      31.15          -
+fe_streams         4.11    4.14    5.87    0.00     11%      27.47          -
+fe_end             9.84    9.67   16.74    0.00     26%      16.60          -
+fe_flush           0.06    0.05    0.23    0.00      0%      33.11          -
+fd_shaders         0.43    0.43    0.63    0.00      1%      32.71          -
+fs_prep            0.36    0.35    0.51    0.00      1%      32.82          -
+fs_plan            3.36    3.40    4.94    0.00      9%      28.39          -
+fe_push            0.26    0.26    0.38    0.00      1%      32.95          -
+fe_pm4             3.71    3.65    5.50    0.00     10%      27.83          -
+fe_textures        5.19    4.83   10.66    0.00     14%      22.67          -
+fs_resolve         0.87    0.85    1.35    0.00      2%      31.98          -
+fs_buffer          2.33    2.41    3.60    0.00      6%      29.73          -
+fb_refresh         2.71    2.78    3.87    0.00      7%      29.47          -
+fb_hash            1.42    1.45    2.23    0.00      4%      31.10          -
+frontend_other     0.61    0.60    0.94    0.00      2%      32.40          -
+fe_end_rest        0.67    0.66    0.97    0.00      2%      32.36          -
+front_wait         0.49    0.00    0.00    0.00      1%      33.33          -
+worker            30.91   31.12   43.30    1.65     83%      -9.97        12%
+record            26.87   26.34   44.72    1.96     72%     -11.38         4%
+gpu               30.14   31.21   38.49    0.00     81%      -5.16         4%
+```
+
+`lz_on1_vulkan` (ON):
+
+```
+Quadros analisados: 1100 (descartados por falta de estágio: 0)
+Intervalo médio 38.9 ms = 25.7 FPS | 1% low 19.7 FPS | mínimo 2.0 FPS
+Orçamento por quadro: 33.3 ms (tempos em ms)
+
+estágio           média     p50     p99   bloq.   util.  folga p99  limitante
+game              38.41   38.61   49.45    0.00     99%     -16.12        78%
+game_guest        19.67   19.64   25.78    0.00     51%       7.55          -
+game_other        31.16   31.25   38.80    0.00     80%      -5.47          -
+capture            7.25    7.00   13.96    0.00     19%      19.38          -
+frontend          18.74   18.96   26.70    0.00     48%       6.64          -
+fe_begin           0.48    0.49    0.70    0.00      1%      32.63          -
+fe_ring            0.29    0.27    0.64    0.00      1%      32.70          -
+fe_device          1.67    1.73    2.20    0.00      4%      31.13          -
+fe_index           1.45    1.43    2.14    0.00      4%      31.19          -
+fe_streams         3.56    3.76    4.95    0.00      9%      28.39          -
+fe_end            10.61   10.49   17.59    0.00     27%      15.74          -
+fe_flush           0.06    0.05    0.18    0.00      0%      33.15          -
+fd_shaders         0.48    0.48    0.69    0.00      1%      32.64          -
+fs_prep            0.39    0.40    0.54    0.00      1%      32.79          -
+fs_plan            2.75    2.92    3.93    0.00      7%      29.40          -
+fe_push            0.29    0.29    0.41    0.00      1%      32.93          -
+fe_pm4             4.05    4.08    5.85    0.00     10%      27.48          -
+fe_textures        5.56    5.20   11.89    0.00     14%      21.45          -
+fs_resolve         0.00    0.00    0.01    0.00      0%      33.33          -
+fs_buffer          2.59    2.74    3.73    0.00      7%      29.60          -
+fb_refresh         2.88    2.96    4.17    0.00      7%      29.16          -
+fb_hash            1.56    1.62    2.44    0.00      4%      30.90          -
+frontend_other     0.67    0.67    1.00    0.00      2%      32.33          -
+fe_end_rest        0.72    0.72    0.98    0.00      2%      32.35          -
+front_wait         0.46    0.00    0.00    0.00      1%      33.33          -
+worker            32.61   33.25   45.97    1.58     84%     -12.64        12%
+record            28.15   27.90   43.64    1.97     72%     -10.31         5%
+gpu               31.71   33.40   38.31    0.00     81%      -4.97         5%
+```
+
+`lz_on2_vulkan` (ON):
+
+```
+Quadros analisados: 1100 (descartados por falta de estágio: 0)
+Intervalo médio 41.3 ms = 24.2 FPS | 1% low 17.9 FPS | mínimo 1.9 FPS
+Orçamento por quadro: 33.3 ms (tempos em ms)
+
+estágio           média     p50     p99   bloq.   util.  folga p99  limitante
+game              40.53   40.76   53.51    0.00     98%     -20.18        78%
+game_guest        20.53   20.64   26.54    0.00     50%       6.79          -
+game_other        32.60   32.83   41.61    0.00     79%      -8.28          -
+capture            7.94    7.57   14.75    0.00     19%      18.58          -
+frontend          20.00   20.11   28.73    0.00     48%       4.60          -
+fe_begin           0.52    0.52    0.76    0.00      1%      32.58          -
+fe_ring            0.31    0.28    0.61    0.00      1%      32.72          -
+fe_device          1.78    1.84    2.29    0.00      4%      31.05          -
+fe_index           1.56    1.54    2.27    0.00      4%      31.07          -
+fe_streams         3.71    3.90    5.07    0.00      9%      28.26          -
+fe_end            11.39   11.15   18.57    0.00     28%      14.76          -
+fe_flush           0.06    0.05    0.20    0.00      0%      33.13          -
+fd_shaders         0.53    0.53    0.72    0.00      1%      32.61          -
+fs_prep            0.43    0.43    0.59    0.00      1%      32.75          -
+fs_plan            2.82    2.97    3.97    0.00      7%      29.37          -
+fe_push            0.32    0.32    0.45    0.00      1%      32.88          -
+fe_pm4             4.38    4.37    6.17    0.00     11%      27.16          -
+fe_textures        5.91    5.40   12.49    0.00     14%      20.85          -
+fs_resolve         0.00    0.00    0.01    0.00      0%      33.33          -
+fs_buffer          2.64    2.78    3.76    0.00      6%      29.58          -
+fb_refresh         2.96    3.07    4.09    0.00      7%      29.24          -
+fb_hash            1.55    1.59    2.33    0.00      4%      31.00          -
+frontend_other     0.73    0.72    1.10    0.00      2%      32.24          -
+fe_end_rest        0.78    0.79    1.10    0.00      2%      32.24          -
+front_wait         0.71    0.00    2.91    0.00      2%      30.42          -
+worker            34.97   35.46   49.60    1.94     85%     -16.27        14%
+record            30.24   29.26   47.14    2.08     73%     -13.81         5%
+gpu               32.73   34.50   40.24    0.00     79%      -6.91         2%
+```
+
+`lz_off2_vulkan` (OFF):
+
+```
+Quadros analisados: 1100 (descartados por falta de estágio: 0)
+Intervalo médio 42.8 ms = 23.4 FPS | 1% low 17.6 FPS | mínimo 2.0 FPS
+Orçamento por quadro: 33.3 ms (tempos em ms)
+
+estágio           média     p50     p99   bloq.   util.  folga p99  limitante
+game              42.11   42.01   54.60    0.00     98%     -21.27        82%
+game_guest        20.46   20.43   25.79    0.00     48%       7.54          -
+game_other        33.80   33.68   42.20    0.00     79%      -8.87          -
+capture            8.31    7.86   16.12    0.00     19%      17.21          -
+frontend          21.65   21.35   30.64    0.00     51%       2.70          -
+fe_begin           0.53    0.53    0.73    0.00      1%      32.60          -
+fe_ring            0.32    0.29    0.61    0.00      1%      32.72          -
+fe_device          1.80    1.80    2.22    0.00      4%      31.11          -
+fe_index           1.74    1.70    2.45    0.00      4%      30.88          -
+fe_streams         4.69    4.64    6.09    0.00     11%      27.24          -
+fe_end            11.84   11.41   19.89    0.00     28%      13.45          -
+fe_flush           0.07    0.05    0.24    0.00      0%      33.10          -
+fd_shaders         0.53    0.53    0.71    0.00      1%      32.62          -
+fs_prep            0.43    0.43    0.58    0.00      1%      32.76          -
+fs_plan            3.79    3.74    4.98    0.00      9%      28.35          -
+fe_push            0.32    0.32    0.42    0.00      1%      32.92          -
+fe_pm4             4.47    4.44    6.29    0.00     10%      27.05          -
+fe_textures        6.24    5.64   13.45    0.00     15%      19.89          -
+fs_resolve         1.00    0.96    1.69    0.00      2%      31.64          -
+fs_buffer          2.59    2.53    3.55    0.00      6%      29.78          -
+fb_refresh         3.11    3.10    4.04    0.00      7%      29.29          -
+fb_hash            1.55    1.53    2.22    0.00      4%      31.11          -
+frontend_other     0.74    0.72    1.06    0.00      2%      32.28          -
+fe_end_rest        0.81    0.81    1.09    0.00      2%      32.24          -
+front_wait         0.63    0.00    5.73    0.00      1%      27.60          -
+worker            36.41   36.47   47.77    1.84     85%     -14.44        13%
+record            31.01   30.10   52.15    2.06     72%     -18.82         4%
+gpu               32.98   32.66   38.95    0.00     77%      -5.62         1%
+```
+
+### Draws por quadro e contadores
+
+Os draws por quadro vêm do campo `draws=` das linhas `Vulkan profile (ms/frame over 120)` dos arquivos `logs/bench_lz_off1_vulkan.log`, `bench_lz_on1_vulkan.log`, `bench_lz_on2_vulkan.log` e `bench_lz_off2_vulkan.log` (cópias do `game.log` feitas com `-Profile`), e os contadores das linhas `native front-end stream plan (per frame over 120)` do mesmo log. Como nas Fases 1.1a e 1.1b, usei as **últimas 9 janelas de 120 quadros** de cada execução (1080 quadros, quase a janela de 1100 do relatório), pareando a janela do contador com a do perfil pela posição. `lz_off1` e `lz_on1` imprimiram 20 janelas (a primeira janela de jogo, 2577 e 2553 draws, fica fora); `lz_on2` e `lz_off2` imprimiram 19, e as 9 últimas são todas as janelas de jogo (a primeira delas entra). Draws por janela:
+
+- `lz_off1`: 2844, 2987, 2853, 2154, 1914, 2435, 2694, 2532, 2565 (média 2553).
+- `lz_on1`: 2881, 3018, 3059, 2486, 1934, 2553, 2994, 2951, 2946 (média 2758).
+- `lz_on2`: 2425, 2926, 3075, 2921, 2239, 1929, 2862, 2971, 2957 (média 2701).
+- `lz_off2`: 2282, 2882, 2994, 2781, 3004, 2806, 2659, 2526, 2566 (média 2722).
+
+A média de draws por modo é 2638 em OFF e 2729 em ON. As quatro execuções diferem em até 205 draws por quadro (2553 a 2758) e as janelas de uma mesma execução variam de 1914 a 3075, então a cena muda bastante; por isso a comparação entre os modos é **por draw**. Contadores (médias por quadro nas mesmas 9 janelas; são divisões inteiras por 120 feitas pelo jogo):
+
+| Execução | `evaluated` | `fast` | `slow` | `slow`/`evaluated` | `address` | `buffer refresh: calls` | `hashes` | `hash_kb` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `lz_off1` | 3450 | 1305 | 2144 | 62,2% | 2143 | 4857 | 1850 | 6602 |
+| `lz_on1` | 3789 | 1409 | 2379 | 62,8% | 2378 | 5269 | 2060 | 7079 |
+| `lz_on2` | 3707 | 1372 | 2334 | 63,0% | 2333 | 5154 | 2014 | 6958 |
+| `lz_off2` | 3687 | 1402 | 2285 | 62,0% | 2283 | 5183 | 1959 | 7080 |
+
+Os motivos `untracked`, `size`, `stride` e `phase` foram 0 em todas as janelas usadas, `decl` ficou em 0,2 a 0,4 e `dirty` em 0,9 a 1,0 por quadro: o mesmo quadro da Fase 1.1b (a fração de avaliações lentas, 62,0% a 63,0%, não depende do modo, como esperado, porque o resolve não entra na condição do cache).
+
+### Comparação por draw, OFF contra ON, e regra de aceitação
+
+µs por draw = média do estágio (ms) × 1000 ÷ `draws=` **da mesma execução**; a coluna de cada modo é a média dos valores das suas duas execuções (OFF: `off1` e `off2`; ON: `on1` e `on2`). Os estágios por comando (`frontend`, `fe_index`) contam também comandos que não são draws (cerca de 3% dos draws, ver a 1.1a): o divisor é sempre `draws=`. Os pares são adjacentes na ordem de execução: par 1 = `on1` menos `off1`, par 2 = `on2` menos `off2`.
+
+| Estágio | OFF: µs/draw (`off1`; `off2`; média) | ON: µs/draw (`on1`; `on2`; média) | Δ média (ON − OFF) | Δ par 1 | Δ par 2 |
+| --- | --- | --- | ---: | ---: | ---: |
+| `fs_resolve` (alvo) | 0,341; 0,367; **0,354** | 0,000; 0,000; **0,000** | −0,354 (−100%) | −0,341 | −0,367 |
+| `fs_buffer` (escopo diferente, ver abaixo) | 0,913; 0,951; 0,932 | 0,939; 0,978; 0,958 | +0,026 (+2,8%) | +0,026 | +0,026 |
+| `fs_plan` | 1,316; 1,392; **1,354** | 0,997; 1,044; **1,021** | **−0,333 (−24,6%)** | −0,319 | −0,348 |
+| `fe_streams` | 1,610; 1,723; **1,666** | 1,291; 1,374; **1,332** | **−0,334 (−20,0%)** | −0,319 | −0,349 |
+| `frontend` | 7,140; 7,953; 7,547 | 6,795; 7,406; 7,100 | −0,446 (−5,9%) | −0,346 | −0,547 |
+| `game` (média do jogo) | 14,433; 15,469; 14,951 | 13,927; 15,008; 14,467 | −0,484 (−3,2%) | −0,507 | −0,461 |
+| controle: `game_guest` | 7,297; 7,516; 7,406 | 7,132; 7,602; 7,367 | −0,039 (−0,5%) | −0,165 | +0,086 |
+| controle: `fe_index` | 0,568; 0,639; 0,604 | 0,526; 0,578; 0,552 | −0,052 (−8,6%) | −0,042 | −0,062 |
+| controle: `fs_prep` | 0,141; 0,158; 0,149 | 0,141; 0,159; 0,150 | +0,001 (+0,6%) | 0,000 | +0,001 |
+
+As médias em ms por modo (OFF; ON), só para referência, porque as cenas diferem: `fs_resolve` 0,935; 0,00. `fs_buffer` 2,46; 2,615. `fs_plan` 3,575; 2,785. `fe_streams` 4,40; 3,635. `frontend` 19,94; 19,37. `game` 39,48; 39,47. Os controles (`game_guest`, `fe_index`, `fs_prep`) são estágios que a mudança não toca; eles mostram o tamanho do ruído de um par: o `game_guest` por draw moveu −0,165 e +0,086 µs/draw nos dois pares (diferença de 0,25 entre os pares) e o `fe_index`, −0,042 e −0,062.
+
+**Regra de aceitação: passou. O estágio-alvo caiu por draw, e o efeito líquido também.** (1) O `fs_resolve` foi de 0,354 µs/draw (0,87 e 1,00 ms nas execuções OFF) para 0,00 ms nas duas execuções ON (o relatório imprime 0,00 de média e 0,01 de p99, então o `Resolve` essencialmente não roda nessas cenas; quantas vezes ele roda no ramo sujo não foi contado). Isso é consistente com a leitura da 1.1b de que o resultado do `Resolve` quase nunca era consumido (a 1.1b só tinha a leitura do código). (2) O efeito líquido está em `fs_plan` e `fe_streams`: −0,333 e −0,334 µs/draw (−24,6% e −20,0%), com o mesmo sinal e tamanho parecido nos dois pares (−0,319 e −0,348 no `fs_plan`; −0,319 e −0,349 no `fe_streams`), e maior que o movimento dos controles nos mesmos pares (até 0,17 µs/draw em módulo). O `fe_streams` cai o mesmo que o `fs_plan`, então o que `fe_streams` tem fora do `fs_plan` (`fs_prep` e `fs_other`, 0,39 a 0,47 ms em OFF e 0,42 a 0,46 ms em ON) não mudou além da variação. A queda líquida (0,333) é ligeiramente menor que o `fs_resolve` removido (0,354): a diferença, 0,02 µs/draw, é pequena e fica dentro do ruído dos controles. Em ms por quadro, a 2729 draws (a média ON), 0,333 µs/draw são ≈0,91 ms. Não há motivo para reverter a mudança.
+
+O `frontend` (−0,446 µs/draw) e o `game` (−0,484) caem mais que o `fs_resolve` removido (0,354) e com o mesmo sinal nos dois pares, mas a parte além de ≈0,35 (≈0,1 µs/draw) tem o tamanho do ruído dos controles, então **não** atribuo a queda além do `fs_resolve` à mudança. Os valores por modo vêm de duas execuções cada, com cenas diferentes.
+
+**`fs_buffer` não é comparável entre os modos.** No modo ansioso o `fs_resolve` e o `fs_buffer` eram irmãos dentro do `fs_plan` (`fs_plan` ≈ `fs_resolve` + `fs_buffer` + resto); no modo preguiçoso o `Resolve` roda dentro do `PlanBuffer`, ou seja, dentro do `fs_buffer`, e o `fs_plan` ≈ `fs_buffer` + resto. O resto (`fs_plan` − `fs_resolve` − `fs_buffer`) é 0,16 e 0,20 ms em OFF e 0,16 e 0,18 ms em ON. O `fs_buffer` ON inclui, portanto, o `Resolve` do ramo sujo (≈0 ms observado). A diferença de +0,026 µs/draw (+2,8%; ≈0,07 ms por quadro), com o mesmo valor nos dois pares, é pequena e **não foi investigada**; por isso o efeito líquido se lê em `fs_plan` e `fe_streams`, não no `fs_buffer`. O nome do estágio no relatório não muda, e a tabela do relatório não avisa disso (a ressalva 7 do início do documento passa a avisar).
+
+### Gate de imagem
+
+Não existia referência em `artifacts/golden`; gravei uma com o modo OFF nesta sessão (`lz_gate_off_vulkan`, `-Gate record`) e conferi o modo ON contra ela (`lz_gate_on_vulkan`, `-Gate check`). Para ter uma base do ruído do próprio gate, conferi também uma segunda execução OFF contra a mesma referência (`lz_gate_off2_vulkan`). O gate compara o screenshot do instante em que o HUD é detectado, e o ângulo da câmera na abertura da fase varia entre execuções; só o emblema do HUD é pixel a pixel.
+
+| Execução | Modo | Veredito | PSNR global | Histograma | logo (PSNR dB / dif. média / cromaticidade) | barra azul | barra vermelha | capa (`char`) |
+| --- | --- | --- | ---: | ---: | --- | --- | --- | --- |
+| `lz_gate_on_vulkan` | ON | PASS | 38,3 dB | 0,005 | 99,0 / 0,0 / 0,000 | 29,3 / 1,2 / 0,002 | 28,1 / 0,5 / 0,001 | 24,1 / 4,2 / 0,034 |
+| `lz_gate_off2_vulkan` | OFF (base do ruído) | PASS | 36,3 dB | 0,007 | 99,0 / 0,0 / 0,000 | 25,6 / 8,7 / 0,014 | 25,4 / 6,1 / 0,011 | 24,0 / 1,7 / 0,014 |
+
+Os dois modos passam, e o ON não fica pior que o OFF contra a mesma referência no PSNR global (38,3 contra 36,3 dB) nem no histograma (0,005 contra 0,007). O emblema (`logo`) é idêntico nos dois (99,0 dB, diferença 0,0). Na capa, o ON tem diferença média maior (4,2 contra 1,7) e cromaticidade 0,034 contra 0,014 (limite do gate: 0,05); a diferença média de 4,2 fica dentro da faixa dos PASS anteriores em `logs/bench_gate.csv` (0,64 a 7,71) e a cromaticidade de 0,034 passa só um pouco acima da maior dos PASS anteriores (0,030). A capa depende do ângulo da câmera e da pose; estes valores não separam diferença de imagem de diferença de cena. **O gate é grosseiro** (limites: PSNR global ≥ 17 dB, histograma ≤ 0,40, PSNR do logo ≥ 30 dB, capa com diferença média ≤ 20): pega falhas grosseiras, não prova imagem bit a bit. A equivalência da mudança vem do argumento estrutural do plano (o `Resolve` só altera o `VertexRange` local do draw e é idempotente, e o modo preguiçoso calcula o intervalo com a mesma fórmula do `PlanStreams`), mais o desligador no mesmo binário, mais este gate. A referência `artifacts/golden/start.png` passa a existir localmente (ignorada pelo Git), gravada pelo modo OFF desta build.
+
+### Efeito em FPS e variação de cena
+
+O FPS **não** muda de forma distinguível. Intervalo médio do relatório: OFF 37,4 e 42,8 ms (média 40,1); ON 38,9 e 41,3 ms (média 40,1). FPS do bench, média das duas execuções: parado 24,45 (OFF) contra 25,4 (ON); andando 25,85 contra 24,45. As direções são opostas entre os dois cenários e entre os pares (OFF1 → ON1 pior em 1,5 ms de intervalo, ON2 → OFF2 pior em 1,5 ms). Os estágios que limitam o quadro também ficam iguais na média: `worker` 33,66 (OFF) contra 33,79 ms (ON) e `gpu` 31,56 contra 32,22 ms.
+
+Ressalvas: (1) **a cena varia entre execuções** (draws por quadro de 2553 a 2758 e intervalo de 37,4 a 42,8 ms); o `game_guest`, que a mudança não toca, subiu de 18,63 ms (`off1`) para 19,67, 20,53 e 20,46 ms nas execuções seguintes, o que indica deriva de cena ou de máquina ao longo da sequência. A ordem OFF, ON, ON, OFF cancela uma deriva linear nas médias por modo, mas não outras formas. (2) Dois resultados por modo, medidos com o detalhe e o perfil ligados. (3) Uma economia de ≈0,9 ms por quadro no `PlanStreams` (a 2729 draws) pode não virar FPS: o `worker` (30,9 a 36,4 ms) e a `gpu` (30,1 a 33,0 ms) estão perto do orçamento de 33,3 ms e não foram medidos em função da redução; **os dados não decidem** quanto da redução viraria FPS.
+
+**Custo do modo detalhado com os escopos novos.** `fb_refresh` roda ≈5100 vezes e `fb_hash` ≈1970 vezes por quadro (médias de ON e OFF, tabela de contadores); cada escopo lê o relógio duas vezes. Isso dá ≈14 200 leituras por quadro, que a 20 a 30 ns por leitura (suposição, o custo de uma leitura **não foi medido**) são ≈0,28 a 0,43 ms por quadro, distribuídos pelos pais que contêm esses escopos (`fs_buffer`, `fs_other`, `fe_index` e, acima, `fs_plan`, `fe_streams`, `frontend`, `game`). Isso é só um teto estimado, não uma medida do custo, e **infla os valores absolutos** de `fb_refresh` e `fb_hash` e dos estágios que os contêm, em ambos os modos. Pela contabilidade da 1.1b (≈1 leitura dentro do intervalo do próprio escopo e ≈1 fora), o `fb_refresh` contém ≈1 leitura por chamada mais as 2 leituras de cada `fb_hash` aninhado, ou seja, ≈9100 leituras (≈0,18 a 0,27 ms, 6% a 9% dos 2,92 ms), e o `fb_hash` contém ≈1 leitura por hash, ≈2000 leituras (≈0,04 a 0,06 ms, 3% a 4% dos 1,52 ms). O A/B OFF contra ON é simétrico nesses escopos (ambos os modos os têm), então a comparação por draw não é afetada por eles; mas as tabelas desta seção não são comparáveis em valor absoluto com as da 1.1b (por exemplo, `fs_buffer` OFF de 2,33 e 2,59 ms contra 2,12 a 2,51 ms na 1.1b, com cenas diferentes).
+
+### Mudança de aninhamento
+
+Modo ansioso (OFF, o que a 1.1b descreve): `fs_resolve` e `fs_buffer` são irmãos dentro do `fs_plan`. Modo preguiçoso (ON, padrão): `fs_resolve` ⊂ `fs_buffer` ⊂ `fs_plan` ⊂ `fe_streams`. Consequências: (a) o `fs_buffer` ON inclui o `fs_resolve` e não é comparável ao OFF (acima); (b) a comparação entre modos se faz em `fs_plan` e `fe_streams`; (c) a afirmação da 1.1b "`fs_resolve` e `fs_buffer` dentro do `fs_plan`" continua verdadeira nos dois modos, mas a de que são partes que se somam só vale no modo ansioso. A ressalva 7 do início do documento e a nota no fim da seção de execuções da 1.1b registram isso sem reescrever o texto original.
+
+### Decomposição do `fs_buffer`: `fb_refresh` e `fb_hash`
+
+O que cada estágio mede, pelo código (`RefreshTrackedBuffer`): `fb_refresh` é a chamada inteira (consulta de escrita de página pelo write-watch, hash quando necessário, marcação de sujo); `fb_hash` é só o `TextureHash` do conteúdo do buffer dentro dela, que roda quando o buffer é de até 32 KiB (`kHashedBufferMax`) e o `BufferContent::Refresh` decide hashear: na primeira chamada de cada quadro para aquele buffer (o "reforço uma vez por quadro" para escritas por aliases virtuais não observados) ou quando o write-watch acusou escrita de página. (O buffer novo é hasheado no cadastro, fora do `fb_hash`, e isso já deixa o conteúdo válido para aquele quadro.) **Os contadores e os estágios `fb_*` cobrem todos os buffers rastreados: de vértices e de índices**, não só os de vértices. Um stream sujo chama o `RefreshTrackedBuffer` duas vezes (na condição do ramo rápido e dentro do `PlanBuffer`), mas isso é raro (`dirty` ≈ 1 por quadro). O hash que o `PlanBuffer` faz ao cadastrar um buffer **novo** é outro trecho de código e não passa por `fb_hash`.
+
+**Onde `fb_refresh` aninha.** Há três pontos de chamada: (a) a condição do ramo rápido do `PlanStreams`, que fica **fora** do `fs_plan` e dentro do `fe_streams` (entra no `fs_other`); (b) o `PlanBuffer` dos streams, dentro do `fs_buffer` (ramo lento); (c) o `PlanBuffer` do buffer de índices, dentro do `fe_index`. O `fb_hash` aninha no `fb_refresh`. Como o primeiro `RefreshTrackedBuffer` de cada quadro para um buffer é o que paga o hash, o hash cai no ponto de chamada que o buffer atingir primeiro no quadro; essa divisão não foi medida. Não afirmo uma divisão do `fs_buffer` em `fb_refresh` e resto. O que os números sustentam é um limite: a média de `fb_refresh` (2,92 ms) supera a do `fs_buffer` ON (2,615 ms), então pelo menos ≈0,3 ms do `fb_refresh` está **fora** do `fs_buffer` (em `fs_other` e `fe_index`); no OFF, 2,91 contra 2,46 ms, ≥ ≈0,45 ms. O restante e a parte do `fs_buffer` que não é `fb_refresh` (chave XXH3, busca em `tracked_`, `align_range`, varredura de `clean`, captura de bytes) não foram separados.
+
+| Execução | `fb_refresh` ms (µs/draw) | `fb_hash` ms (µs/draw) | chamadas/quadro | hashes/quadro | `hash_kb`/quadro | µs por chamada | µs por hash | KiB por hash |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `lz_off1` | 2,71 (1,061) | 1,42 (0,556) | 4857 | 1850 | 6602 | 0,56 | 0,77 | 3,6 |
+| `lz_on1` | 2,88 (1,044) | 1,56 (0,566) | 5269 | 2060 | 7079 | 0,55 | 0,76 | 3,4 |
+| `lz_on2` | 2,96 (1,096) | 1,55 (0,574) | 5154 | 2014 | 6958 | 0,57 | 0,77 | 3,5 |
+| `lz_off2` | 3,11 (1,142) | 1,55 (0,569) | 5183 | 1959 | 7080 | 0,60 | 0,79 | 3,6 |
+| média | **2,92 (1,086)** | **1,52 (0,566)** | **5116** | **1971** | **6930** | 0,57 | 0,77 | 3,5 |
+
+Leitura dos números (média das quatro execuções; o `fb_*` não depende do modo do resolve, e os valores dos dois modos coincidem dentro da variação de cena):
+
+- **`fb_refresh` ≈ 2,92 ms por quadro** (1,09 µs/draw, ≈15% do `frontend` médio de 19,66 ms), em ≈5100 chamadas por quadro (≈1,9 por draw). A média por chamada é 0,57 µs, **inclusive** o relógio do escopo. As chamadas superam as avaliações de stream (`evaluated` de 3450 a 3789) em 1407 a 1496 por quadro; isso é compatível com uma chamada por draw indexado no bloco do buffer de índices, mas o número de draws indexados **não foi contado**, então é uma inferência.
+- **`fb_hash` ≈ 1,52 ms por quadro** (0,57 µs/draw, ≈7,7% do `frontend`, ≈52% do `fb_refresh`): ≈1970 hashes de conteúdo por quadro (0,73 por draw), de ≈3,5 KiB em média (buffers de até 32 KiB), ≈6930 KiB (≈6,8 MiB) hasheados por quadro, ≈0,77 µs por hash, o que equivale a ≈4,6 a 4,8 GB/s contando o relógio e a tradução de endereço. O `fb_refresh` sem o `fb_hash` é ≈1,40 ms (0,27 µs por chamada), dos quais ≈0,15 a 0,2 ms são, por estimativa, leituras de relógio (≈7100 leituras a 20 a 30 ns, não medido); o que ele contém além disso (consulta de escrita de página, early-return, marcação de sujo) não foi decomposto.
+- Depois desta mudança, o `fb_hash` (1,52 ms) é a maior causa isolada já identificada dentro dos estágios de buffer: maior que o `fs_resolve` removido (0,935 ms em OFF). Ele se distribui entre `fs_buffer`, `fs_other` e `fe_index` (a divisão não foi medida), então não se compara com o `fs_plan` (2,79 ms em ON) como uma fração dele. Os blocos `fe_textures` (5,72 ms) e `fe_pm4` (4,15 ms) são maiores, mas continuam sem decomposição.
+
+**O `fb_hash` é um mecanismo de correção e esta fase não o altera.** Ele é o reforço de uma vez por quadro do hash de conteúdo de buffers rastreados de até 32 KiB: confirma o conteúdo contra escritas feitas por aliases virtuais que o write-watch de páginas não observa (é o que o comentário do código diz sobre esse reforço; o comentário da função cita separadamente os vértices da capa, reescritos sem `Unlock` e pegos pelo write-watch físico). É da mesma família do hash de fallback das texturas, para o qual o usuário aceitou uma política de backoff (watch com backoff, para o Vulkan, em 2026-10-08, ver "Atualização: o hash quase não pesa na captura do Vulkan atual"); **para buffers não existe decisão equivalente**. Qualquer mudança de quando ou se o hash roda (backoff, pular, só sob suspeita) pode deixar vértices velhos na tela por quadros e **exige decisão do usuário**; este documento não recomenda removê-lo nem reduzi-lo. A medida de custo (1,52 ms) é o teto do que uma decisão dessas poderia economizar; o ganho real seria menor, e mudanças que não alteram quando nem se o hash roda (por exemplo, o trabalho do `fb_refresh` fora do hash) não dependem dela, mas ainda não foram medidas (ver o item 2 da lista abaixo).
+
+### Candidatos da próxima fase (reordenados com os dados da 1.1c)
+
+O item 5 da lista anterior (adiar o `Resolve`) foi feito nesta fase; o item 8 (repetições dentro do ramo lento) segue rebaixado. Tetos: média do próprio estágio nas quatro execuções (ms por quadro e µs por draw, cada execução dividida pelos seus draws); para os estágios afetados pela mudança, a média ON. Só seriam alcançados se o estágio inteiro sumisse; tetos aninhados não se somam (`fb_refresh` está parcialmente dentro de `fs_buffer`, `fs_other` e `fe_index`; `fb_hash` dentro de `fb_refresh`); incluem o custo dos relógios dos escopos; e quanto vira FPS depende de `worker` e `gpu`, perto do orçamento (ver acima). Todo item que muda comportamento tem de preservar a **imagem bit a bit**, a **semântica do rastreamento de buffer sujo** (`dirty`/`clean`, write-watch, `InvalidateGuestRange`) e a **precedência de leitura dos bytes capturados**; verificação comum: o estágio cai por draw no A/B de quatro execuções (mesma tabela de µs por draw, com controles), `tests/native` e `python -m pytest tests/tools -q` passam, e o gate de imagem (`-Gate check` contra a referência local gravada nesta fase; o gate é grosseiro).
+
+1. **Medir: decomposição de `fe_textures` e `fe_pm4`** (estágios `fe_textures`, teto 5,72 ms, 2,13 µs/draw; `fe_pm4`, teto 4,15 ms, 1,55 µs/draw; os maiores blocos cronometrados do front-end). Sub-regiões no modo detalhado, **sem** alterar a política de watch e de hash das texturas. Risco: nenhum. Verificação: as sub-regiões fecham com o estágio. Sem decisão do usuário.
+2. **Medir: decomposição do `fb_refresh` por ponto de chamada e por desfecho** (estágios `fb_refresh`, teto 2,92 ms, 1,09 µs/draw; `fb_hash`, teto 1,52 ms, 0,57 µs/draw). Contar por quadro: chamadas por ponto de chamada (condição do ramo rápido, `PlanBuffer` de stream, `PlanBuffer` de índices); hashes por motivo (buffer visto pela primeira vez, primeira chamada do quadro, escrita de página detectada pelo write-watch); quantas vezes o hash dá "mudou" (`stats_.buffer_hash_dirty`, que já existe, contra `buffer_watch_dirty`); e o hash do buffer novo no `PlanBuffer`. Cronometrar o `fb_refresh` sem o hash por ponto de chamada. Risco: nenhum no comportamento. Verificação: a soma por ponto de chamada fecha com `calls` e a soma por motivo com `hashes`. Sem decisão do usuário. É o que diz se existe algo a ganhar em `fb_refresh` fora do `fb_hash` e quanto do `fb_hash` é o reforço de uma vez por quadro contra escritas de página.
+3. **Medir: repetição de buffers por slot e desfecho do `PlanBuffer`** (estágio `fs_plan`, teto agora 2,79 ms, 1,02 µs/draw; `fs_buffer`, 2,62 ms, 0,96 µs/draw). É o item 1 da 1.1c anterior, ainda aberto: endereços-base distintos por slot, simulação de caches de 2 e 4 entradas, `action` 0, 1 ou 2, e se o `tracked_` achado está sujo. Risco: nenhum. Sem decisão do usuário.
+4. **Medir: `fe_index` e `fd_other`** (`fe_index`, teto 1,55 ms, 0,58 µs/draw; `fd_other` = `fe_device` − `fd_shaders`, teto 1,20 ms, 0,45 µs/draw). Itens 3 e 4 da 1.1b, ainda sem medida; o `fe_index` inclui agora o `fb_refresh` do buffer de índices (a divisão não foi medida). Risco: nenhum.
+5. **Medir: custo do relógio e contagem de regiões** (todos os `fe_*`; `fe_end_rest`, 0,74 ms, 0,28 µs/draw). Substitui os 20 a 30 ns supostos por um número e dá o custo medido (estimado hoje em ≈0,3 a 0,4 ms) dos escopos `fb_*`. Risco: nenhum na imagem. Sem decisão do usuário.
+6. **Ampliar o acerto do cache de stream, ou consulta direta em `tracked_`** (estágio `fs_plan`, teto 2,79 ms, frouxo; só se o item 3 mostrar o que converter). Risco **alto** no rastreamento de sujo (um acerto que pule a captura quando devia capturar quebra a imagem; o acerto precisa passar por `RefreshTrackedBuffer`). Verificação: gate de imagem, testes de dirty-tracking, contagem de capturas (`action` 1 e 2) idêntica. Uma avaliação convertida em acerto continua pagando o `fb_refresh`, com o hash da primeira chamada do quadro. Não propor antes do item 3.
+7. **Política do hash de conteúdo de buffers rastreados** (estágio `fb_hash`, teto 1,52 ms, 0,57 µs/draw). **Exige decisão do usuário** e não é proposta aqui. Antes de levá-la ao usuário: o item 2 (quantos hashes são o reforço de uma vez por quadro e quantos são por escrita de página); um teste que force uma escrita por alias virtual e conte os quadros com dado velho (o gate de imagem compara uma única captura e é grosseiro); e a definição, pelo usuário, de quantos quadros de atraso são aceitáveis para buffers (para texturas, a decisão foi até 16 quadros). Alternativas que **não** mudam quando o hash roda (por exemplo, calcular o mesmo hash fora da thread do jogo) precisam ser medidas antes de serem listadas como candidatas; o teto delas é menor que 1,52 ms.
+8. **Reduzir `CaptureDevice` fora dos shaders e as buscas de shader** (`fd_other`, 1,20 ms, 0,45 µs/draw; `fd_shaders`, 0,50 ms, 0,18 µs/draw; `fs_prep`, 0,41 ms, 0,15 µs/draw). Só depois do item 4. Risco médio (precedência das faixas e invalidação de shaders; ver a 1.1b).
+9. **Tetos pequenos** (`fs_prep`, `fs_other`, `fe_push`): como na 1.1c anterior, na ordem de grandeza do custo dos relógios; não são candidatos.
+
+Itens que precisam de decisão de política do usuário: **o 7** (hash de buffers). Os demais são medição ou mudanças que preservam a semântica e se verificam por imagem e por contagem.
+
+**O que os dados não decidem.** Quanto da economia de ≈0,9 ms no `PlanStreams` vira FPS (o intervalo médio não mudou: 40,1 ms nos dois modos); por que o `fs_buffer` ON está +0,026 µs/draw acima do OFF; quantas vezes o `Resolve` roda no ramo sujo; como as ≈5100 chamadas e os ≈1970 hashes por quadro se dividem entre os três pontos de chamada, e quantos hashes são o reforço do quadro e quantos são por escrita de página; quanto do `fb_refresh` além do `fb_hash` é trabalho e quanto é relógio; quantas chamadas vêm de draws indexados; e o custo de uma leitura de relógio. A cena variou de uma execução para outra (2553 a 2758 draws por quadro; `game_guest` de 18,6 a 20,5 ms), com duas execuções por modo, em uma máquina.
+
+### Suítes
+
+`python -m pytest tests/tools -q`: 67 passaram. `build\tests-vulkan\sr_vulkan_tests.exe`: 88 testes, 0 falhas (o executável é de 16:30, não foi recompilado nesta tarefa; a mudança não toca o código dele). `ctest --test-dir build/tests-native`: 2 de 2 passaram. Nenhuma dessas suítes exercita o front-end do `PlanStreams` (que precisa do SDK); a segurança vem da equivalência estrutural, do desligador no mesmo binário e do gate de imagem (grosseiro).
