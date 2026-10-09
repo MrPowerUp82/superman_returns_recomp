@@ -376,6 +376,7 @@ struct CaptureTimings {
   uint64_t fe_hook_ns=0,fe_begin_ns=0,fe_ring_ns=0,fe_device_ns=0,fe_index_ns=0,fe_streams_ns=0,fe_end_ns=0,fe_flush_ns=0;
   uint64_t fd_shaders_ns=0,fs_prep_ns=0,fs_plan_ns=0,fe_push_ns=0;
   uint64_t fe_pm4_ns=0,fe_textures_ns=0,fs_resolve_ns=0,fs_buffer_ns=0;
+  uint64_t fb_refresh_ns=0,fb_hash_ns=0;
 };
 thread_local CaptureTimings capture_timings;
 // SR_FRAME_TIMELINE_DETAIL=1: nanosecond accumulator for one front-end region of the game thread.
@@ -397,6 +398,7 @@ struct DetailScope {
 struct StreamPlanCounters {
   uint64_t evaluated=0,fast=0,slow=0;
   uint64_t untracked=0,address=0,size=0,decl=0,stride=0,phase=0,dirty=0;
+  uint64_t refresh_calls=0,refresh_hashes=0,refresh_hash_bytes=0;
 };
 thread_local StreamPlanCounters stream_plan_counters;
 thread_local CheckedGuestReads checked_guest_reads;
@@ -4749,6 +4751,8 @@ const Renderer::BufferEntry* Renderer::ApplyBuffer(uint8_t* base, const BufferPl
 // write watch catches those: a write to a watched page since the last check
 // makes the buffer dirty again (and re-arms the watch).
 bool Renderer::RefreshTrackedBuffer(TrackedBuffer& t) {
+  DetailScope refresh_scope(capture_timings.fb_refresh_ns);
+  if (graphics::FrameTimeline::Detail()) ++stream_plan_counters.refresh_calls;
   bool page_written = false;
   if (texture_watch_ && t.watched) {
     const uint32_t global = write_seq_.load(std::memory_order_acquire);
@@ -4766,6 +4770,8 @@ bool Renderer::RefreshTrackedBuffer(TrackedBuffer& t) {
     // Confirm page-level notifications against the actual allocation. Keep
     // the once-per-frame fallback for writes through unobserved virtual aliases.
     changed = t.content.Refresh(front_frame_, page_written, [&] {
+      DetailScope hash_scope(capture_timings.fb_hash_ns);
+      if (graphics::FrameTimeline::Detail()) {++stream_plan_counters.refresh_hashes;stream_plan_counters.refresh_hash_bytes+=t.size;}
       return TextureHash()(
           REX_KERNEL_MEMORY()->TranslatePhysical<const uint8_t*>(t.address & 0x1FFFFFFF), t.size, 0);
     });
@@ -7196,12 +7202,14 @@ void Renderer::OnSwap(uint8_t* base, uint32_t front_buffer_texture, uint64_t swa
       timeline.RecordBusy(graphics::TimelineStage::kFeTextures, swap_number, t.fe_textures_ns);
       timeline.RecordBusy(graphics::TimelineStage::kFsResolve, swap_number, t.fs_resolve_ns);
       timeline.RecordBusy(graphics::TimelineStage::kFsBuffer, swap_number, t.fs_buffer_ns);
+      timeline.RecordBusy(graphics::TimelineStage::kFbRefresh, swap_number, t.fb_refresh_ns);
+      timeline.RecordBusy(graphics::TimelineStage::kFbHash, swap_number, t.fb_hash_ns);
       if (swap_number % 120 == 0) {
         auto& c = stream_plan_counters;
         REXLOG_INFO("native front-end stream plan (per frame over 120): evaluated={} fast={} slow={} | slow reasons: "
-                    "untracked={} address={} size={} decl={} stride={} phase={} dirty={}",
+                    "untracked={} address={} size={} decl={} stride={} phase={} dirty={} | buffer refresh: calls={} hashes={} hash_kb={}",
                     c.evaluated/120,c.fast/120,c.slow/120,c.untracked/120,c.address/120,c.size/120,c.decl/120,
-                    c.stride/120,c.phase/120,c.dirty/120);
+                    c.stride/120,c.phase/120,c.dirty/120,c.refresh_calls/120,c.refresh_hashes/120,c.refresh_hash_bytes/120/1024);
         c={};
       }
     }

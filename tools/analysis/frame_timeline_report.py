@@ -14,7 +14,10 @@ from collections import defaultdict
 
 # capture and fe_flush nest inside fe_end, so fe_flush is not a FRONT_END_PARTS member (summing it would double count).
 FRONT_END_PARTS = ("fe_begin", "fe_ring", "fe_device", "fe_index", "fe_streams", "fe_end")
-FRONT_END_SUB = ("fd_shaders", "fs_prep", "fs_plan", "fe_push", "fe_pm4", "fe_textures", "fs_resolve", "fs_buffer")  # nest inside fe_device / fe_streams / fe_end: listed, never summed
+FRONT_END_SUB = ("fd_shaders", "fs_prep", "fs_plan", "fe_push", "fe_pm4", "fe_textures", "fs_resolve", "fs_buffer",
+                  "fb_refresh", "fb_hash")
+# fe_pm4/fe_textures ⊂ fe_end; fs_resolve/fs_buffer ⊂ fs_plan (with the lazy range, fs_resolve ⊂ fs_buffer);
+# fb_refresh ⊂ fs_buffer or fs_other; fb_hash ⊂ fb_refresh — listed, never summed
 STAGES = ("game", "game_guest", "game_other", "capture", "frontend", *FRONT_END_PARTS, "fe_flush", *FRONT_END_SUB,
           "frontend_other", "fe_end_rest", "front_wait", "worker", "record", "gpu")
 LIMITERS = ("game", "worker", "record", "gpu")  # stages that can bound the frame rate

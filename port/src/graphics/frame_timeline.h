@@ -24,6 +24,7 @@ enum class TimelineStage : uint8_t {
   kFdShaders, kFsPrep, kFsPlan, kFePush,
   // nest inside fe_end / fs_plan; listed, never summed
   kFePm4, kFeTextures, kFsResolve, kFsBuffer,
+  kFbRefresh, kFbHash,
   kCount
 };
 
@@ -51,6 +52,8 @@ inline const char* TimelineStageName(TimelineStage stage) {
     case TimelineStage::kFeTextures: return "fe_textures";
     case TimelineStage::kFsResolve: return "fs_resolve";
     case TimelineStage::kFsBuffer: return "fs_buffer";
+    case TimelineStage::kFbRefresh: return "fb_refresh";
+    case TimelineStage::kFbHash: return "fb_hash";
     default: return "unknown";
   }
 }

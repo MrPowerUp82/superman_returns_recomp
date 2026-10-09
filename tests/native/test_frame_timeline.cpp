@@ -179,3 +179,12 @@ SR_TEST(timeline_front_end_sub_stages_use_their_csv_names) {
   SR_CHECK(rows.find("4,fs_plan,0,0,33,0\n") != std::string::npos);
   SR_CHECK(rows.find("4,fe_push,0,0,44,0\n") != std::string::npos);
 }
+
+SR_TEST(timeline_buffer_refresh_stages_use_their_csv_names) {
+  FrameTimeline timeline("unused.csv");
+  timeline.RecordBusy(TimelineStage::kFbRefresh, 8, 55);
+  timeline.RecordBusy(TimelineStage::kFbHash, 8, 66);
+  const std::string rows = Rows(timeline, 8, 8);
+  SR_CHECK(rows.find("8,fb_refresh,0,0,55,0\n") != std::string::npos);
+  SR_CHECK(rows.find("8,fb_hash,0,0,66,0\n") != std::string::npos);
+}

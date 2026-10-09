@@ -219,3 +219,18 @@ def test_front_end_sub_stages_are_listed_after_fe_flush(tmp_path):
     assert lines.index("fd_shaders") > lines.index("fe_flush")
     # sub-stages nest inside fe_device / fe_streams / fe_end: they must not change the derivations
     assert result["stages"]["frontend_other"]["mean"] == pytest.approx(1.0)
+
+
+def test_buffer_refresh_stages_are_listed_and_not_summed(tmp_path):
+    rows = []
+    for frame in range(1, 4):
+        rows += detail_rows(frame)
+        rows += [(frame, "fb_refresh", 0, 0, 2 * MS, 0), (frame, "fb_hash", 0, 0, 1 * MS, 0)]
+    path = tmp_path / "fb.csv"
+    write_csv(path, rows)
+    result = ftr.analyze(ftr.load(path))
+    assert result["stages"]["fb_refresh"]["mean"] == pytest.approx(2.0)
+    assert result["stages"]["fb_hash"]["mean"] == pytest.approx(1.0)
+    assert result["stages"]["frontend_other"]["mean"] == pytest.approx(1.0)  # unchanged by the new stages
+    text = ftr.render(result)
+    assert "fb_refresh" in text and "fb_hash" in text
