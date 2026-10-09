@@ -208,3 +208,73 @@ SR_TEST(timeline_gpu_real_and_idle_use_their_csv_names) {
   SR_CHECK(rows.find("5,gpu_real,0,0,111,0\n") != std::string::npos);
   SR_CHECK(rows.find("5,gpu_idle,0,0,222,0\n") != std::string::npos);
 }
+
+// SplitGpuFrame: overlap-corrected GPU time from raw timestamp counters.
+SR_TEST(gpu_split_without_previous_frame_is_all_duration) {
+  const GpuFrameTicks t = SplitGpuFrame(1000, 1700, false, 0, ~0ull);
+  SR_CHECK(t.duration == 700);
+  SR_CHECK(t.overlap == 0);
+  SR_CHECK(t.idle == 0);
+  SR_CHECK(t.real == 700);
+}
+
+SR_TEST(gpu_split_idle_gap_when_begin_follows_previous_end) {
+  const GpuFrameTicks t = SplitGpuFrame(1500, 2000, true, 1200, ~0ull);
+  SR_CHECK(t.idle == 300);
+  SR_CHECK(t.overlap == 0);
+  SR_CHECK(t.duration == 500);
+  SR_CHECK(t.real == 500);
+}
+
+SR_TEST(gpu_split_overlap_when_begin_precedes_previous_end) {
+  const GpuFrameTicks t = SplitGpuFrame(1000, 1600, true, 1250, ~0ull);
+  SR_CHECK(t.overlap == 250);
+  SR_CHECK(t.idle == 0);
+  SR_CHECK(t.duration == 600);
+  SR_CHECK(t.real == 350);
+}
+
+SR_TEST(gpu_split_overlap_larger_than_duration_clamps_real_to_zero) {
+  const GpuFrameTicks t = SplitGpuFrame(1000, 1100, true, 1500, ~0ull);
+  SR_CHECK(t.overlap == 500);
+  SR_CHECK(t.duration == 100);
+  SR_CHECK(t.real == 0);
+}
+
+SR_TEST(gpu_split_prev_end_equal_to_begin_has_no_idle_and_no_overlap) {
+  const GpuFrameTicks t = SplitGpuFrame(1000, 1400, true, 1000, ~0ull);
+  SR_CHECK(t.idle == 0);
+  SR_CHECK(t.overlap == 0);
+  SR_CHECK(t.real == 400);
+}
+
+SR_TEST(gpu_split_36_bit_wrap_after_previous_end_is_a_small_idle) {
+  const uint64_t mask = (1ull << 36) - 1;
+  const uint64_t prev_end = mask - 9;  // 10 ticks before the wrap
+  const GpuFrameTicks t = SplitGpuFrame(20, 120, true, prev_end, mask);
+  SR_CHECK(t.idle == 30);  // 10 to the wrap + 1 + 20
+  SR_CHECK(t.overlap == 0);
+  SR_CHECK(t.duration == 100);
+  SR_CHECK(t.real == 100);
+}
+
+SR_TEST(gpu_split_36_bit_wrap_before_previous_end_is_a_small_overlap) {
+  const uint64_t mask = (1ull << 36) - 1;
+  const uint64_t begin = mask - 4;  // 5 ticks before the wrap
+  const GpuFrameTicks t = SplitGpuFrame(begin, 50, true, 10, mask);  // end and prev_end are past the wrap
+  SR_CHECK(t.overlap == 15);  // 5 to the wrap + 10
+  SR_CHECK(t.idle == 0);
+  SR_CHECK(t.duration == 55);  // 5 to the wrap + 50
+  SR_CHECK(t.real == 40);
+}
+
+SR_TEST(gpu_split_64_bit_mask_idle_and_overlap) {
+  const GpuFrameTicks idle = SplitGpuFrame(5000000000ull, 5000000900ull, true, 4999999000ull, ~0ull);
+  SR_CHECK(idle.idle == 1000);
+  SR_CHECK(idle.overlap == 0);
+  SR_CHECK(idle.real == 900);
+  const GpuFrameTicks over = SplitGpuFrame(5000000000ull, 5000000900ull, true, 5000000400ull, ~0ull);
+  SR_CHECK(over.overlap == 400);
+  SR_CHECK(over.idle == 0);
+  SR_CHECK(over.real == 500);
+}

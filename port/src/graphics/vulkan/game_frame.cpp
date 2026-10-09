@@ -27,7 +27,11 @@ GameFrame::~GameFrame() {
   StopAsync();
   std::lock_guard lock(queue_mutex_);snapshots_.clear();
   if(slot_submitted_[0] || slot_submitted_[1]) {c_.f.vkDeviceWaitIdle(c_.device);renderer_.Retire(serial_);}
-  if(timestamps_) {for(size_t slot=0;slot<kSlots;++slot) HarvestTimestamps(slot);c_.f.vkDestroyQueryPool(c_.device,timestamps_,nullptr);}
+  if(timestamps_) {
+    // Harvest in frame order so prev_end_ticks_ follows it (the slot holding the older swap goes first).
+    const bool slot1_first=kSlots==2 && slot_swap_[0] && slot_swap_[1] && slot_swap_[0]>slot_swap_[1];
+    for(size_t i=0;i<kSlots;++i) HarvestTimestamps(slot1_first?kSlots-1-i:i);
+    c_.f.vkDestroyQueryPool(c_.device,timestamps_,nullptr);}
   FrameTimeline::Global().FlushAll();
   for(auto fence:fences_) if(fence) c_.f.vkDestroyFence(c_.device,fence,nullptr);
   for(auto pool:pools_) if(pool) c_.f.vkDestroyCommandPool(c_.device,pool,nullptr);
@@ -77,8 +81,14 @@ bool GameFrame::WaitSlot(size_t slot,Error& e) {
 void GameFrame::HarvestTimestamps(size_t slot) {
   if(!timestamps_ || !slot_swap_[slot]) return;
   uint64_t ticks[2]{};
-  if(c_.f.vkGetQueryPoolResults(c_.device,timestamps_,uint32_t(slot*2),2,sizeof(ticks),ticks,sizeof(uint64_t),VK_QUERY_RESULT_64_BIT)==VK_SUCCESS)
+  if(c_.f.vkGetQueryPoolResults(c_.device,timestamps_,uint32_t(slot*2),2,sizeof(ticks),ticks,sizeof(uint64_t),VK_QUERY_RESULT_64_BIT)==VK_SUCCESS) {
     FrameTimeline::Global().RecordBusy(TimelineStage::kGpu,slot_swap_[slot],uint64_t(double((ticks[1]-ticks[0])&timestamp_mask_)*timestamp_period_ns_));
+    // Counters wrap at timestampValidBits; SplitGpuFrame separates the idle gap and the overlap with the previous frame.
+    const GpuFrameTicks split=SplitGpuFrame(ticks[0],ticks[1],have_prev_end_,prev_end_ticks_,timestamp_mask_);
+    prev_end_ticks_=ticks[1]&timestamp_mask_;have_prev_end_=true;
+    FrameTimeline::Global().RecordBusy(TimelineStage::kGpuReal,slot_swap_[slot],uint64_t(double(split.real)*timestamp_period_ns_));
+    FrameTimeline::Global().RecordBusy(TimelineStage::kGpuIdle,slot_swap_[slot],uint64_t(double(split.idle)*timestamp_period_ns_));
+  }
   slot_swap_[slot]=0;
 }
 void GameFrame::Cancel() {

@@ -40,7 +40,7 @@ private:
   std::array<VkCommandPool,kSlots> pools_{};std::array<VkCommandBuffer,kSlots> commands_{},uploads_{};std::array<VkFence,kSlots> fences_{};
   std::array<uint64_t,kSlots> slot_serial_{};std::array<bool,kSlots> slot_submitted_{};
   // SR_FRAME_TIMELINE: two timestamps per slot bracket the frame's GPU work.
-  VkQueryPool timestamps_=VK_NULL_HANDLE;std::array<uint64_t,kSlots> slot_swap_{};uint64_t timestamp_mask_=0;double timestamp_period_ns_=0;
+  VkQueryPool timestamps_=VK_NULL_HANDLE;std::array<uint64_t,kSlots> slot_swap_{};uint64_t timestamp_mask_=0;double timestamp_period_ns_=0;uint64_t prev_end_ticks_=0;bool have_prev_end_=false;
   VkCommandPool pool_=VK_NULL_HANDLE;VkCommandBuffer command_=VK_NULL_HANDLE,upload_=VK_NULL_HANDLE;
   // Presentation snapshots, reused once neither a mailbox nor a submission holds them.
   std::vector<std::shared_ptr<TextureResource>> snapshots_;

@@ -64,6 +64,26 @@ inline const char* TimelineStageName(TimelineStage stage) {
   }
 }
 
+// GPU time of one frame split from raw timestamp counter values. `mask` is (1<<validBits)-1
+// (~0ull for 64 bits); the counters wrap, so every difference is taken modulo the mask.
+// duration = end - begin. Against the previous frame's end: a begin that follows it by up to half
+// the counter range is an idle gap; otherwise the previous frame ended after this one began and
+// the overlap is counted twice, so real = duration minus that overlap (clamped at zero).
+struct GpuFrameTicks { uint64_t duration, overlap, idle, real; };
+inline GpuFrameTicks SplitGpuFrame(uint64_t begin, uint64_t end, bool have_prev, uint64_t prev_end, uint64_t mask) {
+  begin &= mask;
+  end &= mask;
+  prev_end &= mask;
+  GpuFrameTicks t{(end - begin) & mask, 0, 0, 0};
+  if (have_prev) {
+    const uint64_t backward = (begin - prev_end) & mask;
+    if (backward <= mask / 2) t.idle = backward;
+    else t.overlap = (prev_end - begin) & mask;
+  }
+  t.real = t.duration - std::min(t.overlap, t.duration);
+  return t;
+}
+
 class FrameTimeline {
  public:
   static constexpr uint64_t kRing = 4096;

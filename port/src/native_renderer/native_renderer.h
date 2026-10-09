@@ -284,6 +284,8 @@ class Renderer : public NativeFrontend {
   uint64_t ts_frequency_ = 0;
   bool ts_pending_[3] = {};
   uint64_t ts_frame_[3] = {};  // swap number of the frame measured in each slot (SR_FRAME_TIMELINE)
+  uint64_t ts_prev_end_ = 0;  // end timestamp of the previously harvested frame (gpu_real / gpu_idle)
+  bool ts_have_prev_ = false;
   bool ts_open_ = false;
   double ts_accum_ms_ = 0.0;
   // Per-pass split (sr_native_gpu_pass_timing): timestamps at pass changes.

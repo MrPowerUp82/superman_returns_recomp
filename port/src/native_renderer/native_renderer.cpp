@@ -1780,6 +1780,16 @@ void Renderer::BeginFrameTimestamp() {
       graphics::FrameTimeline::Global().RecordBusy(
           graphics::TimelineStage::kGpu, ts_frame_[frame_index_],
           uint64_t(double(t[n - 1] - t[0]) * 1e9 / double(ts_frequency_)));
+      {
+        const graphics::GpuFrameTicks split =
+            graphics::SplitGpuFrame(t[0], t[n - 1], ts_have_prev_, ts_prev_end_, ~0ull);
+        ts_prev_end_ = t[n - 1];
+        ts_have_prev_ = true;
+        graphics::FrameTimeline::Global().RecordBusy(graphics::TimelineStage::kGpuReal, ts_frame_[frame_index_],
+            uint64_t(double(split.real) * 1e9 / double(ts_frequency_)));
+        graphics::FrameTimeline::Global().RecordBusy(graphics::TimelineStage::kGpuIdle, ts_frame_[frame_index_],
+            uint64_t(double(split.idle) * 1e9 / double(ts_frequency_)));
+      }
       ++ts_frames_;
       for (uint32_t i = 0; i + 1 < n; ++i) {
         if (t[i + 1] >= t[i]) {
