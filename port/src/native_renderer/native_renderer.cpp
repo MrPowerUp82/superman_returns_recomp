@@ -4782,7 +4782,8 @@ bool Renderer::RefreshTrackedBuffer(TrackedBuffer& t) {
 Renderer::BufferPlan Renderer::PlanBuffer(uint8_t* base, uint32_t address, uint32_t size,
                                           uint32_t decl, uint32_t stride, uint32_t index_format,
                                           uint32_t phase, uint32_t need_begin, uint32_t need_end,
-                                          bool& ok, uint32_t reset_index) {
+                                          bool& ok, uint32_t reset_index,
+                                          VertexRange* lazy_range, uint32_t lazy_offset) {
   BufferPlan plan;
   ok = size && size <= (64u << 20);
   if (!ok) return plan;
@@ -4821,6 +4822,20 @@ Renderer::BufferPlan Renderer::PlanBuffer(uint8_t* base, uint32_t address, uint3
     RefreshTrackedBuffer(t);
     if (!t.dirty) return plan;
     uint32_t b = need_begin, e = need_end;
+    if (lazy_range) {
+      // The dirty branch is the only reader of the needed range (the clean and new-buffer
+      // branches ignore it), so the index scan is paid only here.
+      {
+        DetailScope resolve_scope(capture_timings.fs_resolve_ns);
+        lazy_range->Resolve();
+      }
+      if (lazy_range->end != ~0u) {
+        const uint64_t lo = uint64_t(lazy_offset) + uint64_t(lazy_range->first) * stride;
+        const uint64_t hi = uint64_t(lazy_offset) + uint64_t(lazy_range->end) * stride;
+        b = uint32_t(std::min<uint64_t>(lo, size));
+        e = uint32_t(std::min<uint64_t>(hi, size));
+      }
+    }
     align_range(b, e);
     if (e <= b) return plan;
     for (const auto& [cb, ce] : t.clean) {
@@ -4966,7 +4981,12 @@ bool Renderer::PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRan
         else ++c.dirty;  // every cached field matched: RefreshTrackedBuffer reported a dirty buffer
       }
       uint32_t need_begin = 0, need_end = ~0u;
-      if (range) {
+      // SR_NATIVE_LAZY_RESOLVE=0 restores the eager range scan (same-binary A/B).
+      static const bool lazy_resolve = [] {
+        const char* value = std::getenv("SR_NATIVE_LAZY_RESOLVE");
+        return !(value && *value == '0');
+      }();
+      if (range && !lazy_resolve) {
         {DetailScope resolve_scope(capture_timings.fs_resolve_ns);range->Resolve();}
         if (range->end != ~0u) {
           uint64_t b = uint64_t(offset) + uint64_t(range->first) * stride;
@@ -4979,7 +4999,8 @@ bool Renderer::PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRan
       {
         DetailScope buffer_scope(capture_timings.fs_buffer_ns);
         sp.buffer = PlanBuffer(base, buffer_base, buffer_size, decl, stride, s << 8, phase,
-                               need_begin, need_end, ok);
+                               need_begin, need_end, ok, UINT32_MAX,
+                               lazy_resolve ? range : nullptr, offset);
       }
       if (!ok) return false;
       auto it = tracked_.find(sp.buffer.key);
@@ -5014,8 +5035,8 @@ bool Renderer::PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRan
       if (match && logged < 90) {
         ++logged;
         uint32_t first = 0, last = 0;
+        if (range) range->Resolve();  // debug-only reader: lazy mode may not have resolved it
         if (range && range->end != ~0u) {
-          range->Resolve();
           first = range->first;
           last = range->end;
         }

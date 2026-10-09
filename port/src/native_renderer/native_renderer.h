@@ -205,10 +205,11 @@ class Renderer : public NativeFrontend {
   void CaptureBytes(uint8_t* base, uint32_t address, uint32_t length);
   void CaptureDevice(uint8_t* base, uint32_t dev);
   void CaptureRing(uint8_t* base, uint32_t dev);
+  struct VertexRange;
   BufferPlan PlanBuffer(uint8_t* base, uint32_t address, uint32_t size, uint32_t decl,
                         uint32_t stride, uint32_t format, uint32_t phase, uint32_t need_begin,
-                        uint32_t need_end, bool& ok, uint32_t reset_index = UINT32_MAX);
-  struct VertexRange;
+                        uint32_t need_end, bool& ok, uint32_t reset_index = UINT32_MAX,
+                        VertexRange* lazy_range = nullptr, uint32_t lazy_offset = 0);
   bool PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRange* range);
   void FlushBatch();
   void WaitWorkerIdle(uint64_t batches);
@@ -405,8 +406,8 @@ class Renderer : public NativeFrontend {
                    bool& quads,
                    D3D12_INDEX_BUFFER_STRIP_CUT_VALUE strip_cut =
                        D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED);
-  // Vertex range of a draw, computed only when a dirty dynamic buffer needs it
-  // (indexed draws scan their indices).
+  // Vertex range of a draw, computed only when a dirty buffer needs it (PlanBuffer
+  // resolves it lazily; indexed draws scan their indices).
   struct VertexRange {
     uint32_t first = 0, end = ~0u;
     bool resolved = true;
