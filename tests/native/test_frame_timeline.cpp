@@ -199,3 +199,12 @@ SR_TEST(timeline_pm4_probe_stages_use_their_csv_names) {
   SR_CHECK(rows.find("3,fp_read,0,0,22,0\n") != std::string::npos);
   SR_CHECK(rows.find("3,fp_copy,0,0,33,0\n") != std::string::npos);
 }
+
+SR_TEST(timeline_gpu_real_and_idle_use_their_csv_names) {
+  FrameTimeline timeline("unused.csv");
+  timeline.RecordBusy(TimelineStage::kGpuReal, 5, 111);
+  timeline.RecordBusy(TimelineStage::kGpuIdle, 5, 222);
+  const std::string rows = Rows(timeline, 5, 5);
+  SR_CHECK(rows.find("5,gpu_real,0,0,111,0\n") != std::string::npos);
+  SR_CHECK(rows.find("5,gpu_idle,0,0,222,0\n") != std::string::npos);
+}

@@ -25,6 +25,7 @@ enum class TimelineStage : uint8_t {
   // nest inside fe_end / fs_plan; listed, never summed
   kFePm4, kFeTextures, kFsResolve, kFsBuffer,
   kFbRefresh, kFbHash, kFpPrimary, kFpRead, kFpCopy,
+  kGpuReal, kGpuIdle,
   kCount
 };
 
@@ -57,6 +58,8 @@ inline const char* TimelineStageName(TimelineStage stage) {
     case TimelineStage::kFpPrimary: return "fp_primary";
     case TimelineStage::kFpRead: return "fp_read";
     case TimelineStage::kFpCopy: return "fp_copy";
+    case TimelineStage::kGpuReal: return "gpu_real";
+    case TimelineStage::kGpuIdle: return "gpu_idle";
     default: return "unknown";
   }
 }

@@ -21,8 +21,10 @@ FRONT_END_SUB = ("fd_shaders", "fs_prep", "fs_plan", "fe_push", "fe_pm4", "fe_te
 # (PlanBuffer of the index buffer) or fs_other (the fast-path condition in PlanStreams, outside fs_plan; fs_other is
 # fe_streams minus fs_plan and fs_prep); its counters cover every tracked buffer, vertex and index.
 # fb_hash ⊂ fb_refresh — listed, never summed
+# gpu_real / gpu_idle: GPU busy time split by the real GPU clock; gpu_overlap = gpu - gpu_real is derived.
+GPU_SUB = ("gpu_real", "gpu_idle")
 STAGES = ("game", "game_guest", "game_other", "capture", "frontend", *FRONT_END_PARTS, "fe_flush", *FRONT_END_SUB,
-          "frontend_other", "fe_end_rest", "fp_scan", "front_wait", "worker", "record", "gpu")
+          "frontend_other", "fe_end_rest", "fp_scan", "front_wait", "worker", "record", "gpu", *GPU_SUB, "gpu_overlap")
 LIMITERS = ("game", "worker", "record", "gpu")  # stages that can bound the frame rate
 REQUIRED = ("game", "worker")  # a frame without these has unusable ids or a lost stage
 
@@ -87,7 +89,7 @@ def analyze(frames, last=1100, budget_ms=1000.0 / 30.0):
         }
 
     stages = {}
-    for name in ("game", "capture", "front_wait", "worker", "record", "gpu", "frontend", *FRONT_END_PARTS, "fe_flush",
+    for name in ("game", "capture", "front_wait", "worker", "record", "gpu", *GPU_SUB, "frontend", *FRONT_END_PARTS, "fe_flush",
                  *FRONT_END_SUB):
         rows = [frames[i][name] for i in complete if name in frames[i]]
         if rows:
@@ -117,6 +119,10 @@ def analyze(frames, last=1100, budget_ms=1000.0 / 30.0):
                         - sum(frames[i][p]["busy_ns"] for p in ("fp_primary", "fp_read", "fp_copy") if p in frames[i])) / 1e6
                     for i in probed]
             stages["fp_scan"] = _summary(scan, [0.0] * len(scan), mean_interval, budget_ms)
+    both = [i for i in complete if "gpu" in frames[i] and "gpu_real" in frames[i]]
+    if both:  # GPU time that overlapped the previous frame (upper-bound gpu minus the real time)
+        overlap = [max(0, frames[i]["gpu"]["busy_ns"] - frames[i]["gpu_real"]["busy_ns"]) / 1e6 for i in both]
+        stages["gpu_overlap"] = _summary(overlap, [0.0] * len(overlap), mean_interval, budget_ms)
     result["stages"] = stages
 
     present = [name for name in LIMITERS if name in stages]

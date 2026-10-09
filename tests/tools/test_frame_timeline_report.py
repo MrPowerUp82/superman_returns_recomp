@@ -261,3 +261,33 @@ def test_fp_scan_is_clamped_and_absent_without_the_probe(tmp_path):
     plain = tmp_path / "plain3.csv"
     write_csv(plain, [r for f in range(1, 4) for r in detail_rows(f)])
     assert "fp_scan" not in ftr.analyze(ftr.load(plain))["stages"]
+
+
+def test_gpu_real_idle_and_overlap_are_listed_and_not_limiters(tmp_path):
+    rows = []
+    for frame in range(1, 6):
+        rows += frame_rows(frame)   # gpu = 18 ms
+        rows += [(frame, "gpu_real", 0, 0, 12 * MS, 0), (frame, "gpu_idle", 0, 0, 3 * MS, 0)]
+    path = tmp_path / "gpu.csv"
+    write_csv(path, rows)
+    result = ftr.analyze(ftr.load(path))
+    stages = result["stages"]
+    assert stages["gpu_real"]["mean"] == pytest.approx(12.0)
+    assert stages["gpu_idle"]["mean"] == pytest.approx(3.0)
+    assert stages["gpu_overlap"]["mean"] == pytest.approx(6.0)     # 18 - 12
+    assert "gpu_real" not in result["limiting_share"] and "gpu_idle" not in result["limiting_share"]
+    names = [line.split()[0] for line in ftr.render(result).splitlines()[5:] if line.strip()]
+    assert names.index("gpu_real") > names.index("gpu")
+
+
+def test_gpu_overlap_is_clamped_and_absent_without_gpu_real(tmp_path):
+    rows = []
+    for frame in range(1, 4):
+        rows += frame_rows(frame)
+        rows += [(frame, "gpu_real", 0, 0, 20 * MS, 0)]   # more than gpu (18 ms)
+    path = tmp_path / "clamp4.csv"
+    write_csv(path, rows)
+    assert ftr.analyze(ftr.load(path))["stages"]["gpu_overlap"]["mean"] == 0.0
+    plain = tmp_path / "plain4.csv"
+    write_csv(plain, [r for f in range(1, 4) for r in frame_rows(f)])
+    assert "gpu_overlap" not in ftr.analyze(ftr.load(plain))["stages"]
