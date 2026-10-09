@@ -14,9 +14,9 @@ from collections import defaultdict
 
 # capture and fe_flush nest inside fe_end, so fe_flush is not a FRONT_END_PARTS member (summing it would double count).
 FRONT_END_PARTS = ("fe_begin", "fe_ring", "fe_device", "fe_index", "fe_streams", "fe_end")
-FRONT_END_SUB = ("fd_shaders", "fs_prep", "fs_plan", "fe_push")  # nest inside fe_device / fe_streams / fe_end: listed, never summed
+FRONT_END_SUB = ("fd_shaders", "fs_prep", "fs_plan", "fe_push", "fe_pm4", "fe_textures", "fs_resolve", "fs_buffer")  # nest inside fe_device / fe_streams / fe_end: listed, never summed
 STAGES = ("game", "game_guest", "game_other", "capture", "frontend", *FRONT_END_PARTS, "fe_flush", *FRONT_END_SUB,
-          "frontend_other", "front_wait", "worker", "record", "gpu")
+          "frontend_other", "fe_end_rest", "front_wait", "worker", "record", "gpu")
 LIMITERS = ("game", "worker", "record", "gpu")  # stages that can bound the frame rate
 REQUIRED = ("game", "worker")  # a frame without these has unusable ids or a lost stage
 
@@ -99,6 +99,12 @@ def analyze(frames, last=1100, budget_ms=1000.0 / 30.0):
                     - sum(frames[i][part]["busy_ns"] for part in FRONT_END_PARTS if part in frames[i])) / 1e6
                 for i in with_frontend]
         stages["frontend_other"] = _summary(rest, [0.0] * len(rest), mean_interval, budget_ms)
+        has_parts = [i for i in with_frontend if "fe_end" in frames[i] and ("fe_pm4" in frames[i] or "fe_textures" in frames[i])]
+        if has_parts:  # EndCmd minus its nanosecond-timed parts
+            rest = [max(0, frames[i]["fe_end"]["busy_ns"]
+                        - sum(frames[i][p]["busy_ns"] for p in ("fe_pm4", "fe_textures", "fe_push") if p in frames[i])) / 1e6
+                    for i in has_parts]
+            stages["fe_end_rest"] = _summary(rest, [0.0] * len(rest), mean_interval, budget_ms)
     result["stages"] = stages
 
     present = [name for name in LIMITERS if name in stages]

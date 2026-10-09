@@ -154,6 +154,19 @@ SR_TEST(timeline_detail_is_off_without_the_environment) {
   SR_CHECK(!FrameTimeline::Detail());
 }
 
+SR_TEST(timeline_end_cmd_and_stream_plan_stages_use_their_csv_names) {
+  FrameTimeline timeline("unused.csv");
+  timeline.RecordBusy(TimelineStage::kFePm4, 6, 11);
+  timeline.RecordBusy(TimelineStage::kFeTextures, 6, 22);
+  timeline.RecordBusy(TimelineStage::kFsResolve, 6, 33);
+  timeline.RecordBusy(TimelineStage::kFsBuffer, 6, 44);
+  const std::string rows = Rows(timeline, 6, 6);
+  SR_CHECK(rows.find("6,fe_pm4,0,0,11,0\n") != std::string::npos);
+  SR_CHECK(rows.find("6,fe_textures,0,0,22,0\n") != std::string::npos);
+  SR_CHECK(rows.find("6,fs_resolve,0,0,33,0\n") != std::string::npos);
+  SR_CHECK(rows.find("6,fs_buffer,0,0,44,0\n") != std::string::npos);
+}
+
 SR_TEST(timeline_front_end_sub_stages_use_their_csv_names) {
   FrameTimeline timeline("unused.csv");
   timeline.RecordBusy(TimelineStage::kFdShaders, 4, 11);

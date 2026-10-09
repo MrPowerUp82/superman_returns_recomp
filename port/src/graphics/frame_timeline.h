@@ -22,6 +22,8 @@ enum class TimelineStage : uint8_t {
   // Front-end detail on the game thread (SR_FRAME_TIMELINE_DETAIL=1).
   kFrontend, kFeBegin, kFeRing, kFeDevice, kFeIndex, kFeStreams, kFeEnd, kFeFlush,
   kFdShaders, kFsPrep, kFsPlan, kFePush,
+  // nest inside fe_end / fs_plan; listed, never summed
+  kFePm4, kFeTextures, kFsResolve, kFsBuffer,
   kCount
 };
 
@@ -45,6 +47,10 @@ inline const char* TimelineStageName(TimelineStage stage) {
     case TimelineStage::kFsPrep: return "fs_prep";
     case TimelineStage::kFsPlan: return "fs_plan";
     case TimelineStage::kFePush: return "fe_push";
+    case TimelineStage::kFePm4: return "fe_pm4";
+    case TimelineStage::kFeTextures: return "fe_textures";
+    case TimelineStage::kFsResolve: return "fs_resolve";
+    case TimelineStage::kFsBuffer: return "fs_buffer";
     default: return "unknown";
   }
 }

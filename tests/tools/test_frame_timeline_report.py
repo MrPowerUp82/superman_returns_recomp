@@ -173,6 +173,34 @@ def test_report_without_detail_has_no_front_end_rows(tmp_path):
         assert name not in result["stages"]
 
 
+def test_end_cmd_rest_is_derived_from_the_nanosecond_parts(tmp_path):
+    rows = []
+    for frame in range(1, 4):
+        rows += detail_rows(frame)   # fe_end = 3 ms
+        rows += [(frame, "fe_pm4", 0, 0, 1 * MS, 0), (frame, "fe_textures", 0, 0, 1 * MS, 0),
+                 (frame, "fe_push", 0, 0, 0, 0), (frame, "fs_resolve", 0, 0, 1 * MS, 0),
+                 (frame, "fs_buffer", 0, 0, 2 * MS, 0)]
+    path = tmp_path / "rest.csv"
+    write_csv(path, rows)
+    stages = ftr.analyze(ftr.load(path))["stages"]
+    assert stages["fe_pm4"]["mean"] == pytest.approx(1.0)
+    assert stages["fs_buffer"]["mean"] == pytest.approx(2.0)
+    assert stages["fe_end_rest"]["mean"] == pytest.approx(1.0)   # 3 - 1 - 1 - 0
+
+
+def test_end_cmd_rest_is_clamped_and_absent_without_the_parts(tmp_path):
+    rows = []
+    for frame in range(1, 4):
+        rows += detail_rows(frame)
+        rows += [(frame, "fe_pm4", 0, 0, 4 * MS, 0)]   # more than fe_end (3 ms)
+    path = tmp_path / "clamp2.csv"
+    write_csv(path, rows)
+    assert ftr.analyze(ftr.load(path))["stages"]["fe_end_rest"]["mean"] == 0.0
+    plain = tmp_path / "plain.csv"
+    write_csv(plain, [r for f in range(1, 4) for r in detail_rows(f)])
+    assert "fe_end_rest" not in ftr.analyze(ftr.load(plain))["stages"]
+
+
 def test_front_end_sub_stages_are_listed_after_fe_flush(tmp_path):
     rows = []
     for frame in range(1, 4):
