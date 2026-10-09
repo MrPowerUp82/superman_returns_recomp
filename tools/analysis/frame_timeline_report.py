@@ -17,7 +17,10 @@ FRONT_END_PARTS = ("fe_begin", "fe_ring", "fe_device", "fe_index", "fe_streams",
 FRONT_END_SUB = ("fd_shaders", "fs_prep", "fs_plan", "fe_push", "fe_pm4", "fe_textures", "fs_resolve", "fs_buffer",
                   "fb_refresh", "fb_hash")
 # fe_pm4/fe_textures ⊂ fe_end; fs_resolve/fs_buffer ⊂ fs_plan (with the lazy range, fs_resolve ⊂ fs_buffer);
-# fb_refresh ⊂ fs_buffer or fs_other; fb_hash ⊂ fb_refresh — listed, never summed
+# fb_refresh sits under one of three parents by call site: fs_buffer (PlanBuffer of a stream, slow path), fe_index
+# (PlanBuffer of the index buffer) or fs_other (the fast-path condition in PlanStreams, outside fs_plan; fs_other is
+# fe_streams minus fs_plan and fs_prep); its counters cover every tracked buffer, vertex and index.
+# fb_hash ⊂ fb_refresh — listed, never summed
 STAGES = ("game", "game_guest", "game_other", "capture", "frontend", *FRONT_END_PARTS, "fe_flush", *FRONT_END_SUB,
           "frontend_other", "fe_end_rest", "front_wait", "worker", "record", "gpu")
 LIMITERS = ("game", "worker", "record", "gpu")  # stages that can bound the frame rate
