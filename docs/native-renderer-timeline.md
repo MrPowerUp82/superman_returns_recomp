@@ -16,7 +16,7 @@ Ferramenta da Fase 0 do ciclo 4 (design: `superpowers/specs/2026-10-08-native-re
 
 ### Ressalvas (leia antes de usar os números)
 
-1. **`gpu` não é tempo ocupado puro.** No Vulkan a linha `gpu` vai do `TOP_OF_PIPE` do primeiro command buffer de upload ao `BOTTOM_OF_PIPE` do fim do quadro, com 2 quadros em voo; ela pode incluir fila atrás do quadro anterior. Trate o `util.` da GPU do Vulkan como **limite superior**, não como tempo ocupado. No D3D12 a linha vem dos timestamps do próprio renderer (do primeiro ao último dentro do quadro) e pode ter ressalva parecida (lacunas entre passes entram na conta).
+1. **`gpu` não é tempo ocupado puro.** No Vulkan a linha `gpu` vai do `TOP_OF_PIPE` do primeiro command buffer de upload ao `BOTTOM_OF_PIPE` do fim do quadro, com 2 quadros em voo; ela pode incluir fila atrás do quadro anterior. Trate o `util.` da GPU do Vulkan como **limite superior**, não como tempo ocupado [atualização da Fase 2.0: a parte "fila atrás do quadro anterior" desta ressalva não se confirmou; em 12.716 quadros medidos nas duas APIs a sobreposição entre quadros foi zero e o `gpu` é igual ao `gpu_real`; o texto original fica como foi escrito, ver "Tempo real de GPU (Fase 2.0)" no fim deste documento]. No D3D12 a linha vem dos timestamps do próprio renderer (do primeiro ao último dentro do quadro) e pode ter ressalva parecida (lacunas entre passes entram na conta).
 2. **`game` inclui a lógica do próprio jogo**, não só o renderer. Ele é o intervalo entre a saída de um `OnSwap` e a entrada do seguinte, então também inclui qualquer espera da thread do jogo fora do renderer. Nas tabelas, `game` + `front_wait` fecha com o intervalo médio do quadro (por exemplo, no D3D12: 32,76 + 0,72 ≈ 33,5 ms), logo o `util.` do `game` fica perto de 100% sempre que o `OnSwap` é curto. Só o `game_other` (`game` menos `capture`, apenas no Vulkan) separa a captura do resto. No Vulkan também vale `game` + `front_wait` ≈ intervalo por construção, então o `util.` e o `limitante` do `game` ali, sozinhos, não provam que a thread do jogo é o gargalo. No D3D12 o limitador de 30 FPS segura o intervalo em ~33,4 ms, então o `game` e o seu `limitante` **não provam** que a thread do jogo é o gargalo.
 3. **`limitante` é a fração dos QUADROS** em que o estágio teve o maior tempo ocupado, não uma fração ponderada pelo tempo.
 4. **Uma máquina, cena variável.** Tudo vem de um notebook (Intel UHD, i5-13420H) e de uma cena que muda de uma execução para outra. Compare as razões entre as duas execuções de cada API, não os valores absolutos.
@@ -138,22 +138,22 @@ O `bloq.` do worker sobe de 0,00 para 28,35 ms, o `front_wait` do jogo sobe para
 
 ## Conclusão: estágio limitante de cada API
 
-**Vulkan, medições.** O intervalo médio ficou em 35,9 e 37,7 ms (27,8 e 26,6 FPS), com 1% low de 19,2 e 18,0 FPS. O `game` mede média de 34,99 e 36,67 ms (acima do orçamento de 33,3 ms) e p99 de 48,3 e 49,1 ms (folga p99 de -15,0 e -15,7 ms), com `util.` de 97% e `limitante` em 73% e 72% dos quadros. O `front_wait` é de 0,92 e 0,95 ms. A captura é só uma parte do `game` (6,59 e 7,16 ms, 18% e 19% de `util.`, p99 de 14,5 e 14,3 ms) e o `game_other` (28,40 e 29,51 ms de média, 79% e 78%, p99 de 37,85 e 37,69 ms) é o maior bloco que existe. Os outros estágios estão abaixo do orçamento na média, mas com p99 acima dele: `worker` 29,32 e 31,55 ms (82% e 84%, limitante em 14% e 13%, folga p99 de -10,4 e -10,5 ms), `record` 25,27 e 27,72 ms (70% e 74%, limitante em 5% e 6%, folga p99 de -10,0 e -16,4 ms) e `gpu` 29,75 e 31,93 ms (83% e 85%, limitante em 8% e 9%, folga p99 de -6,1 e -3,9 ms; limite superior, ver ressalva 1). Nenhum dos quatro estágios principais do Vulkan tem folga de p99.
+**Vulkan, medições.** O intervalo médio ficou em 35,9 e 37,7 ms (27,8 e 26,6 FPS), com 1% low de 19,2 e 18,0 FPS. O `game` mede média de 34,99 e 36,67 ms (acima do orçamento de 33,3 ms) e p99 de 48,3 e 49,1 ms (folga p99 de -15,0 e -15,7 ms), com `util.` de 97% e `limitante` em 73% e 72% dos quadros. O `front_wait` é de 0,92 e 0,95 ms. A captura é só uma parte do `game` (6,59 e 7,16 ms, 18% e 19% de `util.`, p99 de 14,5 e 14,3 ms) e o `game_other` (28,40 e 29,51 ms de média, 79% e 78%, p99 de 37,85 e 37,69 ms) é o maior bloco que existe. Os outros estágios estão abaixo do orçamento na média, mas com p99 acima dele: `worker` 29,32 e 31,55 ms (82% e 84%, limitante em 14% e 13%, folga p99 de -10,4 e -10,5 ms), `record` 25,27 e 27,72 ms (70% e 74%, limitante em 5% e 6%, folga p99 de -10,0 e -16,4 ms) e `gpu` 29,75 e 31,93 ms (83% e 85%, limitante em 8% e 9%, folga p99 de -6,1 e -3,9 ms; limite superior, ver ressalva 1 e a atualização da Fase 2.0 no fim do documento). Nenhum dos quatro estágios principais do Vulkan tem folga de p99.
 
 **Vulkan, interpretação.** O `game` é o estágio de ritmo: ele vai da saída de um `OnSwap` à entrada do seguinte, então `game` + `front_wait` fecha com o intervalo do quadro (34,99 + 0,92 ≈ 35,9 ms; 36,67 + 0,95 ≈ 37,7 ms) por construção (ressalva 2). Com o `front_wait` em ~1 ms, o `game` é o maior dos quatro estágios na maioria dos quadros. O `util.` de 97% é o número quase tautológico (`game` + `front_wait` ≈ intervalo), e o `limitante` de 72% a 73% fica inflado pela mesma construção; nenhum dos dois prova que a thread do jogo é o gargalo. O que os dados sustentam: o `front_wait` de ~1 ms mostra que a thread do jogo não é segurada pelo renderer esperando, e o `game_other` é o maior bloco. Sem a captura, a média do `game` (~28 a 30 ms) ficaria abaixo do orçamento de 33,3 ms, e só o p99 (37,85 e 37,69 ms no `game_other`) o estouraria. Não está decidido se o `game_other` é trabalho ou espera fora do renderer (ver "O que os dados não decidem").
 
 **D3D12.** O quadro fecha no limitador (intervalo médio de 33,5 e 33,4 ms, 29,8 e 29,9 FPS), então o `game` (98% e 92% de `util.`, limitante em 74% e 42%) não identifica o gargalo (ressalva 2). O estágio de trabalho real mais ocupado é o `worker`: 29,17 e 32,37 ms de tempo ocupado, 87% e 97% de `util.`, `bloq.` de 0,00 ms, limitante em 26% e 57% dos quadros e p99 de 47,6 e 43,5 ms (folga p99 de -14,3 e -10,2 ms). A GPU tem folga: 21,47 e 25,02 ms (64% e 75%), limitante em 0% e 1% dos quadros e folga p99 de +7,1 e +3,4 ms. O 1% low ficou em 21,7 e 22,5 FPS e o mínimo em 11,9 e 10,5 FPS.
 
-**GPU: no Vulkan ela mede 1,28 a 1,39x a do D3D12 (limite superior, por outro método); não está provada como gargalo.** A GPU do Vulkan (29,75 e 31,93 ms) é 1,39x e 1,28x a do D3D12 (21,47 e 25,02 ms) nas duas execuções, e só no Vulkan o p99 da GPU passa do orçamento (39,38 e 37,20 ms). Mas as duas APIs medem a GPU de formas diferentes: no Vulkan vai do `TOP_OF_PIPE` até o `BOTTOM_OF_PIPE` em uma submissão nova, com 2 quadros em voo, e pode incluir a espera atrás do quadro anterior; no D3D12 vai do primeiro ao último timestamp dentro da própria command list. A razão é, portanto, um limite superior obtido por método diferente, e a GPU do Vulkan é limitante em só 8% e 9% dos quadros. A cena varia entre execuções, então vale a razão, não uma comparação de cena a cena (que não foi feita). Recomendação para a Fase 1, antes do passo 2: registrar os dois ticks de início e fim da GPU do Vulkan, para subtrair a sobreposição com o quadro anterior (ocupada(N) = fim(N) − max(início(N), fim(N−1))).
+**GPU: no Vulkan ela mede 1,28 a 1,39x a do D3D12 (limite superior, por outro método); não está provada como gargalo.** A GPU do Vulkan (29,75 e 31,93 ms) é 1,39x e 1,28x a do D3D12 (21,47 e 25,02 ms) nas duas execuções, e só no Vulkan o p99 da GPU passa do orçamento (39,38 e 37,20 ms). Mas as duas APIs medem a GPU de formas diferentes: no Vulkan vai do `TOP_OF_PIPE` até o `BOTTOM_OF_PIPE` em uma submissão nova, com 2 quadros em voo, e pode incluir a espera atrás do quadro anterior; no D3D12 vai do primeiro ao último timestamp dentro da própria command list. A razão é, portanto, um limite superior obtido por método diferente, e a GPU do Vulkan é limitante em só 8% e 9% dos quadros. A cena varia entre execuções, então vale a razão, não uma comparação de cena a cena (que não foi feita). Recomendação para a Fase 1, antes do passo 2: registrar os dois ticks de início e fim da GPU do Vulkan, para subtrair a sobreposição com o quadro anterior (ocupada(N) = fim(N) − max(início(N), fim(N−1))). [Atualização da Fase 2.0: isso foi feito (`gpu_real`, `gpu_idle`); a sobreposição medida foi zero e a diferença de `gpu_real` entre as APIs sobreviveu, 7,6 a 10,3 ms; ver "Tempo real de GPU (Fase 2.0)" no fim deste documento.]
 
 **Ordem recomendada para a Fase 1 (passos da tabela da seção 5 do design).**
 
 1. **Passo 1, hash paralelo exato: primeiro.** A captura é compartilhada pelas duas APIs. No Vulkan ela está dentro do `game`, o estágio de ritmo (`util.` quase tautológico; `limitante` inflado pela mesma construção, ressalva 2) e o único com média acima do orçamento. Mas o teto do ganho é pequeno: a captura mede 6,59 e 7,16 ms por quadro (menos que os 8 a 13 ms de hash citados no design, e o relatório não separa o hash dentro dela), e restariam `game_other` de 28,40 e 29,51 ms, com p99 de 37,85 e 37,69 ms. O passo 1 sozinho não leva o Vulkan à meta (o p99 do `game_other` continua acima de 33,3 ms), embora a média sem a captura ficasse abaixo do orçamento. No D3D12 o hash roda dentro do `worker`, que a tabela não decompõe, então o ganho ali precisa ser medido.
 2. **Passo 3, pipeline entre estágios: segundo.** No D3D12 o `worker` (87% e 97% de `util.`) é o estágio de trabalho mais ocupado, e o design prevê separar preparo e gravação ali. No Vulkan o `game` sozinho passa de 33 ms na média (a regra do design manda o trabalho ir para dentro do estágio, não para o pipeline), mas esse valor inclui o ritmo do quadro (ressalva 2); `worker` e `record` têm p99 acima do orçamento e já são threads separadas, então aumentar a profundidade entre replay e gravação ataca a cauda deles. O `front_wait` médio é de 0,92 e 0,95 ms no Vulkan e o bench reporta cerca de 7 threads lógicas em uso (campo `cores`, 7 a 7,2 nas execuções do Vulkan) de 12 (o processador tem 8 núcleos, 4P+4E), o que deixa threads livres. No D3D12 a soma serial NÃO foi medida: o `game` do D3D12 inclui a espera do limitador de 30 FPS (ressalva 2), então não dá para somá-lo ao `worker`. O `worker` sozinho fica em 29,17 e 32,37 ms de média (de 29 a 32 ms; p99 de 47,6 e 43,5 ms). A metade "núcleos ociosos" da condição do design ("soma serial > 33 ms com núcleos ociosos") vale: o bench reporta 6,1 a 6,4 threads lógicas de 12 em uso nas execuções do D3D12. A separação preparo/gravação do passo 3 ali se apoia no `worker` de 29 a 32 ms, não numa soma serial medida.
-3. **Passo 2, itens de GPU bit a bit: terceiro, e só no Vulkan.** No D3D12 a GPU não está entre os limitantes (0% e 1%, folga p99 positiva), então o passo não entra lá. No Vulkan a GPU tem p99 acima do orçamento, mas é limitante em só 8% a 9% dos quadros, o `util.` é limite superior, e esta fase não mediu por grupo de passes, então não dá para escolher os itens do passo 2 sem uma medição por passe.
+3. **Passo 2, itens de GPU bit a bit: terceiro, e só no Vulkan.** No D3D12 a GPU não está entre os limitantes (0% e 1%, folga p99 positiva), então o passo não entra lá. No Vulkan a GPU tem p99 acima do orçamento, mas é limitante em só 8% a 9% dos quadros, o `util.` é limite superior (a Fase 2.0 levantou esta parte, ver o fim do documento; a falta de medição por passe continua), e esta fase não mediu por grupo de passes, então não dá para escolher os itens do passo 2 sem uma medição por passe.
 4. **Passo 4, estabilidade do 1% low: necessário qualquer que seja a ordem.** O 1% low ficou entre 18,0 e 22,5 FPS e o mínimo entre 1,8 e 11,9 FPS nas quatro execuções; `game`, `worker`, `record` e `gpu` no Vulkan e `game` e `worker` no D3D12 têm p99 acima de 33,3 ms. Mesmo no D3D12, com a média em 29,3 a 30 FPS, os mínimos do bench ficaram entre 25,8 e 29,7 FPS.
 
-**O que os dados não decidem.** Entre os passos 2 e 3 no Vulkan, `worker` (13% a 14% dos quadros), `gpu` (8% a 9%) e `record` (5% a 6%) estão próximos e todos têm p99 acima do orçamento; colocar o 3 antes do 2 vem da ressalva de limite superior da GPU e da falta de dados por passe, não de uma diferença clara de custo. Também não está medido quanto do `game_other` (28,40 e 29,51 ms) é lógica do jogo e quanto é espera da thread do jogo fora do renderer (por exemplo vblank ou outra sincronização; a Fase 0.5, no fim deste documento, mediu a parte que é código do renderer medido por hook na thread do jogo, cerca de um terço do `game_other` no Vulkan, e o restante, o `game_guest`, continua sem separação entre lógica, driver e espera); a execução de D3D12 limitada pela GPU mostra que o `game` pode ter boa parte de espera (23,47 ms ali, contra 32,76 ms quando o limitador de 30 FPS manda). Por isso o `game` do Vulkan, com `util.` e `limitante` inflados por construção, não prova que a thread do jogo é o gargalo; só a média do `game` sem a captura (~28 a 30 ms, abaixo de 33,3 ms) e o p99 (37,85 e 37,69 ms no `game_other`, acima) estão medidos.
+**O que os dados não decidem.** Entre os passos 2 e 3 no Vulkan, `worker` (13% a 14% dos quadros), `gpu` (8% a 9%) e `record` (5% a 6%) estão próximos e todos têm p99 acima do orçamento; colocar o 3 antes do 2 vem da ressalva de limite superior da GPU (levantada pela Fase 2.0, ver o fim do documento) e da falta de dados por passe (continua), não de uma diferença clara de custo. Também não está medido quanto do `game_other` (28,40 e 29,51 ms) é lógica do jogo e quanto é espera da thread do jogo fora do renderer (por exemplo vblank ou outra sincronização; a Fase 0.5, no fim deste documento, mediu a parte que é código do renderer medido por hook na thread do jogo, cerca de um terço do `game_other` no Vulkan, e o restante, o `game_guest`, continua sem separação entre lógica, driver e espera); a execução de D3D12 limitada pela GPU mostra que o `game` pode ter boa parte de espera (23,47 ms ali, contra 32,76 ms quando o limitador de 30 FPS manda). Por isso o `game` do Vulkan, com `util.` e `limitante` inflados por construção, não prova que a thread do jogo é o gargalo; só a média do `game` sem a captura (~28 a 30 ms, abaixo de 33,3 ms) e o p99 (37,85 e 37,69 ms no `game_other`, acima) estão medidos.
 
 ## Decomposição do front-end da thread do jogo (Fase 0.5)
 
@@ -1414,3 +1414,182 @@ Esta lista reordena a da Fase 1.1c: o item 1 dela ("decomposição de `fe_textur
 ### Suítes desta fase
 
 `python -m pytest tests/tools -q`: 69 passaram. Esta fase não altera código (só este documento); as suítes de C++ foram executadas na tarefa das sondas (`ctest --test-dir build/tests-native`: 2 de 2) e não foram repetidas aqui.
+
+## Tempo real de GPU (Fase 2.0)
+
+Plano: `superpowers/plans/2026-10-09-gpu-real-time.md`. A pergunta que as seções anteriores deixaram aberta: o estágio `gpu` do Vulkan (≈30 a 32 ms) é só um limite superior (ressalva 1 da lista no início do documento) porque pode incluir a fila atrás do quadro anterior; quanto dele é tempo real de execução, e a GPU é de fato um limitante? Esta fase não muda renderização, ordem de comandos nem sincronização: ela só lê os timestamps que já existiam, nas duas APIs, e grava dois estágios novos.
+
+| Estágio | O que mede (por quadro) |
+| --- | --- |
+| `gpu_real` | duração do quadro na GPU menos a sobreposição com o quadro anterior |
+| `gpu_idle` | intervalo (≥ 0) entre o fim do quadro anterior na GPU e o início deste |
+| `gpu_overlap` | derivado no relatório: `gpu` menos `gpu_real`; não é gravado |
+
+`gpu` continua como era (do primeiro timestamp ao último do quadro). Os três estágios novos não entram no `limitante`. Por quadro: `sobreposição = max(0, fim_anterior − início)`, `ocioso = max(0, início − fim_anterior)` e `real = duração − min(sobreposição, duração)`.
+
+### Medição
+
+Binário release de 2026-10-09 (`port\out\build\win-amd64-release\superman_returns.exe`, gerado às 09:50, depois da última edição dos fontes do commit `a2d4f46`). Quatro execuções, uma por vez, sem build nem outra carga em paralelo, na ordem Vulkan, D3D12, D3D12, Vulkan (intercaladas para diluir a deriva): `tools\bench\bench_api.ps1` com `-Timeline -Profile` (sem `-TimelineDetail`) e os nomes `gr1_vulkan`, `gr2_d3d12`, `gr3_d3d12` e `gr4_vulkan`. Janela do relatório: os últimos 1100 quadros, como nas fases anteriores. O `-Profile` foi usado para ter os draws por quadro. Todos os valores abaixo vêm das tabelas do relatório, dos CSVs `logs\timeline_gr*.csv`, de `logs\bench_results.csv` e dos `logs\bench_gr*.log`.
+
+### Tabelas impressas pelo relatório
+
+Execução `gr1_vulkan` (bench: parado 26,3 FPS, andando 29,3 FPS):
+
+```
+Quadros analisados: 1100 (descartados por falta de estágio: 0)
+Intervalo médio 36.1 ms = 27.7 FPS | 1% low 20.4 FPS | mínimo 2.1 FPS
+Orçamento por quadro: 33.3 ms (tempos em ms)
+
+estágio           média     p50     p99   bloq.   util.  folga p99  limitante
+game              35.58   35.28   46.59    0.00     99%     -13.26        72%
+game_other        28.46   28.38   35.55    0.00     79%      -2.22          -
+capture            7.12    6.76   14.02    0.00     20%      19.31          -
+front_wait         0.50    0.00    3.89    0.00      1%      29.45          -
+worker            30.66   30.38   41.92    2.37     85%      -8.59        14%
+record            27.69   27.09   42.01    2.20     77%      -8.68         6%
+gpu               30.70   30.48   36.60    0.00     85%      -3.26         7%
+gpu_real          30.70   30.48   36.60    0.00     85%      -3.26          -
+gpu_idle           5.39    2.83   19.93    0.00     15%      13.40          -
+gpu_overlap        0.00    0.00    0.00    0.00      0%      33.33          -
+```
+
+Execução `gr2_d3d12` (bench: parado 28,7 FPS, andando 28,2 FPS):
+
+```
+Quadros analisados: 1100 (descartados por falta de estágio: 0)
+Intervalo médio 34.9 ms = 28.6 FPS | 1% low 20.4 FPS | mínimo 10.8 FPS
+Orçamento por quadro: 33.3 ms (tempos em ms)
+
+estágio           média     p50     p99   bloq.   util.  folga p99  limitante
+game              26.21   25.40   38.34    0.00     75%      -5.00        22%
+front_wait         8.70    9.11   21.85    0.00     25%      11.48          -
+worker            32.93   33.26   46.09    0.00     94%     -12.75        78%
+gpu               22.44   24.03   27.01    0.00     64%       6.32         0%
+gpu_real          22.44   24.03   27.01    0.00     64%       6.32          -
+gpu_idle          12.49   11.85   26.36    0.00     36%       6.97          -
+gpu_overlap        0.00    0.00    0.00    0.00      0%      33.33          -
+```
+
+Execução `gr3_d3d12` (bench: parado 27,9 FPS, andando 28,2 FPS):
+
+```
+Quadros analisados: 1100 (descartados por falta de estágio: 0)
+Intervalo médio 35.3 ms = 28.3 FPS | 1% low 20.1 FPS | mínimo 11.4 FPS
+Orçamento por quadro: 33.3 ms (tempos em ms)
+
+estágio           média     p50     p99   bloq.   util.  folga p99  limitante
+game              25.75   25.36   37.95    0.00     73%      -4.62        10%
+front_wait         9.55    9.65   23.42    0.00     27%       9.91          -
+worker            34.44   33.96   47.97    0.00     97%     -14.64        90%
+gpu               23.07   23.70   26.24    0.00     65%       7.09         0%
+gpu_real          23.07   23.70   26.24    0.00     65%       7.09          -
+gpu_idle          12.25   11.23   26.02    0.00     35%       7.31          -
+gpu_overlap        0.00    0.00    0.00    0.00      0%      33.33          -
+```
+
+Execução `gr4_vulkan` (bench: parado 24,2 FPS, andando 27,1 FPS):
+
+```
+Quadros analisados: 1100 (descartados por falta de estágio: 0)
+Intervalo médio 39.3 ms = 25.4 FPS | 1% low 19.2 FPS | mínimo 2.1 FPS
+Orçamento por quadro: 33.3 ms (tempos em ms)
+
+estágio           média     p50     p99   bloq.   util.  folga p99  limitante
+game              38.78   38.47   50.60    0.00     99%     -17.27        73%
+game_other        30.67   30.51   38.98    0.00     78%      -5.65          -
+capture            8.11    7.75   15.26    0.00     21%      18.07          -
+front_wait         0.49    0.00    1.42    0.00      1%      31.92          -
+worker            34.34   33.98   46.80    1.89     87%     -13.47        18%
+record            29.50   28.76   43.05    2.06     75%      -9.72         4%
+gpu               32.77   32.26   38.29    0.00     83%      -4.96         5%
+gpu_real          32.77   32.26   38.29    0.00     83%      -4.96          -
+gpu_idle           6.53    3.86   23.76    0.00     17%       9.57          -
+gpu_overlap        0.00    0.00    0.00    0.00      0%      33.33          -
+```
+
+### Resumo por execução (ms médios por quadro)
+
+O intervalo é o do relatório com duas casas (calculado dos CSVs; o relatório imprime uma). As duas últimas colunas são `gpu_real ÷ intervalo` e `gpu_idle ÷ intervalo`, a mesma conta do `util.` do relatório.
+
+| Execução | Bench (parado / andando, FPS) | Intervalo | `game` + `front_wait` | `gpu` | `gpu_real` | `gpu_overlap` | `gpu_idle` | `gpu_real` ÷ intervalo | `gpu_idle` ÷ intervalo |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `gr1_vulkan` | 26,3 / 29,3 | 36,11 | 36,08 | 30,70 | 30,70 | 0,00 | 5,39 | 85,0% | 14,9% |
+| `gr2_d3d12` | 28,7 / 28,2 | 34,92 | 34,91 | 22,44 | 22,44 | 0,00 | 12,49 | 64,3% | 35,8% |
+| `gr3_d3d12` | 27,9 / 28,2 | 35,33 | 35,30 | 23,07 | 23,07 | 0,00 | 12,25 | 65,3% | 34,7% |
+| `gr4_vulkan` | 24,2 / 27,1 | 39,31 | 39,27 | 32,77 | 32,77 | 0,00 | 6,53 | 83,4% | 16,6% |
+
+Faixas por API nas duas execuções de cada uma: Vulkan, `gpu_real` 30,70 a 32,77 ms, `gpu_idle` 5,39 a 6,53 ms, intervalo 36,11 a 39,31 ms; D3D12, `gpu_real` 22,44 a 23,07 ms, `gpu_idle` 12,25 a 12,49 ms, intervalo 34,92 a 35,33 ms.
+
+Conferência: `gpu_real + gpu_idle` dá 36,09, 34,93, 35,31 e 39,30 ms, contra os intervalos de 36,11, 34,92, 35,33 e 39,31 ms. Isso é esperado quando não há sobreposição (início a início da GPU é o período do quadro) e confere os dois estágios entre si e com o intervalo do jogo; não é uma evidência independente de que a GPU seja a causa de nada.
+
+### Sobreposição entre quadros: não observada
+
+Verificação quadro a quadro nos CSVs, com `gpu_real` contra `gpu`:
+
+| Execução | Quadros da janela (1100) com `gpu_real` < `gpu` | Quadros do arquivo inteiro com `gpu_real` < `gpu` | Quadros com `gpu_real` > `gpu` |
+| --- | ---: | ---: | ---: |
+| `gr1_vulkan` | 0 | 0 de 2564 | 0 |
+| `gr2_d3d12` | 0 | 0 de 3944 | 0 |
+| `gr3_d3d12` | 0 | 0 de 3824 | 0 |
+| `gr4_vulkan` | 0 | 0 de 2384 | 0 |
+
+Em nenhum dos 12.716 quadros dos arquivos inteiros (4400 nas janelas) o início de um quadro na GPU veio antes do fim do anterior: `gpu_real` é igual a `gpu` em todos os quadros, nas duas APIs, e o `gpu_overlap` do relatório é 0,00 em média, p50 e p99. Em cada arquivo o único quadro com `gpu_idle` igual a 0 é o quadro 1 (o primeiro colhido, que não tem anterior); nas janelas nenhum quadro tem `gpu_idle` zero. Com `gpu_idle` acima de 1 ms, ficaram 85,5% e 83,4% dos quadros no Vulkan (`gr1`, `gr4`) e 100% nos dois do D3D12.
+
+**Consequência para as seções anteriores.** A ressalva 1 dizia que o `gpu` do Vulkan podia incluir fila atrás do quadro anterior e devia ser tratado como limite superior. Nesta máquina, nesta configuração (Intel UHD, 1280x720, vsync, limite de 30 FPS, 2 quadros em voo) e nestas quatro execuções, essa parte da ressalva não se confirmou: o `gpu_real` é igual ao `gpu` em todos os quadros, ou seja, não houve sobreposição a descontar, e o `gpu` do Vulkan coincide com o `gpu_real`. Portanto, para esta configuração, o `gpu` do Vulkan deixa de ser "limite superior" no sentido de fila atrás do quadro anterior. Não foi investigado o que serializa os quadros na GPU (só que eles são serializados); em outra configuração (outra GPU, mais quadros em voo, sem vsync) isto precisa ser medido de novo. Continua valendo a ressalva de que um intervalo de timestamps (topo do pipe no começo, fundo do pipe no fim) mede o tempo de execução do quadro e não a ocupação: dentro do quadro a GPU pode ter lacunas entre passes, e passes podem se sobrepor entre si, o que o `gpu_real` não separa (ver "Ressalvas desta fase").
+
+### Vulkan contra D3D12: o `gpu_real`
+
+Vulkan: 30,70 e 32,77 ms; D3D12: 22,44 e 23,07 ms. As quatro razões possíveis entre uma execução de Vulkan e uma de D3D12 vão de 1,33x (30,70 ÷ 23,07) a 1,46x (32,77 ÷ 22,44), e a diferença em ms vai de 7,63 a 10,33 ms. Nas fases anteriores o `gpu` ficou em 29,75 a 32,26 ms no Vulkan (4 execuções) e em 21,22 a 25,02 ms no D3D12 (4 execuções), então, contando as seis execuções de cada API, as faixas (Vulkan 29,75 a 32,77 ms; D3D12 21,22 a 25,02 ms) não se sobrepõem. Mas os binários das fases anteriores são outros, e a variação de uma execução para outra no D3D12 é de 3,8 ms (21,22 a 25,02 ms), que é de 37% a 50% da diferença entre as APIs nestas execuções (7,63 a 10,33 ms). **A diferença de ≈9 ms do `gpu` antigo não era sobreposição: ela sobrevive como diferença de `gpu_real`, de 7,6 a 10,3 ms nestas execuções.**
+
+Por draw (draws por quadro: média das últimas 9 janelas de 120 quadros, 1080 quadros, do campo `draws=` das linhas `Vulkan profile (ms/frame over 120)` no Vulkan e das linhas `native CPU constants (ms/frame over 120, nested)` no D3D12):
+
+| Execução | `gpu_real` (ms) | Draws por quadro | µs de GPU por draw |
+| --- | ---: | ---: | ---: |
+| `gr1_vulkan` | 30,70 | 2700 | 11,37 |
+| `gr4_vulkan` | 32,77 | 2743 | 11,95 |
+| `gr2_d3d12` | 22,44 | 2714 | 8,27 |
+| `gr3_d3d12` | 23,07 | 2785 | 8,28 |
+
+Os draws por quadro são parecidos entre as APIs (2700 a 2743 no Vulkan; 2714 a 2785 no D3D12), então, nestas execuções, a diferença de `gpu_real` não vem de um número de draws visivelmente maior no Vulkan: o Vulkan gasta 11,37 a 11,95 µs de GPU por draw contra 8,27 e 8,28 µs no D3D12 (1,37x a 1,45x entre as quatro combinações). Cuidados: são dois contadores de linhas de log diferentes, cuja definição de "draw" não foi reconciliada; as janelas do log não coincidem exatamente com os 1100 quadros do relatório; as janelas individuais variam muito (Vulkan de 2433 a 3003; D3D12 de 1973 a 3093 nas últimas 9 janelas de cada execução), e o tempo de GPU não é proporcional ao número de draws (há custo fixo por passe e por resolve); um µs por draw é, portanto, uma ordem de grandeza e não uma constante. A causa da diferença (API, driver, estados de pipeline, sincronização, formato dos dados) **não está decidida** por estas medições.
+
+Verificação cruzada no D3D12 com o log do próprio jogo: as linhas `native: GPU time ... ms/frame` das últimas 8 janelas (≈1140 quadros) dão 22,62 ms (`gr2_d3d12`) e 23,16 ms (`gr3_d3d12`), contra 22,44 e 23,07 ms do relatório. As janelas não são as mesmas, e o log vem do mesmo renderer, então isto é uma conferência de consistência, não uma medida independente. O perfil do Vulkan não tem linha equivalente.
+
+### O que o `gpu_idle` diz
+
+`gpu_idle` é o tempo em que a GPU não tinha trabalho do quadro em execução (entre o fim do quadro anterior e o início do seguinte). Quando ele é grande, o quadro não é limitado só pela GPU. Quando é zero em todos os quadros, a GPU está sempre ocupada com trabalho e passa a ser candidata a limitante. Os dois casos aparecem:
+
+- **Vulkan: a GPU em execução ocupa 83,4% a 85,0% do intervalo (`gpu_real` ÷ intervalo) e fica sem trabalho 14,9% a 16,6% (5,39 e 6,53 ms por quadro).** A GPU está perto de ser contínua, mas não é: o p50 do `gpu_idle` é 2,83 e 3,86 ms e o p99 é 19,93 e 23,76 ms (1% dos quadros tem ociosidade acima disso). Pelo lado da CPU, o intervalo do quadro é fechado pelo `game` (`game` + `front_wait` = intervalo, ressalva 2, por construção): 35,58 e 38,78 ms. O `worker` (30,66 e 34,34 ms de média), o `record` (27,69 e 29,50 ms) e o `gpu_real` (30,70 e 32,77 ms) ficam todos entre 27,69 e 34,34 ms, abaixo do intervalo na média; os p99 dos quatro estão acima do orçamento (`game` 46,59 e 50,60 ms; `worker` 41,92 e 46,80 ms; `record` 42,01 e 43,05 ms; `gpu_real` 36,60 e 38,29 ms). O que o `gpu_idle` mostra é que o ritmo de entrega de trabalho à GPU é mais lento do que a GPU, na média, consegue consumir; não mostra qual estágio da CPU causa a espera, nem exclui que parte dela seja espera por apresentação ou outra sincronização (não medida).
+- **D3D12: a GPU em execução ocupa 64,3% e 65,3% do intervalo e fica sem trabalho 35,8% e 34,7% (12,49 e 12,25 ms por quadro).** O p50 do `gpu_idle` é 11,85 e 11,23 ms; mais de 10 ms de ociosidade em 65,9% e 63,9% dos quadros das janelas. O `gpu_real` tem folga de 10,89 e 10,26 ms (média contra 33,3 ms) e de 6,32 e 7,09 ms no p99. Pelo lado da CPU, o estágio de trabalho mais ocupado é o `worker`: 32,93 e 34,44 ms de média, limitante em 78% e 90% dos quadros, p99 de 46,09 e 47,97 ms; o `game` tem 26,21 e 25,75 ms de trabalho e espera 8,70 e 9,55 ms no `front_wait`. Nestas execuções o intervalo (34,92 e 35,33 ms) ficou acima de 33,3 ms, então o limitador de 30 FPS não é o que segura o quadro. A leitura compatível com os dados é que o D3D12 aqui é limitado pela CPU (o `worker`), com a GPU esperando; o `bloq.` de 0,00 ms do `worker` e a GPU com folga são consistentes com isso, mas o `bloq.` do `worker` não prova ausência de espera (ressalva 6).
+
+**D3D12 mais lento que nas fases 0 e 0.5.** O intervalo do D3D12 ficou em 34,92 e 35,33 ms (28,6 e 28,3 FPS no relatório), contra 33,4 a 33,6 ms nas quatro execuções anteriores; o `worker` ficou em 32,93 e 34,44 ms contra 29,17 a 32,37 ms; e o `front_wait` (a espera do `worker` dentro do `OnSwap`) em 8,70 e 9,55 ms contra 0,72 a 2,56 ms. Os binários, a cena e a deriva de ≈8% entre execuções (observada em "Não adotado: A/B inconclusivo da leitura preguiçosa dos fetch constants") podem explicar isso; **a causa não está decidida** e esta fase não a investigou. Para as conclusões abaixo isto importa pouco: a GPU do D3D12 tem folga em qualquer das duas leituras, e a ociosidade (12,49 e 12,25 ms) é maior que a folga média (10,89 e 10,26 ms).
+
+### Conclusão: a GPU do Vulkan é um limitante?
+
+**Hoje ela não é o limitante que fecha o intervalo, mas está perto do limite e deixa pouca folga (0,56 a 2,63 ms na média) para estabilizar em 30 FPS.** Com os números:
+
+- **Não é o estágio que fecha o quadro.** O intervalo do Vulkan (36,11 e 39,31 ms) é maior que o `gpu_real` (30,70 e 32,77 ms) em 5,41 e 6,54 ms; essa diferença é o `gpu_idle` (5,39 e 6,53 ms, a menos de 0,02 ms): tempo em que a GPU não tem trabalho do quadro. A fração dos quadros em que o `gpu` é o maior tempo ocupado entre `game`, `worker`, `record` e `gpu` (`limitante`) é 7% e 5%; essa coluna favorece o `game` por construção (ressalva 2) e não prova nada sozinha.
+- **Está perto do orçamento.** Contra os 33,3 ms de um quadro a 30 FPS, a média do `gpu_real` deixa 2,63 e 0,56 ms de folga. Em 12,4% (`gr1`) e 32,7% (`gr4`) dos quadros o `gpu_real` sozinho passa de 33,3 ms, e o p99 é 36,60 e 38,29 ms (3,27 e 4,96 ms acima do orçamento). A folga média de 0,56 a 2,63 ms é do tamanho da deriva de ≈8% entre execuções (8% de 30,70 ms são 2,46 ms), e a diferença entre `gr1` e `gr4` (2,07 ms, 6,7%) é dessa ordem.
+- **Aritmética para 30 FPS estáveis.** O orçamento é 33,3 ms por quadro. Se a CPU custasse zero, o intervalo cairia ao `gpu_real` (30,70 e 32,77 ms em média, ≈32,6 e ≈30,5 FPS), ou seja, 30 FPS só na média e sem margem, e com o p99 do `gpu_real` (36,60 e 38,29 ms) acima do orçamento. Pelo lado da CPU, a média do `game` (35,58 e 38,78 ms) precisa cair 2,25 e 5,45 ms para caber no orçamento, e o `worker` do `gr4` (34,34 ms) 1,01 ms; os p99 de `game`, `worker`, `record` e `gpu_real` estão todos acima de 33,3 ms (de 3,27 a 17,27 ms acima). Pela aritmética das médias, reduzir só a CPU leva o intervalo em direção ao `gpu_real` (30,70 e 32,77 ms) e não abaixo dele; reduzir só a GPU não ajuda enquanto o `game` (ou o `worker`, no `gr4`) estiver acima de 33,3 ms (se o `game` é trabalho ou espera fora do renderer **não está decidido**, ver "O que os dados não decidem" acima). Estas contas são de médias e p99 de estágios separados; não prevêem o FPS, e **não está medido** se o `gpu_real` mudaria quando a CPU entregasse trabalho mais rápido (por exemplo por frequência de relógio ou pressão de memória compartilhada em uma GPU integrada).
+- **No D3D12 a GPU não limita.** `gpu_real` de 22,44 e 23,07 ms (folga de 10,26 a 10,89 ms na média e de 6,32 a 7,09 ms no p99), nunca acima de 33,3 ms nas janelas (0% dos quadros), e ociosa por 12,25 a 12,49 ms por quadro. Para 30 FPS ali o que falta é a CPU (o `worker`, de 32,93 e 34,44 ms de média, e de 46,09 e 47,97 ms de p99).
+
+**Para a Fase 1.** A ordem recomendada (passo 1, passo 3, passo 2) não muda por estes dados. O motivo dado para deixar o passo 2 em terceiro tinha duas partes: o `gpu` ser limite superior (levantado nesta configuração, ver acima) e a falta de dados por passe (continua). A GPU do Vulkan passa a ser um tempo de execução medido de 30,70 a 32,77 ms por quadro, que também precisa caber no orçamento para 30 FPS estáveis; isso é compatível com manter o passo 2 na lista, não prova que ele seja o próximo. De qual passe viria a redução, esta fase não responde.
+
+### Próximos passos
+
+1. **Tempo de GPU por passe, nas duas APIs, com uma chave de agrupamento pela assinatura do render target.** Hoje o Vulkan grava só dois timestamps por quadro (início e fim, `slot*2` e `slot*2+1`), e o D3D12 tem um corte opcional por passe (`sr_native_gpu_pass_timing`, desligado por padrão e não usado aqui) que depende do id de passe do guest. Foi informado ao abrir esta medição que os ids de passe do perfil saem como -1; isso **não foi reverificado** nos logs destas execuções (as linhas citadas acima não trazem id de passe), e, se for verdade, o corte por id não serve de chave. O que a medição precisa: (a) definir a assinatura (por exemplo formato, dimensões e endereço dos alvos de cor e profundidade ligados) e verificar que ela agrupa os draws do mesmo jeito no Vulkan e no D3D12; (b) mais timestamps por quadro no Vulkan (hoje 2 por quadro em voo; o D3D12 reserva até 64 timestamps por quadro) e a colheita em ordem cronológica, que a Fase 2.0 já exige para o `gpu_idle`; (c) a soma dos grupos tem de fechar com o `gpu_real` do mesmo quadro dentro de uma tolerância declarada, e o `gpu_idle` continua separado; (d) contagem de draws por grupo, para dar µs por draw por grupo; (e) o custo da própria instrumentação medido por A/B (os timestamps podem quebrar sobreposição entre passes dentro do quadro e mudar o tempo que se quer medir); (f) mais de uma execução por API e a mesma cena, porque a variação entre execuções (≈8%, vários ms de cena) é do tamanho do que se quer comparar; preferir razões por grupo entre as APIs a valores absolutos.
+2. **Só depois escolher os itens do passo 2 (GPU bit a bit) no Vulkan**, e só nos grupos cujo `gpu_real` explique a diferença de 7,6 a 10,3 ms contra o D3D12 (ou o excesso do p99 sobre 33,3 ms).
+3. **Em paralelo, continuar na CPU.** O `gpu_idle` de 5,4 a 6,5 ms no Vulkan e de 12,3 a 12,5 ms no D3D12 diz que há ritmo de entrega a recuperar; os candidatos estão em "Candidatos da próxima fase (ordem proposta)" acima. Também continua sem medida a divisão do `game_guest` (≈63% a 65% do `game_other` do Vulkan na Fase 0.5).
+
+### Ressalvas desta fase
+
+1. **Execução, não ocupação.** Timestamps de topo de pipe no começo e de fundo de pipe no fim medem o intervalo em que o quadro esteve na GPU, não quanto tempo as unidades ficaram ocupadas: dentro do quadro pode haver lacunas, e passes podem executar sobrepostos. "A GPU executa 83% a 85% do intervalo" não quer dizer "ocupada a 83% a 85%", e muito menos "ocupada a 100%".
+2. **Só a sobreposição entre quadros foi descontada.** `gpu_real` não corrige nada dentro do quadro. Ela foi zero nas quatro execuções; isso é uma observação desta máquina e desta configuração, não uma garantia.
+3. **Uma máquina, cenas variáveis.** Notebook Intel UHD, i5-13420H; as quatro execuções percorrem a mesma sequência do bench mas a cena muda de uma execução para outra (as médias de draws por janela variam de 1973 a 3093). Dois valores por API não dão intervalo de confiança; as faixas acima são as dos quatro valores observados, não limites.
+4. **Deriva.** Foi observado um aumento de ≈8% do tempo ao longo de quatro execuções em uma fase anterior (ver a proveniência do A/B das sondas do PM4). Aqui o intervalo do Vulkan foi 8,9% maior em `gr4` que em `gr1` (39,31 contra 36,11 ms, mesma API) e o `gpu_real` subiu 6,7% (32,77 contra 30,70 ms); a ordem das execuções não permite separar deriva de cena.
+5. **`-Profile` e custo da instrumentação.** As quatro execuções usaram `-Profile` (`SR_VULKAN_PROFILE=1`); o custo do perfil e o do cálculo de `gpu_real` e `gpu_idle` (aritmética sobre timestamps já lidos) não foram medidos por A/B aqui, e não foi verificado quais execuções das fases anteriores usaram `-Profile`, então a comparação com elas pode misturar as duas condições.
+6. **Os draws por quadro vêm de dois contadores de log diferentes** (ver acima) e de janelas que não coincidem com as do relatório.
+7. **O intervalo do relatório é o do `game`** (fim a fim do `OnSwap`), não o da apresentação; o `gpu_real + gpu_idle` bateu com ele (conferência acima), mas o instante em que o quadro aparece na tela não foi medido.
+
+### Suítes desta fase
+
+`python -m pytest tests/tools -q`: 71 passaram. Esta tarefa só edita este documento; as alterações de código da fase (estágios `gpu_real`, `gpu_idle` e o derivado `gpu_overlap`, em `frame_timeline.h`, no relatório e nas duas APIs) são das tarefas anteriores da fase.
