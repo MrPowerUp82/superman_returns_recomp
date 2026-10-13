@@ -20,6 +20,7 @@ add_executable(sr_native_tests
     test_texture_source_probe.cpp
     test_resource_unlock_audit.cpp
     test_frame_timeline.cpp
+    test_gpu_pass_stats.cpp
     "${SR_NATIVE_DIR}/../graphics/backend_selection.cpp"
     test_shader_requirements.cpp
     test_guest_state.cpp
