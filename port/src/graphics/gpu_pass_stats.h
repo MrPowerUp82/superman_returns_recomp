@@ -3,10 +3,12 @@
 // A "pass" is a run of draws on the same render-target set; the key is API independent so the two
 // backends can be compared: width x height x colour target count x has-depth.
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace superman_returns::graphics {
@@ -29,6 +31,11 @@ struct GpuPassSegment {
   uint64_t ns = 0;
 };
 
+// Accumulates a window of frames. Every per-frame value (ms and passes) divides by ALL frames in the
+// window, so a key present in only some frames reports its average over the window, not over the frames
+// that had it. "passes" counts segments: a key appearing twice in one frame counts twice. Groups are
+// ordered by total time descending; equal totals are ordered by (width, height, colors, depth) ascending
+// so the log is deterministic and diffable between the two APIs.
 class GpuPassStats {
  public:
   // One frame: the pass segments, plus the frame's remaining GPU time (gaps between passes).
@@ -51,21 +58,29 @@ class GpuPassStats {
   std::string Format(size_t limit) const {
     if (!frames_) return "gpu passes: no frames";
     std::vector<std::pair<GpuPassKey, Entry>> sorted(entries_.begin(), entries_.end());
-    std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.second.ns > b.second.ns; });
+    std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
+      if (a.second.ns != b.second.ns) return a.second.ns > b.second.ns;
+      const GpuPassKey& ka = a.first;
+      const GpuPassKey& kb = b.first;
+      if (ka.width != kb.width) return ka.width < kb.width;
+      if (ka.height != kb.height) return ka.height < kb.height;
+      if (ka.colors != kb.colors) return ka.colors < kb.colors;
+      return ka.depth < kb.depth;
+    });
     const double frames = double(frames_);
     char buffer[160];
     std::snprintf(buffer, sizeof(buffer), "gpu passes (per frame over %llu frames):", (unsigned long long)frames_);
     std::string text = buffer;
     for (size_t i = 0; i < sorted.size() && i < limit; ++i) {
       const auto& [key, entry] = sorted[i];
-      std::snprintf(buffer, sizeof(buffer), " %ux%u c%u d%d: %.2f ms (%.1f passes) |", key.width, key.height,
-                    key.colors, key.depth ? 1 : 0, double(entry.ns) / 1e6 / frames, double(entry.passes) / frames);
+      std::snprintf(buffer, sizeof(buffer), " %ux%u c%u d%d: %.2f ms (%.1f passes) |", (unsigned)key.width,
+                    (unsigned)key.height, (unsigned)key.colors, key.depth ? 1 : 0, double(entry.ns) / 1e6 / frames, double(entry.passes) / frames);
       text += buffer;
     }
     if (sorted.size() > limit) {
       double rest = 0;
       for (size_t i = limit; i < sorted.size(); ++i) rest += double(sorted[i].second.ns);
-      std::snprintf(buffer, sizeof(buffer), " %zu more groups: %.2f ms |", sorted.size() - limit, rest / 1e6 / frames);
+      std::snprintf(buffer, sizeof(buffer), " %zu more groups: %.2f ms |", (size_t)(sorted.size() - limit), rest / 1e6 / frames);
       text += buffer;
     }
     std::snprintf(buffer, sizeof(buffer), " other %.2f ms", double(other_ns_) / 1e6 / frames);
