@@ -1,5 +1,82 @@
 # Uso direto de Lossless.dll
 
+## Native Vulkan opcional — 2026-10-14
+
+Implementado no branch local `codex/vulkan-frame-generation`, preservando as
+otimizações de CPU anteriores. O launcher publicado ao lado de
+`port/out/build/win-amd64-release/superman_returns.exe` oferece **Geração de
+quadros (2x)**, desligada por padrão, e seleção de `Lossless.dll`. A opção é
+persistida no INI e aplicada na próxima execução. O caminho Steam instalado é
+detectado; a DLL não é distribuída. Desligado, o jogo não abre a DLL nem cria a
+sessão FG. Builds sem SR_LSFG rejeitam explicitamente a solicitação.
+
+A sessão grava compute no mesmo VkDevice/VkQueue do renderer Vulkan. Timeline
+semaphores são opcionais e habilitados somente quando solicitados e suportados.
+FP32/performance gera um intermediário entre fontes reais distintas. O original
+é a mesma snapshot imutável do jogo, composta com seu gamma original; somente
+o input LSFG é convertido para RGBA8. O intermediário já contém gamma e não o
+aplica novamente. Serial real, warmup, pausas, formato/tamanho e reconexão
+controlam o histórico. Repaints não geram novos intermediários. Originais
+pendentes são preservados quando a segunda aquisição suspende. Esperas de
+fence/acquire/cadência ficam fora do mutex compartilhado da fila.
+
+Recursos canônicos e intermediários têm ownership próprio e são retirados após
+fences. Não há `DeviceWaitIdle` por par; setup/reset/shutdown podem drenar a GPU.
+Falha de setup desativa FG antes de gravar apresentação; falha durante gravação
+continua como erro do frame loop, sem tratar comandos parciais como sucesso.
+
+Verificação: 177 testes nativos, 91 Vulkan, launcher sem falhas; publish WPF e
+build completo. Contratos de pixels passam com `validation_errors=0`. Fixture
+GPU com Khronos validation + synchronization validation verifica original
+pixel-exact, intermediário distinto dos dois inputs em movimento, gamma uma
+vez, guards do command buffer emprestado, reset com lease de imagem existente
+e timestamps GPU. A barreira inicial do backend foi corrigida após reproduzir
+um WRITE_AFTER_WRITE. SDK de validação está apenas em `.tools`, instalado em
+copy-only, sem alteração global de driver/registro.
+
+Gameplay, mesmas opções 1280x720/qualidade original/MSAA1/limite real30, sem
+build simultâneo:
+
+| Rodada | FPS reais do benchmark: parado / movimento | Intermediários |
+|---|---:|---|
+| FG desligado 1 | 10,0 / 10,6 | 0; gate PASS |
+| FG ligado 1 | 13,8 / 12,8 | contadores medidos, abaixo |
+| FG desligado 2 | 11,7 / 11,5 | 0; gate PASS |
+| EXE anterior, mesmo nome | 12,9 / 10,9 | 0; gate PASS |
+| FG ligado final, após correções | 12,9 / 13,0 | contadores medidos, abaixo |
+
+As janelas de log FG de aproximadamente 20s mediram **13,71 reais + 13,71
+gerados = 27,42 quadros distintos/s parado** e **12,86 + 12,86 = 25,71 em
+movimento**. Houve janelas de 2s com 33 quadros distintos, sem sustentação.
+Na rodada final, foram **12,84 + 12,84 = 25,68 parado** e **13,05 + 13,05 =
+26,10 em movimento**; `fg_gpu_ms` cumulativo ficou em aproximadamente 0,95ms.
+`fg_gpu_ms` cumulativo nessa rodada ficou em aproximadamente 0,84ms. Não
+multiplicamos o FPS guest para obter esses valores: são apresentações reais
+contadas após sucesso. `presented_fps` inclui repaints, que são informados
+separadamente e **não contam como frames novos**.
+
+O alvo de 30 FPS reais e de 30 quadros distintos sustentados continua pendente.
+A sessão anterior tinha 15,1/14,6 FPS reais; o executável anterior também ficou
+mais lento no controle atual, e estas rodadas não isolam uma regressão uniforme
+da opção desligada. Controle com EXE renomeado não chegou ao HUD e foi
+descartado. Capturas FG parado/movimento foram inspecionadas sem corrupção
+grosseira, mas não substituem avaliação temporal longa de ghosting, HUD,
+alt-tab e redimensionamento no jogo. O runtime de automação nativa do launcher
+estava indisponível; a UI foi compilada e seu contrato/persistência testados,
+sem alegação de clique automatizado no checkbox.
+
+O core standalone sem backend compilou e linkou os 91 testes Vulkan.
+Adicionalmente, native_provider/native_graphics_system/native_bridge compilaram
+com `SR_HAS_LSFG=0` em objetos separados; o candidato ON foi preservado. Isso
+verifica os guards de compilação, sem alegar link completo de outro jogo OFF.
+
+Reprodução: `tools/bench/bench_api.ps1 -Api vulkan -Name caso -Exe <exe>`;
+acrescentar `-FrameGeneration` e, se necessário, `-FrameGenerationDll <path>`.
+Todos os runs enviam sr_lsfg explicitamente e preservam `logs/bench_<Name>.log`.
+Os logs `fg_*` e capturas `bench_fg_vulkan_*` mantêm as evidências locais.
+
+As seções abaixo registram a investigação e a ponte D3D12 anteriores.
+
 ## Resultado da investigação — 2026-09-30
 
 A integração pretendida usa somente a DLL fornecida pelo usuário. Não precisa

@@ -6,6 +6,7 @@
 //
 #include "pm4_mirror.h"
 #include "../graphics/guest/constant_snapshot.h"
+#include <algorithm>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -57,6 +58,34 @@ bool HostReadable(const uint8_t *p, size_t bytes) {
 
 } // namespace
 
+void Pm4Mirror::WriteRange(uint32_t first,const uint8_t* words,uint32_t count) {
+  // Constant packets usually write an entire bank. Keep the same number of
+  // version changes, but reduce it once per bank so endian conversion and
+  // comparison can vectorize instead of branching on every register.
+  if(first>=kAluConstantBase && first<kAluConstantBase+0x800 &&
+     count<=kAluConstantBase+0x800-first) {
+    while(count) {
+      const bool pixel=first>=kAluConstantBase+0x400;
+      const uint32_t end=kAluConstantBase+(pixel?0x800:0x400);
+      const uint32_t length=std::min(count,end-first);
+      uint32_t changes=0;
+      auto* destination=regs_+first;
+      for(size_t i=0;i<length;++i) {
+        uint32_t value;
+        std::memcpy(&value,words+i*4,4);
+        value=__builtin_bswap32(value);
+        changes+=destination[i]!=value;
+        destination[i]=value;
+      }
+      std::memset(written_+first-kAluConstantBase,1,length);
+      (pixel?ps_version:vs_version)+=changes;
+      first+=length;words+=length*4;count-=length;
+    }
+    return;
+  }
+  for(uint32_t i=0;i<count;++i) Write(first+i,LoadBE(words,i*4));
+}
+
 void Pm4Mirror::ScanFrom(const uint8_t *base, const uint8_t *stream,
                          uint32_t begin, uint32_t end, int depth,
                          const MemoryReader *reader) {
@@ -72,9 +101,8 @@ void Pm4Mirror::ScanFrom(const uint8_t *base, const uint8_t *stream,
       bool one_register = (header >> 15) & 1;
       if (p + count * 4 > end)
         return;
-      for (uint32_t i = 0; i < count; ++i) {
-        Write(one_register ? index : index + i, LoadBE(stream, p + 4 * i));
-      }
+      if(one_register) for(uint32_t i=0;i<count;++i) Write(index,LoadBE(stream,p+4*i));
+      else WriteRange(index,stream+p,count);
       p += count * 4;
       dwords += count;
       break;
@@ -119,15 +147,13 @@ void Pm4Mirror::ScanFrom(const uint8_t *base, const uint8_t *stream,
           first = kRegisterCount;
           break;
         }
-        for (uint32_t i = 1; i < count; ++i)
-          Write(first + i - 1, LoadBE(stream, p + 4 * i));
+        WriteRange(first,stream+p+4,count-1);
         break;
       }
       case 0x55:   // SET_CONSTANT2
       case 0x56: { // SET_SHADER_CONSTANTS
         uint32_t index = d0 & 0xFFFF;
-        for (uint32_t i = 1; i < count; ++i)
-          Write(index + i - 1, LoadBE(stream, p + 4 * i));
+        WriteRange(index,stream+p+4,count-1);
         break;
       }
       case 0x2F: { // LOAD_ALU_CONSTANT (from memory)
@@ -167,9 +193,7 @@ void Pm4Mirror::ScanFrom(const uint8_t *base, const uint8_t *stream,
           ++unreadable_alu_loads;
           break;
         }
-        for (uint32_t i = 0; i < size; ++i)
-          Write(first + i, reader ? LoadBE(captured.data(), 4 * i)
-                                  : LoadBE(base, src + 4 * i));
+        WriteRange(first,reader?captured.data():base+src,size);
         break;
       }
       case 0x22:                        // DRAW_INDX

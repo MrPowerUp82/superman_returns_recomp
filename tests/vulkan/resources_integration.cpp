@@ -82,6 +82,44 @@ public:
     std::vector<uint8_t> bytes(4096);std::memcpy(bytes.data(),mapped,bytes.size());c.f.vkUnmapMemory(c.device,memory);return bytes;
   }
 };
+void BenchmarkMappedBindings(Context& c) {
+  Error e;UploadFixture fixture(c);ResourceStore store(c);
+  Require(store.BeginSubmission(fixture.command,1,e),e);
+  guest::DrawPacket draw;
+  for(uint32_t i=0;i<8;++i) {draw.texture_fetch[i][0]=2;draw.texture_fetch[i][1]=0x1006+i*4096;draw.texture_fetch[i][5]=1<<9;}
+  for(uint32_t i=0;i<4;++i) {guest::VertexStream stream;stream.stream=i;stream.update.plan.key=500+i;draw.streams.push_back(stream);}
+  for(uint32_t i=0;i<16;++i) draw.vertex_fetch[i]={i%4,i*4,64,37};
+  constexpr uint32_t draws=3000,rounds=16;
+  std::vector<TransientSlice> slices(draws);
+  std::vector<guest::DrawPacket> packets(draws,draw);
+  for(uint32_t i=0;i<draws;++i) {packets[i].constants.vs[0]=i*7/10;packets[i].constants.ps[0]=i*4/10;}
+  const auto map_begin=std::chrono::steady_clock::now();
+  for(auto& slice:slices) Require(store.MapTransient(sizeof(guest::ConstantSnapshot),slice,e),e);
+  const double map_us=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-map_begin).count()/draws;
+  DrawBindings bindings;
+  for(uint32_t i=0;i<draws;++i) Require(BuildBindings(packets[i],slices[i].data,bindings,e),e);
+  const auto begin=std::chrono::steady_clock::now();
+  uint64_t checksum=0;
+  for(uint32_t round=0;round<rounds;++round) for(uint32_t i=0;i<draws;++i) {
+    Require(BuildBindings(packets[i],slices[i].data,bindings,e),e);checksum+=bindings.textures[0][0];
+  }
+  const double us=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-begin).count()/(draws*rounds);
+  const auto cache_begin=std::chrono::steady_clock::now();uint64_t cached_checksum=0;
+  for(uint32_t round=0;round<rounds;++round) {
+    ConstantBankCache cache;
+    for(uint32_t i=0;i<draws;++i) {
+      auto reuse=cache.Find(1,slices[i].chunk.get(),packets[i].constants);
+      Require(BuildBindings(packets[i],slices[i].data,bindings,e,(reuse.vs?0u:1u)|(reuse.ps?0u:2u)),e);
+      cache.Commit(1,slices[i].chunk.get(),uint32_t(slices[i].offset),packets[i].constants,reuse);
+      cached_checksum+=bindings.textures[0][0];
+    }
+  }
+  const double cached_us=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-cache_begin).count()/(draws*rounds);
+  if(checksum!=cached_checksum) throw std::runtime_error("Bindings benchmark checksum differs");
+  for(auto& slice:slices) Require(store.FlushTransient(slice,e),e);
+  fixture.Finish();store.Retire(1);
+  std::cout<<"mapped bindings flags="<<slices[0].chunk->memory_properties<<" map_us/draw="<<map_us<<" bindings_us/draw="<<us<<" cached_us/draw="<<cached_us<<" checksum="<<checksum<<'\n';
+}
 void CheckTargetClears(Context& c) {
   Error e;UploadFixture fixture(c);ImageState state(c.f);TargetStore targets(c,state);
   Require(targets.BeginSubmission(fixture.command,1,e),e);
@@ -149,6 +187,8 @@ void CheckTargetDraws(Context& c,bool record=false,bool merged=false) {
       draw.command_serial=4;
       if(renderer.Record(guest::RenderPacket(draw),fixture.command,e) || renderer.Stats().alias_violations!=1) throw std::runtime_error("SR_VULKAN_CHECK_ALIASES did not report alias work on an open pass");
     }
+    if(renderer.Record(guest::RenderPacket{},fixture.command,e) || e.message.find("empty draw payload")==std::string::npos)
+      throw std::runtime_error("Default packet did not reject its empty draw payload");
     renderer.FinishSubmission();
   } else {
   auto pipeline=pipelines.Acquire(draw,*pass,*vertex,pixel.get(),1,e);Require(bool(pipeline),e);
@@ -494,6 +534,7 @@ int main(int argc,char** argv) {
     if(argc==2 && std::string(argv[1])=="--immediate") {CheckImmediate(c);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--stacked-resolve") {CheckStackedResolve(c);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--composition") {CheckComposition(c);return c.validation_errors.load()?1:0;}
+    if(argc==2 && std::string(argv[1])=="--bench-bindings") {BenchmarkMappedBindings(c);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--hold-lifetime") {CheckHoldLifetime(c);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--resolve-copy") {CheckResolveCopy(c);return c.validation_errors.load()?1:0;}
     if(argc!=1) throw std::runtime_error("Unknown GPU fixture argument; refusing a different test");

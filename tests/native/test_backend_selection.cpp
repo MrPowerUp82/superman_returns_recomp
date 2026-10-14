@@ -1,6 +1,13 @@
 #include "test_main.h"
 #include "../../port/src/graphics/backend_selection.h"
 using namespace superman_returns::graphics;
+SR_TEST(native_vulkan_frame_generation_requires_compiled_backend) {
+  NativeVulkanOptions options;options.lsfg=true;std::string error;
+  SR_CHECK(ValidateNativeApi(NativeApi::kVulkan,true,options,error,true));
+  options.fxaa=true;
+  SR_CHECK(!ValidateNativeApi(NativeApi::kVulkan,true,options,error,true));
+  SR_CHECK(error.find("FXAA")!=std::string::npos);
+}
 SR_TEST(native_api_selection_is_explicit_and_rejects_unavailable_vulkan) {
   NativeApi api=NativeApi::kD3D12;std::string error;
   SR_CHECK(ParseNativeApi("d3d12",api,error));SR_CHECK(api==NativeApi::kD3D12);

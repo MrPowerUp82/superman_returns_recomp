@@ -4,6 +4,7 @@
 #include "render_state.h"
 #include "vertex_layout.h"
 #include <array>
+#include <stdexcept>
 #include <variant>
 namespace superman_returns::native {
 class Pm4Mirror;
@@ -25,6 +26,12 @@ struct SurfaceDesc {
   SurfaceGeometry geometry{};
 };
 struct DrawPacket {
+  struct ReplayStorageTag {};
+  DrawPacket() : mirrored_registers{} {}
+  // Only DecodeCapturedPacket may publish this storage: it fills both float
+  // banks and all mirrored registers before their first use. Partial fields
+  // (shared/device/vertex/fetch state) keep their normal initialization.
+  explicit DrawPacket(ReplayStorageTag) : constants(ConstantSnapshot::ReplayStorageTag{}) {}
   int pass = 0;
   Primitive primitive = Primitive::kTriangles;
   bool indexed = false, inline_vertices = false;
@@ -43,7 +50,8 @@ struct DrawPacket {
   Viewport viewport;
   Rect scissor{0, 0, 16384, 16384};
   bool tiling_active = false;
-  std::array<uint32_t, 0x400> registers{}, mirrored_registers{};
+  std::array<uint32_t, 0x400> registers{};
+  std::array<uint32_t, 0x400> mirrored_registers;
   std::array<std::array<uint32_t, 6>, 32> texture_fetch{};
   std::array<SurfaceDesc, 4> colors{};
   SurfaceDesc depth;
@@ -97,12 +105,63 @@ struct PassPacket {
   bool clear_color = false;
   SurfaceDesc color_surface, depth_surface;
 };
-using RenderPacket = std::variant<DrawPacket, ClearPacket, ResolvePacket,
+// Draws contain large constant/register arrays. Moving an inline variant
+// copied those arrays again at every queue handoff and vector growth. Keep
+// exclusive payload ownership so its address and captured state remain stable.
+struct DrawPacketOwner {
+  std::shared_ptr<DrawPacket> payload;
+  DrawPacketOwner() = default;
+  DrawPacketOwner(DrawPacket packet)
+      : payload(std::make_shared<DrawPacket>(std::move(packet))) {}
+  DrawPacketOwner(std::shared_ptr<DrawPacket> packet)
+      : payload(std::move(packet)) {}
+  DrawPacketOwner(const DrawPacketOwner&)=delete;
+  DrawPacketOwner& operator=(const DrawPacketOwner&)=delete;
+  DrawPacketOwner(DrawPacketOwner&&)=default;
+  DrawPacketOwner& operator=(DrawPacketOwner&&)=default;
+};
+// One allocation for a batch's payloads instead of one large allocation per
+// draw. Each alias keeps the block alive after replay recycles the WorkBatch.
+// Next hands each freshly initialized element out at most once.
+class DrawPacketArena {
+public:
+  explicit DrawPacketArena(size_t count,bool replay_storage=false) {
+    if(!replay_storage) packets_=std::make_shared<std::vector<DrawPacket>>(count);
+    else {
+      packets_=std::make_shared<std::vector<DrawPacket>>();
+      packets_->reserve(count);
+      for(size_t i=0;i<count;++i) packets_->emplace_back(DrawPacket::ReplayStorageTag{});
+    }
+  }
+  DrawPacketArena(const DrawPacketArena&)=delete;
+  DrawPacketArena& operator=(const DrawPacketArena&)=delete;
+  DrawPacketArena(DrawPacketArena&&)=delete;
+  DrawPacketArena& operator=(DrawPacketArena&&)=delete;
+  DrawPacketOwner Next() {
+    if(next_>=packets_->size()) throw std::out_of_range("Draw packet arena exhausted");
+    return std::shared_ptr<DrawPacket>(packets_,&(*packets_)[next_++]);
+  }
+private:
+  std::shared_ptr<std::vector<DrawPacket>> packets_;
+  size_t next_=0;
+};
+using RenderPacket = std::variant<DrawPacketOwner, ClearPacket, ResolvePacket,
                                   SwapPacket, PassPacket>;
+inline DrawPacket* GetDraw(RenderPacket& packet) {
+  auto* owner=std::get_if<DrawPacketOwner>(&packet);
+  return owner?owner->payload.get():nullptr;
+}
+inline const DrawPacket* GetDraw(const RenderPacket& packet) {
+  auto* owner=std::get_if<DrawPacketOwner>(&packet);
+  return owner?owner->payload.get():nullptr;
+}
 bool DecodeRenderPacket(const WorkBatch &, const WorkCmd &,
                         const native::Pm4Mirror &, RenderPacket &,
                         std::string &);
-bool ReplayCapturedRenderPacket(const WorkBatch&,const WorkCmd&,native::Pm4Mirror&,RenderPacket&,std::string&);
+// Optional storage must be a fresh payload returned by DrawPacketArena::Next.
+// Optional counters belong to the replay owner; null performs no clock reads.
+struct ReplayProbe { uint64_t capture_ns=0,pm4_ns=0,decode_ns=0; };
+bool ReplayCapturedRenderPacket(const WorkBatch&,const WorkCmd&,native::Pm4Mirror&,RenderPacket&,std::string&,DrawPacketOwner storage={},std::shared_ptr<const WorkBatch> capture_owner={},ReplayProbe* probe=nullptr);
 // Original scale1/MSAA1 shader ABI state. Descriptor indices are populated by
 // the backend after binding resources; these semantic constants are common.
 void FinalizeDrawConstants(DrawPacket &);

@@ -1,7 +1,9 @@
 #include "../../port/src/graphics/guest/captured_batch.h"
+#include "../../port/src/graphics/guest/capture_batch_pool.h"
 #include "../../port/src/graphics/guest/pm4_capture.h"
 #include "../../port/src/graphics/guest/render_packet.h"
 #include "../../port/src/native_renderer/pm4_mirror.h"
+#include "../../port/src/native_renderer/game_profile.h"
 #include "test_main.h"
 SR_TEST(packet_check_cadence_limits_debug_capture) {
   using superman_returns::graphics::guest::IsCaptureFrame;
@@ -12,6 +14,154 @@ SR_TEST(packet_check_cadence_limits_debug_capture) {
 #include <bit>
 #include <stdexcept>
 using namespace superman_returns::graphics::guest;
+SR_TEST(replay_probe_does_not_process_a_rejected_capture) {
+  WorkBatch batch; WorkCmd cmd; cmd.pm4_capture_ok=false;
+  superman_returns::native::Pm4Mirror mirror;
+  RenderPacket packet; std::string error; ReplayProbe probe;
+  SR_CHECK(!ReplayCapturedRenderPacket(batch,cmd,mirror,packet,error,{}, {},&probe));
+  SR_CHECK_EQ(probe.capture_ns,0u);
+  SR_CHECK_EQ(probe.pm4_ns,0u);
+  SR_CHECK_EQ(probe.decode_ns,0u);
+}
+SR_TEST(replay_storage_matches_initialized_draw_after_complete_decode) {
+  ConstantSnapshot defaults;
+  for(auto v:defaults.vs) SR_CHECK_EQ(v,0u);
+  for(auto v:defaults.ps) SR_CHECK_EQ(v,0u);
+  WorkBatch batch; WorkCmd cmd;cmd.op=Op::kDraw;cmd.u[0]=4;cmd.u[2]=3;
+  superman_returns::native::Pm4Mirror mirror;
+  RenderPacket ordinary,prepared;std::string error;
+  // Write nonzero words, including NaN payloads, into both banks and state.
+  const uint8_t words[]={0,0,0x40,0,0x7f,0xc0,0,1,
+                         0,0,0x44,0,0x3f,0x80,0,0,
+                         0,0,0x20,0,0x12,0x34,0x56,0x78};
+  mirror.ScanCopy(nullptr,words,sizeof(words));
+  DrawPacketArena arena(2,true);
+  SR_CHECK(ReplayCapturedRenderPacket(batch,cmd,mirror,ordinary,error));
+  SR_CHECK(ReplayCapturedRenderPacket(batch,cmd,mirror,prepared,error,arena.Next()));
+  const auto& a=*GetDraw(ordinary);const auto& b=*GetDraw(prepared);
+  SR_CHECK(a.constants.vs==b.constants.vs);SR_CHECK(a.constants.ps==b.constants.ps);
+  SR_CHECK(a.constants.shared==b.constants.shared);
+  SR_CHECK(a.registers==b.registers);SR_CHECK(a.mirrored_registers==b.mirrored_registers);
+  SR_CHECK(a.texture_fetch==b.texture_fetch);
+  SR_CHECK_EQ(std::memcmp(a.vertex_fetch.data(),b.vertex_fetch.data(),sizeof(a.vertex_fetch)),0);
+  cmd.u[0]=UINT32_MAX;
+  auto* published=GetDraw(prepared);
+  SR_CHECK(!ReplayCapturedRenderPacket(batch,cmd,mirror,prepared,error,arena.Next()));
+  SR_CHECK(GetDraw(prepared)==published);
+}
+SR_TEST(pm4_sequential_constant_writes_match_individual_writes) {
+  using superman_returns::native::Pm4Mirror;
+  auto put=[](std::vector<uint8_t>& bytes,uint32_t word) {
+    bytes.push_back(uint8_t(word>>24));bytes.push_back(uint8_t(word>>16));
+    bytes.push_back(uint8_t(word>>8));bytes.push_back(uint8_t(word));
+  };
+  for(auto [first,count]:std::array<std::pair<uint32_t,uint32_t>,6>{{
+      {0x4000,1024},{0x4400,1024},{0x43f0,32},{0x3ff0,32},{0x47f0,32},{0x4ff0,32}}}) {
+    Pm4Mirror bulk,individual;
+    for(uint32_t round=0;round<3;++round) {
+      std::vector<uint8_t> stream,scalar;
+      put(stream,((count-1)<<16)|first);
+      for(uint32_t i=0;i<count;++i) {
+        // Repeated writes, changed values, NaNs and infinities remain raw here.
+        uint32_t value=i%4==0?0x7fc00001u:(i%4==1?0x7f800000u:0x3f800000u+i+(round==2));
+        put(stream,value);put(scalar,(first+i)|0x8000);put(scalar,value);
+      }
+      bulk.ScanCopy(nullptr,stream.data(),uint32_t(stream.size()));
+      individual.ScanCopy(nullptr,scalar.data(),uint32_t(scalar.size()));
+      for(uint32_t i=0;i<Pm4Mirror::kRegisterCount;++i) {
+        SR_CHECK_EQ(bulk.reg(i),individual.reg(i));
+        SR_CHECK_EQ(bulk.written(i),individual.written(i));
+      }
+      SR_CHECK_EQ(bulk.vs_version,individual.vs_version);
+      SR_CHECK_EQ(bulk.ps_version,individual.ps_version);
+      SR_CHECK(bulk.FloatConstants(false)==individual.FloatConstants(false));
+      SR_CHECK(bulk.FloatConstants(true)==individual.FloatConstants(true));
+    }
+  }
+}
+SR_TEST(pm4_constant_packet_variants_preserve_both_bank_versions) {
+  using superman_returns::native::Pm4Mirror;
+  auto put=[](std::vector<uint8_t>& bytes,uint32_t word) {
+    for(int shift=24;shift>=0;shift-=8) bytes.push_back(uint8_t(word>>shift));
+  };
+  constexpr uint32_t first=0x43fc,count=8;
+  std::vector<uint8_t> values;
+  for(uint32_t i=0;i<count;++i) put(values,0x3f800000+i);
+  for(uint32_t opcode: {0x2du,0x55u,0x56u,0x2fu}) {
+    Pm4Mirror actual,expected;
+    std::vector<uint8_t> stream,scalar;
+    if(opcode==0x2f) {
+      put(stream,0xc0000000u|(2u<<16)|(opcode<<8));
+      put(stream,0x200);put(stream,first-0x4000);put(stream,count);
+    } else {
+      put(stream,0xc0000000u|(count<<16)|(opcode<<8));
+      put(stream,opcode==0x2d?first-0x4000:first);
+      stream.insert(stream.end(),values.begin(),values.end());
+    }
+    put(scalar,((count-1)<<16)|first);
+    scalar.insert(scalar.end(),values.begin(),values.end());
+    for(unsigned round=0;round<2;++round) {
+      actual.ScanCopyUsing(stream.data(),uint32_t(stream.size()),[&](uint32_t address,uint32_t bytes)->std::span<const uint8_t> {
+        SR_CHECK_EQ(address,0xa0000200u);SR_CHECK_EQ(bytes,values.size());return values;
+      });
+      expected.ScanCopy(nullptr,scalar.data(),uint32_t(scalar.size()));
+      SR_CHECK_EQ(actual.vs_version,expected.vs_version);
+      SR_CHECK_EQ(actual.ps_version,expected.ps_version);
+      SR_CHECK(actual.FloatConstants(false)==expected.FloatConstants(false));
+      SR_CHECK(actual.FloatConstants(true)==expected.FloatConstants(true));
+      for(uint32_t i=first;i<first+count;++i) SR_CHECK_EQ(actual.written(i),expected.written(i));
+    }
+  }
+}
+SR_TEST(draw_payload_survives_queue_growth_without_relocation) {
+  WorkBatch batch;
+  batch.bytes={1,2,3,4};batch.ranges={{0x1000,4,0}};
+  WorkCmd cmd;cmd.op=Op::kDraw;cmd.u[0]=4;cmd.range_count=1;
+  auto shader=std::make_shared<ShaderCapture>();shader->vertex=true;shader->hash=123;
+  cmd.vertex_shader=shader;
+  superman_returns::native::Pm4Mirror mirror;
+  RenderPacket packet;std::string error;
+  SR_CHECK(DecodeRenderPacket(batch,cmd,mirror,packet,error));
+  const auto* payload=GetDraw(packet);
+  SR_CHECK(payload);
+  std::vector<RenderPacket> queue;
+  queue.push_back(std::move(packet));
+  for(unsigned i=0;i<128;++i) queue.emplace_back(PassPacket{});
+  batch.Clear();cmd.vertex_shader.reset();shader.reset();
+  const auto* retained=GetDraw(queue.front());
+  SR_CHECK(retained==payload);
+  SR_CHECK_EQ(retained->memory.Read(0x1000,4)[2],3);
+  SR_CHECK_EQ(retained->vertex_shader->hash,123u);
+  SR_CHECK(sizeof(RenderPacket)<=1024);
+}
+SR_TEST(failed_draw_decode_preserves_published_packet) {
+  WorkBatch batch;WorkCmd cmd;cmd.op=Op::kDraw;cmd.u[0]=UINT32_MAX;
+  superman_returns::native::Pm4Mirror mirror;
+  RenderPacket packet=SwapPacket{77,88,{}};std::string error;
+  SR_CHECK(!DecodeRenderPacket(batch,cmd,mirror,packet,error));
+  SR_CHECK(std::holds_alternative<SwapPacket>(packet));
+  SR_CHECK_EQ(std::get<SwapPacket>(packet).frontbuffer,77u);
+}
+SR_TEST(batch_draw_payloads_remain_distinct_after_arena_release) {
+  static_assert(!std::is_copy_constructible_v<RenderPacket>);
+  static_assert(!std::is_copy_constructible_v<DrawPacketArena>);
+  WorkBatch batch;WorkCmd cmd;cmd.op=Op::kDraw;cmd.u[0]=4;
+  superman_returns::native::Pm4Mirror mirror;
+  RenderPacket first,second;std::string error;
+  {
+    DrawPacketArena arena(2);
+    cmd.u[2]=3;SR_CHECK(ReplayCapturedRenderPacket(batch,cmd,mirror,first,error,arena.Next()));
+    cmd.u[2]=6;SR_CHECK(ReplayCapturedRenderPacket(batch,cmd,mirror,second,error,arena.Next()));
+    bool exhausted=false;
+    try {arena.Next();} catch(const std::out_of_range&) {exhausted=true;}
+    SR_CHECK(exhausted);
+  }
+  SR_CHECK(GetDraw(first)!=GetDraw(second));
+  SR_CHECK_EQ(GetDraw(first)->count,3u);
+  SR_CHECK_EQ(GetDraw(second)->count,6u);
+  first=PassPacket{};
+  SR_CHECK_EQ(GetDraw(second)->count,6u);
+}
 SR_TEST(pm4_dependency_capture_preserves_caller_state_between_commands) {
   WorkBatch batch;
   // Type0 writes to VS c0.x, then PS c0.x in a later command.
@@ -63,6 +213,29 @@ SR_TEST(pm4_dependency_capture_owns_nested_sources) {
                          return memory.Read(address, length);
                        });
   SR_CHECK_EQ(mirror.reg(mirror.kAluConstantBase), 0x3f800000u);
+}
+SR_TEST(pm4_dependency_capture_freezes_reused_reader_storage_before_nested_reads) {
+  WorkBatch batch;
+  batch.bytes={0xc0,0x01,0x3f,0,0,0,2,0,0,0,0,4,
+               0,0,0x44,0,0x40,0,0,0}; // PS write after returning from the indirect.
+  batch.bytes.shrink_to_fit();
+  WorkCmd cmd;cmd.ring_bytes=uint32_t(batch.bytes.size());
+  std::vector<uint8_t> scratch;
+  scratch.reserve(16);
+  superman_returns::native::Pm4Mirror mirror;std::string error;
+  SR_CHECK(CapturePm4Dependencies(batch,cmd,[&](uint32_t address,uint32_t length)->std::span<const uint8_t> {
+    if(address==0xa0000200 && length==16) scratch={0xc0,0x02,0x2f,0,0,0,1,0,0,0,0,0,0,0,0,1};
+    else if(address==0xa0000100 && length==4) scratch={0x3f,0x80,0,0};
+    else return {};
+    return scratch;
+  },error,&mirror));
+  SR_CHECK_EQ(mirror.reg(mirror.kAluConstantBase),0x3f800000u);
+  SR_CHECK_EQ(mirror.reg(mirror.kAluConstantBase+1024),0x40000000u);
+  SR_CHECK_EQ(batch.ranges.size(),2u);
+  SR_CHECK_EQ(batch.ranges[0].offset,20u);
+  SR_CHECK_EQ(batch.ranges[1].offset,36u);
+  SR_CHECK_EQ(batch.bytes[20],0xc0u); // reader scratch was overwritten, owned indirect was not.
+  SR_CHECK_EQ(batch.bytes[36],0x3fu);
 }
 // Same ring as pm4_dependency_capture_owns_nested_sources: an indirect buffer
 // (16 bytes) that in turn loads a 4-byte ALU constant, so two guest reads.
@@ -142,6 +315,40 @@ SR_TEST(captured_memory_owns_bytes_after_source_reuse) {
   batch.Clear();
   SR_CHECK_EQ(memory.Read(0x1000, 4)[2], 3);
   SR_CHECK_EQ(memory.Read(0x2000, 2)[1], 6);
+}
+SR_TEST(owned_capture_reuses_immutable_bytes_and_limits_reads_to_its_command) {
+  auto batch=std::make_shared<WorkBatch>();batch->bytes={1,2,3,4};
+  batch->ranges={{0x1000,2,0},{0x1000,2,2}};
+  WorkCmd cmd;cmd.range_count=1;
+  CapturedMemory first,second;std::string error;
+  SR_CHECK(CapturedMemory::CaptureOwned(batch,cmd,first,error));
+  SR_CHECK(first.Read(0x1000,2).data()==batch->bytes.data());
+  cmd.range_first=1;
+  SR_CHECK(CapturedMemory::CaptureOwned(batch,cmd,second,error));
+  std::weak_ptr<const WorkBatch> lifetime=batch;
+  batch.reset();SR_CHECK(!lifetime.expired());
+  SR_CHECK_EQ(first.Read(0x1000,2)[0],1);
+  SR_CHECK_EQ(second.Read(0x1000,2)[0],3);
+  first={};SR_CHECK(!lifetime.expired());
+  second={};SR_CHECK(lifetime.expired());
+}
+SR_TEST(batch_pool_recycles_only_after_the_last_packet_capture_is_released) {
+  auto pool=std::make_shared<CaptureBatchPool>();
+  auto batch=pool->Acquire();const auto* original=batch.get();
+  batch->bytes={5,6};batch->ranges={{0x1000,2,0}};
+  WorkCmd cmd;cmd.range_count=1;CapturedMemory memory;std::string error;
+  auto frozen=pool->Freeze(std::move(batch));
+  SR_CHECK(CapturedMemory::CaptureOwned(frozen,cmd,memory,error));
+  frozen.reset();auto concurrent=pool->Acquire();SR_CHECK(concurrent.get()!=original);
+  SR_CHECK_EQ(memory.Read(0x1000,2)[0],5);
+  memory={};auto reused=pool->Acquire();SR_CHECK(reused.get()==original);
+  SR_CHECK(reused->bytes.empty());SR_CHECK(reused->ranges.empty());
+  reused->bytes={9,8};reused->ranges={{0x2000,2,0}};
+  frozen=pool->Freeze(std::move(reused));
+  SR_CHECK(CapturedMemory::CaptureOwned(frozen,cmd,memory,error));
+  frozen.reset();pool.reset(); // a packet remains usable after its producer shuts down
+  SR_CHECK_EQ(memory.Read(0x2000,2)[0],9);
+  memory={};
 }
 SR_TEST(capture_range_overflow_is_rejected) {
   WorkBatch batch;
@@ -223,7 +430,7 @@ SR_TEST(packet_owns_constants_and_buffers_after_guest_mutation) {
   SR_CHECK(DecodeRenderPacket(batch, cmd, mirror, packet, error));
   batch.Clear();
   mirror = superman_returns::native::Pm4Mirror{};
-  const auto &draw = std::get<DrawPacket>(packet);
+  const auto &draw = (*GetDraw(packet));
   SR_CHECK_EQ(draw.constants.vs[0], 0x3f800000);
   SR_CHECK_EQ(draw.streams[0].update.bytes[2], 3);
   cmd.vertex_shader.reset();
@@ -264,7 +471,7 @@ SR_TEST(strip_and_ushort2_metadata_survive_packet) {
   RenderPacket packet;
   std::string error;
   SR_CHECK(DecodeRenderPacket(batch, cmd, mirror, packet, error));
-  const auto &draw = std::get<DrawPacket>(packet);
+  const auto &draw = (*GetDraw(packet));
   SR_CHECK(draw.indices.normalized ==
            std::vector<uint32_t>({1, UINT32_MAX, 2}));
     SR_CHECK(draw.primitive == Primitive::kTriangleStrip);
@@ -279,12 +486,12 @@ SR_TEST(strip_and_ushort2_metadata_survive_packet) {
   batch.bytes[12+0x3b]=0x5f;
   RenderPacket changed;
   SR_CHECK(DecodeRenderPacket(batch,cmd,mirror,changed,error));
-  SR_CHECK_EQ(std::get<DrawPacket>(changed).vertex_fetch[0].type,0x2c225fu);
+  SR_CHECK_EQ((*GetDraw(changed)).vertex_fetch[0].type,0x2c225fu);
   auto patch=uint32_t(batch.bytes.size());
   batch.bytes.insert(batch.bytes.end(),{0,0x2c,0x22,0x59});
   batch.ranges.push_back({0x3038,4,patch});++cmd.range_count;
   SR_CHECK(DecodeRenderPacket(batch,cmd,mirror,changed,error));
-  SR_CHECK_EQ(std::get<DrawPacket>(changed).vertex_fetch[0].type,0x2c2259u);
+  SR_CHECK_EQ((*GetDraw(changed)).vertex_fetch[0].type,0x2c2259u);
   SR_CHECK_EQ(draw.vertex_fetch[0].type,0x2c2259u);
 }
 SR_TEST(same_capture_decodes_identically_for_both_backends) {
@@ -307,7 +514,7 @@ SR_TEST(same_capture_decodes_identically_for_both_backends) {
   batch.ranges={{0x1000,12,0}};cmd.range_count=1;
   SR_CHECK(DecodeRenderPacket(batch,cmd,mirror,d3d,error));
   SR_CHECK(DecodeRenderPacket(batch,cmd,mirror,vulkan,error));
-  auto& a=std::get<DrawPacket>(d3d);auto& b=std::get<DrawPacket>(vulkan);
+  auto& a=(*GetDraw(d3d));auto& b=(*GetDraw(vulkan));
   SR_CHECK(a.inline_data==b.inline_data);
   SR_CHECK(a.constants.vs==b.constants.vs);
   SR_CHECK(a.constants.ps==b.constants.ps);
@@ -388,7 +595,7 @@ SR_TEST(shader_roles_follow_owned_container_stage_when_device_slots_are_reversed
   auto vs=std::make_shared<ShaderCapture>(),ps=std::make_shared<ShaderCapture>();vs->vertex=true;vs->hash=17;ps->hash=29;
   cmd.vertex_shader=ps;cmd.pixel_shader=vs;
   superman_returns::native::Pm4Mirror mirror;RenderPacket packet;std::string error;
-  SR_CHECK(DecodeRenderPacket(batch,cmd,mirror,packet,error));const auto& draw=std::get<DrawPacket>(packet);
+  SR_CHECK(DecodeRenderPacket(batch,cmd,mirror,packet,error));const auto& draw=(*GetDraw(packet));
   SR_CHECK(draw.vertex_shader==vs);SR_CHECK(draw.pixel_shader==ps);
 }
 SR_TEST(contiguous_capture_fast_path_rejects_partial_overlays) {
@@ -401,6 +608,68 @@ SR_TEST(contiguous_capture_fast_path_rejects_partial_overlays) {
   SR_CHECK(memory.ReadUnambiguous(0x1000,4).empty());
   SR_CHECK_EQ(memory.ReadUnambiguous(0x1001,2)[0],9);
   SR_CHECK_EQ(memory.Read(0x1000,4)[1],2);
+}
+SR_TEST(device_bulk_decode_preserves_latest_word_overlays_and_pm4_precedence) {
+  namespace profile=superman_returns::native::profile;
+  WorkBatch batch;batch.bytes.resize(0x4000,0);batch.ranges={{0x10000,0x4000,0}};
+  auto store=[&](uint32_t offset,uint32_t value) {
+    for(uint32_t byte=0;byte<4;++byte) batch.bytes[offset+byte]=uint8_t(value>>(24-byte*8));
+  };
+  for(auto range:profile::kRegisterShadow)
+    for(uint32_t i=0;i<range.count;++i) store(range.offset+i*4,range.first+i);
+  for(uint32_t i=0;i<192;++i) store(profile::kDevice.fetch_constants+i*4,i+1);
+  const auto shadow=profile::kRegisterShadow[0];
+  batch.bytes.insert(batch.bytes.end(),{0x12,0x34,0x56,0x78,0x87,0x65,0x43,0x21});
+  batch.ranges.push_back({0x10000+shadow.offset+4,4,0x4000});
+  batch.ranges.push_back({0x10000+profile::kDevice.fetch_constants+4,4,0x4004});
+  WorkCmd cmd;cmd.op=Op::kDraw;cmd.u[0]=4;cmd.device=0x10000;cmd.range_count=3;
+  superman_returns::native::Pm4Mirror mirror;
+  const uint8_t fetch_write[]={0,0,0x48,0,0xaa,0xbb,0xcc,0xdd};
+  mirror.ScanCopy(nullptr,fetch_write,sizeof(fetch_write));
+  RenderPacket packet;std::string error;
+  SR_CHECK(DecodeRenderPacket(batch,cmd,mirror,packet,error));
+  const auto& draw=*GetDraw(packet);
+  SR_CHECK_EQ(draw.registers[0],0x2000u);
+  SR_CHECK_EQ(draw.registers[1],0x12345678u);
+  SR_CHECK_EQ(draw.registers[2],0x2002u);
+  SR_CHECK_EQ(draw.texture_fetch[0][0],0xaabbccddu);
+  SR_CHECK_EQ(draw.texture_fetch[0][1],0x87654321u);
+  SR_CHECK_EQ(draw.texture_fetch[31][5],192u);
+}
+SR_TEST(bulk_capture_accepts_only_byte_identical_partial_overlays) {
+  WorkBatch batch;
+  // CaptureDevice appends a duplicate vertex-fetch suffix after the full bank.
+  batch.bytes.resize(768);
+  for(size_t i=0;i<768;++i) batch.bytes[i]=uint8_t(i*17);
+  const std::vector<uint8_t> suffix(batch.bytes.begin()+640,batch.bytes.end());
+  batch.bytes.insert(batch.bytes.end(),suffix.begin(),suffix.end());
+  batch.bytes.insert(batch.bytes.end(),{batch.bytes[16],batch.bytes[17]});
+  batch.ranges={{0x1000,768,0},{0x1280,128,768},{0x1010,2,896}};
+  WorkCmd cmd;cmd.range_count=3;
+  CapturedMemory memory;std::string error;
+  SR_CHECK(CapturedMemory::Capture(batch,cmd,memory,error));
+  const auto full=memory.ReadUnambiguous(0x1000,768);
+  SR_CHECK_EQ(full.size(),768u);
+  if(full.size()==768) for(size_t i=0;i<768;++i) SR_CHECK_EQ(full[i],uint8_t(i*17));
+  // A single changed byte retains the scalar overlay path.
+  batch.bytes[897]^=1;
+  SR_CHECK(CapturedMemory::Capture(batch,cmd,memory,error));
+  SR_CHECK(memory.ReadUnambiguous(0x1000,768).empty());
+  // A newer complete capture supersedes all earlier partial overlays.
+  batch.ranges.push_back({0x1000,768,0});cmd.range_count=4;
+  SR_CHECK(CapturedMemory::Capture(batch,cmd,memory,error));
+  SR_CHECK_EQ(memory.ReadUnambiguous(0x1000,768).size(),768u);
+  // Compare only the queried intersection of a suffix extending past the bank.
+  std::vector<uint8_t> clipped(batch.bytes.begin(),batch.bytes.begin()+768);
+  clipped.insert(clipped.end(),batch.bytes.begin()+760,batch.bytes.begin()+768);
+  clipped.resize(784,0xa5);
+  std::array<CaptureRange,2> ranges{{{0x1000,768,0},{0x12f8,16,768}}};
+  SR_CHECK_EQ(FindUnambiguousCapture(ranges,clipped,0x1000,768).size(),768u);
+  clipped[775]^=1;
+  SR_CHECK(FindUnambiguousCapture(ranges,clipped,0x1000,768).empty());
+  ranges[1].offset=UINT32_MAX;
+  SR_CHECK(FindUnambiguousCapture(ranges,clipped,0x1000,768).empty());
+  SR_CHECK(FindUnambiguousCapture(ranges,clipped,0xfffffffeu,4).empty());
 }
 SR_TEST(replayed_draw_keeps_latest_capture_and_pm4_constants_after_batch_reuse) {
   WorkBatch batch;
@@ -419,7 +688,7 @@ SR_TEST(replayed_draw_keeps_latest_capture_and_pm4_constants_after_batch_reuse) 
   batch.Clear();
   batch.bytes.resize(1024, 0xff);
   mirror = superman_returns::native::Pm4Mirror{};
-  const auto& draw = std::get<DrawPacket>(packet);
+  const auto& draw = (*GetDraw(packet));
   SR_CHECK_EQ(draw.constants.vs[0], 0x3f800000u);
   SR_CHECK_EQ(draw.memory.Read(0x1001, 2)[0], 9);
   SR_CHECK_EQ(draw.memory.Read(0x1000, 4)[1], 2);

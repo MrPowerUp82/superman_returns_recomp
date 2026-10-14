@@ -5,6 +5,7 @@
 // docs/native-port-plan.md section 2.
 //
 #include "native_renderer.h"
+#include "guest_cpu_profile.h"
 #include "checked_guest_memory.h"
 #include "guest_hash.h"
 #include "cpu_features.h"
@@ -407,6 +408,20 @@ thread_local CheckedGuestReads checked_guest_reads;
 bool TextureWatchScanCaching() {
   static const bool enabled=[] {
     const char* value=std::getenv("SR_NATIVE_TEXTURE_WATCH_SCAN_CACHE");
+    return !value || !*value || *value!='0';
+  }();
+  return enabled;
+}
+bool SmallBufferHashEveryUse() {
+  static const bool enabled=[] {
+    const char* value=std::getenv("SR_NATIVE_SMALL_BUFFER_HASH_EVERY_USE");
+    return value && *value && *value!='0';
+  }();
+  return enabled;
+}
+bool TextureSlotLookupCaching() {
+  static const bool enabled=[] {
+    const char* value=std::getenv("SR_NATIVE_TEXTURE_SLOT_CACHE");
     return !value || !*value || *value!='0';
   }();
   return enabled;
@@ -4766,7 +4781,8 @@ bool Renderer::RefreshTrackedBuffer(TrackedBuffer& t) {
   DetailScope refresh_scope(capture_timings.fb_refresh_ns);
   if (graphics::FrameTimeline::Detail()) ++stream_plan_counters.refresh_calls;
   bool page_written = false;
-  if (texture_watch_ && t.watched) {
+  const bool every_use=t.size<=kHashedBufferMax && SmallBufferHashEveryUse();
+  if (texture_watch_ && t.watched && !every_use) {
     const uint32_t global = write_seq_.load(std::memory_order_acquire);
     if (global != t.checked_seq) {
       t.checked_seq = global;
@@ -4786,7 +4802,7 @@ bool Renderer::RefreshTrackedBuffer(TrackedBuffer& t) {
       if (graphics::FrameTimeline::Detail()) {++stream_plan_counters.refresh_hashes;stream_plan_counters.refresh_hash_bytes+=t.size;}
       return TextureHash()(
           REX_KERNEL_MEMORY()->TranslatePhysical<const uint8_t*>(t.address & 0x1FFFFFFF), t.size, 0);
-    });
+    },every_use);
     if (changed) ++stats_.buffer_hash_dirty;
   }
   if (changed) {
@@ -4805,7 +4821,7 @@ Renderer::BufferPlan Renderer::PlanBuffer(uint8_t* base, uint32_t address, uint3
   BufferPlan plan;
   ok = size && size <= (64u << 20);
   if (!ok) return plan;
-  uint64_t key_parts[] = {address, size, decl, stride, index_format, phase, reset_index};
+  const uint64_t key_parts[]{address,size,decl,stride,index_format,phase,reset_index};
   plan.key = XXH3_64bits(key_parts, sizeof(key_parts));
   plan.address = address;
   plan.size = size;
@@ -4874,7 +4890,7 @@ Renderer::BufferPlan Renderer::PlanBuffer(uint8_t* base, uint32_t address, uint3
   TrackedBuffer& t = tracked_[plan.key];
   t.address = address;
   t.size = size;
-  if (texture_watch_) {
+  if (texture_watch_ && !(size<=kHashedBufferMax && SmallBufferHashEveryUse())) {
     t.watch_seq = ArmTextureWatch(address, size);
     t.checked_seq = write_seq_.load(std::memory_order_acquire);
     t.watched = true;
@@ -6465,7 +6481,7 @@ void Renderer::CaptureTextures(uint8_t* base) {
           : Load32(base,cur_.device+kDev.fetch_constants+slot*24+i*4);
     }
     if(!IsTextureBound(fetch[0])) continue;
-    auto& entry=captured_textures_[fetch];
+    auto& entry=TextureSlotLookupCaching()?CapturedTexture(slot,fetch):captured_textures_[fetch];
     if(!entry.snapshot && entry.failed_frame!=~0ull && front_frame_<entry.failed_frame+16) {cur_.texture_errors.emplace_back(slot,entry.failure);continue;}
     bool dirty=!entry.snapshot;
     bool notified=false;
@@ -6576,6 +6592,7 @@ void Renderer::CaptureTextures(uint8_t* base) {
   }
   // Commands retain ownership even when the frontend cache is pruned.
   if(captured_textures_.size()>2048) {
+    InvalidateTextureSlotLookups();
     for(auto it=captured_textures_.begin();it!=captured_textures_.end();) {
       if(it->second.checked_frame+120<front_frame_) it=captured_textures_.erase(it);
       else ++it;
@@ -6643,18 +6660,13 @@ void Renderer::CaptureRing(uint8_t* base, uint32_t dev) {
 void Renderer::FlushBatch() {
   DetailScope scope(capture_timings.fe_flush_ns);
   if (!batch_ || batch_->cmds.empty()) return;
-  std::unique_ptr<WorkBatch> next;
   {
     std::lock_guard<std::mutex> lock(queue_mutex_);
     work_queue_.push_back(std::move(batch_));
     ++batches_submitted_;
-    if (!free_batches_.empty()) {
-      next = std::move(free_batches_.back());
-      free_batches_.pop_back();
-    }
   }
   queue_cv_.notify_one();
-  batch_ = next ? std::move(next) : std::make_unique<WorkBatch>();
+  batch_ = batch_pool_->Acquire();
 }
 
 // Waits until the worker executed the first `batches` batches.
@@ -6665,9 +6677,17 @@ void Renderer::WaitWorkerIdle(uint64_t batches) {
 
 namespace {
 // SR_VULKAN_PROFILE=1: worker-side split of the packet sink path, per 120 swaps.
-struct SinkProfile {uint64_t swaps=0,packets=0,replay_us=0,sink_us=0,swap_us=0,idle_us=0;};
+struct SinkProfile {
+  graphics::guest::ReplayProbe replay;
+  uint64_t arena_setup_us=0;
+  uint64_t swaps=0,packets=0,replay_us=0,sink_us=0,swap_us=0,idle_us=0;
+  uint64_t draws=0,vs_same=0,ps_same=0,last_vs=~0ull,last_ps=~0ull;
+};
 SinkProfile g_sink_profile;
 bool SinkProfiling() {static const bool on=[]{const char* v=std::getenv("SR_VULKAN_PROFILE");return v && *v && *v!='0';}();return on;}
+// The decoder fully assigns these banks before use. Keep an explicit off
+// switch for comparisons against the former eager initialization path.
+bool ReplayStorageEnabled() {static const bool on=[]{const char* v=std::getenv("SR_NATIVE_REPLAY_STORAGE");return !v || !*v || *v!='0';}();return on;}
 uint64_t ElapsedUs(std::chrono::steady_clock::time_point since) {return uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-since).count());}
 }
 
@@ -6675,23 +6695,34 @@ void Renderer::WorkerMain() {
   compat::RegisterSampledThread(4, "sr_native_worker");
   auto& timeline = graphics::FrameTimeline::Global();
   for (;;) {
-    std::unique_ptr<WorkBatch> batch;
+    std::shared_ptr<const WorkBatch> batch;
     {
       std::unique_lock<std::mutex> lock(queue_mutex_);
       const auto idle_started=std::chrono::steady_clock::now();
       queue_cv_.wait(lock, [this] { return worker_stop_ || !work_queue_.empty(); });
       if(SinkProfiling()) g_sink_profile.idle_us+=ElapsedUs(idle_started);
       if(work_queue_.empty() && worker_stop_) return;
-      batch = std::move(work_queue_.front());
+      batch = batch_pool_->Freeze(std::move(work_queue_.front()));
       work_queue_.pop_front();
     }
     const uint64_t timeline_begin_ns = timeline.enabled() ? graphics::FrameTimeline::NowNs() : 0;
     graphics::TakeTimelineBlockedNs();  // drop waits recorded outside a batch
     {
       std::lock_guard<std::recursive_mutex> lock(mutex_);
+      const auto draw_count=std::count_if(batch->cmds.begin(),batch->cmds.end(),[](const WorkCmd& cmd) {
+        return cmd.op==Op::kDraw || cmd.op==Op::kDrawIndexed || cmd.op==Op::kDrawInline;
+      });
+      std::optional<graphics::guest::DrawPacketArena> payloads;
+      if(packet_sink_ && draw_count) {
+        const bool profile=SinkProfiling();
+        const auto started=profile?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
+        payloads.emplace(size_t(draw_count),ReplayStorageEnabled());
+        if(profile) g_sink_profile.arena_setup_us+=ElapsedUs(started);
+      }
       for (const WorkCmd& cmd : batch->cmds) {
         const auto started=CpuProfiling()?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
-        Execute(guest_base_, *batch, cmd);
+        const bool draw=cmd.op==Op::kDraw || cmd.op==Op::kDrawIndexed || cmd.op==Op::kDrawInline;
+        Execute(guest_base_, *batch, cmd,payloads && draw?payloads->Next():graphics::guest::DrawPacketOwner{},packet_sink_?batch:nullptr);
         if(CpuProfiling()) {
           auto& p=cpu_timings;
           p.execute_ns+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-started).count());
@@ -6723,24 +6754,28 @@ void Renderer::WorkerMain() {
         timeline_worker_begin_ns_ = timeline_worker_exec_ns_ = timeline_worker_blocked_ns_ = 0;
       }
     }
-    batch->Clear();
+    batch.reset();
     {
       std::lock_guard<std::mutex> lock(queue_mutex_);
-      free_batches_.push_back(std::move(batch));
       ++batches_done_;
     }
     done_cv_.notify_all();
   }
 }
 
-void Renderer::Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd) {
+void Renderer::Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd,graphics::guest::DrawPacketOwner storage,std::shared_ptr<const WorkBatch> capture_owner) {
   if(packet_sink_) {
     if(worker_stop_ || packet_sink_failed_) return;
     graphics::guest::RenderPacket packet;std::string error;
     const bool profile=SinkProfiling();const auto started=profile?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
-    bool ok=graphics::guest::ReplayCapturedRenderPacket(batch,cmd,mirror_,packet,error);
+    bool ok=graphics::guest::ReplayCapturedRenderPacket(batch,cmd,mirror_,packet,error,std::move(storage),std::move(capture_owner),profile?&g_sink_profile.replay:nullptr);
     const bool swap=std::holds_alternative<graphics::guest::SwapPacket>(packet);
     const auto replayed=profile?std::chrono::steady_clock::now():started;
+    if(profile && ok && graphics::guest::GetDraw(packet)) {
+      auto& p=g_sink_profile;
+      ++p.draws;p.vs_same+=p.last_vs==mirror_.vs_version;p.ps_same+=p.last_ps==mirror_.ps_version;
+      p.last_vs=mirror_.vs_version;p.last_ps=mirror_.ps_version;
+    }
     if(ok) {
       // The swap hand-off waits for the previous frame's recording; count it as blocked, not busy.
       if(swap) {graphics::TimelineBlockScope blocked;ok=packet_sink_(std::move(packet),error);}
@@ -6751,6 +6786,8 @@ void Renderer::Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd
       (swap?p.swap_us:p.sink_us)+=ElapsedUs(replayed);
       if(swap && ++p.swaps==120) {
         REXLOG_INFO("Vulkan worker profile (ms/frame over 120): replay={:.1f} sink={:.1f} swap_enqueue={:.1f} idle={:.1f} packets={}",p.replay_us/120000.0,p.sink_us/120000.0,p.swap_us/120000.0,p.idle_us/120000.0,p.packets/120);
+        REXLOG_INFO("Vulkan constant banks (per frame over 120): draws={} unchanged_vs={} unchanged_ps={}",p.draws/120,p.vs_same/120,p.ps_same/120);
+        REXLOG_INFO("Vulkan replay detail (ms/frame over 120): capture={:.2f} pm4={:.2f} decode={:.2f} arena_setup={:.2f}",p.replay.capture_ns/120000000.0,p.replay.pm4_ns/120000000.0,p.replay.decode_ns/120000000.0,p.arena_setup_us/120000.0);
         p={};
       }
     }
@@ -6813,7 +6850,7 @@ void Renderer::Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd
         REXLOG_WARN("native packet check: op {} pass {}: {}", int(cmd.op), cmd.pass, error);
     } else {
       ++stats_.packets_decoded;
-      if(auto* draw=std::get_if<graphics::guest::DrawPacket>(&packet)) {
+      if(auto* draw=graphics::guest::GetDraw(packet)) {
         for(const auto& texture:draw->textures) if(texture) ++stats_.packet_texture_refs;
         for(const auto& [slot,reason]:draw->texture_errors) {
           if(++stats_.packet_texture_errors<=8)
@@ -6874,6 +6911,7 @@ void Renderer::Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd
 
 void Renderer::DrawVertices(uint8_t* base, uint32_t prim, uint32_t start_vertex,
                             uint32_t vertex_count) {
+  GuestNativeCaptureProfile guest_capture_profile;
   DetailScope hook_scope(capture_timings.fe_hook_ns);
   if (!REXCVAR_GET(sr_native_draws)) return;
   std::lock_guard<std::mutex> lock(front_mutex_);
@@ -6914,6 +6952,7 @@ void Renderer::DrawVertices(uint8_t* base, uint32_t prim, uint32_t start_vertex,
 
 void Renderer::DrawIndexedVertices(uint8_t* base, uint32_t prim, int32_t base_vertex,
                                    uint32_t start_index, uint32_t index_count) {
+  GuestNativeCaptureProfile guest_capture_profile;
   DetailScope hook_scope(capture_timings.fe_hook_ns);
   if (int32_t spin = REXCVAR_GET(sr_native_debug_spin_us)) {
     auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(spin);
@@ -7003,6 +7042,7 @@ void Renderer::DrawIndexedVertices(uint8_t* base, uint32_t prim, int32_t base_ve
 
 void Renderer::DrawInlineVertices(uint8_t* base, uint32_t prim, uint32_t data,
                                   uint32_t vertex_count, uint32_t stride) {
+  GuestNativeCaptureProfile guest_capture_profile;
   DetailScope hook_scope(capture_timings.fe_hook_ns);
   if (!REXCVAR_GET(sr_native_draws)) return;
   std::lock_guard<std::mutex> lock(front_mutex_);
@@ -7023,6 +7063,7 @@ void Renderer::DrawInlineVertices(uint8_t* base, uint32_t prim, uint32_t data,
 void Renderer::Resolve(uint8_t* base, uint32_t flags, uint32_t src_rect, uint32_t dest_texture,
                        uint32_t dest_point, uint32_t clear_color, float clear_z,
                        uint32_t clear_stencil,uint32_t level,uint32_t slice) {
+  GuestNativeCaptureProfile guest_capture_profile;
   DetailScope hook_scope(capture_timings.fe_hook_ns);
   if (!REXCVAR_GET(sr_native_resolves)) return;
   std::lock_guard<std::mutex> lock(front_mutex_);
@@ -7050,6 +7091,7 @@ void Renderer::Resolve(uint8_t* base, uint32_t flags, uint32_t src_rect, uint32_
 
 void Renderer::BeginTiling(uint8_t* base, uint32_t count, uint32_t rects, uint32_t clear_color,
                            float clear_z, uint32_t clear_stencil) {
+  GuestNativeCaptureProfile guest_capture_profile;
   DetailScope hook_scope(capture_timings.fe_hook_ns);
   std::lock_guard<std::mutex> lock(front_mutex_);
   guest_base_ = base;
@@ -7071,6 +7113,7 @@ void Renderer::BeginTiling(uint8_t* base, uint32_t count, uint32_t rects, uint32
 
 void Renderer::Clear(uint8_t* base, uint32_t count, uint32_t rects, uint32_t flags,
                      const float color[4], float z, uint32_t stencil) {
+  GuestNativeCaptureProfile guest_capture_profile;
   DetailScope hook_scope(capture_timings.fe_hook_ns);
   std::lock_guard<std::mutex> lock(front_mutex_);
   guest_base_ = base;
@@ -7147,6 +7190,7 @@ void Renderer::ExecClear(uint8_t* base, uint32_t count, uint32_t rects, uint32_t
 }
 
 void Renderer::EndTiling() {
+  GuestNativeCaptureProfile guest_capture_profile;
   DetailScope hook_scope(capture_timings.fe_hook_ns);
   std::lock_guard<std::mutex> lock(front_mutex_);
   if (!guest_base_) return;
@@ -7155,6 +7199,7 @@ void Renderer::EndTiling() {
 }
 
 void Renderer::OnPassEnd(int pass) {
+  GuestNativeCaptureProfile guest_capture_profile;
   DetailScope hook_scope(capture_timings.fe_hook_ns);
   if (REXCVAR_GET(sr_native_dump_after_pass) < 0) return;  // debug dumps only
   std::lock_guard<std::mutex> lock(front_mutex_);
@@ -7228,6 +7273,10 @@ void Renderer::OnSwap(uint8_t* base, uint32_t front_buffer_texture, uint64_t swa
       timeline.RecordBusy(graphics::TimelineStage::kFpRead, swap_number, t.fp_read_ns);
       timeline.RecordBusy(graphics::TimelineStage::kFpCopy, swap_number, t.fp_copy_ns);
       if (swap_number % 120 == 0) {
+        const auto writes=completed_texture_writes_.load(std::memory_order_acquire);
+        const auto write_delta=writes>=profiled_texture_writes_?writes-profiled_texture_writes_:0;
+        REXLOG_INFO("native physical write notifications: per_frame={:.1f} completed={}",double(write_delta)/120.0,writes);
+        profiled_texture_writes_=writes;
         auto& c = stream_plan_counters;
         REXLOG_INFO("native front-end stream plan (per frame over 120): evaluated={} fast={} slow={} | slow reasons: "
                     "untracked={} address={} size={} decl={} stride={} phase={} dirty={} | buffer refresh: calls={} hashes={} hash_kb={} | pm4 deps: reads={} kb={}",

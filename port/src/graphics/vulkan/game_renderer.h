@@ -2,6 +2,7 @@
 #include "game_pipeline.h"
 #include "depth_resolve.h"
 #include "state_shadow.h"
+#include "constant_bank_cache.h"
 #include "../guest/texture_capture.h"
 #include <atomic>
 #include <chrono>
@@ -55,6 +56,9 @@ private:
   bool Upload(const guest::BufferUpdate&,bool indices,uint64_t version,Error&);
   static bool StateFilterEnabled();
   static bool AliasCheckEnabled();
+  static bool ConstantBankCacheEnabled();
+  bool constant_bank_cache_enabled_=ConstantBankCacheEnabled();
+  ConstantBankCache constant_bank_cache_;
   Context& c_;ShaderLookup shaders_;TextureDecoder decoder_;ImageState state_;ResourceStore resources_;TargetStore targets_;DescriptorStore descriptors_;GamePipelineStore pipelines_;
   DepthResolver depth_resolver_;bool depth_ready_=false;
   AliasOptions alias_options_;

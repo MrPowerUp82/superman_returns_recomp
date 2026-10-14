@@ -1,6 +1,7 @@
 #ifdef _WIN32
 #include "../../port/src/native_renderer/checked_guest_memory.h"
 #include "test_main.h"
+#include <array>
 using superman_returns::native::CheckedGuestReads;
 SR_TEST(checked_guest_reads_keep_nested_sources_owned) {
   CheckedGuestReads reads;
@@ -24,5 +25,22 @@ SR_TEST(checked_guest_reads_reject_inaccessible_and_partial_ranges) {
   SR_CHECK(reads.Read(pages,4097).empty());
   SR_CHECK(VirtualFree(pages,0,MEM_RELEASE));
   SR_CHECK_EQ(valid[0],17u); // Owned bytes survive release of the source.
+}
+SR_TEST(checked_guest_reads_reuse_slots_without_aliasing_successful_reads) {
+  CheckedGuestReads reads;
+  std::array<uint8_t,128> first{},second{};
+  first.fill(17);second.fill(23);
+  auto warm=reads.Read(first.data(),uint32_t(first.size()));
+  const auto* slot=warm.data();reads.Reset();
+  first.fill(31);
+  auto a=reads.Read(first.data(),uint32_t(first.size()));
+  SR_CHECK(a.data()==slot);SR_CHECK_EQ(a[0],31u);
+  SR_CHECK(reads.Read(reinterpret_cast<void*>(1),128).empty());
+  auto b=reads.Read(second.data(),uint32_t(second.size()));
+  SR_CHECK(a.data()!=b.data());SR_CHECK_EQ(a[0],31u);SR_CHECK_EQ(b[0],23u);
+  // Force outer storage growth while the first two spans remain in use.
+  for(unsigned i=0;i<64;++i) SR_CHECK_EQ(reads.Read(second.data(),128).size(),128u);
+  SR_CHECK_EQ(a[0],31u);SR_CHECK_EQ(b[0],23u);
+  reads.Reset();SR_CHECK_EQ(reads.Read(second.data(),128)[0],23u);
 }
 #endif

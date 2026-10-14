@@ -31,7 +31,8 @@ template <typename T> struct DefaultInitAllocator : std::allocator<T> {
 struct CaptureRange {
   uint32_t address, length, offset;
 };
-// Empty means that a bulk decode would hide a newer partial overlay (or miss).
+// Empty means that a bulk decode would hide a changed newer partial overlay
+// (or miss). Byte-identical newer intersections may borrow the complete span.
 std::span<const uint8_t> FindUnambiguousCapture(std::span<const CaptureRange>,
     std::span<const uint8_t>,uint32_t address,uint32_t length);
 
@@ -106,6 +107,8 @@ class CapturedMemory {
 public:
   static bool Capture(const WorkBatch &, const WorkCmd &, CapturedMemory &,
                       std::string &);
+  static bool CaptureOwned(std::shared_ptr<const WorkBatch>,const WorkCmd&,
+                           CapturedMemory&,std::string&);
   std::span<const uint8_t> Read(uint32_t address, uint32_t length) const;
   std::span<const uint8_t> ReadUnambiguous(uint32_t address,uint32_t length) const;
 
@@ -115,6 +118,12 @@ private:
     std::vector<CaptureRange> ranges;
   };
   std::shared_ptr<const Snapshot> snapshot_;
+  // CaptureOwned requires a frozen batch that no producer can mutate. Reads
+  // remain limited to this command's range slice even though bytes are shared.
+  std::shared_ptr<const WorkBatch> batch_;
+  uint32_t range_first_=0,range_count_=0;
+  std::span<const CaptureRange> Ranges() const;
+  std::span<const uint8_t> Bytes() const;
 };
 constexpr bool IsCaptureFrame(uint64_t frame,uint32_t every) {
   return frame % (every ? every : 1) == 0;

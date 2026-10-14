@@ -32,7 +32,9 @@ bool RemapTextureBindings(std::span<const TextureBindingRequest>,DrawBindings&,E
 // Fills `bindings` and writes the draw's constants into `block` (sizeof(guest::ConstantSnapshot) bytes, e.g. a
 // ResourceStore::MapTransient slice): vs and ps as captured, shared patched with the texture and sampler
 // indices and the vertex fetch metadata. Callers may patch the shared part further afterwards.
-bool BuildBindings(const guest::DrawPacket&,std::byte* block,DrawBindings& bindings,Error&);
+// copy_banks: bit 0 VS, bit 1 PS; omitted banks must be bound to a prior
+// immutable slice by the caller. Shared metadata is always rebuilt.
+bool BuildBindings(const guest::DrawPacket&,std::byte* block,DrawBindings& bindings,Error&,uint32_t copy_banks=3);
 bool PlanSampler(std::span<const uint32_t,6>,const VkPhysicalDeviceFeatures&,
                  const VkPhysicalDeviceLimits&,bool mirror_clamp,
                  VkSamplerCreateInfo&,Error&);

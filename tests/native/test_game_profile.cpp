@@ -12,11 +12,11 @@
 namespace profile = superman_returns::native::profile;
 
 SR_TEST(profile_has_every_kit_hook_role) {
-  // The 21 kit roles plus the common unlock and planar handoff observations.
-  SR_CHECK_EQ(sizeof(profile::kHookRoles) / sizeof(profile::kHookRoles[0]), size_t(23));
+  // Kit roles, unlock/handoff observations and verified float-copy leaves.
+  SR_CHECK_EQ(sizeof(profile::kHookRoles) / sizeof(profile::kHookRoles[0]), size_t(25));
   std::set<std::string> names;
   for (const auto& r : profile::kHookRoles) names.insert(r.role);
-  SR_CHECK_EQ(names.size(), size_t(23));
+  SR_CHECK_EQ(names.size(), size_t(25));
 }
 
 SR_TEST(hook_addresses_are_code_addresses) {

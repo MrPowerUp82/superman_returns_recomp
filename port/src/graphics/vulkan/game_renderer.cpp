@@ -37,6 +37,10 @@ bool GameRenderer::AliasCheckEnabled() {
   const char* value=std::getenv("SR_VULKAN_CHECK_ALIASES");
   return value && value[0] && value[0]!='0';
 }
+bool GameRenderer::ConstantBankCacheEnabled() {
+  const char* value=std::getenv("SR_VULKAN_CONSTANT_BANK_CACHE");
+  return value && value[0] && value[0]!='0';
+}
 std::shared_ptr<TextureResource> GameRenderer::SelectFrontbuffer(const guest::SwapPacket& swap,Error& e) const {
   if(!swap.frontbuffer || swap.frontbuffer>UINT32_MAX-0x23u) {Fail(e,"Invalid captured frontbuffer object");return {};}
   try {
@@ -49,6 +53,7 @@ std::shared_ptr<TextureResource> GameRenderer::SelectFrontbuffer(const guest::Sw
   } catch(const std::exception& ex) {e={"Captured frontbuffer",VK_ERROR_INITIALIZATION_FAILED,ex.what()};return {};}
 }
 bool GameRenderer::BeginSubmission(VkCommandBuffer command,uint64_t serial,Error& e,VkCommandBuffer upload) {
+  constant_bank_cache_.Reset();
   open_pass_.reset();bound_pipeline_=VK_NULL_HANDLE;shadow_.Invalidate();
   if(!resources_.BeginSubmission(command,serial,e,upload) || !targets_.BeginSubmission(command,serial,e)) return false;
   command_=command;serial_=serial;merge_passes_=upload!=VK_NULL_HANDLE;recording_.store(command,std::memory_order_relaxed);
@@ -88,7 +93,7 @@ bool GameRenderer::Record(const guest::RenderPacket& packet,VkCommandBuffer comm
   if(command!=command_ || !serial_) return Fail(e,"Packet command buffer differs from active submission");
   if(dumping_) {
     std::ostringstream s;s<<dump_packet_++<<" ";
-    if(auto* d=std::get_if<guest::DrawPacket>(&packet)) {
+    if(auto* d=guest::GetDraw(packet)) {
       s<<"draw vs="<<Hex(d->vertex_shader?d->vertex_shader->hash:0)<<" ps="<<Hex(d->pixel_shader?d->pixel_shader->hash:0)<<" prim="<<int(d->primitive)<<" n="<<d->count<<(d->indexed?" idx":"")<<(d->inline_vertices?" inline":"")
        <<" c0="<<Surface(d->colors[0])<<" c1="<<Surface(d->colors[1])<<" ds="<<Surface(d->depth)<<" mask="<<Hex(d->registers[0x104])<<" depthctl="<<Hex(d->registers[0x200])<<" blend0="<<Hex(d->registers[0x201])
        <<" vp="<<d->viewport.x<<","<<d->viewport.y<<","<<d->viewport.width<<"x"<<d->viewport.height<<" z="<<d->viewport.min_depth<<".."<<d->viewport.max_depth<<" sc="<<d->scissor.left<<","<<d->scissor.top<<","<<d->scissor.right<<","<<d->scissor.bottom<<" tex=";
@@ -104,7 +109,8 @@ bool GameRenderer::Record(const guest::RenderPacket& packet,VkCommandBuffer comm
   }
   Lap lap(profiling_,profile_);
   try {
-    if(auto* draw=std::get_if<guest::DrawPacket>(&packet)) {bool ok=Draw(*draw,command,e);if(!ok && e.result!=VK_NOT_READY) ++stats_.failed;return ok;}
+    if(auto* draw=guest::GetDraw(packet)) {bool ok=Draw(*draw,command,e);if(!ok && e.result!=VK_NOT_READY) ++stats_.failed;return ok;}
+    if(std::holds_alternative<guest::DrawPacketOwner>(packet)) return Fail(e,"Packet has empty draw payload");
     struct PacketLap {Lap& lap;RecordProfile::Phase phase;~PacketLap(){lap(phase);}} packet_lap{lap,std::holds_alternative<guest::ResolvePacket>(packet)?RecordProfile::kResolves:RecordProfile::kClears};
     ClosePass();
     if(auto* clear=std::get_if<guest::ClearPacket>(&packet)) {if(!targets_.Clear(*clear,e)) return false;++stats_.clears;return true;}
@@ -231,9 +237,16 @@ bool GameRenderer::Draw(const guest::DrawPacket& draw,VkCommandBuffer command,Er
   }
   lap(RecordProfile::kTextures);
   TransientSlice constants;if(!resources_.MapTransient(sizeof(guest::ConstantSnapshot),constants,e)) return false;
-  DrawBindings bindings;if(!BuildBindings(draw,constants.data,bindings,e)) return false;
+  auto reused=constant_bank_cache_enabled_ && constants.offset<=UINT32_MAX
+      ?constant_bank_cache_.Find(serial_,constants.chunk.get(),draw.constants):ConstantBankCache::Reuse{};
+  DrawBindings bindings;if(!BuildBindings(draw,constants.data,bindings,e,(reused.vs?0u:1u)|(reused.ps?0u:2u))) return false;
   lap(RecordProfile::kBindings);
   DescriptorDraw descriptors;if(!descriptors_.Prepare(bindings,draw.texture_fetch,resources_,serial_,constants,descriptors,e)) return false;
+  if(reused.vs) descriptors.dynamic_offsets[0]=reused.vs_offset;
+  if(reused.ps) descriptors.dynamic_offsets[1]=reused.ps_offset;
+  // Prepare flushed this slice; the chunk is held until completion and slices
+  // are never overwritten inside a submission. Offset bases remain unchanged.
+  if(constant_bank_cache_enabled_) constant_bank_cache_.Commit(serial_,constants.chunk.get(),uint32_t(constants.offset),draw.constants,reused);
   lap(RecordProfile::kDescriptors);
   auto pipeline=pipelines_.Acquire(draw,*pass,vs.artifact,ps.artifact,serial_,e);if(!pipeline) {e.message+="; VS="+std::to_string(draw.vertex_shader->hash)+", PS="+std::to_string(draw.pixel_shader?draw.pixel_shader->hash:0)+", RT0="+std::to_string(pass->formats[0])+", DS="+std::to_string(pass->depth_format);return false;}
   struct Binding {uint32_t slot;VkBuffer handle;VkDeviceSize offset;};

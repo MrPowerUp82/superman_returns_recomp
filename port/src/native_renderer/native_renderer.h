@@ -27,6 +27,7 @@
 // address; binding a texture at such an address uses the host copy.
 #pragma once
 #include "native_frontend.h"
+#include "../graphics/guest/capture_batch_pool.h"
 #include "buffer_content.h"
 #include "shared_constants_cache.h"
 
@@ -250,12 +251,12 @@ class Renderer : public NativeFrontend {
   } front_stream_cache_[17];
   // Worker.
   void WorkerMain();
-  void Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd);
+  void Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd,graphics::guest::DrawPacketOwner storage={},std::shared_ptr<const WorkBatch> capture_owner={});
   std::thread worker_;
   std::mutex queue_mutex_;
   std::condition_variable queue_cv_, done_cv_;
   std::deque<std::unique_ptr<WorkBatch>> work_queue_;
-  std::vector<std::unique_ptr<WorkBatch>> free_batches_;
+  std::shared_ptr<graphics::guest::CaptureBatchPool> batch_pool_=std::make_shared<graphics::guest::CaptureBatchPool>();
   uint64_t batches_submitted_ = 0, batches_done_ = 0;
   uint64_t prev_swap_batches_ = 0;  // batches submitted up to the previous swap
   // Worker-side executors of the guest entry points.

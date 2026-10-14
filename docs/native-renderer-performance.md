@@ -1,5 +1,8 @@
 # Native renderer: generic CPU optimizations (2026-10-06)
 
+New CPU capture work and measurements on 2026-10-09 are recorded in
+[native-vulkan-cpu-2026-10-09.md](native-vulkan-cpu-2026-10-09.md).
+
 This pass reduces CPU work in the existing native renderer without changing
 resolution, shader quality, texture validation cadence, or GPU resource lifetime.
 It does not select settings for one notebook or GPU vendor.

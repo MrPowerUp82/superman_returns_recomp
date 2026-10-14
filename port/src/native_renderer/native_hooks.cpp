@@ -37,6 +37,8 @@
 #include "native_renderer.h"
 #include "sdk_compat.h"
 #include "checked_guest_memory.h"
+#include "idle_yield.h"
+#include "xdk_constant_copy.h"
 #include "resource_unlock_audit.h"
 
 namespace {
@@ -311,6 +313,65 @@ void superman_returns::native::ObserveTextureValidationForUnlockAudit(const uint
 #define SR_DEFINE_HOOK(addr) SR_DEFINE_HOOK_(addr)
 #define SR_ORIGINAL_(addr) __imp__sub_##addr
 #define SR_ORIGINAL(addr) SR_ORIGINAL_(addr)
+
+namespace {
+bool NativeBulkConstantsEnabled() {
+  static const bool enabled=[] {
+    const char* value=std::getenv("SR_NATIVE_XDK_BULK_COPY");
+    return value && *value && *value!='0';
+  }();
+  return enabled;
+}
+}
+#if SR_HOOK_ENABLED(FLOAT_COPY_VS)
+SR_DEFINE_HOOK(SR_ADDR_FLOAT_COPY_VS) {
+  if(NativeBulkConstantsEnabled() && native::Enabled()) native::TryCopyConstantPrefix(ctx,base,false);
+  SR_ORIGINAL(SR_ADDR_FLOAT_COPY_VS)(ctx,base);
+}
+#endif
+#if SR_HOOK_ENABLED(FLOAT_COPY_PS)
+SR_DEFINE_HOOK(SR_ADDR_FLOAT_COPY_PS) {
+  if(NativeBulkConstantsEnabled() && native::Enabled()) native::TryCopyConstantPrefix(ctx,base,true);
+  SR_ORIGINAL(SR_ADDR_FLOAT_COPY_PS)(ctx,base);
+}
+#endif
+
+#if SR_HOOK_ENABLED(IDLE_YIELD)
+namespace {
+bool IdleYieldBackoffEnabled() {
+  static const bool enabled=[] {
+    const char* value=std::getenv("SR_NATIVE_IDLE_YIELD");
+    return value && *value && *value!='0';
+  }();
+  return enabled;
+}
+class IdleYieldWait {
+public:
+  IdleYieldWait():timer_(CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_MODIFY_STATE|SYNCHRONIZE)) {}
+  ~IdleYieldWait() {if(timer_) CloseHandle(timer_);}
+  void Wait() {
+    LARGE_INTEGER due;due.QuadPart=-2500; // 250 us, relative 100 ns units.
+    if(timer_ && SetWaitableTimerEx(timer_,&due,0,nullptr,nullptr,nullptr,0)) {
+      WaitForSingleObject(timer_,1);
+    } else Sleep(1);
+  }
+private:
+  HANDLE timer_=nullptr;
+};
+}
+SR_DEFINE_HOOK(SR_ADDR_IDLE_YIELD) {
+  // Preserve the original yield's result and volatile/nonvolatile register
+  // effects. The host wait only changes how an idle polling thread is parked.
+  SR_ORIGINAL(SR_ADDR_IDLE_YIELD)(ctx,base);
+  if(IdleYieldBackoffEnabled() && native::Enabled()) {
+    thread_local native::IdleYieldBackoff backoff;
+    const auto now=std::chrono::steady_clock::now().time_since_epoch();
+    if(backoff.Observe(uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count()))) {
+      thread_local IdleYieldWait wait;wait.Wait();
+    }
+  }
+}
+#endif
 
 #if SR_HOOK_ENABLED(FRAME_HANDOFF)
 // Observe arguments before the dispatch thunk and the actual returned result.

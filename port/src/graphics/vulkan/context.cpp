@@ -192,7 +192,7 @@ bool Context::EnumerateCandidates(VkSurfaceKHR target,
   return true;
 }
 bool Context::OpenDevice(VkSurfaceKHR owned, std::string_view uuid, Error &e,
-                         const VkPhysicalDeviceFeatures *requested_features,bool require_mirror_clamp) {
+                         const VkPhysicalDeviceFeatures *requested_features,bool require_mirror_clamp,bool request_timeline) {
   if (device || surface) {
     e = {"OpenDevice", VK_ERROR_INITIALIZATION_FAILED,
          "Device already initialized"};
@@ -236,6 +236,19 @@ bool Context::OpenDevice(VkSurfaceKHR owned, std::string_view uuid, Error &e,
     extensions.push_back(VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME);
   }
   VkDeviceCreateInfo ci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+  VkPhysicalDeviceTimelineSemaphoreFeatures timeline{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES};
+  bool enable_timeline=false;
+  if(request_timeline) {
+    std::vector<VkExtensionProperties> available;
+    if(!Query<VkExtensionProperties>([&](auto* count,auto* values) {return f.vkEnumerateDeviceExtensionProperties(physical,nullptr,count,values);},available,"FG device extensions",e)) return false;
+    const bool extension=std::any_of(available.begin(),available.end(),[](const auto& v) {return std::strcmp(v.extensionName,VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME)==0;});
+    if(extension && f.vkGetPhysicalDeviceFeatures2) {
+      VkPhysicalDeviceFeatures2 queried{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};queried.pNext=&timeline;
+      f.vkGetPhysicalDeviceFeatures2(physical,&queried);enable_timeline=timeline.timelineSemaphore;
+    }
+    if(enable_timeline) {extensions.push_back(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);ci.pNext=&timeline;}
+    else Log("Frame generation unavailable: timeline semaphores not supported; using original Vulkan frames");
+  }
   ci.queueCreateInfoCount = uint32_t(queues.size());
   ci.pQueueCreateInfos = queues.data();
   ci.enabledExtensionCount = uint32_t(extensions.size());
@@ -246,6 +259,7 @@ bool Context::OpenDevice(VkSurfaceKHR owned, std::string_view uuid, Error &e,
              e))
     return false;
   enabled_features=requested_features?*requested_features:VkPhysicalDeviceFeatures{};
+  timeline_enabled=enable_timeline;
   mirror_clamp_enabled=require_mirror_clamp;
   if (!injected_ && !loader_.LoadDevice(f, device, e))
     return false;

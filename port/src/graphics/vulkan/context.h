@@ -17,7 +17,7 @@ public:
                            Error &);
   bool OpenDevice(VkSurfaceKHR owned_surface, std::string_view uuid, Error &,
                   const VkPhysicalDeviceFeatures *requested_features = nullptr,
-                  bool require_mirror_clamp=false);
+                  bool require_mirror_clamp=false,bool request_timeline=false);
   PFN_vkGetInstanceProcAddr Proc() const {
     return loader_.GetInstanceProcAddr();
   }
@@ -35,6 +35,7 @@ public:
   VkPhysicalDeviceMemoryProperties memory{};
   VkPhysicalDeviceFeatures enabled_features{};
   bool mirror_clamp_enabled=false;
+  bool timeline_enabled=false;
   std::atomic<uint32_t> validation_errors{0};
   bool validation_active = false;
 

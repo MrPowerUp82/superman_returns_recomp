@@ -1,8 +1,27 @@
 #include "descriptors.h"
+#include "constant_bank_cache.h"
 #include "test_main.h"
 #include <cstring>
 using namespace superman_returns::graphics::vulkan;
 namespace guest=superman_returns::graphics::guest;
+SR_TEST(constant_bank_cache_requires_exact_bytes_submission_and_chunk) {
+  ConstantBankCache cache;guest::ConstantSnapshot v{};int chunk1=0,chunk2=0;
+  v.vs[0]=0x7fc00001;v.ps[1023]=0x80000000;
+  auto r=cache.Find(1,&chunk1,v);SR_CHECK(!r.vs && !r.ps);
+  cache.Commit(1,&chunk1,12288,v,r);
+  r=cache.Find(1,&chunk1,v);SR_CHECK(r.vs && r.ps);
+  SR_CHECK_EQ(r.vs_offset,12288u);SR_CHECK_EQ(r.ps_offset,12288u);
+  v.vs[0]=0x7fc00002;r=cache.Find(1,&chunk1,v);SR_CHECK(!r.vs && r.ps);
+  cache.Commit(1,&chunk1,24576,v,r);
+  r=cache.Find(1,&chunk1,v);SR_CHECK(r.vs && r.ps);
+  SR_CHECK_EQ(r.vs_offset,24576u);SR_CHECK_EQ(r.ps_offset,12288u);
+  v.ps[1023]=0;r=cache.Find(1,&chunk1,v);SR_CHECK(r.vs && !r.ps);
+  r=cache.Find(2,&chunk1,v);SR_CHECK(!r.vs && !r.ps);
+  r=cache.Find(1,&chunk2,v);SR_CHECK(!r.vs && !r.ps);
+  cache.Commit(2,&chunk2,0,v,r);
+  r=cache.Find(2,&chunk2,v);SR_CHECK(r.vs && r.ps);
+  r=cache.Find(2,&chunk1,v);SR_CHECK(!r.vs && !r.ps);
+}
 namespace {
 // The 12 KiB constant block of one draw (vs, ps, shared), as MapTransient hands it out.
 struct Block {
@@ -71,6 +90,19 @@ SR_TEST(build_bindings_writes_vs_ps_and_patches_shared_in_the_block) {
   std::memcpy(&word,block.shared()+7*4,4);SR_CHECK_EQ(word,b.texture_indices[7]);   // texture index of slot 7
   std::memcpy(&word,block.shared()+128+7*4,4);SR_CHECK_EQ(word,7u);                // sampler index of slot 7
   SR_CHECK_EQ(b.sampler_indices[7],7u);
+}
+SR_TEST(build_bindings_reused_banks_preserve_destination_and_rebuild_shared) {
+  guest::DrawPacket p;p.constants.vs.fill(0x12345678);p.constants.ps.fill(0x87654321);p.constants.shared[300]=0x7e;
+  for(uint32_t mask=0;mask<4;++mask) {
+    Block block;block.bytes.fill(std::byte{0xa5});DrawBindings b;Error e;
+    SR_CHECK(BuildBindings(p,block.data(),b,e,mask));
+    for(uint32_t i=0;i<4096;++i) {
+      SR_CHECK_EQ(uint32_t(block.bytes[i]),(mask&1)?uint32_t(reinterpret_cast<const uint8_t*>(p.constants.vs.data())[i]):0xa5u);
+      SR_CHECK_EQ(uint32_t(block.bytes[4096+i]),(mask&2)?uint32_t(reinterpret_cast<const uint8_t*>(p.constants.ps.data())[i]):0xa5u);
+    }
+    SR_CHECK_EQ(uint32_t(block.shared()[300]),0x7eu);
+    guest::VertexFetchMeta meta{};std::memcpy(&meta,block.shared()+512,16);SR_CHECK_EQ(meta.buffer,31u);SR_CHECK_EQ(meta.type,0u);
+  }
 }
 namespace {
 // The implementation before Task 9: copies the whole 12 KiB snapshot, then overwrites shared[0,256) and shared[512,4096).

@@ -42,6 +42,12 @@
      </StackPanel>
     </UniformGrid>
     <TextBlock x:Name="FpsNote" Foreground="{StaticResource Muted}" TextWrapping="Wrap" FontSize="12" Margin="0,0,0,10"/>
+    <CheckBox x:Name="FrameGenerationBox" Content="Geração de quadros (2x)" AutomationProperties.Name="Geração de quadros"/>
+    <TextBlock Text="Melhora a fluidez com quadros intermediários. A velocidade e a resposta do jogo continuam nos FPS reais." Foreground="{StaticResource Muted}" TextWrapping="Wrap" FontSize="12" Margin="0,0,0,8"/>
+    <StackPanel x:Name="FrameGenerationPanel" Margin="0,0,0,12">
+     <TextBlock Text="Lossless.dll instalada" Foreground="{StaticResource Muted}"/>
+     <DockPanel Margin="0,6,0,0"><Button DockPanel.Dock="Right" Content="Procurar" Margin="8,0,0,0" Background="#30394A" Click="BrowseFrameGeneration_Click"/><TextBox x:Name="FrameGenerationDllBox" AutomationProperties.Name="Lossless.dll"/></DockPanel>
+    </StackPanel>
     <Expander Header="Mais opções gráficas" Foreground="{StaticResource Text}" Margin="0,0,0,16">
      <StackPanel Margin="0,10,0,0"><TextBlock x:Name="EngineNote" Foreground="{StaticResource Muted}" TextWrapping="Wrap" FontSize="12" Margin="0,0,0,10"/><UniformGrid Columns="2">
       <StackPanel Margin="0,0,12,0"><TextBlock Text="Resolução das sombras"/><ComboBox x:Name="ShadowBox"/></StackPanel>

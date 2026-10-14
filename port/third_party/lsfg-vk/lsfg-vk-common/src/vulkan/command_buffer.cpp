@@ -54,8 +54,13 @@ namespace {
 
 CommandBuffer::CommandBuffer(const vk::Vulkan& vk)
         : commandBuffer(createCommandBuffer(vk)) {}
+CommandBuffer::CommandBuffer(VkCommandBuffer borrowed)
+        : commandBuffer(new VkCommandBuffer(borrowed)),borrowed_(true) {
+    if(!borrowed) throw std::invalid_argument("Borrowed command buffer is null");
+}
 
 void CommandBuffer::begin(const vk::Vulkan& vk) const {
+    if(borrowed_) throw std::logic_error("Cannot begin a borrowed command buffer");
     auto res = vk.df().ResetCommandBuffer(*this->commandBuffer, 0);
     if (res != VK_SUCCESS)
         throw ls::vulkan_error(res, "vkResetCommandBuffer() failed");
@@ -203,6 +208,7 @@ void CommandBuffer::copyBufferToImage(const vk::Vulkan& vk,
 }
 
 void CommandBuffer::end(const vk::Vulkan& vk) const {
+    if(borrowed_) throw std::logic_error("Cannot end a borrowed command buffer");
     auto res = vk.df().EndCommandBuffer(*this->commandBuffer);
     if (res != VK_SUCCESS)
         throw ls::vulkan_error(res, "vkEndCommandBuffer() failed");
@@ -230,6 +236,7 @@ void CommandBuffer::submit(const vk::Vulkan& vk,
         signalValues.back() = signalValue;
 
     // create submit info
+    if(borrowed_) throw std::logic_error("Cannot submit a borrowed command buffer");
     const VkTimelineSemaphoreSubmitInfo timelineInfo{
         .sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
         .waitSemaphoreValueCount = static_cast<uint32_t>(waitValues.size()),
@@ -257,6 +264,7 @@ void CommandBuffer::submit(const vk::Vulkan& vk,
 
 
 void CommandBuffer::submit(const vk::Vulkan& vk) const {
+    if(borrowed_) throw std::logic_error("Cannot submit a borrowed command buffer");
     const VkSubmitInfo submitInfo{
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .commandBufferCount = 1,

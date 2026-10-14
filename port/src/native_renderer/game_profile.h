@@ -32,6 +32,15 @@
 
 // ---- XDK D3D hook addresses (docs/native-port-plan.md table 3.1) ----------
 
+// Verified generated leaf routines: copy float4s to dev+(start+112/368)*16,
+// then OR the r7 dirty mask into dev+0 / dev+8. No external calls.
+#define SR_ADDR_FLOAT_COPY_VS 820F4920
+#define SR_CONFIRMED_FLOAT_COPY_VS 1
+#define SR_ABSENT_FLOAT_COPY_VS 0
+#define SR_ADDR_FLOAT_COPY_PS 820F4A30
+#define SR_CONFIRMED_FLOAT_COPY_PS 1
+#define SR_ABSENT_FLOAT_COPY_PS 0
+
 // D3DDevice_DrawVertices(dev, prim, start, count). Conan 82580918.
 #define SR_ADDR_DRAW_VERTICES 820FBBF8  // CONFIRMED: sub_820FBBF8, PM4 DRAW_INDX (0xC0012201) auto-index
 #define SR_CONFIRMED_DRAW_VERTICES 1
@@ -124,6 +133,12 @@
 #define SR_CONFIRMED_FRAME_HANDOFF 1
 #define SR_ABSENT_FRAME_HANDOFF 0
 
+// Confirmed generated wrapper and CPU samples: calls NtYieldExecution, maps
+// its status to a bool, then restores LR. No guest memory/state update.
+#define SR_ADDR_IDLE_YIELD 828A7978
+#define SR_CONFIRMED_IDLE_YIELD 1
+#define SR_ABSENT_IDLE_YIELD 0
+
 // XDK shader object creators: sub_820F5148 (vertex) and sub_820F4D90 (pixel).
 // r3 = the finished container (virtualSize / physicalSize set, both parts
 // contiguous), the new shader object comes back in r3 with the container
@@ -190,6 +205,8 @@ inline constexpr HookRole kHookRoles[] = {
     SR_ROLE("PollGpuProgress", POLL_GPU_PROGRESS),
     SR_ROLE("ResourceUnlock", RESOURCE_UNLOCK),
     SR_ROLE("FrameHandoff", FRAME_HANDOFF),
+    SR_ROLE("FloatCopyVS", FLOAT_COPY_VS),
+    SR_ROLE("FloatCopyPS", FLOAT_COPY_PS),
 };
 
 #undef SR_ROLE

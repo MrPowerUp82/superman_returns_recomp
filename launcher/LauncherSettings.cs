@@ -26,6 +26,8 @@ public sealed class LauncherSettings
     public string GraphicsApi { get; set; } = "vulkan";
     public bool UsesVulkan => GraphicsApi == "vulkan";
     public bool SkipIntro { get; set; }
+    public bool FrameGeneration { get; set; }
+    public string FrameGenerationDll { get; set; } = "";
 
     public static LauncherSettings Load(string path)
     {
@@ -57,6 +59,8 @@ public sealed class LauncherSettings
                 case "renderer": s.Renderer = value; break;
                 case "graphics_api": s.GraphicsApi = value == "d3d12" ? "d3d12" : "vulkan"; break;
                 case "skip_intro": if (bool.TryParse(value, out var si)) s.SkipIntro = si; break;
+                case "frame_generation": if (bool.TryParse(value, out var fg)) s.FrameGeneration = fg; break;
+                case "frame_generation_dll": s.FrameGenerationDll = value; break;
             }
         }
         return s;
@@ -70,7 +74,8 @@ public sealed class LauncherSettings
             $"vsync={VSync.ToString().ToLowerInvariant()}", $"fps_limit={FpsLimit}", $"render_scale={RenderScale}",
             $"texture_filter={TextureFilter}", $"antialiasing={Antialiasing}", $"shadow_quality={ShadowQuality}",
             $"msaa={Msaa}", $"input={InputMode}", $"renderer={Renderer}", $"graphics_api={GraphicsApi}",
-            $"skip_intro={SkipIntro.ToString().ToLowerInvariant()}" };
+            $"skip_intro={SkipIntro.ToString().ToLowerInvariant()}",
+            $"frame_generation={FrameGeneration.ToString().ToLowerInvariant()}", $"frame_generation_dll={FrameGenerationDll}" };
         var temporary = path + ".tmp";
         File.WriteAllLines(temporary, lines, new UTF8Encoding(false));
         File.Move(temporary, path, true);
@@ -113,6 +118,11 @@ public sealed class LauncherSettings
         // An empty "--flag=" makes the engine's argument parser take the next argument
         // as its value, so the LUID is passed only when a GPU was chosen.
         if (!string.IsNullOrWhiteSpace(GpuLuid)) result.Add($"--sr_native_gpu_luid={GpuLuid.Trim()}");
+        result.Add($"--sr_lsfg={FrameGeneration.ToString().ToLowerInvariant()}");
+        if (FrameGeneration) {
+            result.Add("--sr_lsfg_mode=performance");
+            if (!string.IsNullOrWhiteSpace(FrameGenerationDll)) result.Add("--sr_lsfg_dll=" + FrameGenerationDll.Trim());
+        }
         if (InputMode == "KeyboardMouse") { result.Add("--mnk_mode=true"); result.Add("--mnk_mouse=true"); }
         else { result.Add("--mnk_mode=false"); result.Add("--mnk_mouse=false"); }
         return result;
@@ -128,6 +138,8 @@ public sealed class LauncherSettings
         var data = Path.GetFullPath(string.IsNullOrWhiteSpace(GameData) ? Path.Combine(Path.GetDirectoryName(exe)!, "game") : GameData, baseDirectory);
         if (!File.Exists(Path.Combine(data, "default.xex")) || !Directory.Exists(Path.Combine(data, "DATA")))
             throw new InvalidOperationException("Selecione a pasta game que contém default.xex e a pasta DATA.");
+        if (FrameGeneration && (string.IsNullOrWhiteSpace(FrameGenerationDll) || !File.Exists(FrameGenerationDll)))
+            throw new InvalidOperationException("Selecione a Lossless.dll instalada para ativar a geração de quadros.");
         var logDir = Path.Combine(Path.GetDirectoryName(exe)!, "logs");
         Directory.CreateDirectory(logDir);
         var start = new ProcessStartInfo(exe) { WorkingDirectory = Path.GetDirectoryName(exe)!, UseShellExecute = false };
@@ -139,7 +151,7 @@ public sealed class LauncherSettings
 
     public static LauncherSettings DetectDefaults(string baseDirectory)
     {
-        var s = new LauncherSettings();
+        var s = new LauncherSettings { FrameGenerationDll = FindFrameGenerationDll() };
         for (var dir = new DirectoryInfo(baseDirectory); dir is not null; dir = dir.Parent)
         {
             foreach (var suffix in new[] { "superman_returns.exe", "port/out/build/win-amd64-release/superman_returns.exe", "port/out/build/win-amd64-dist/superman_returns.exe" })
@@ -154,5 +166,11 @@ public sealed class LauncherSettings
             }
         }
         return s;
+    }
+
+    public static string FindFrameGenerationDll()
+    {
+        var steam = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Steam", "steamapps", "common", "Lossless Scaling", "Lossless.dll");
+        return File.Exists(steam) ? steam : "";
     }
 }

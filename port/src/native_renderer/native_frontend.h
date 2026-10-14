@@ -29,16 +29,39 @@ struct RingConstants {
 };
 
 struct NativeFrontend {
+  NativeFrontend()=default;
+  NativeFrontend(const NativeFrontend&)=delete;
+  NativeFrontend& operator=(const NativeFrontend&)=delete;
+  NativeFrontend(NativeFrontend&&)=delete;
+  NativeFrontend& operator=(NativeFrontend&&)=delete;
   Pm4Mirror mirror_;
   Pm4Mirror capture_mirror_;
   uint64_t capture_serial_ = 0;
   bool capture_tiling_active_ = false;
   std::map<std::array<uint32_t,6>, CapturedTextureEntry> captured_textures_;
+  struct TextureSlotLookup {
+    std::array<uint32_t,6> fetch{};
+    CapturedTextureEntry* entry=nullptr;
+  };
+  std::array<TextureSlotLookup,32> texture_slot_lookups_{};
+  CapturedTextureEntry& CapturedTexture(uint32_t slot,const std::array<uint32_t,6>& fetch) {
+    auto& lookup=texture_slot_lookups_[slot];
+    if(!lookup.entry || lookup.fetch!=fetch) {
+      lookup.entry=&captured_textures_[fetch];lookup.fetch=fetch;
+    }
+    // Cache only the map lookup: callers still validate writes/content on every
+    // use. std::map keeps node addresses stable while new entries are inserted.
+    return *lookup.entry;
+  }
+  void InvalidateTextureSlotLookups() {
+    for(auto& lookup:texture_slot_lookups_) lookup.entry=nullptr;
+  }
   std::vector<uint32_t> mirror_snapshot_;
   uint32_t ring_last_ = 0;
   uint64_t ring_resyncs_ = 0;
   std::vector<RingConstants> pending_ring_constants_;
   uint64_t swap_number_ = 0;
+  uint64_t profiled_texture_writes_ = 0;
   uint32_t pass_draw_index_[32] = {};
   uint32_t trace_draws_ = 0;
 };

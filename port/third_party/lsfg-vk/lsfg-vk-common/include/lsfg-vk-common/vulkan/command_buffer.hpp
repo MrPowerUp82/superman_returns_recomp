@@ -27,6 +27,9 @@ namespace vk {
         /// @param vk the vulkan instance
         /// @throws ls::vulkan_error on failure
         CommandBuffer(const vk::Vulkan& vk);
+        // Recording-only view. The caller owns recording/submission/lifetime.
+        explicit CommandBuffer(VkCommandBuffer borrowed);
+        [[nodiscard]] bool borrowed() const {return borrowed_;}
 
         /// begin recording commands
         /// @param vk the vulkan instance
@@ -103,5 +106,6 @@ namespace vk {
         void submit(const vk::Vulkan& vk) const;
     private:
         ls::owned_ptr<VkCommandBuffer> commandBuffer;
+        bool borrowed_=false;
     };
 }

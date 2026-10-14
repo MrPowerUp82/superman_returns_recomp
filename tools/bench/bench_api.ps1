@@ -19,6 +19,8 @@ param(
   [switch]$Profile,
   [switch]$Timeline,
   [switch]$TimelineDetail,
+  [switch]$FrameGeneration,
+  [string]$FrameGenerationDll = 'C:\Program Files (x86)\Steam\steamapps\common\Lossless Scaling\Lossless.dll',
   [ValidateSet('', 'record', 'check')] [string]$Gate = ''
 )
 $ErrorActionPreference = 'Stop'
@@ -31,6 +33,10 @@ $gameArgs = @(
   '--sr_native_fxaa=false', '--sr_native_shadow_quality=1', '--sr_native_msaa_samples=1',
   '--mnk_mode=true', '--mnk_mouse=true'
 ) -join ' '
+if($FrameGeneration) {
+  if(-not (Test-Path -LiteralPath $FrameGenerationDll -PathType Leaf)) {throw "Lossless.dll ausente: $FrameGenerationDll"}
+  $gameArgs += ' --sr_lsfg=true --sr_lsfg_mode=performance --sr_lsfg_dll="' + $FrameGenerationDll + '"'
+} else { $gameArgs += ' --sr_lsfg=false' }
 $prevProfile = $env:SR_VULKAN_PROFILE
 $prevTimeline = $env:SR_FRAME_TIMELINE
 $prevTimelineDetail = $env:SR_FRAME_TIMELINE_DETAIL
@@ -53,7 +59,7 @@ try {
   if ($null -ne $prevProfile) { $env:SR_VULKAN_PROFILE = $prevProfile } else { Remove-Item env:SR_VULKAN_PROFILE -ErrorAction SilentlyContinue }
   # Keep diagnostic evidence even when gameplay validation rejects the run.
   # The next invocation clears game.log before launching the game.
-  if ($Profile -and (Test-Path "$root\logs\game.log")) {
+  if (Test-Path "$root\logs\game.log") {
     Copy-Item "$root\logs\game.log" "$root\logs\bench_$Name.log" -Force
   }
   if ($Timeline -and -not (Test-Path $timelineCsv)) {

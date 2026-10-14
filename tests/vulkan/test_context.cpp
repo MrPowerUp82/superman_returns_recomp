@@ -7,6 +7,7 @@ static std::vector<std::string> events;
 static uint32_t version = VK_API_VERSION_1_1;
 static bool ext = true;
 static bool debug_available = false;
+static bool timeline_available=false,timeline_supported=true;
 static PFN_vkDebugUtilsMessengerCallbackEXT debug_callback;
 static void *debug_user;
 static VkResult VKAPI_CALL Version(uint32_t *v) {
@@ -109,9 +110,10 @@ static void VKAPI_CALL DeviceProperties(VkPhysicalDevice,
 static VkResult VKAPI_CALL DeviceExtensions(VkPhysicalDevice, const char *,
                                             uint32_t *n,
                                             VkExtensionProperties *p) {
-  *n = 1;
+  *n = timeline_available?2:1;
   if (p)
     std::strcpy(p->extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+  if(p && timeline_available) std::strcpy(p[1].extensionName,VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
   return VK_SUCCESS;
 }
 static void VKAPI_CALL DeviceFamilies(VkPhysicalDevice, uint32_t *n,
@@ -136,6 +138,30 @@ static VkResult VKAPI_CALL FailedDevice(VkPhysicalDevice,
   requested_features_seen = ci->pEnabledFeatures;
   events.push_back("create-device-failed");
   return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+}
+static int feature_queries=0;static bool timeline_seen=false;
+static void VKAPI_CALL TimelineFeatures(VkPhysicalDevice,VkPhysicalDeviceFeatures2* features) {
+  ++feature_queries;
+  auto* timeline=static_cast<VkPhysicalDeviceTimelineSemaphoreFeatures*>(features->pNext);
+  timeline->timelineSemaphore=timeline_supported;
+}
+static VkResult VKAPI_CALL TimelineDevice(VkPhysicalDevice,const VkDeviceCreateInfo* info,const VkAllocationCallbacks*,VkDevice*) {
+  timeline_seen=info->pNext && static_cast<const VkPhysicalDeviceTimelineSemaphoreFeatures*>(info->pNext)->timelineSemaphore;
+  return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+}
+SR_TEST(optional_fg_timeline_does_not_change_the_off_device) {
+  for(bool requested:{false,true}) for(bool available:{false,true}) for(bool supported:{false,true}) {
+    timeline_available=available;timeline_supported=supported;feature_queries=0;timeline_seen=false;
+    auto f=Fake();f.vkEnumeratePhysicalDevices=OneDevice;f.vkGetPhysicalDeviceProperties2=DeviceProperties;
+    f.vkEnumerateDeviceExtensionProperties=DeviceExtensions;f.vkGetPhysicalDeviceQueueFamilyProperties=DeviceFamilies;
+    f.vkGetPhysicalDeviceSurfaceSupportKHR=DevicePresent;f.vkGetPhysicalDeviceFeatures2=TimelineFeatures;f.vkCreateDevice=TimelineDevice;
+    Context c(f);Error error;SR_CHECK(c.CreateInstance({},false,error));
+    SR_CHECK(!c.OpenDevice(reinterpret_cast<VkSurfaceKHR>(2),"",error,nullptr,false,requested));
+    SR_CHECK_EQ(timeline_seen,requested && available && supported);
+    if(!requested) SR_CHECK_EQ(feature_queries,0);
+    SR_CHECK(error.result==VK_ERROR_OUT_OF_DEVICE_MEMORY);
+  }
+  timeline_available=false;
 }
 SR_TEST(partial_device_failure_cleans_surface_and_instance) {
   events.clear();

@@ -19,13 +19,13 @@ if(SR_GUEST_TEXTURE_TESTS)
     target_link_libraries(sr_guest_texture_tests PRIVATE rex::runtime)
     target_include_directories(sr_guest_texture_tests PRIVATE ../tests/native)
 endif()
-if(SR_VULKAN_FOUNDATION)
-    add_subdirectory(src/graphics/vulkan)
-endif()
 
 option(SR_LSFG "Build experimental direct-DLL LSFG presentation and GPU smoke test" OFF)
 if(SR_LSFG)
     add_subdirectory(src/lsfg)
+endif()
+if(SR_VULKAN_FOUNDATION)
+    add_subdirectory(src/graphics/vulkan)
 endif()
 
 # Sources
@@ -162,6 +162,7 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
         add_library(sr_native OBJECT
             ${SR_NATIVE_ROOT}/native_bridge.cpp
             ${SR_NATIVE_ROOT}/native_hooks.cpp
+            ${SR_NATIVE_ROOT}/guest_cpu_profile.cpp
             ${SR_NATIVE_ROOT}/native_graphics_system.cpp
             ${SR_NATIVE_ROOT}/native_renderer.cpp
             ${SR_NATIVE_ROOT}/pm4_mirror.cpp
@@ -274,4 +275,22 @@ else()
     endif()
     target_compile_definitions(superman_returns PRIVATE SR_HAS_TRACE_GPU=0)
     target_compile_definitions(superman_returns PRIVATE SR_HAS_NATIVE=0)
+endif()
+
+# Experimental Release build for profiling cross-file guest/native call costs.
+# Keep the ordinary instruction and floating-point settings unchanged.
+option(SR_THIN_LTO "Enable Clang ThinLTO for Release guest/native/Vulkan code" OFF)
+if(SR_THIN_LTO)
+    if(NOT WIN32 OR NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        message(FATAL_ERROR "SR_THIN_LTO currently requires Windows Clang with LLD")
+    endif()
+    foreach(sr_lto_target IN ITEMS superman_returns superman_returns_recomp sr_native sr_vulkan_core)
+        if(TARGET ${sr_lto_target})
+            target_compile_options(${sr_lto_target} PRIVATE $<$<CONFIG:Release>:-flto=thin>)
+        endif()
+    endforeach()
+    target_link_options(superman_returns PRIVATE
+        $<$<CONFIG:Release>:-flto=thin>
+        $<$<CONFIG:Release>:-Wl,/opt:lldltojobs=2>
+        "$<$<CONFIG:Release>:-Wl,/lldltocache:${CMAKE_CURRENT_BINARY_DIR}/thin-lto-cache>")
 endif()

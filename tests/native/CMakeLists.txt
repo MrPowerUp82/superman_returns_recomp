@@ -12,9 +12,12 @@ add_executable(sr_native_tests
     main.cpp
     test_backend_selection.cpp
     test_checked_guest_memory.cpp
+    test_idle_yield.cpp
+    test_frame_generation_policy.cpp
     test_guest_hash.cpp
     test_shared_constants_cache.cpp
     test_texture_content.cpp
+    test_texture_capture_cache.cpp
     test_texture_ranges.cpp
     test_texture_hash_replay.cpp
     test_texture_source_probe.cpp
@@ -67,6 +70,7 @@ enable_testing()
 add_test(NAME sr_native_tests COMMAND sr_native_tests)
 
 add_executable(sr_capture_budget test_capture_budget.cpp
+    "${SR_NATIVE_DIR}/../graphics/guest/pm4_capture.cpp"
     "${SR_NATIVE_DIR}/../graphics/guest/render_packet.cpp"
     "${SR_NATIVE_DIR}/../graphics/guest/captured_batch.cpp"
     "${SR_NATIVE_DIR}/../graphics/guest/render_state.cpp"
@@ -75,3 +79,8 @@ add_executable(sr_capture_budget test_capture_budget.cpp
     "${SR_NATIVE_DIR}/../graphics/guest/vertex_layout.cpp"
     "${SR_NATIVE_DIR}/pm4_mirror.cpp")
 add_test(NAME sr_capture_budget COMMAND sr_capture_budget)
+
+# Manual Release performance diagnostic; timing budgets do not belong in CTest.
+add_executable(sr_pm4_budget test_pm4_budget.cpp
+    "${SR_NATIVE_DIR}/pm4_mirror.cpp"
+    "${SR_NATIVE_DIR}/../graphics/guest/constant_snapshot.cpp")

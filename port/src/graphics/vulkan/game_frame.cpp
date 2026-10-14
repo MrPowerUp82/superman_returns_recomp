@@ -117,7 +117,7 @@ void GameFrame::RecorderMain() {
 }
 bool GameFrame::WaitShaders(const std::vector<guest::RenderPacket>& packets,Error& e) {
   std::vector<std::shared_ptr<const guest::ShaderCapture>> captures;
-  for(auto& packet:packets) if(auto* draw=std::get_if<guest::DrawPacket>(&packet);draw && draw->count) {
+  for(auto& packet:packets) if(auto* draw=guest::GetDraw(packet);draw && draw->count) {
     if(!draw->vertex_shader) {e={"Game shader",VK_ERROR_INITIALIZATION_FAILED,"Draw has no captured vertex shader"};return false;}
     for(auto& shader:{draw->vertex_shader,draw->pixel_shader}) if(shader && std::find(captures.begin(),captures.end(),shader)==captures.end()) captures.push_back(shader);
   }

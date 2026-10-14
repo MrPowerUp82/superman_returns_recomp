@@ -4,6 +4,7 @@
 #include "../composition.h"
 #include "../immediate.h"
 #include "../frame_loop.h"
+#include "../frame_generation_policy.h"
 #include "../../../native_renderer/native_renderer.h"
 #include "../../../native_renderer/hang_watchdog.h"
 #include <rex/ui/surface_win.h>
@@ -12,6 +13,8 @@
 #include <atomic>
 #include <map>
 #include <mutex>
+#include <chrono>
+#include <thread>
 namespace superman_returns::graphics::vulkan {
 namespace {
 void Report(const Error& e) {REXLOG_ERROR("native Vulkan: {}: {} (VkResult {})",e.operation,e.message,int(e.result));}
@@ -44,7 +47,7 @@ struct Host {
     VkWin32SurfaceCreateInfoKHR surface_info{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};surface_info.hinstance=window.hinstance();surface_info.hwnd=window.hwnd();VkSurfaceKHR surface=VK_NULL_HANDLE;
     if(!Check(create(context.instance,&surface_info,nullptr,&surface),"Create SDK window surface",e)) return false;
     VkPhysicalDeviceFeatures features{};features.shaderSampledImageArrayDynamicIndexing=features.shaderStorageBufferArrayDynamicIndexing=features.independentBlend=features.shaderClipDistance=features.shaderCullDistance=features.robustBufferAccess=VK_TRUE;
-    if(!context.OpenDevice(surface,config.gpu_uuid,e,&features,true)) return false;
+    if(!context.OpenDevice(surface,config.gpu_uuid,e,&features,true,config.frame_generation.enabled)) return false;
     if(!(context.selected.queues[context.graphics_family].flags&VK_QUEUE_COMPUTE_BIT)) {e={"Game queue",VK_ERROR_FEATURE_NOT_PRESENT,"Graphics queue must also support compute resolves"};return false;}
     config.shaders.compiler_workers=2;
     shaders=std::make_unique<shaders::VulkanShaderService>(config.shaders,WindowsShaderProcess());
@@ -103,7 +106,7 @@ public:
 private:
   std::shared_ptr<Host> host_;bool batch_ready_=false;
 };
-struct Mailbox {std::shared_ptr<TextureResource> image;std::array<uint32_t,256> gamma{};bool gamma_enabled=false;};
+struct Mailbox {std::shared_ptr<TextureResource> image;std::array<uint32_t,256> gamma{};bool gamma_enabled=false;uint64_t source_serial=0;};
 class RefreshContext final:public rex::ui::Presenter::GuestOutputRefreshContext {
 public:
   Mailbox output;
@@ -120,7 +123,7 @@ public:
   rex::ui::Surface::TypeFlags GetSupportedSurfaceTypes() const override {return rex::ui::Surface::kTypeFlag_Win32Hwnd;}
   bool CaptureGuestOutput(rex::ui::RawImage& image) override;
   bool Submit(guest::RenderPacket&& packet,std::string& diagnostic) {
-    auto* swap=std::get_if<guest::SwapPacket>(&packet);auto gamma=swap?swap->gamma:nullptr;bool gamma_enabled=swap && swap->gamma_enabled;
+    auto* swap=std::get_if<guest::SwapPacket>(&packet);auto gamma=swap?swap->gamma:nullptr;bool gamma_enabled=swap && swap->gamma_enabled;uint64_t source_serial=swap?swap->guest_swap:0;
     Error e;std::shared_ptr<TextureResource> image;
     GameFrame* game;
     game=host_->ready_game.load(std::memory_order_acquire);
@@ -132,16 +135,16 @@ public:
     }
     // Frames record on GameFrame's thread while this worker replays the next.
     std::call_once(async_started_,[&] {game->StartAsync([this](std::shared_ptr<TextureResource> image,const guest::SwapPacket& swap) {
-      if(!Publish(image,swap.gamma,swap.gamma_enabled)) REXLOG_WARN("native Vulkan: presenter rejected a submitted frontbuffer");
+      if(!Publish(image,swap.gamma,swap.gamma_enabled,swap.guest_swap)) REXLOG_WARN("native Vulkan: presenter rejected a submitted frontbuffer");
     });});
     if(!game->Enqueue(std::move(packet),image,e)) {diagnostic=e.operation+": "+e.message;return false;}
     if(!image) return true;
-    if(!Publish(image,gamma,gamma_enabled)) {diagnostic="Vulkan presenter rejected submitted frontbuffer";return false;}
+    if(!Publish(image,gamma,gamma_enabled,source_serial)) {diagnostic="Vulkan presenter rejected submitted frontbuffer";return false;}
     return true;
   }
-  bool Publish(const std::shared_ptr<TextureResource>& image,const std::shared_ptr<const std::array<uint32_t,256>>& gamma,bool gamma_enabled) {
+  bool Publish(const std::shared_ptr<TextureResource>& image,const std::shared_ptr<const std::array<uint32_t,256>>& gamma,bool gamma_enabled,uint64_t source_serial) {
     return RefreshGuestOutput(image->extent.width,image->extent.height,1280,720,[&](GuestOutputRefreshContext& base) {
-      auto& context=static_cast<RefreshContext&>(base);context.output.image=image;if(gamma) context.output.gamma=*gamma;context.output.gamma_enabled=gamma_enabled;context.SetIs8bpc(image->format==VK_FORMAT_R8G8B8A8_UNORM);return true;
+      auto& context=static_cast<RefreshContext&>(base);context.output.image=image;if(gamma) context.output.gamma=*gamma;context.output.gamma_enabled=gamma_enabled;context.output.source_serial=source_serial;context.SetIs8bpc(image->format==VK_FORMAT_R8G8B8A8_UNORM);return true;
     });
   }
 protected:
@@ -164,10 +167,22 @@ protected:
     hwnd_=window.hwnd();
     if(was_paintable && swapchain_.handle && requested_extent_.width==width && requested_extent_.height==height) return SurfacePaintConnectResult::kSuccessUnchanged;
     if(!frames_.Retire(host_->context,e) || !swapchain_.Recreate(host_->context,{width,height},host_->config.vsync,e) || !frames_.Initialize(host_->context,swapchain_,e)) {Report(e);swapchain_.Destroy();return SurfacePaintConnectResult::kFailure;}
+    generation_policy_.Reset();
+#if SR_HAS_LSFG
+    if(generation_) generation_->ResetAfterRetire();
+    else if(host_->config.frame_generation.enabled) {
+      generation_=std::make_unique<FrameGenerationSession>(host_->context,host_->config.frame_generation);
+      if(!generation_->Initialize(e)) {REXLOG_WARN("native Vulkan: frame generation disabled: {}",e.message);generation_.reset();host_->config.frame_generation.enabled=false;}
+    }
+#endif
     requested_extent_={width,height};return SurfacePaintConnectResult::kSuccess;
   }
   void DisconnectPaintingFromSurfaceFromUIThreadImpl() override {
-    std::lock_guard lock(host_->gpu_mutex);if(!host_->context.device) return;Error e;frames_.Retire(host_->context,e);swapchain_.Destroy();requested_extent_={};
+    std::lock_guard lock(host_->gpu_mutex);if(!host_->context.device) return;Error e;frames_.Retire(host_->context,e);
+#if SR_HAS_LSFG
+    generation_.reset();
+#endif
+    generation_policy_.Reset();pending_original_={};swapchain_.Destroy();requested_extent_={};
   }
   bool RefreshGuestOutputImpl(uint32_t index,uint32_t,uint32_t,std::function<bool(GuestOutputRefreshContext&)> callback,bool& is8) override {
     // The SDK hands the refresher an exclusive writable slot; consumers only read
@@ -175,27 +190,98 @@ protected:
     RefreshContext context(is8);if(!callback(context) || !context.output.image) return false;mailbox_[index]=std::move(context.output);return true;
   }
   PaintResult PaintAndPresentImpl(bool ui) override {
-    uint32_t index;GuestOutputProperties properties;auto consumer=ConsumeGuestOutput(index,&properties,nullptr);Mailbox source;if(index!=UINT32_MAX) source=mailbox_[index];consumer.unlock();
+    uint32_t index;GuestOutputProperties properties{};auto consumer=ConsumeGuestOutput(index,&properties,nullptr);Mailbox source;if(index!=UINT32_MAX) source=mailbox_[index];consumer.unlock();
+    const bool pending=bool(pending_original_.image);
+    if(pending) {source=pending_original_;properties.display_aspect_ratio_x=pending_aspect_x_;properties.display_aspect_ratio_y=pending_aspect_y_;}
     if(!swapchain_.handle) return PaintResult::kNotPresented;
     Error e;TargetPass pass;pass.owns_handles=false;pass.render_pass=swapchain_.render_pass;pass.extent=swapchain_.choice.extent;pass.color_count=1;pass.formats[0]=swapchain_.choice.format.format;
+    const auto now=std::chrono::steady_clock::now();
+    const auto source_time=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count());
+    auto action=generation_policy_.PreviewSource(source.source_serial,source_time);
+    const bool new_source=pending || action==GenerationAction::kWarmup || action==GenerationAction::kInterpolate;
+    bool generate=false;
+#if SR_HAS_LSFG
+    FrameGenerationInput input{};input.source_serial=source.source_serial;input.image=source.image;input.gamma=source.gamma;input.gamma_enabled=source.gamma_enabled;
+    input.extent=swapchain_.choice.extent;input.aspect_x=properties.display_aspect_ratio_x;input.aspect_y=properties.display_aspect_ratio_y;input.force_warmup=action==GenerationAction::kWarmup;
+    if(generation_ && generation_->active() && source.image && new_source && !pending) {
+      std::lock_guard lock(host_->gpu_mutex);
+      if(generation_->NeedsReset(input.extent,source.image->format)) {
+        if(!frames_.Retire(host_->context,e) || !frames_.Initialize(host_->context,swapchain_,e)) {Report(e);return PaintResult::kNotPresented;}
+        generation_->ResetAfterRetire();input.force_warmup=true;
+      }
+      if(generation_->Prepare(input,e)) generate=true;
+      else {REXLOG_WARN("native Vulkan: frame generation disabled: {}",e.message);frames_.Retire(host_->context,e);generation_.reset();host_->config.frame_generation.enabled=false;if(!frames_.Initialize(host_->context,swapchain_,e)) {Report(e);return PaintResult::kNotPresented;}}
+    }
+#endif
     std::shared_ptr<CompositionDraw> composition;
+    std::shared_ptr<TextureResource> displayed=source.image;
+    bool generated=false;
     FrameWork work;
     work.queue_mutex=&host_->gpu_mutex;  // DrawGame locks it only around recording, submit, present and retire
     work.prepare=[&](VkCommandBuffer command,uint64_t serial,Error& error) {
       if(!host_->Prepare(command,serial,error)) return false;
-      if(source.image) {composition=host_->compositor->Prepare(command,pass,source.image,*host_->resources,host_->game->Renderer().Images(),source.gamma,source.gamma_enabled,properties.display_aspect_ratio_x,properties.display_aspect_ratio_y,error);if(!composition) return false;}
+#if SR_HAS_LSFG
+      if(generate) {
+        FrameGenerationOutput output;
+        if(!generation_->Record(command,serial,input,*source.image->state,output,error))return false;
+        generated=bool(output.generated);displayed=generated?output.generated:output.original;
+      }
+#endif
+      composition.reset();
+      if(displayed) {composition=host_->compositor->Prepare(command,pass,displayed,*host_->resources,*displayed->state,source.gamma,generated?false:source.gamma_enabled,generated?pass.extent.width:properties.display_aspect_ratio_x,generated?pass.extent.height:properties.display_aspect_ratio_y,error);if(!composition) return false;}
       return true;
     };
     work.paint=[&](VkCommandBuffer command,uint32_t) {if(composition) host_->compositor->Record(command,*composition);if(ui) {DrawContext context(*this,*host_,command,pass);ExecuteUIDrawersFromUIThread(context);}};
-    work.retire=[host=host_](uint64_t serial) {host->Retire(serial);};
+    work.retire=[this,host=host_](uint64_t serial) {host->Retire(serial);
+#if SR_HAS_LSFG
+      if(generation_)generation_->Retire(serial);
+#endif
+    };
+    auto presented_before=frames_.presented;
     auto outcome=frames_.DrawGame(host_->context,swapchain_,work,e);
-    if(outcome==FrameOutcome::kPresented) return PaintResult::kPresented;
+    if(outcome!=FrameOutcome::kFailed && frames_.presented>presented_before) {
+      // Also seed history after a reconnect while an original was pending.
+      // Committing an already known serial is idempotent.
+      if(new_source)generation_policy_.OnSource(source.source_serial,source_time);
+      generation_policy_.OnPresented(generated?FramePresentationKind::kGenerated:(new_source?FramePresentationKind::kReal:FramePresentationKind::kRepeat));
+      if(generated) {
+        pending_original_=source;pending_aspect_x_=properties.display_aspect_ratio_x;pending_aspect_y_=properties.display_aspect_ratio_y;
+      } else if(pending)pending_original_={};
+      if(generated && outcome==FrameOutcome::kPresented) {
+        // Pacing never holds gpu_mutex: the guest worker can submit the next real frame.
+        std::this_thread::sleep_until(std::chrono::steady_clock::now()+std::chrono::nanoseconds(generation_policy_.HalfIntervalNs()));
+        generate=false;generated=false;displayed=source.image;
+        presented_before=frames_.presented;
+        outcome=frames_.DrawGame(host_->context,swapchain_,work,e);
+        if(outcome!=FrameOutcome::kFailed && frames_.presented>presented_before) {generation_policy_.OnPresented(FramePresentationKind::kReal);pending_original_={};}
+      }
+      ReportPresentationStats();
+      if(outcome==FrameOutcome::kPresented)return PaintResult::kPresented;
+    }
     if(outcome==FrameOutcome::kRecreate) return PaintResult::kNotPresentedConnectionOutdated;
     if(outcome==FrameOutcome::kSuspended) return PaintResult::kNotPresented;
     Report(e);return e.result==VK_ERROR_DEVICE_LOST?PaintResult::kGpuLostResponsible:PaintResult::kNotPresented;
   }
 private:
+  void ReportPresentationStats() {
+    const auto now=std::chrono::steady_clock::now();
+    if(!stats_started_) {stats_started_=true;stats_time_=now;stats_real_=generation_policy_.real();stats_generated_=generation_policy_.generated();stats_repeat_=generation_policy_.repeated();return;}
+    const double seconds=std::chrono::duration<double>(now-stats_time_).count();if(seconds<2)return;
+    const auto real=generation_policy_.real()-stats_real_,generated=generation_policy_.generated()-stats_generated_,repeat=generation_policy_.repeated()-stats_repeat_;
+    double gpu_ms=0;
+#if SR_HAS_LSFG
+    if(generation_) {const auto stats=generation_->GpuStats();if(stats.samples)gpu_ms=double(stats.total_ns)/double(stats.samples)/1000000.0;}
+#endif
+    REXLOG_INFO("native Vulkan presentation: real_fps={:.2f} generated_fps={:.2f} repeat_fps={:.2f} presented_fps={:.2f} fg_gpu_ms={:.3f}",real/seconds,generated/seconds,repeat/seconds,(real+generated+repeat)/seconds,gpu_ms);
+    stats_time_=now;stats_real_=generation_policy_.real();stats_generated_=generation_policy_.generated();stats_repeat_=generation_policy_.repeated();
+  }
   std::shared_ptr<Host> host_;std::array<Mailbox,kGuestOutputMailboxSize> mailbox_;std::once_flag async_started_;
+  FrameGenerationPolicy generation_policy_;
+  Mailbox pending_original_;uint32_t pending_aspect_x_=1280,pending_aspect_y_=720;
+#if SR_HAS_LSFG
+  std::unique_ptr<FrameGenerationSession> generation_;
+#endif
+  bool stats_started_=false;std::chrono::steady_clock::time_point stats_time_{};uint64_t stats_real_=0,stats_generated_=0,stats_repeat_=0;
   Swapchain swapchain_;FrameLoop frames_;VkExtent2D requested_extent_{};HWND hwnd_=nullptr;
 };
 bool Presenter::CaptureGuestOutput(rex::ui::RawImage& output) {

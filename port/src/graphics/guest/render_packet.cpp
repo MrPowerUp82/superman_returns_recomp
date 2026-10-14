@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <chrono>
 #include <cstring>
 #include <exception>
 #include <stdexcept>
@@ -11,13 +12,19 @@ namespace superman_returns::graphics::guest {
 namespace {
 bool DecodeCapturedPacket(const WorkBatch&, const WorkCmd&,
                           const native::Pm4Mirror&, const CapturedMemory&,
-                          RenderPacket&, std::string&);
+                          RenderPacket&, std::string&,DrawPacketOwner={});
 }
-bool ReplayCapturedRenderPacket(const WorkBatch& batch,const WorkCmd& cmd,native::Pm4Mirror& mirror,RenderPacket& packet,std::string& error) {
+bool ReplayCapturedRenderPacket(const WorkBatch& batch,const WorkCmd& cmd,native::Pm4Mirror& mirror,RenderPacket& packet,std::string& error,DrawPacketOwner storage,std::shared_ptr<const WorkBatch> capture_owner,ReplayProbe* probe) {
   error.clear();
   if(!cmd.pm4_capture_ok) {error="PM4 dependency capture failed";return false;}
   if(uint64_t(cmd.ring_offset)+cmd.ring_bytes>batch.bytes.size()) {error="Captured primary PM4 range exceeds batch";return false;}
-  CapturedMemory memory;if(!CapturedMemory::Capture(batch,cmd,memory,error)) return false;
+  if(capture_owner && capture_owner.get()!=&batch) {error="Capture owner does not match replay batch";return false;}
+  const auto now=[] {return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());};
+  auto started=probe?now():0;
+  CapturedMemory memory;
+  if(!(capture_owner?CapturedMemory::CaptureOwned(std::move(capture_owner),cmd,memory,error):
+                    CapturedMemory::Capture(batch,cmd,memory,error))) return false;
+  if(probe) {auto end=now();probe->capture_ns+=end-started;started=end;}
   if(cmd.ring_bytes) {
     auto alu=mirror.unreadable_alu_loads,indirect=mirror.unreadable_indirect_buffers;std::string missing;
     mirror.ScanCopyUsing(batch.bytes.data()+cmd.ring_offset,cmd.ring_bytes,[&](uint32_t address,uint32_t length)->std::span<const uint8_t> {
@@ -25,7 +32,10 @@ bool ReplayCapturedRenderPacket(const WorkBatch& batch,const WorkCmd& cmd,native
     });
     if(!missing.empty() || mirror.unreadable_alu_loads!=alu || mirror.unreadable_indirect_buffers!=indirect) {error=missing.empty()?"Captured PM4 dependency could not be read":missing;return false;}
   }
-  return DecodeCapturedPacket(batch,cmd,mirror,memory,packet,error);
+  if(probe) {auto end=now();probe->pm4_ns+=end-started;started=end;}
+  const bool ok=DecodeCapturedPacket(batch,cmd,mirror,memory,packet,error,std::move(storage));
+  if(probe) probe->decode_ns+=now()-started;
+  return ok;
 }
 namespace {
 uint32_t Address(uint32_t base, uint64_t offset) {
@@ -37,6 +47,10 @@ uint32_t U32(const CapturedMemory &m, uint32_t a) {
   auto b = m.Read(a, 4);
   return uint32_t(b[0]) << 24 | uint32_t(b[1]) << 16 | uint32_t(b[2]) << 8 |
          b[3];
+}
+uint32_t CapturedWord(std::span<const uint8_t> bytes,uint32_t offset) {
+  return uint32_t(bytes[offset])<<24 | uint32_t(bytes[offset+1])<<16 |
+         uint32_t(bytes[offset+2])<<8 | bytes[offset+3];
 }
 uint16_t U16(const CapturedMemory &m, uint32_t a) {
   auto b = m.Read(a, 2);
@@ -87,11 +101,13 @@ void DeviceState(DrawPacket &d, uint32_t device,
                  const native::Pm4Mirror &mirror) {
   const auto &layout = native::profile::kDevice;
   for (const auto &range : native::profile::kRegisterShadow) {
+    const auto address=Address(device,range.offset);
+    const auto bytes=d.memory.ReadUnambiguous(address,range.count*4);
     for (uint32_t i = 0; i < range.count; ++i) {
       uint32_t reg = range.first + i;
       if (reg >= 0x2000 && reg < 0x2400)
         d.registers[reg - 0x2000] =
-            U32(d.memory, Address(device, uint64_t(range.offset) + i * 4));
+            bytes.empty()?U32(d.memory, Address(address,uint64_t(i)*4)):CapturedWord(bytes,i*4);
     }
   }
   uint32_t a = Address(device, layout.viewport);
@@ -110,14 +126,16 @@ void DeviceState(DrawPacket &d, uint32_t device,
                     U32(d.memory, Address(device, layout.depth_stencil)), true);
   d.shader_a = U32(d.memory, Address(device, layout.shader_a));
   d.shader_b = U32(d.memory, Address(device, layout.shader_b));
+  const auto fetch_address=Address(device,layout.fetch_constants);
+  const auto fetch_bytes=d.memory.ReadUnambiguous(fetch_address,32*24);
   for (uint32_t slot = 0; slot < 32; ++slot)
     for (uint32_t i = 0; i < 6; ++i) {
       uint32_t reg = native::Pm4Mirror::kFetchConstantBase + slot * 6 + i;
       d.texture_fetch[slot][i] =
           mirror.written(reg)
               ? mirror.reg(reg)
-              : U32(d.memory, Address(device, layout.fetch_constants +
-                                                  slot * 24 + i * 4));
+              : (fetch_bytes.empty()?U32(d.memory, Address(fetch_address,slot*24+i*4)):
+                 CapturedWord(fetch_bytes,slot*24+i*4));
     }
   d.has_device_state = true;
 }
@@ -226,13 +244,14 @@ namespace {
 bool DecodeCapturedPacket(const WorkBatch &batch, const WorkCmd &cmd,
                           const native::Pm4Mirror &mirror,
                           const CapturedMemory &memory, RenderPacket &out,
-                          std::string &error) {
+                          std::string &error,DrawPacketOwner storage) {
   try {
     switch (cmd.op) {
     case Op::kDraw:
     case Op::kDrawIndexed:
     case Op::kDrawInline: {
-      DrawPacket d;
+      auto owned=storage.payload?std::move(storage):DrawPacketOwner(std::make_shared<DrawPacket>());
+      auto& d=*owned.payload;
       d.memory = memory;
       d.pass = cmd.pass;
       // The XDK device slots can be reversed during internal passes. Match
@@ -380,7 +399,7 @@ bool DecodeCapturedPacket(const WorkBatch &batch, const WorkCmd &cmd,
         }
       }
       FinalizeDrawConstants(d);
-      out = std::move(d);
+      out = std::move(owned);
       return true;
     }
     case Op::kClear: {

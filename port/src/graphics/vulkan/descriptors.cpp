@@ -30,7 +30,7 @@ bool RemapTextureBindings(std::span<const TextureBindingRequest> requests,DrawBi
   }
   error={};return true;
 }
-bool BuildBindings(const guest::DrawPacket& draw,std::byte* block,DrawBindings& out,Error& error) {
+bool BuildBindings(const guest::DrawPacket& draw,std::byte* block,DrawBindings& out,Error& error,uint32_t copy_banks) {
   out=DrawBindings{};
   out.vertex_buffers.fill(DummyBuffer);
   std::array<TextureBindingRequest,32> requests;size_t request_count=0;
@@ -61,7 +61,11 @@ bool BuildBindings(const guest::DrawPacket& draw,std::byte* block,DrawBindings& 
   static_assert(offsetof(guest::ConstantSnapshot,vs)==0 && offsetof(guest::ConstantSnapshot,ps)==sizeof(guest::ConstantSnapshot::vs) && kSharedConstantsOffset==sizeof(guest::ConstantSnapshot::vs)+sizeof(guest::ConstantSnapshot::ps),"vs, ps and shared are contiguous");
   static_assert(sizeof(guest::ConstantSnapshot::shared)==512+224*16 && sizeof(draw.vertex_fetch)==224*sizeof(guest::VertexFetchMeta) && sizeof(guest::VertexFetchMeta)==16,"vertex fetch fills shared[512,4096)");
   std::byte* shared=block+kSharedConstantsOffset;
-  std::memcpy(block,&draw.constants,kSharedConstantsOffset);
+  if(copy_banks==3) std::memcpy(block,&draw.constants,kSharedConstantsOffset);
+  else {
+    if(copy_banks&1) std::memcpy(block,draw.constants.vs.data(),sizeof(draw.constants.vs));
+    if(copy_banks&2) std::memcpy(block+sizeof(draw.constants.vs),draw.constants.ps.data(),sizeof(draw.constants.ps));
+  }
   std::memcpy(shared+256,draw.constants.shared.data()+256,256);
   for(uint32_t i=0;i<draw.vertex_fetch.size();++i) {
     auto meta=draw.vertex_fetch[i];

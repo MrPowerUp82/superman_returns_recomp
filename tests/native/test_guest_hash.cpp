@@ -27,6 +27,18 @@ SR_TEST(buffer_content_checks_page_writes_within_the_frame_and_ignores_neighbors
   SR_CHECK(content.Refresh(2,false,hash));SR_CHECK_EQ(hashes,5);
   SR_CHECK(!content.Refresh(3,false,hash));SR_CHECK_EQ(hashes,6);
 }
+SR_TEST(buffer_content_every_use_detects_unnotified_changes_in_the_same_frame) {
+  superman_returns::native::BufferContent content;
+  uint64_t bytes=17;unsigned hashes=0;
+  auto hash=[&] {++hashes;return bytes;};
+  SR_CHECK(!content.Refresh(12,false,hash,true));
+  SR_CHECK(!content.Refresh(12,false,hash,true));SR_CHECK_EQ(hashes,2u);
+  bytes=23;
+  SR_CHECK(content.Refresh(12,false,hash,true));SR_CHECK_EQ(hashes,3u);
+  SR_CHECK(!content.Refresh(12,false,hash,true));SR_CHECK_EQ(hashes,4u);
+  // Original mode still uses the once-per-frame fast path after a full check.
+  SR_CHECK(!content.Refresh(12,false,hash));SR_CHECK_EQ(hashes,4u);
+}
 SR_TEST(guest_hash_in_place_matches_hashing_a_copy) {
   for (uint32_t size : {1u, 7u, 4096u, 100003u}) {
     std::vector<uint8_t> bytes(size);

@@ -34,6 +34,9 @@ public partial class MainWindow : Window
         VSyncBox.Unchecked += (_, _) => UpdateSummary();
         GameExeBox.TextChanged += (_, _) => UpdateSummary();
         GameDataBox.TextChanged += (_, _) => UpdateSummary();
+        FrameGenerationBox.Checked += (_, _) => UpdateSummary();
+        FrameGenerationBox.Unchecked += (_, _) => UpdateSummary();
+        FrameGenerationDllBox.TextChanged += (_, _) => UpdateSummary();
         _ready = true;
         UpdateSummary();
         if (loadWarning is not null) StatusText.Text = loadWarning;
@@ -67,6 +70,8 @@ public partial class MainWindow : Window
         GpuBox.SelectedItem = adapters.FirstOrDefault(x => !string.IsNullOrEmpty(_settings.GpuLuid) && x.Luid == _settings.GpuLuid)
             ?? adapters.FirstOrDefault(x => x.Name == _settings.Gpu) ?? adapters[0];
         VSyncBox.IsChecked = _settings.VSync;
+        FrameGenerationBox.IsChecked = _settings.FrameGeneration;
+        FrameGenerationDllBox.Text = string.IsNullOrWhiteSpace(_settings.FrameGenerationDll) ? LauncherSettings.FindFrameGenerationDll() : _settings.FrameGenerationDll;
         GameExeBox.Text = _settings.GameExe; GameDataBox.Text = _settings.GameData;
     }
     private static string Value(ComboBox box) => ((Choice)box.SelectedItem).Value;
@@ -79,12 +84,15 @@ public partial class MainWindow : Window
         _settings.FpsLimit = Value(FpsBox); _settings.ShadowQuality = Value(ShadowBox); _settings.Msaa = Value(MsaaBox);
         var gpu = (GpuAdapter)GpuBox.SelectedItem; _settings.Gpu = gpu.Name; _settings.GpuIndex = gpu.Index; _settings.GpuLuid = gpu.Luid;
         _settings.VSync = VSyncBox.IsChecked == true;
+        _settings.FrameGeneration = FrameGenerationBox.IsChecked == true;
+        _settings.FrameGenerationDll = FrameGenerationDllBox.Text.Trim();
         _settings.GameExe = GameExeBox.Text.Trim(); _settings.GameData = GameDataBox.Text.Trim();
     }
     private void UpdateSummary()
     {
         if (!_ready) return;
         ReadSettings();
+        FrameGenerationPanel.Visibility = _settings.FrameGeneration ? Visibility.Visible : Visibility.Collapsed;
         SummaryText.Text = _settings.UsesVulkan
             ? $"Vulkan · Nativo · {_settings.Resolution.Replace("x", " × ")} · 100% interno"
             : $"Direct3D 12 · {(_settings.Renderer == "xenos" ? "Xenos" : "Nativo")} · {_settings.Resolution.Replace("x", " × ")} · {_settings.RenderScale}% interno";
@@ -122,6 +130,11 @@ public partial class MainWindow : Window
     {
         var dialog = new OpenFolderDialog { Title = "Selecione a pasta game (default.xex e DATA)" };
         if (dialog.ShowDialog() == true) GameDataBox.Text = dialog.FolderName;
+    }
+    private void BrowseFrameGeneration_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new OpenFileDialog { Filter = "Lossless Scaling|Lossless.dll", Title = "Selecione a Lossless.dll instalada" };
+        if (dialog.ShowDialog() == true) FrameGenerationDllBox.Text = dialog.FileName;
     }
     private void Defaults_Click(object sender, RoutedEventArgs e)
     {

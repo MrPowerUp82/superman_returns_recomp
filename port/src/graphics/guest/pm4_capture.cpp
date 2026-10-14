@@ -1,7 +1,6 @@
 #include "pm4_capture.h"
 #include "../../native_renderer/pm4_mirror.h"
 #include <chrono>
-#include <deque>
 #include <exception>
 #include <memory>
 #include <stdexcept>
@@ -24,15 +23,16 @@ bool CapturePm4Dependencies(WorkBatch &batch, const WorkCmd &cmd,
     error = "Primary PM4 capture exceeds batch";
     return false;
   }
-  // Appending dependencies may grow the arena. Keep primary and all recursive
-  // indirect streams stable for the entire scan, including nested callbacks.
+  // Keep the arena unchanged during the scan. The primary ring can then be
+  // read in place; dependencies are committed only after the scan succeeds.
   const uint64_t primary_t0 = probe ? NowNs() : 0;
-  std::vector<uint8_t> primary(batch.bytes.begin() + cmd.ring_offset,
-                               batch.bytes.begin() + cmd.ring_offset +
-                                   cmd.ring_bytes);
+  const auto primary=std::span<const uint8_t>(batch.bytes).subspan(cmd.ring_offset,cmd.ring_bytes);
   if (probe)
     probe->primary_ns += NowNs() - primary_t0;
-  std::deque<std::vector<uint8_t>> sources;
+  struct Dependency {uint32_t address;std::vector<uint8_t> bytes;};
+  // Moving an inner vector keeps its allocation (and recursive reader spans)
+  // stable when this outer vector grows. No allocation without dependencies.
+  std::vector<Dependency> sources;
   const size_t initial_bytes = batch.bytes.size(),
                initial_ranges = batch.ranges.size();
   try {
@@ -44,6 +44,7 @@ bool CapturePm4Dependencies(WorkBatch &batch, const WorkCmd &cmd,
     auto alu_before = scanner.unreadable_alu_loads;
     auto indirect_before = scanner.unreadable_indirect_buffers;
     uint32_t missing_address = 0, missing_length = 0;
+    uint64_t staged_bytes=0;
     scanner.ScanCopyUsing(
         primary.data(), cmd.ring_bytes,
         [&](uint32_t address, uint32_t length) -> std::span<const uint8_t> {
@@ -58,7 +59,7 @@ bool CapturePm4Dependencies(WorkBatch &batch, const WorkCmd &cmd,
             missing_length = length;
             return {};
           }
-          if (uint64_t(batch.bytes.size()) + length > UINT32_MAX)
+          if (uint64_t(initial_bytes) + staged_bytes + length > UINT32_MAX)
             throw std::length_error(
                 "PM4 dependency capture exceeds arena limit");
           if (probe) {
@@ -66,18 +67,25 @@ bool CapturePm4Dependencies(WorkBatch &batch, const WorkCmd &cmd,
             probe->bytes += length;
           }
           const uint64_t copy_t0 = probe ? NowNs() : 0;
-          sources.emplace_back(source.begin(), source.begin() + length);
-          auto &owned = sources.back();
-          auto offset = uint32_t(batch.bytes.size());
-          batch.bytes.insert(batch.bytes.end(), owned.begin(), owned.end());
-          batch.ranges.push_back({address, length, offset});
+          sources.push_back({address,{source.begin(),source.begin()+length}});
+          staged_bytes+=length;
           if (probe)
             probe->copy_ns += NowNs() - copy_t0;
-          return owned;
+          return sources.back().bytes;
         });
     if (scanner.unreadable_alu_loads == alu_before &&
-        scanner.unreadable_indirect_buffers == indirect_before)
+        scanner.unreadable_indirect_buffers == indirect_before) {
+      const uint64_t copy_t0=probe?NowNs():0;
+      // Preserve vector's geometric growth across commands in a batch. Exact
+      // size reserves here would recopy the accumulated arena on every draw.
+      for(const auto& source:sources) {
+        const auto offset=uint32_t(batch.bytes.size());
+        batch.bytes.insert(batch.bytes.end(),source.bytes.begin(),source.bytes.end());
+        batch.ranges.push_back({source.address,uint32_t(source.bytes.size()),offset});
+      }
+      if(probe) probe->copy_ns+=NowNs()-copy_t0;
       return true;
+    }
     error =
         "Referenced PM4 memory was not readable during capture: address=" +
         std::to_string(missing_address) +

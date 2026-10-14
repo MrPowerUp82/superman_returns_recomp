@@ -156,7 +156,8 @@ std::shared_ptr<BufferResource> ResourceStore::NewBuffer(VkDeviceSize size,VkBuf
   VkMemoryRequirements mr{};c_.f.vkGetBufferMemoryRequirements(c_.device,b->handle,&mr);b->allocation=mr.size;
   auto type=MemoryType(c_,mr.memoryTypeBits,required,(required&VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)?VK_MEMORY_PROPERTY_HOST_COHERENT_BIT:VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
   if(!type) {Fail(e,"Buffer memory","Required memory type unavailable");return {};}
-  b->coherent=c_.memory.memoryTypes[*type].propertyFlags&VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+  b->memory_properties=c_.memory.memoryTypes[*type].propertyFlags;
+  b->coherent=b->memory_properties&VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
   VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};alloc.allocationSize=mr.size;alloc.memoryTypeIndex=*type;
   if(!Check(c_.f.vkAllocateMemory(c_.device,&alloc,nullptr,&b->memory),"Allocate resource buffer",e) ||
      !Check(c_.f.vkBindBufferMemory(c_.device,b->handle,b->memory,0),"Bind resource buffer",e)) return {};
@@ -205,7 +206,7 @@ bool ResourceStore::Place(Arena& arena,VkDeviceSize size,VkDeviceSize alignment,
 std::shared_ptr<BufferResource> ResourceStore::Suballocate(Arena& arena,VkDeviceSize size,VkDeviceSize alignment,Error& e) {
   Placement at;if(!Place(arena,size,alignment,at,e)) return {};
   auto v=std::make_shared<BufferResource>();v->context=&c_;v->owner=at.chunk;v->handle=at.chunk->handle;v->memory=at.chunk->memory;
-  v->size=size;v->allocation=size;v->offset=at.offset;v->coherent=at.chunk->coherent;v->mapped=static_cast<std::byte*>(at.chunk->mapped)+at.offset;
+  v->size=size;v->allocation=size;v->offset=at.offset;v->coherent=at.chunk->coherent;v->memory_properties=at.chunk->memory_properties;v->mapped=static_cast<std::byte*>(at.chunk->mapped)+at.offset;
   return v;
 }
 VkDeviceSize ResourceStore::TransientAlignment() const {
@@ -317,23 +318,23 @@ bool ResourceStore::UploadTexture(guest::ResourceId id,const guest::LinearTextur
   else c_.f.vkCmdPipelineBarrier(command_,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_VERTEX_SHADER_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,0,0,nullptr,0,nullptr,1,&barrier);
   submissions_.Hold(serial_,upload);submissions_.Hold(serial_,gpu);textures_[id]=std::move(gpu);e={};return true;
 }
-std::shared_ptr<TextureResource> ResourceStore::ResolveTexture(guest::ResourceId id,VkFormat format,VkExtent3D extent,uint32_t mips,uint32_t layers,bool cube,ImageState& state,Error& e) {
+std::shared_ptr<TextureResource> ResourceStore::ResolveTexture(guest::ResourceId id,VkFormat format,VkExtent3D extent,uint32_t mips,uint32_t layers,bool cube,ImageState& state,Error& e,VkImageUsageFlags additional_usage) {
   if(!Ready(e)) return {};
   if(!id || format==VK_FORMAT_UNDEFINED || !extent.width || !extent.height || extent.depth!=1 || !mips || !layers || (cube&&(layers!=6 || extent.width!=extent.height))) {
     e={"Resolve texture",VK_ERROR_INITIALIZATION_FAILED,"Invalid dimensions/view: "+std::to_string(extent.width)+"x"+std::to_string(extent.height)+"x"+std::to_string(extent.depth)+", mips="+std::to_string(mips)+", layers="+std::to_string(layers)+", cube="+std::to_string(cube)+", format="+std::to_string(format)+", id="+std::to_string(id)};return {};
   }
   auto view_type=cube?VK_IMAGE_VIEW_TYPE_CUBE:VK_IMAGE_VIEW_TYPE_2D;
+  const VkImageUsageFlags usage=VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT|additional_usage;
   auto old=textures_.find(id);
   if(old!=textures_.end()) {
     auto t=old->second;
-    if(t->state==&state && t->format==format && t->extent.width==extent.width && t->extent.height==extent.height && t->mips==mips && t->layers==layers && t->view_type==view_type) {submissions_.Hold(serial_,t);e={};return t;}
+    if(t->state==&state && t->format==format && t->extent.width==extent.width && t->extent.height==extent.height && t->mips==mips && t->layers==layers && t->view_type==view_type && t->usage==usage) {submissions_.Hold(serial_,t);e={};return t;}
   }
   auto flags=cube?VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT:0u;
-  constexpr VkImageUsageFlags usage=VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT;
   VkImageFormatProperties caps{};
   if(!Check(c_.f.vkGetPhysicalDeviceImageFormatProperties(c_.physical,format,VK_IMAGE_TYPE_2D,VK_IMAGE_TILING_OPTIMAL,usage,flags,&caps),"Resolve image support",e)) return {};
   if(extent.width>caps.maxExtent.width || extent.height>caps.maxExtent.height || mips>caps.maxMipLevels || layers>caps.maxArrayLayers) {Fail(e,"Resolve texture","Image exceeds device limits");return {};}
-  auto t=std::make_shared<TextureResource>();t->context=&c_;t->format=format;t->extent=extent;t->mips=mips;t->layers=layers;t->view_type=view_type;
+  auto t=std::make_shared<TextureResource>();t->context=&c_;t->format=format;t->extent=extent;t->mips=mips;t->layers=layers;t->view_type=view_type;t->usage=usage;
   VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};ci.flags=flags;ci.imageType=VK_IMAGE_TYPE_2D;ci.format=format;ci.extent=extent;ci.mipLevels=mips;ci.arrayLayers=layers;ci.samples=VK_SAMPLE_COUNT_1_BIT;ci.tiling=VK_IMAGE_TILING_OPTIMAL;ci.usage=usage;ci.sharingMode=VK_SHARING_MODE_EXCLUSIVE;
   if(!Check(c_.f.vkCreateImage(c_.device,&ci,nullptr,&t->handle),"Create resolve texture",e)) return {};
   VkMemoryRequirements mr{};c_.f.vkGetImageMemoryRequirements(c_.device,t->handle,&mr);

@@ -5,6 +5,7 @@
 #include "../../port/src/graphics/shaders/shader_requirements.h"
 #include "context.h"
 #include "descriptor_sets.h"
+#include "constant_bank_cache.h"
 #include "platform/win32_surface.h"
 #include "triangle.h"
 #include <array>
@@ -641,10 +642,23 @@ int Run(const std::filesystem::path &shaders_dir, const std::string &uuid,
           packet.texture_fetch[7][0]=2|(3<<10)|(3<<13);packet.texture_fetch[7][1]=0x1006;packet.texture_fetch[7][5]=1<<9;
           guest::LinearTexture linear;linear.width=linear.height=1;linear.format=guest::LinearFormat::kRGBA8Unorm;linear.levels={{1,1,4,1,0}};linear.data={255,255,255,255};
           if(!resources.UploadTexture(TextureResourceId(packet.texture_fetch[7]),linear,1,e)) throw std::runtime_error(e.operation+": "+e.message);
-          TransientSlice constants;if(!resources.MapTransient(sizeof(guest::ConstantSnapshot),constants,e)) throw std::runtime_error(e.operation+": "+e.message);
-          DrawBindings bindings;if(!BuildBindings(packet,constants.data,bindings,e)) throw std::runtime_error(e.message);
           DescriptorDraw sets;
-          if(!descriptors.Prepare(bindings,packet.texture_fetch,resources,uint64_t(variant)+1,constants,sets,e)) throw std::runtime_error(e.operation+": "+e.message);
+          ConstantBankCache cache;
+          packet.constants.vs[2]=state.vs[2]^0x40000000u;
+          packet.constants.ps[1]=state.ps[1]^0x3f800000u;
+          for(uint32_t step=0;step<4;++step) {
+            // Restore shader-consumed depth and color independently. The last
+            // draw reuses both restored banks; stale offsets break the pixels.
+            if(step==1) packet.constants.vs[2]=state.vs[2];
+            if(step==2) packet.constants.ps[1]=state.ps[1];
+            TransientSlice constants;if(!resources.MapTransient(sizeof(guest::ConstantSnapshot),constants,e)) throw std::runtime_error(e.operation+": "+e.message);
+            auto reuse=cache.Find(uint64_t(variant)+1,constants.chunk.get(),packet.constants);
+            DrawBindings bindings;if(!BuildBindings(packet,constants.data,bindings,e,(reuse.vs?0u:1u)|(reuse.ps?0u:2u))) throw std::runtime_error(e.message);
+            if(!descriptors.Prepare(bindings,packet.texture_fetch,resources,uint64_t(variant)+1,constants,sets,e)) throw std::runtime_error(e.operation+": "+e.message);
+            if(reuse.vs) sets.dynamic_offsets[0]=reuse.vs_offset;
+            if(reuse.ps) sets.dynamic_offsets[1]=reuse.ps_offset;
+            cache.Commit(uint64_t(variant)+1,constants.chunk.get(),uint32_t(constants.offset),packet.constants,reuse);
+          }
           fixture.sets=sets.sets;
           fixture.dynamic_offsets=sets.dynamic_offsets;fixture.dynamic_count=uint32_t(sets.dynamic_offsets.size());
         }):std::function<void()>{});

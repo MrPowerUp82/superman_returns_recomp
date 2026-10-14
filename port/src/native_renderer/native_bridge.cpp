@@ -276,7 +276,7 @@ std::unique_ptr<rex::system::IGraphicsSystem> CreateNativeGraphicsSystem(
   options.anisotropic_filtering=rex::cvar::Query<int32_t>("sr_native_anisotropic_filtering");
   options.foliage_antialiasing=rex::cvar::Query<bool>("sr_native_foliage_antialiasing");
   if(!graphics::ParseNativeApi(rex::cvar::Query<std::string>("sr_native_api"),api,api_error) ||
-     !graphics::ValidateNativeApi(api,SR_VULKAN_GAME && SR_NATIVE_RENDERER_BUILD,options,api_error)) {
+     !graphics::ValidateNativeApi(api,SR_VULKAN_GAME && SR_NATIVE_RENDERER_BUILD,options,api_error,SR_HAS_LSFG)) {
     rex::FatalError(api_error);return nullptr;
   }
   if(api==graphics::NativeApi::kVulkan) {

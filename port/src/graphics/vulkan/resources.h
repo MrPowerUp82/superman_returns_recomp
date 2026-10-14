@@ -47,6 +47,7 @@ struct BufferResource {
   uint64_t version=0;
   uint64_t held_serial=0;  // submission whose list already holds this resource (SubmissionResources::Hold)
   bool coherent=false;
+  VkMemoryPropertyFlags memory_properties=0;
   void* mapped=nullptr;  // persistent mapping of host-visible allocations
   ~BufferResource();
 };
@@ -60,6 +61,8 @@ struct TransientSlice {
 struct TextureResource {
   Context* context=nullptr;
   ImageState* state=nullptr;
+  // Optional lifetime for state attached to standalone presentation snapshots.
+  std::shared_ptr<ImageState> state_owner;
   std::shared_ptr<TextureResource> image_owner;
   VkImage handle=VK_NULL_HANDLE;
   VkDeviceMemory memory=VK_NULL_HANDLE;
@@ -69,6 +72,7 @@ struct TextureResource {
   uint32_t layers=1,mips=1;
   VkImageViewType view_type=VK_IMAGE_VIEW_TYPE_2D;
   uint64_t version=0;VkDeviceSize allocation=0;
+  VkImageUsageFlags usage=0;
   uint64_t held_serial=0;  // see BufferResource::held_serial
   ~TextureResource();
 };
@@ -98,7 +102,7 @@ public:
   bool UploadTexture(guest::ResourceId,const guest::LinearTexture&,uint64_t version,Error&);
   // Tracked resolve images remain GPU-authoritative and preserve partial writes.
   // The supplied ImageState must outlive this store and descriptor leases.
-  std::shared_ptr<TextureResource> ResolveTexture(guest::ResourceId,VkFormat,VkExtent3D,uint32_t mips,uint32_t layers,bool cube,ImageState&,Error&);
+  std::shared_ptr<TextureResource> ResolveTexture(guest::ResourceId,VkFormat,VkExtent3D,uint32_t mips,uint32_t layers,bool cube,ImageState&,Error&,VkImageUsageFlags additional_usage=0);
   std::shared_ptr<BufferResource> ResolveScratch(VkDeviceSize,Error&);
   std::shared_ptr<BufferResource> ReadbackBuffer(VkDeviceSize,Error&);
   bool Readback(const std::shared_ptr<BufferResource>&,std::vector<uint8_t>&,Error&);

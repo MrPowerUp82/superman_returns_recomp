@@ -87,6 +87,7 @@ private:
   void ScanFrom(const uint8_t *base, const uint8_t *stream, uint32_t begin,
                 uint32_t end, int depth, const MemoryReader *reader = nullptr);
   static constexpr uint32_t kTrackedCount = 0xA00;
+  void WriteRange(uint32_t first,const uint8_t* big_endian_words,uint32_t count);
   void Write(uint32_t index, uint32_t value) {
     if (index >= kRegisterCount)
       return;

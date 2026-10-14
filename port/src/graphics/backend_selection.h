@@ -10,5 +10,5 @@ struct NativeVulkanOptions {
   int shadow_quality=1,bloom_quality=1,anisotropic_filtering=-1;
 };
 bool ParseNativeApi(std::string_view,NativeApi&,std::string&);
-bool ValidateNativeApi(NativeApi,bool vulkan_compiled,const NativeVulkanOptions&,std::string&);
+bool ValidateNativeApi(NativeApi,bool vulkan_compiled,const NativeVulkanOptions&,std::string&,bool lsfg_compiled=false);
 }

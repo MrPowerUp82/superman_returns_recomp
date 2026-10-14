@@ -4,7 +4,7 @@
 #endif
 #include <windows.h>
 #include <cstdint>
-#include <deque>
+#include <algorithm>
 #include <span>
 #include <vector>
 
@@ -16,16 +16,27 @@ class CheckedGuestReads {
  public:
   std::span<const uint8_t> Read(const void* source, uint32_t length) {
     if (!source || !length || length > 0x20000000u) return {};
-    auto& bytes = copies_.emplace_back(length);
+    // Each successful read owns a different slot until Reset. Moving the
+    // outer vector preserves inner byte allocations and outstanding spans.
+    if(used_==copies_.size()) copies_.emplace_back();
+    auto& bytes=copies_[used_];
+    bytes.resize(length);
     SIZE_T copied = 0;
     if (!ReadProcessMemory(GetCurrentProcess(), source, bytes.data(), length, &copied) || copied != length) {
-      copies_.pop_back();
       return {};
     }
+    ++used_;
     return bytes;
   }
-  void Reset() { copies_.clear(); }
+  void Reset() {
+    // Reuse small draw/PM4 reads, but never retain an unbounded streaming
+    // snapshot. At most 32 slots of 64 KiB (2 MiB) survive a command.
+    copies_.resize(std::min(copies_.size(),size_t{32}));
+    for(auto& bytes:copies_) if(bytes.capacity()>64*1024) std::vector<uint8_t>().swap(bytes);
+    used_=0;
+  }
  private:
-  std::deque<std::vector<uint8_t>> copies_;
+  std::vector<std::vector<uint8_t>> copies_;
+  size_t used_=0;
 };
 } // namespace superman_returns::native
