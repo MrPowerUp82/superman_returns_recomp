@@ -12,8 +12,32 @@ SR_TEST(packet_check_cadence_limits_debug_capture) {
   SR_CHECK(IsCaptureFrame(7,0));
 }
 #include <bit>
+#include <algorithm>
 #include <stdexcept>
 using namespace superman_returns::graphics::guest;
+SR_TEST(draw_packet_keeps_replay_payload_below_24_kib) {
+  // Bound per-draw memory independently of arena allocation count. At 3,008
+  // draws, 4 KiB of unused state would add nearly 12 MiB to every batch.
+  SR_CHECK(sizeof(DrawPacket)<=24*1024);
+  std::printf("draw_packet_bytes=%zu\n",sizeof(DrawPacket));
+}
+SR_TEST(replay_preserves_polygon_offset_register_bits) {
+  WorkBatch batch;WorkCmd cmd;cmd.op=Op::kDraw;cmd.u[0]=4;cmd.u[2]=3;
+  superman_returns::native::Pm4Mirror mirror;
+  const uint8_t words[]={0,3,0x23,0x80,0x42,0,0,0,0x33,0x80,0,1,
+                        0x42,0x80,0,0,0xb4,0,0,1};
+  mirror.ScanCopy(nullptr,words,sizeof(words));
+  DrawPacketArena arena(1,true);RenderPacket ordinary,replay;std::string error;
+  SR_CHECK(ReplayCapturedRenderPacket(batch,cmd,mirror,ordinary,error));
+  SR_CHECK(ReplayCapturedRenderPacket(batch,cmd,mirror,replay,error,arena.Next()));
+  for(auto* draw:{GetDraw(ordinary),GetDraw(replay)}) {
+    for(uint32_t i=0;i<4;++i) SR_CHECK_EQ(draw->polygon_offset_registers[i],mirror.reg(0x2380+i));
+    draw->registers[0x205]=1<<11;FinalizeDrawConstants(*draw);
+    SR_CHECK_EQ(draw->depth_bias,1);SR_CHECK_EQ(draw->slope_bias,2.0f);
+    draw->registers[0x205]=1<<12;FinalizeDrawConstants(*draw);
+    SR_CHECK_EQ(draw->depth_bias,-2);SR_CHECK_EQ(draw->slope_bias,4.0f);
+  }
+}
 SR_TEST(replay_probe_does_not_process_a_rejected_capture) {
   WorkBatch batch; WorkCmd cmd; cmd.pm4_capture_ok=false;
   superman_returns::native::Pm4Mirror mirror;
@@ -27,6 +51,7 @@ SR_TEST(replay_storage_matches_initialized_draw_after_complete_decode) {
   ConstantSnapshot defaults;
   for(auto v:defaults.vs) SR_CHECK_EQ(v,0u);
   for(auto v:defaults.ps) SR_CHECK_EQ(v,0u);
+  for(auto v:defaults.shared) SR_CHECK_EQ(v,0u);
   WorkBatch batch; WorkCmd cmd;cmd.op=Op::kDraw;cmd.u[0]=4;cmd.u[2]=3;
   superman_returns::native::Pm4Mirror mirror;
   RenderPacket ordinary,prepared;std::string error;
@@ -35,19 +60,26 @@ SR_TEST(replay_storage_matches_initialized_draw_after_complete_decode) {
                          0,0,0x44,0,0x3f,0x80,0,0,
                          0,0,0x20,0,0x12,0x34,0x56,0x78};
   mirror.ScanCopy(nullptr,words,sizeof(words));
-  DrawPacketArena arena(2,true);
+  DrawPacketArena arena(3,true);
   SR_CHECK(ReplayCapturedRenderPacket(batch,cmd,mirror,ordinary,error));
-  SR_CHECK(ReplayCapturedRenderPacket(batch,cmd,mirror,prepared,error,arena.Next()));
+  auto storage=arena.Next();
+  // Decode must assign the complete suffix, even when there are no attributes.
+  std::fill(storage.payload->constants.shared.begin()+512,storage.payload->constants.shared.end(),0xa5);
+  SR_CHECK(ReplayCapturedRenderPacket(batch,cmd,mirror,prepared,error,std::move(storage)));
   const auto& a=*GetDraw(ordinary);const auto& b=*GetDraw(prepared);
   SR_CHECK(a.constants.vs==b.constants.vs);SR_CHECK(a.constants.ps==b.constants.ps);
   SR_CHECK(a.constants.shared==b.constants.shared);
-  SR_CHECK(a.registers==b.registers);SR_CHECK(a.mirrored_registers==b.mirrored_registers);
+  SR_CHECK(a.registers==b.registers);SR_CHECK(a.polygon_offset_registers==b.polygon_offset_registers);
   SR_CHECK(a.texture_fetch==b.texture_fetch);
   SR_CHECK_EQ(std::memcmp(a.vertex_fetch.data(),b.vertex_fetch.data(),sizeof(a.vertex_fetch)),0);
   cmd.u[0]=UINT32_MAX;
   auto* published=GetDraw(prepared);
   SR_CHECK(!ReplayCapturedRenderPacket(batch,cmd,mirror,prepared,error,arena.Next()));
   SR_CHECK(GetDraw(prepared)==published);
+  // A late failure happens after the metadata copy, and still publishes nothing.
+  cmd.op=Op::kDrawIndexed;cmd.u[0]=4;cmd.u[3]=3;cmd.has_index=false;
+  SR_CHECK(!ReplayCapturedRenderPacket(batch,cmd,mirror,prepared,error,arena.Next()));
+  SR_CHECK(GetDraw(prepared)==published);SR_CHECK(GetDraw(prepared)->constants.shared==a.constants.shared);
 }
 SR_TEST(pm4_sequential_constant_writes_match_individual_writes) {
   using superman_returns::native::Pm4Mirror;
@@ -474,6 +506,13 @@ SR_TEST(strip_and_ushort2_metadata_survive_packet) {
   const auto &draw = (*GetDraw(packet));
   SR_CHECK(draw.indices.normalized ==
            std::vector<uint32_t>({1, UINT32_MAX, 2}));
+  DrawPacketArena storage(1,true);RenderPacket replay;
+  auto owner=storage.Next();
+  std::fill(owner.payload->constants.shared.begin()+512,owner.payload->constants.shared.end(),0xa5);
+  SR_CHECK(ReplayCapturedRenderPacket(batch,cmd,mirror,replay,error,std::move(owner)));
+  SR_CHECK(GetDraw(replay)->constants.shared==draw.constants.shared);
+  SR_CHECK(std::memcmp(GetDraw(replay)->vertex_fetch.data(),draw.vertex_fetch.data(),sizeof(draw.vertex_fetch))==0);
+  SR_CHECK(GetDraw(replay)->indices.normalized==draw.indices.normalized);
     SR_CHECK(draw.primitive == Primitive::kTriangleStrip);
     SR_CHECK(draw.primitive_restart);
   SR_CHECK_EQ(draw.vertex_fetch[0].type, 0x2c2259);

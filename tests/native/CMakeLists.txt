@@ -49,6 +49,9 @@ add_executable(sr_native_tests
     "${SR_NATIVE_DIR}/pm4_mirror.cpp"
 )
 target_include_directories(sr_native_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${SR_NATIVE_DIR}")
+if(WIN32)
+    target_sources(sr_native_tests PRIVATE test_replay_storage_writes.cpp)
+endif()
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(sr_native_tests PRIVATE -Wall -Wextra)
 endif()
@@ -81,6 +84,15 @@ add_executable(sr_capture_budget test_capture_budget.cpp
 add_test(NAME sr_capture_budget COMMAND sr_capture_budget)
 
 # Manual Release performance diagnostic; timing budgets do not belong in CTest.
+add_executable(sr_replay_storage_bench replay_storage_benchmark.cpp
+    "${SR_NATIVE_DIR}/../graphics/guest/pm4_capture.cpp"
+    "${SR_NATIVE_DIR}/../graphics/guest/render_packet.cpp"
+    "${SR_NATIVE_DIR}/../graphics/guest/captured_batch.cpp"
+    "${SR_NATIVE_DIR}/../graphics/guest/render_state.cpp"
+    "${SR_NATIVE_DIR}/../graphics/guest/constant_snapshot.cpp"
+    "${SR_NATIVE_DIR}/../graphics/guest/draw_state.cpp"
+    "${SR_NATIVE_DIR}/../graphics/guest/vertex_layout.cpp"
+    "${SR_NATIVE_DIR}/pm4_mirror.cpp")
 add_executable(sr_pm4_budget test_pm4_budget.cpp
     "${SR_NATIVE_DIR}/pm4_mirror.cpp"
     "${SR_NATIVE_DIR}/../graphics/guest/constant_snapshot.cpp")

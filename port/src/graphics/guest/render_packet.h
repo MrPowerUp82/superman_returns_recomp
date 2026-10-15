@@ -27,10 +27,12 @@ struct SurfaceDesc {
 };
 struct DrawPacket {
   struct ReplayStorageTag {};
-  DrawPacket() : mirrored_registers{} {}
+  // Keep this user-provided: value-initialization must not add a whole-packet
+  // zeroing pass before the individual members initialize themselves.
+  DrawPacket() {}
   // Only DecodeCapturedPacket may publish this storage: it fills both float
-  // banks and all mirrored registers before their first use. Partial fields
-  // (shared/device/vertex/fetch state) keep their normal initialization.
+  // banks, polygon offset registers and the shared metadata suffix before their
+  // first use. Shared prefix/device/vertex/fetch keep normal initialization.
   explicit DrawPacket(ReplayStorageTag) : constants(ConstantSnapshot::ReplayStorageTag{}) {}
   int pass = 0;
   Primitive primitive = Primitive::kTriangles;
@@ -51,7 +53,9 @@ struct DrawPacket {
   Rect scissor{0, 0, 16384, 16384};
   bool tiling_active = false;
   std::array<uint32_t, 0x400> registers{};
-  std::array<uint32_t, 0x400> mirrored_registers;
+  // Only PM4 registers 0x2380..0x2383 are consumed by FinalizeDrawConstants.
+  // Keep their exact bits; the other 1,020 mirrored registers are not read.
+  std::array<uint32_t, 4> polygon_offset_registers{};
   std::array<std::array<uint32_t, 6>, 32> texture_fetch{};
   std::array<SurfaceDesc, 4> colors{};
   SurfaceDesc depth;

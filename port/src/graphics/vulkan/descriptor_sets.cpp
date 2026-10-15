@@ -53,17 +53,19 @@ DescriptorCacheEntry* DescriptorStore::Shared(const DrawBindings& bindings,
   std::array<uint64_t,6*32> key;uint32_t words=0;uint64_t hash=14695981039346656037ull;
   auto push=[&](uint64_t value) {key[words++]=value;hash^=value;hash*=1099511628211ull;};
   // The texture loop visits dimension 0, 1, 2 of each slot in turn, so each dimension keeps its own last id.
-  guest::ResourceId last_buffer=~0ull;const void* buffer_ptr=nullptr;
-  std::array<guest::ResourceId,3> last_id{~0ull,~0ull,~0ull};std::array<const void*,3> last_ptr{};
+  guest::ResourceId last_buffer=0;const void* buffer_ptr=nullptr;bool buffer_seen=false;
+  // DummyTexture(k2D) is UINT64_MAX: no ResourceId is an unvisited sentinel.
+  std::array<guest::ResourceId,3> last_id{};std::array<const void*,3> last_ptr{};
+  std::array<bool,3> texture_seen{};
   auto texture_key=[&](uint32_t dimension,guest::ResourceId id) -> const void* {
-    if(id!=last_id[dimension]) {auto* t=store.FindTexture(id);last_ptr[dimension]=t?t->get():nullptr;last_id[dimension]=id;}
+    if(!texture_seen[dimension] || id!=last_id[dimension]) {auto* t=store.FindTexture(id);last_ptr[dimension]=t?t->get():nullptr;last_id[dimension]=id;texture_seen[dimension]=true;}
     return last_ptr[dimension];
   };
   // Draws binding per-submission transient buffers (inline geometry) never
   // repeat: they are written but not cached, so they cannot pin arena chunks.
   bool complete=true,cacheable=true;
   for(uint32_t slot=0;slot<32;++slot) {
-    if(bindings.vertex_buffers[slot]!=last_buffer) {auto* b=store.FindBuffer(bindings.vertex_buffers[slot]);buffer_ptr=b?b->get():nullptr;last_buffer=bindings.vertex_buffers[slot];if(b && (*b)->owner) cacheable=false;}
+    if(!buffer_seen || bindings.vertex_buffers[slot]!=last_buffer) {auto* b=store.FindBuffer(bindings.vertex_buffers[slot]);buffer_ptr=b?b->get():nullptr;last_buffer=bindings.vertex_buffers[slot];buffer_seen=true;if(b && (*b)->owner) cacheable=false;}
     push(uint64_t(reinterpret_cast<uintptr_t>(buffer_ptr)));complete&=buffer_ptr!=nullptr;
     for(uint32_t dimension=0;dimension<3;++dimension) {auto* t=texture_key(dimension,bindings.textures[dimension][slot]);push(uint64_t(reinterpret_cast<uintptr_t>(t)));complete&=t!=nullptr;}
     // Only the sampler/filter bits of texture slots matter. Other slots hold

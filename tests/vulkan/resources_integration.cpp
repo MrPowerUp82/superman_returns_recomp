@@ -512,6 +512,46 @@ void CheckHoldLifetime(Context& c) {
   retire(5);expect(v3.expired(),"a replaced texture leaked after its submission retired");
   std::cout<<"Resources bound by recorded draws stay alive until their submission retires (cache miss, hit in the same and in a later submission)\n";
 }
+// Repeated draws without textures still bind the 2D/3D/cube dummy images.
+// UINT64_MAX is a valid dummy texture ID and can also be a buffer ID; neither
+// may be treated as an unvisited lookup sentinel. Exercise the production store.
+void CheckDescriptorCacheIds(Context& c) {
+  Error e;UploadFixture fixture(c);ResourceStore resources(c);DescriptorStore descriptors(c);
+  Require(resources.BeginSubmission(fixture.command,1,e),e);Require(resources.CreateDummies(e),e);
+  Require(descriptors.Initialize(e),e);std::array<std::byte,16> bytes{};
+  Require(resources.UploadHostBuffer(UINT64_MAX,bytes,1,e),e);
+  guest::DrawPacket packet;TransientSlice constants;DrawBindings bindings;
+  Require(resources.MapTransient(sizeof(guest::ConstantSnapshot),constants,e),e);
+  Require(BuildBindings(packet,constants.data,bindings,e),e);
+  for(bool full_width_buffer:{false,true}) {
+    if(full_width_buffer) bindings.vertex_buffers[0]=UINT64_MAX;
+    DescriptorDraw first,next;
+    Require(descriptors.Prepare(bindings,packet.texture_fetch,resources,1,constants,first,e),e);
+    Require(descriptors.Prepare(bindings,packet.texture_fetch,resources,1,constants,next,e),e);
+    const auto stats=descriptors.TakeCacheStats();
+    if(stats.misses!=1 || stats.hits!=1 || first.sets!=next.sets)
+      throw std::runtime_error("full-width resource ID skipped lookup: identical dummy bindings must cache");
+  }
+  // Keeping a cached entry alive must not make a removed binding valid.
+  resources.ForgetTexture(DummyTexture(TextureDimension::k2D));DescriptorDraw next;
+  if(descriptors.Prepare(bindings,packet.texture_fetch,resources,1,constants,next,e))
+    throw std::runtime_error("missing dummy texture incorrectly reused cached descriptors");
+  fixture.Finish();descriptors.Retire(1);resources.Retire(1);
+  std::cout<<"Descriptor cache accepts UINT64_MAX texture/buffer IDs and rejects removed bindings\n";
+}
+void BenchmarkDummyDescriptors(Context& c) {
+  Error e;UploadFixture fixture(c);ResourceStore resources(c);DescriptorStore descriptors(c);
+  Require(resources.BeginSubmission(fixture.command,1,e),e);Require(resources.CreateDummies(e),e);
+  Require(descriptors.Initialize(e),e);guest::DrawPacket packet;TransientSlice constants;DrawBindings bindings;
+  Require(resources.MapTransient(sizeof(guest::ConstantSnapshot),constants,e),e);
+  Require(BuildBindings(packet,constants.data,bindings,e),e);DescriptorDraw out;
+  constexpr uint32_t draws=3000;const auto start=std::chrono::steady_clock::now();
+  for(uint32_t i=0;i<draws;++i) Require(descriptors.Prepare(bindings,packet.texture_fetch,resources,1,constants,out,e),e);
+  const double us=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-start).count()/draws;
+  const auto stats=descriptors.TakeCacheStats();
+  std::cout<<"dummy_descriptor_bench draws="<<draws<<" us/draw="<<us<<" hits="<<stats.hits<<" misses="<<stats.misses<<'\n';
+  fixture.Finish();descriptors.Retire(1);resources.Retire(1);
+}
 int main(int argc,char** argv) {
   try {
     Win32Window window;Context c;Error e;
@@ -535,6 +575,8 @@ int main(int argc,char** argv) {
     if(argc==2 && std::string(argv[1])=="--stacked-resolve") {CheckStackedResolve(c);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--composition") {CheckComposition(c);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--bench-bindings") {BenchmarkMappedBindings(c);return c.validation_errors.load()?1:0;}
+    if(argc==2 && std::string(argv[1])=="--descriptor-cache-ids") {CheckDescriptorCacheIds(c);return c.validation_errors.load()?1:0;}
+    if(argc==2 && std::string(argv[1])=="--bench-descriptor-dummies") {BenchmarkDummyDescriptors(c);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--hold-lifetime") {CheckHoldLifetime(c);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--resolve-copy") {CheckResolveCopy(c);return c.validation_errors.load()?1:0;}
     if(argc!=1) throw std::runtime_error("Unknown GPU fixture argument; refusing a different test");

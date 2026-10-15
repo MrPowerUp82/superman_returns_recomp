@@ -143,11 +143,11 @@ void DeviceState(DrawPacket &d, uint32_t device,
 void FinalizeDrawConstants(DrawPacket &d) {
   uint32_t mode=d.registers[0x205];float scale=0,offset=0;
   bool polygonal=d.primitive==Primitive::kTriangles || d.primitive==Primitive::kTriangleStrip || d.primitive==Primitive::kQuads || d.primitive==Primitive::kRectangles;
-  auto read_offset=[&](uint32_t first) {scale=std::bit_cast<float>(d.mirrored_registers[first]);offset=std::bit_cast<float>(d.mirrored_registers[first+1]);};
+  auto read_offset=[&](uint32_t first) {scale=std::bit_cast<float>(d.polygon_offset_registers[first]);offset=std::bit_cast<float>(d.polygon_offset_registers[first+1]);};
   if(polygonal) {
-    if((mode&(1<<11)) && !(mode&1)) read_offset(0x380);
-    if((mode&(1<<12)) && !(mode&2) && !scale && !offset) read_offset(0x382);
-  } else if(mode&(1<<13)) read_offset(0x380);
+    if((mode&(1<<11)) && !(mode&1)) read_offset(0);
+    if((mode&(1<<12)) && !(mode&2) && !scale && !offset) read_offset(2);
+  } else if(mode&(1<<13)) read_offset(0);
   if(!std::isfinite(scale)) scale=0;if(!std::isfinite(offset)) offset=0;
   // Same D24 conversion used by the reference GetD3D10IntegerPolygonOffset.
   auto magnitude=std::min(double(std::ceil(std::abs(offset)*16777215.0f)),double(INT32_MAX));
@@ -278,8 +278,8 @@ bool DecodeCapturedPacket(const WorkBatch &batch, const WorkCmd &cmd,
         auto v = mirror.reg(native::Pm4Mirror::kLoopConstantBase + i);
         std::memcpy(d.constants.shared.data() + 304 + i * 4, &v, 4);
       }
-      for (uint32_t i = 0; i < d.mirrored_registers.size(); ++i)
-        d.mirrored_registers[i] = mirror.reg(0x2000 + i);
+      for (uint32_t i = 0; i < d.polygon_offset_registers.size(); ++i)
+        d.polygon_offset_registers[i] = mirror.reg(0x2380 + i);
       d.scissor = DecodeScissor({mirror.reg(0x2081), mirror.reg(0x2082),
                                  mirror.reg(0x2080), mirror.reg(0x200e),
                                  mirror.reg(0x200f)},
@@ -328,6 +328,8 @@ bool DecodeCapturedPacket(const WorkBatch &batch, const WorkCmd &cmd,
                 s.stream, Address(s.offset, offset), s.stride, type};
         }
       }
+      static_assert(sizeof(d.vertex_fetch)==sizeof(d.constants.shared)-512,
+                    "Replay storage requires a complete shared metadata suffix");
       std::memcpy(d.constants.shared.data() + 512, d.vertex_fetch.data(),
                   sizeof(d.vertex_fetch));
       for(auto& stream:d.streams) {

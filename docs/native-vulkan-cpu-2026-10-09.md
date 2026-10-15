@@ -364,8 +364,8 @@ intervalos de gameplay: captura 0,41/0,50 ms, PM4 2,99/3,54 ms, decode
 inicialização; não atribuir todo esse intervalo exclusivamente aos stores.
 O sync-only consumidor nativo não executa desenhos do backend de emulação.
 
-A arena pode deixar sem inicialização somente VS, PS e mirrored_registers
-(12 KiB por draw): DecodeCapturedPacket atribui os três arrays integralmente
+No desenho de 13/10, a arena deixava sem inicialização VS, PS e mirrored_registers
+(12 KiB por draw): DecodeCapturedPacket atribuía os três arrays integralmente
 antes de usá-los/publicá-los. Os defaults de ConstantSnapshot/DrawPacket
 continuam zerados para outros consumidores; shared/device/vertex/fetch e os
 demais campos mantêm a inicialização anterior. A capacidade é reservada com o
@@ -374,6 +374,11 @@ Erros precoces não publicam nem leem os arrays. Revisão read-only sem bugs;
 172 testes nativos, 90 testes Vulkan e três variantes de pixels passaram,
 validation_errors=0. O teste novo usa a arena real, bancos não zero/NaN e
 falha precoce, comparando o resultado completo com o caminho inicializado.
+
+Esse desenho histórico foi refinado em 14/10: o sufixo de `shared` passou a
+ser preenchido apenas pelo decoder, e o bloco `mirrored_registers` foi
+substituído pelos quatro parâmetros de polygon offset realmente consumidos.
+As medições de 13/10 abaixo correspondem ao layout anterior.
 
 Teste isolado de 3.008 draws/frame: arena + preenchimento 5,835/5,719 ms
 antes, 4,440/4,195 ms depois; checksums iguais. Não usar esse teste para
@@ -405,3 +410,51 @@ Validação final sem SR_NATIVE_REPLAY_STORAGE, sem instrumentação:
 histograma 0,015, personagem chroma 0,003. Build concluído; configuração
 1280x720/scale1/MSAA1/vsync/limite30/qualidade original mantida.
 O trabalho não está concluído: 30 FPS ainda não foram atingidos.
+
+### Correção do cache de descritores (2026-10-14)
+
+`UINT64_MAX` era simultaneamente o marcador de consulta não realizada e o ID
+válido da textura dummy 2D. Isso impedia cachear draws repetidos nesse caso.
+Flags explícitos de primeira consulta corrigem texturas e buffers, preservando
+as políticas existentes. No diagnóstico de 3.000 draws dummy idênticos: 3.000
+misses / 103–106 µs por draw passam a um miss / 4,7–4,9 µs. É um ganho desse caso
+isolado; a série de gameplay não demonstra ganho estável de FPS. O atalho extra
+de último binding foi testado e removido. Final 14,9/14,8 FPS, imagem aprovada,
+91 testes Vulkan, 177 nativos, orçamento de alocações e contratos de pixels
+passaram. Evidências e hashes em
+[native-vulkan-descriptor-cpu-2026-10-14.md](native-vulkan-descriptor-cpu-2026-10-14.md).
+
+### Inicialização do sufixo do replay (2026-10-14)
+
+Storage de replay deixa de zerar 3,5 KiB de metadados que o decoder sobrescreve
+por inteiro antes de publicar cada draw. Construtores comuns permanecem zerados.
+No diagnóstico de 3.008 draws, arena mais decode passou de 39,1–42,2 ms para
+38,0–38,9 ms, com checksum idêntico. Quatro rodadas limpas de gameplay não
+demonstraram ganho estável de FPS. Passaram 178 testes nativos, 91 Vulkan,
+orçamento de alocações, contratos de pixels e gates de imagem. Evidências e
+limitações em
+[native-vulkan-replay-shared-cpu-2026-10-14.md](native-vulkan-replay-shared-cpu-2026-10-14.md).
+
+### Compactação dos registradores de polygon offset (2026-10-14)
+
+O DrawPacket copiava 1.024 registradores PM4, mas só quatro tinham consumidor.
+Guardar apenas os bits de `0x2380..0x2383` mantém o cálculo de polygon offset
+e reduz o payload de 25.952 para 21.872 bytes, cerca de 11,7 MiB por batch de
+3.008 draws. Três pares alternados do diagnóstico de replay completo mediram
+39,0–42,4 ms antes e 37,2–37,5 ms depois, com checksum idêntico. Gameplay
+não demonstrou ganho estável de FPS. O executável final foi validado com
+181 testes nativos, 91 Vulkan, orçamento de alocações, pixels e imagens.
+Evidências, hashes e limitações em
+[native-vulkan-polygon-offset-cpu-2026-10-14.md](native-vulkan-polygon-offset-cpu-2026-10-14.md).
+
+### Cache por versão VS/PS — descartado (2026-10-14)
+
+O cache por identidade/versões, limitado a submissão e chunk, passou os testes
+e reduziu o upload isolado em cerca de 2–7%. No perfil, bindings marcou
+11,0–12,8 ms ligado e 15,9–16,0 ms desligado, com cargas diferentes. Nas quatro
+rodadas limpas, ON ficou abaixo das respectivas referências em FPS. O ganho
+local não sustentou manter o experimento; fontes e executável anteriores foram
+restaurados, sem perder os ajustes aceitos. Restaurado 13,6/14,4 FPS, 181 testes
+nativos, 91 Vulkan, alocações, pixels e imagem passaram. Evidências e snapshot
+experimental em
+[native-vulkan-versioned-banks-cpu-2026-10-14.md](native-vulkan-versioned-banks-cpu-2026-10-14.md).
