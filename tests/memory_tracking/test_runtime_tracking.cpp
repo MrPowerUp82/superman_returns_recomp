@@ -1,10 +1,13 @@
 #include "../native/test_main.h"
 #include "../../tools/rexglue-write-tracking/include/rex_memory_tracking_abi.h"
+#include "../../port/src/native_renderer/resource_write_tracking.h"
 #include <rex/system/xmemory.h>
 #include <rex/logging.h>
 #include <rex/stream.h>
 #include <windows.h>
 #include <array>
+#include <atomic>
+#include <thread>
 
 namespace {
 struct Fixture {
@@ -59,6 +62,50 @@ SR_TEST(runtime_guest_aliases_and_raw_physical_store_invalidate) {
     SR_CHECK(after.coverage != RexTrackingCoverage::Complete);
     SR_CHECK_EQ(*data, 23);
     f.api->unwatch(f.session, watch);
+  }
+}
+
+SR_TEST(runtime_optional_client_negotiates_and_releases_watches) {
+  Fixture f;
+  if (!f.session) return;
+  f.api->stop(f.session); f.session = 0;
+  superman_returns::native::ResourceWriteTracker tracker;
+  SR_CHECK(tracker.Start(f.memory));
+  SR_CHECK(f.Allocate());
+  const RexTrackingRange range{0x04000000, 4096};
+  const auto watch = tracker.Watch(std::span(&range, 1));
+  SR_CHECK(watch != 0);
+  RexTrackingStamp stamp{};
+  SR_CHECK(tracker.Sample(watch, std::span(&stamp, 1)));
+  SR_CHECK(stamp.coverage == RexTrackingCoverage::Complete);
+  SR_CHECK_EQ(tracker.Stats().active_watches, 1u);
+  tracker.Invalidate(watch);
+  SR_CHECK(tracker.Sample(watch, std::span(&stamp, 1)));
+  SR_CHECK(stamp.coverage != RexTrackingCoverage::Complete);
+  tracker.Unwatch(watch);
+  SR_CHECK_EQ(tracker.Stats().active_watches, 0u);
+  tracker.Stop();
+  SR_CHECK(!tracker.Sample(watch, std::span(&stamp, 1)));
+}
+
+SR_TEST(runtime_stop_drains_inflight_faults) {
+  for (unsigned attempt = 0; attempt < 16; ++attempt) {
+    Fixture f;
+    if (!f.session) return;
+    SR_CHECK(f.Allocate());
+    f.Watch();
+    auto* target = f.memory.TranslatePhysical<volatile uint8_t*>(0x04000000);
+    std::atomic<bool> go = false, ready = false;
+    std::thread writer([&] {
+      ready.store(true, std::memory_order_release);
+      while (!go.load(std::memory_order_acquire)) std::this_thread::yield();
+      for (unsigned i = 0; i < 128; ++i) *target = uint8_t(i);
+    });
+    while (!ready.load(std::memory_order_acquire)) std::this_thread::yield();
+    go.store(true, std::memory_order_release);
+    f.api->stop(f.session); f.session = 0;
+    writer.join();
+    SR_CHECK_EQ(*target, 127u);
   }
 }
 

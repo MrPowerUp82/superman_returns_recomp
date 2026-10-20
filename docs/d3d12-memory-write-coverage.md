@@ -14,9 +14,10 @@ separado, patch versionado e manifesto SHA256; o recorte de GPU não é modifica
 | Alias adicional 7F | `Memory::MapViews`, GPU writeback de 16 MiB | Também mapeia os primeiros 16 MiB físicos, embora LookupHeap retorne null para essa vista |
 | Alloc/fixed/range e reuso | `BaseHeap`, heap físico pai | Registrar identidade uma vez no pai; alias não cria alocação física independente |
 | Proteção, commit, decommit, release, reset | Todos os `Protect`/`AllocFixed` de `src/system/xmemory.cpp`, inclusive recovery de proteção obsoleta | Invalidar antes da chamada OS, sob região crítica; reset não recicla contadores |
-| Leitura de arquivos host | `XFile::ReadInternal` → VFS → `Win32FileHandle::Read` | Precisa de begin/end explícito; kernel não gera o fault de CPU necessário. Pendente |
-| Scatter de arquivos | `XFile::ReadScatter` → `ReadInternal` | Mesmo escopo de I/O, inclusive falhas/parcial. Pendente |
-| Recepção de rede | `XSocket::Recv`, `RecvFrom` → Winsock | Precisa de begin/end e liberação de proteção do buffer antes de entregar ao kernel. Pendente |
+| Leitura de arquivos host | `XFile::ReadInternal` → VFS → `Win32FileHandle::Read` | HostWriteScope registra e invalida antes do kernel; termina inclusive em erro parcial/zero bytes. Teste ReadFile real e backend de erro controlado |
+| Scatter de arquivos | `XFile::ReadScatter` → `ReadInternal` | Escopo por leitura efetiva; teste cobre duas páginas e callbacks após conclusão |
+| Recepção de rede | `XSocket::Recv`, `RecvFrom` → Winsock | Escopo durante operação bloqueante; testes UDP loopback cobrem bytes, época e contador antes/depois |
+| Saída de ioctl de rede | `XSocket::IOControl` → `ioctlsocket` | Escopo cobre quatro bytes; teste FIONREAD em página protegida |
 | Áudio, memexport e resolves com cópia CPU | XMA e `src/graphics/d3d12/command_processor.cpp` | Stores comuns pelo ponteiro físico devem atingir guardas; não chamar data providers no fault físico |
 | Novos mapeamentos ou produtores fora do inventário | Extensões/plugins/API do host | Cobertura desconhecida; não anunciar capability HostProducers sem fechar o inventário |
 
@@ -27,8 +28,8 @@ de múltiplas faixas e a instalação de guardas usam a região crítica global;
 metadados puros têm seu próprio mutex, sempre adquirido depois dela.
 
 A instalação não deve certificar um snapshot enquanto houver stores anteriores
-pendentes. A implementação completa deverá proteger todas as vistas antes da
-cópia e executar uma barreira entre processadores antes da primeira certificação.
+pendentes. A implementação protege todas as vistas antes da
+cópia e executa FlushProcessWriteBuffers antes da primeira certificação.
 A documentação de [VirtualProtect](https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-virtualprotect)
 descreve a alteração de proteção das páginas comprometidas; a de
 [FlushProcessWriteBuffers](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-flushprocesswritebuffers)
@@ -36,18 +37,23 @@ garante visibilidade das escritas entre processadores. Isso não substitui os
 scopes de I/O nem permite rearmar uma alocação após fault. O custo da barreira
 inicial deve entrar na medição de criação de watches.
 
-O contrato inicialmente anuncia somente lifecycle/aliases, guards e observação
-das mudanças de proteção (`11`); falta HostProducers (`4`). O renderer deve exigir
-a máscara completa (`15`), logo não pode usar esta versão para dispensar hash.
-Os testes de guarda observam mudanças de época sem falsificar cobertura completa.
+O contrato anuncia a máscara completa (`15`) somente no runtime opcional com
+os hooks deste inventário. O cliente rejeita DLL stock, versão/tamanho incompatível,
+funções ausentes e capacidades incompletas. Ainda não existe integração de hash
+skipping no renderer nem certificação de uploads D3D12.
 
-Verificação inicial: doze casos no runtime real passaram (CTest 1/1), cobrindo
-stores A/C/E/raw em heaps de 4/64 KiB, alias 7F, alloc/range/release/reuso,
-decommit/reset/restore (incluindo reset de alias e restore de páginas livres),
-alteração de proteção compartilhada, remoção de watch e manutenção
-das proteções pertencentes ao SDK. A suíte pura contém 209 casos, e os testes
-Python de ferramentas passaram em 73/73. Isso ainda não certifica os produtores
-host, uploads D3D12 ou ganho de FPS.
+Scopes são registrados mesmo antes de existir uma sessão: I/O pendente impede
+instalação de sessão/watch. Stop restaura suas guardas e separa a sessão; scopes
+ativos retêm os metadados até concluir, sem esperar indefinidamente por recv.
+Uma faixa de produtor não representável invalida o domínio e bloqueia novas sessões.
+O inventário completo encontrou outros ReadSync apenas com buffers host próprios;
+XMA, memexport e readbacks executam cópias de CPU que passam pelas guardas físicas.
+
+Verificação da Task 3: suíte real passou em quatro alvos CTest, incluindo processos
+isolados para perda de contrato, falha de mapeamento e Memory não inicializada.
+Os casos normais cobrem aliases, lifecycle, I/O parcial/erro/zero/scatter, rede,
+produtor anterior à sessão e teardown concorrente. Cliente stock passou em 1/1.
+A suíte pura contém 210 casos. Essas verificações ainda não demonstram ganho de FPS.
 
 Reprodução: `powershell -NoProfile -File tools/setup_memory_tracking_sdk.ps1`;
 depois `SR_MEMORY_TRACKING_SDK=ON`, `SR_BUILD_DIR=port/out/build/win-amd64-write-tracking`

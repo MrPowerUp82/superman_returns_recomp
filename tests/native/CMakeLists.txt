@@ -12,6 +12,7 @@ set(SR_NATIVE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../port/src/native_renderer")
 add_executable(sr_native_tests
     main.cpp
     test_resource_write_tracking.cpp
+    test_resource_tracking_api.cpp
     test_texture_write_proof.cpp
     "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/rexglue-write-tracking/src/write_tracking_state.cpp"
     test_benchmark_input.cpp
