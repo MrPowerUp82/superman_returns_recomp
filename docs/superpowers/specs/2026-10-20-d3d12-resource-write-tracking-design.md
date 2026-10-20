@@ -1,7 +1,7 @@
 # D3D12: rastreamento de escritas para reduzir hashes de recursos
 
-Data: 20/10/2026. Status: direção aprovada em conversa; esta especificação
-ainda requer revisão do usuário. Não há autorização de implementação nesta etapa.
+Data: 20/10/2026. Status: especificação aprovada pelo usuário em conversa.
+Próxima etapa: revisão do plano e escolha da forma de execução.
 
 ## Objetivo e limite deste projeto
 
@@ -245,7 +245,7 @@ integração D3D12 opcional, modo de comparação, testes reais de cobertura e r
 de correção/custos/FPS. Falta de cobertura é um resultado explícito, não licença
 para pular o hash.
 
-O próximo marco é a revisão desta especificação pelo usuário. Após aprovação,
-escrever o plano de implementação e escolher a forma de execução. As frentes de
+O próximo marco, após a aprovação desta especificação, é revisar o plano de
+implementação e escolher a forma de execução. As frentes de
 estado gráfico incremental e substituição seletiva do XDK serão projetos seguintes,
 guiados pelos custos que permanecerem após este marco.
