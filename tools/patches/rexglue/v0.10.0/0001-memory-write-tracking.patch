@@ -1,0 +1,326 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 9b3cdf5..fb10f4d 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -223,9 +223,9 @@ configure_file(
+ )
+ 
+ # Output directories (multi-config appends /<Config>/ automatically)
+-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${REXGLUE_ROOT}/out/${REX_PLATFORM}")
+-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${REXGLUE_ROOT}/out/${REX_PLATFORM}")
+-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${REXGLUE_ROOT}/out/${REX_PLATFORM}")
++set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/out/${REX_PLATFORM}")
++set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/out/${REX_PLATFORM}")
++set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/out/${REX_PLATFORM}")
+ 
+ # Sanitizer support for debugging memory corruption and undefined behavior
+ if(REXGLUE_ENABLE_SANITIZERS)
+diff --git a/src/system/CMakeLists.txt b/src/system/CMakeLists.txt
+index fc46d86..284066a 100644
+--- a/src/system/CMakeLists.txt
++++ b/src/system/CMakeLists.txt
+@@ -48,7 +48,9 @@ set(REXSYSTEM_SOURCES
+     xex_module.cpp
+ )
+ 
+-add_library(rexruntime SHARED ${REXSYSTEM_SOURCES})
++add_library(rexruntime SHARED ${REXSYSTEM_SOURCES}
++    write_tracking/src/write_tracking_state.cpp
++    write_tracking/src/runtime_memory_tracker.cpp)
+ add_library(rex::runtime ALIAS rexruntime)
+ add_library(rex::system ALIAS rexruntime)
+ add_library(rex::kernel ALIAS rexruntime)
+diff --git a/src/system/xmemory.cpp b/src/system/xmemory.cpp
+index 76cc877..e589c3b 100644
+--- a/src/system/xmemory.cpp
++++ b/src/system/xmemory.cpp
+@@ -28,6 +28,7 @@
+ #include <rex/system/function_dispatcher.h>
+ #include <rex/system/mmio_handler.h>
+ #include <rex/system/xmemory.h>
++#include "write_tracking/src/runtime_memory_tracker.h"
+ #include <rex/thread.h>
+ 
+ // TODO(benvanik): move xbox.h out
+@@ -43,6 +44,21 @@ REXCVAR_DEFINE_BOOL(scribble_heap, false, "Memory", "Scribble 0xCD into all allo
+ 
+ namespace rex::memory {
+ 
++// Serialize coverage loss before the OS can expose a writable mapping.
++static bool TrackedProtect(Memory* memory, void* address, size_t length,
++                           PageAccess access, PageAccess* old = nullptr) {
++  auto lock = rex::thread::global_critical_region::AcquireDirect();
++  sr::tracking::TrackingHostProtection(memory, address, length);
++  return rex::memory::Protect(address, length, access, old);
++}
++static void* TrackedAllocFixed(Memory* memory, void* address, size_t length,
++                              AllocationType type, PageAccess access) {
++  auto lock = rex::thread::global_critical_region::AcquireDirect();
++  sr::tracking::TrackingHostProtection(memory, address, length);
++  return rex::memory::AllocFixed(address, length, type, access);
++}
++
++
+ uint32_t get_page_count(uint32_t value, uint32_t page_size, uint32_t page_size_shift) {
+   return rex::round_up(value, page_size) >> page_size_shift;
+ }
+@@ -100,6 +116,7 @@ Memory::Memory() {
+ }
+ 
+ Memory::~Memory() {
++  sr::tracking::TrackingStopMemory(this);
+   assert_true(active_memory_ == this);
+   active_memory_ = nullptr;
+ 
+@@ -218,7 +235,7 @@ bool Memory::Initialize() {
+ 
+   // Pre-commit the physical memory range so the GPU can access it
+   // without page faults. Reference: xenia-canary 5f5be0668.
+-  rex::memory::AllocFixed(heaps_.physical.TranslateRelative(0), heaps_.physical.heap_size(),
++  TrackedAllocFixed(this, heaps_.physical.TranslateRelative(0), heaps_.physical.heap_size(),
+                           rex::memory::AllocationType::kCommit,
+                           rex::memory::PageAccess::kReadWrite);
+ 
+@@ -387,6 +404,8 @@ void Memory::UnmapViews() {
+ }
+ 
+ void Memory::Reset() {
++  auto tracking_lock = rex::thread::global_critical_region::AcquireDirect();
++  sr::tracking::TrackingReset(this);
+   heaps_.v00000000.Reset();
+   heaps_.v40000000.Reset();
+   heaps_.v80000000.Reset();
+@@ -516,7 +535,7 @@ bool Memory::AddVirtualMappedRange(uint32_t virtual_address, uint32_t mask, uint
+       reinterpret_cast<uintptr_t>(range_start) & ~(uintptr_t(host_page_size) - 1));
+   const size_t aligned_length =
+       rex::round_up(size_t(range_start - aligned_start) + size, host_page_size);
+-  if (!rex::memory::AllocFixed(aligned_start, aligned_length, rex::memory::AllocationType::kCommit,
++  if (!TrackedAllocFixed(this, aligned_start, aligned_length, rex::memory::AllocationType::kCommit,
+                                rex::memory::PageAccess::kNoAccess)) {
+     REXSYS_ERROR("Unable to map range; commit/protect failed");
+     return false;
+@@ -533,6 +552,7 @@ runtime::MMIORange* Memory::LookupVirtualMappedRange(uint32_t virtual_address) {
+ 
+ bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> global_lock_locked_once,
+                                      void* host_address, bool is_write) {
++  if (sr::tracking::TrackingFault(this, host_address, is_write)) return true;
+   // Access via physical_membase_ is special, when need to bypass everything
+   // (for instance, for a data provider to actually write the data) so only
+   // triggering callbacks on virtual memory regions.
+@@ -607,7 +627,7 @@ bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> glob
+       size_t host_page_size = rex::memory::page_size();
+       uintptr_t page_base =
+           reinterpret_cast<uintptr_t>(host_address) & ~(uintptr_t(host_page_size - 1));
+-      if (rex::memory::Protect(reinterpret_cast<void*>(page_base), host_page_size,
++      if (TrackedProtect(this, reinterpret_cast<void*>(page_base), host_page_size,
+                                rex::memory::PageAccess::kReadWrite, nullptr)) {
+         REXSYS_WARN(
+             "Recovered stale physical page protection for guest {:08X} (host {:016X}, "
+@@ -770,6 +790,8 @@ bool Memory::Save(stream::ByteStream* stream) {
+ }
+ 
+ bool Memory::Restore(stream::ByteStream* stream) {
++  auto tracking_lock = rex::thread::global_critical_region::AcquireDirect();
++  sr::tracking::TrackingReset(this);
+   REXSYS_DEBUG("Restoring memory...");
+   heaps_.v00000000.Restore(stream);
+   heaps_.v40000000.Restore(stream);
+@@ -908,7 +930,7 @@ BaseHeap::BaseHeap() : membase_(nullptr), heap_base_(0), heap_size_(0), page_siz
+ BaseHeap::~BaseHeap() = default;
+ 
+ std::unique_lock<std::recursive_mutex> BaseHeap::AcquireHostPageReconcileLock() const {
+-  if (page_size_ >= memory_->system_page_size_) {
++  if (page_size_ >= memory_->system_page_size_ && heap_type_ != HeapType::kGuestPhysical) {
+     return {};
+   }
+   return rex::thread::global_critical_region::AcquireDirect();
+@@ -1006,7 +1028,7 @@ bool BaseHeap::SyncHostPageAccess(uint32_t start_page_number, uint32_t end_page_
+   const auto flush_run = [&](uint32_t run_last_page) {
+     const size_t run_length = (size_t(run_last_page - run_first_page) + 1) * host_page_size;
+     uint8_t* const run_pointer = heap_host_base + size_t(run_first_page) * host_page_size;
+-    if (!rex::memory::Protect(run_pointer, run_length, run_access, nullptr)) {
++    if (!TrackedProtect(memory_, run_pointer, run_length, run_access, nullptr)) {
+       REXSYS_ERROR("BaseHeap::SyncHostPageAccess failed for heap {:08X} host pages {}-{}",
+                    heap_base_, run_first_page, run_last_page);
+       return false;
+@@ -1152,11 +1174,11 @@ bool BaseHeap::Save(stream::ByteStream* stream) {
+       void* addr = TranslateRelative(i << page_size_shift_);
+ 
+       memory::PageAccess old_access;
+-      memory::Protect(addr, page_size_, memory::PageAccess::kReadWrite, &old_access);
++      TrackedProtect(memory_, addr, page_size_, memory::PageAccess::kReadWrite, &old_access);
+ 
+       stream->Write(addr, page_size_);
+ 
+-      memory::Protect(addr, page_size_, old_access, nullptr);
++      TrackedProtect(memory_, addr, page_size_, old_access, nullptr);
+     }
+   }
+ 
+@@ -1173,6 +1195,7 @@ bool BaseHeap::Restore(stream::ByteStream* stream) {
+   // Restore doesn't take heap_mutex_, but SyncHostPageAccess below still needs
+   // the global critical region held by its caller.
+   auto global_lock = AcquireHostPageReconcileLock();
++  if (heap_type_ == HeapType::kGuestPhysical) sr::tracking::TrackingReset(memory_);
+ 
+   for (size_t i = 0; i < page_table_.size(); i++) {
+     auto& page = page_table_[i];
+@@ -1198,14 +1221,14 @@ bool BaseHeap::Restore(stream::ByteStream* stream) {
+     if (!reconcile_host_pages) {
+       // Commit the memory if it isn't already. We do not need to reserve any
+       // memory, as the mapping has already taken care of that.
+-      rex::memory::AllocFixed(addr, page_size_, memory::AllocationType::kCommit,
++      TrackedAllocFixed(memory_, addr, page_size_, memory::AllocationType::kCommit,
+                               memory::PageAccess::kReadWrite);
+       // Read into memory with R/W protection, then restore the saved
+       // protection.
+       // TODO(DrChat): read compressed with snappy.
+-      rex::memory::Protect(addr, page_size_, memory::PageAccess::kReadWrite, nullptr);
++      TrackedProtect(memory_, addr, page_size_, memory::PageAccess::kReadWrite, nullptr);
+       stream->Read(addr, page_size_);
+-      rex::memory::Protect(addr, page_size_, page_access, nullptr);
++      TrackedProtect(memory_, addr, page_size_, page_access, nullptr);
+       continue;
+     }
+ 
+@@ -1220,7 +1243,7 @@ bool BaseHeap::Restore(stream::ByteStream* stream) {
+         uint32_t(((uint64_t(i) << page_size_shift_) + host_address_offset_) / host_page_size);
+     if (host_page != writable_host_page) {
+       uint8_t* host_page_pointer = membase_ + heap_base_ + size_t(host_page) * host_page_size;
+-      if (!rex::memory::AllocFixed(host_page_pointer, host_page_size,
++      if (!TrackedAllocFixed(memory_, host_page_pointer, host_page_size,
+                                    memory::AllocationType::kCommit,
+                                    memory::PageAccess::kReadWrite)) {
+         REXSYS_ERROR("BaseHeap::Restore failed to make host page {} writable", host_page);
+@@ -1241,6 +1264,8 @@ bool BaseHeap::Restore(stream::ByteStream* stream) {
+ }
+ 
+ void BaseHeap::Reset() {
++  auto tracking_lock = AcquireHostPageReconcileLock();
++  if (heap_type_ == HeapType::kGuestPhysical) sr::tracking::TrackingReset(memory_);
+   // TODO(DrChat): protect pages.
+   std::memset(page_table_.data(), 0, sizeof(PageEntry) * page_table_.size());
+   // TODO(Triang3l): Remove access callbacks from pages if this is a physical
+@@ -1348,7 +1373,7 @@ bool BaseHeap::AllocFixed(uint32_t base_address, uint32_t size, uint32_t alignme
+                           ? rex::memory::AllocationType::kCommit
+                           : rex::memory::AllocationType::kReserve;
+     void* result =
+-        rex::memory::AllocFixed(TranslateRelative(start_page_number << page_size_shift_),
++        TrackedAllocFixed(memory_, TranslateRelative(start_page_number << page_size_shift_),
+                                 page_count << page_size_shift_, alloc_type, ToPageAccess(protect));
+     if (!result) {
+       REXSYS_ERROR("BaseHeap::AllocFixed failed to alloc range from host");
+@@ -1382,6 +1407,9 @@ bool BaseHeap::AllocFixed(uint32_t base_address, uint32_t size, uint32_t alignme
+                 page_count << page_size_shift_);
+   }
+ 
++  if (this == memory_->GetPhysicalHeap()) {
++    sr::tracking::TrackingAllocation(memory_, base_address, page_count << page_size_shift_);
++  }
+   return true;
+ }
+ 
+@@ -1511,7 +1539,7 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address, uint32_t
+                           ? rex::memory::AllocationType::kCommit
+                           : rex::memory::AllocationType::kReserve;
+     void* result =
+-        rex::memory::AllocFixed(TranslateRelative(start_page_number << page_size_shift_),
++        TrackedAllocFixed(memory_, TranslateRelative(start_page_number << page_size_shift_),
+                                 page_count << page_size_shift_, alloc_type, ToPageAccess(protect));
+     if (!result) {
+       REXSYS_ERROR("BaseHeap::Alloc failed to alloc range from host");
+@@ -1543,6 +1571,9 @@ bool BaseHeap::AllocRange(uint32_t low_address, uint32_t high_address, uint32_t
+   }
+ 
+   *out_address = heap_base_ + (start_page_number << page_size_shift_);
++  if (this == memory_->GetPhysicalHeap()) {
++    sr::tracking::TrackingAllocation(memory_, *out_address, page_count << page_size_shift_);
++  }
+   return true;
+ }
+ 
+@@ -1558,6 +1589,8 @@ bool BaseHeap::Decommit(uint32_t address, uint32_t size) {
+   auto global_lock = AcquireHostPageReconcileLock();
+   std::lock_guard<std::recursive_mutex> heap_lock(heap_mutex_);
+ 
++  sr::tracking::TrackingHostProtection(memory_, TranslateRelative(start_page_number << page_size_shift_),
++                                      page_count << page_size_shift_);
+   // Release from host.
+   // TODO(benvanik): find a way to actually decommit memory;
+   //     mapped memory cannot be decommitted.
+@@ -1605,6 +1638,9 @@ bool BaseHeap::Release(uint32_t base_address, uint32_t* out_region_size) {
+     *out_region_size = (base_page_entry.region_page_count << page_size_shift_);
+   }
+ 
++  if (this == memory_->GetPhysicalHeap()) {
++    sr::tracking::TrackingRelease(memory_, base_address, base_page_entry.region_page_count << page_size_shift_);
++  }
+   // Release from host not needed as mapping reserves the range for us.
+   // TODO(benvanik): protect with NOACCESS?
+   /*BOOL result = VirtualFree(
+@@ -1621,7 +1657,7 @@ bool BaseHeap::Release(uint32_t base_address, uint32_t* out_region_size) {
+     // it. It's possible this is some virtual/physical stuff where the GPU
+     // still can access it.
+     if (REXCVAR_GET(protect_on_release)) {
+-      if (!rex::memory::Protect(TranslateRelative(base_page_number << page_size_shift_),
++      if (!TrackedProtect(memory_, TranslateRelative(base_page_number << page_size_shift_),
+                                 base_page_entry.region_page_count << page_size_shift_,
+                                 rex::memory::PageAccess::kNoAccess, nullptr)) {
+         REXSYS_WARN("BaseHeap::Release failed due to host VirtualProtect failure");
+@@ -1703,7 +1739,7 @@ bool BaseHeap::Protect(uint32_t address, uint32_t size, uint32_t protect, uint32
+   if (page_size_ >= memory_->system_page_size_) {
+     const uint32_t page_count = end_page_number - start_page_number + 1;
+     memory::PageAccess old_protect_access;
+-    if (!rex::memory::Protect(TranslateRelative(start_page_number << page_size_shift_),
++    if (!TrackedProtect(memory_, TranslateRelative(start_page_number << page_size_shift_),
+                               page_count << page_size_shift_, ToPageAccess(protect),
+                               old_protect ? &old_protect_access : nullptr)) {
+       REXSYS_ERROR("BaseHeap::Protect failed due to host VirtualProtect failure");
+@@ -2159,14 +2195,14 @@ void PhysicalHeap::EnableAccessCallbacks(uint32_t physical_address, uint32_t len
+       }
+     } else {
+       if (protect_system_page_first != UINT32_MAX) {
+-        rex::memory::Protect(protect_base + protect_system_page_first * system_page_size_,
++        TrackedProtect(memory_, protect_base + protect_system_page_first * system_page_size_,
+                              (i - protect_system_page_first) * system_page_size_, protect_access);
+         protect_system_page_first = UINT32_MAX;
+       }
+     }
+   }
+   if (protect_system_page_first != UINT32_MAX) {
+-    rex::memory::Protect(protect_base + protect_system_page_first * system_page_size_,
++    TrackedProtect(memory_, protect_base + protect_system_page_first * system_page_size_,
+                          (system_page_last + 1 - protect_system_page_first) * system_page_size_,
+                          protect_access);
+   }
+@@ -2300,7 +2336,7 @@ bool PhysicalHeap::TriggerCallbacks(std::unique_lock<std::recursive_mutex> globa
+         }
+       } else {
+         if (unprotect_system_page_first != UINT32_MAX) {
+-          rex::memory::Protect(protect_base + unprotect_system_page_first * system_page_size_,
++          TrackedProtect(memory_, protect_base + unprotect_system_page_first * system_page_size_,
+                                (i - unprotect_system_page_first) * system_page_size_,
+                                rex::memory::PageAccess::kReadWrite);
+           unprotect_system_page_first = UINT32_MAX;
+@@ -2308,7 +2344,7 @@ bool PhysicalHeap::TriggerCallbacks(std::unique_lock<std::recursive_mutex> globa
+       }
+     }
+     if (unprotect_system_page_first != UINT32_MAX) {
+-      rex::memory::Protect(protect_base + unprotect_system_page_first * system_page_size_,
++      TrackedProtect(memory_, protect_base + unprotect_system_page_first * system_page_size_,
+                            (system_page_last + 1 - unprotect_system_page_first) * system_page_size_,
+                            rex::memory::PageAccess::kReadWrite);
+     }
+diff --git a/thirdparty/CMakeLists.txt b/thirdparty/CMakeLists.txt
+index f102b56..01484d9 100644
+--- a/thirdparty/CMakeLists.txt
++++ b/thirdparty/CMakeLists.txt
+@@ -126,7 +126,7 @@ target_compile_options(aes128 PRIVATE -w)
+ 
+ # libmspack - LZX decompression (only lzxd.c needed for XEX decompression)
+ # Uses cabextract version which has all needed headers in one place
+-set(MSPACK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libmspack/cabextract/mspack")
++set(MSPACK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libmspack/libmspack/mspack")
+ add_library(mspack STATIC
+     ${MSPACK_DIR}/lzxd.c
+ )

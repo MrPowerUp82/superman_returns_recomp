@@ -8,7 +8,31 @@ project(superman_returns LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+option(SR_MEMORY_TRACKING_SDK "Use the optional patched memory tracking runtime" OFF)
+if(SR_MEMORY_TRACKING_SDK)
+    if(NOT WIN32 OR NOT REXSDK_DIR)
+        message(FATAL_ERROR "Memory tracking SDK requires Windows and REXSDK_DIR")
+    endif()
+    execute_process(COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File
+        "${CMAKE_CURRENT_SOURCE_DIR}/../tools/setup_memory_tracking_sdk.ps1" -VerifyOnly -Checkout "${REXSDK_DIR}"
+        RESULT_VARIABLE SR_MEMORY_SDK_VERIFY)
+    if(NOT SR_MEMORY_SDK_VERIFY EQUAL 0)
+        message(FATAL_ERROR "Memory tracking SDK manifest verification failed")
+    endif()
+    set(SR_REXGPU_SOURCE_DIR "${REXSDK_DIR}" CACHE PATH "GPU sources matching the selected runtime" FORCE)
+    # Match ReXGlue's windows-base preset when adding its source tree here.
+    add_compile_options(-march=x86-64-v2)
+endif()
+
 include(generated/rexglue.cmake)
+
+if(SR_MEMORY_TRACKING_SDK)
+    if(NOT TARGET rex::xxhash)
+        add_library(rex::xxhash ALIAS xxhash)
+    endif()
+    enable_testing()
+    add_subdirectory(../tests/memory_tracking memory-tracking-tests)
+endif()
 
 option(SR_VULKAN_FOUNDATION "Build standalone Vulkan foundation smoke test" OFF)
 option(SR_VULKAN_GAME "Build the native Vulkan game renderer (explicit runtime selection)" OFF)
@@ -50,6 +74,12 @@ else()
 endif()
 
 rexglue_setup_target(superman_returns GPU_PLUGINS xenos)
+if(SR_MEMORY_TRACKING_SDK)
+    # Installed SDK headers flatten ImGui into include/. In the source build,
+    # public UI headers still need its original include directory. Its code
+    # remains owned by rexruntime; do not link a second ImGui instance here.
+    target_include_directories(superman_returns PRIVATE "${REXSDK_DIR}/thirdparty/imgui")
+endif()
 
 if(SR_LSFG)
     # Instantiate the project presenter explicitly: rexruntime is a DLL and

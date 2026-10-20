@@ -2,3 +2,5 @@
 docs/wasm/*.mjs -text whitespace=-blank-at-eol
 docs/wasm/*.wasm -text
 docs/wasm/shader_common.h -text whitespace=-blank-at-eol
+# SDK patches must retain LF for git apply on every checkout.
+tools/patches/** text eol=lf whitespace=-blank-at-eol

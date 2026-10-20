@@ -15,6 +15,18 @@ call "%VSROOT%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 >nul
 if errorlevel 1 exit /b 1
 set "PATH=%ROOT%.tools\clang+llvm-23.1.2-x86_64-pc-windows-msvc\bin;%VSROOT%\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin;%VSROOT%\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;%PATH%"
 set "SDK=%ROOT%.tools\rexglue-sdk\win-amd64"
+if not defined SR_MEMORY_TRACKING_SDK set "SR_MEMORY_TRACKING_SDK=OFF"
+set "SR_MEMORY_SDK_DIR="
+set "SR_MEMORY_SDK_ARGS="
+if /i "%SR_MEMORY_TRACKING_SDK%"=="ON" (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%tools\setup_memory_tracking_sdk.ps1" -VerifyOnly
+  if errorlevel 1 exit /b 1
+  set "SR_MEMORY_SDK_DIR=%ROOT%.tools/rexglue-write-tracking-source"
+  set "SR_MEMORY_SDK_ARGS=-DREXGLUE_ENABLE_TRACY=OFF -DREXGLUE_USE_VULKAN=OFF"
+) else if /i not "%SR_MEMORY_TRACKING_SDK%"=="OFF" (
+  echo SR_MEMORY_TRACKING_SDK must be ON or OFF.
+  exit /b 1
+)
 if not exist "%SDK%\bin\rexglue.exe" (
   echo ReXGlue SDK v0.10.0 not found in .tools.
   exit /b 1
@@ -43,7 +55,7 @@ rem tools\package_release.ps1 builds a separate folder with SR_EMBED_SHADERS=OFF
 rem release carries nothing translated from the game.
 if not defined SR_BUILD_DIR set "SR_BUILD_DIR=%ROOT%port\out\build\win-amd64-release"
 if not defined SR_EMBED_SHADERS set "SR_EMBED_SHADERS=ON"
-cmake -S "%ROOT%port" -B "%SR_BUILD_DIR%" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_PREFIX_PATH="%SDK%" -DSR_NATIVE=%SR_NATIVE% -DSR_LSFG=%SR_LSFG% -DSR_VULKAN_FOUNDATION=%SR_VULKAN% -DSR_VULKAN_GAME=%SR_VULKAN% -DSR_NATIVE_EMBED_SHADERS=%SR_EMBED_SHADERS% -DCMAKE_RUNTIME_OUTPUT_DIRECTORY="%SR_RUNTIME_OUTPUT_DIR%"
+cmake -S "%ROOT%port" -B "%SR_BUILD_DIR%" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_PREFIX_PATH="%SDK%" -DSR_MEMORY_TRACKING_SDK=%SR_MEMORY_TRACKING_SDK% -DREXSDK_DIR="%SR_MEMORY_SDK_DIR%" %SR_MEMORY_SDK_ARGS% -DSR_NATIVE=%SR_NATIVE% -DSR_LSFG=%SR_LSFG% -DSR_VULKAN_FOUNDATION=%SR_VULKAN% -DSR_VULKAN_GAME=%SR_VULKAN% -DSR_NATIVE_EMBED_SHADERS=%SR_EMBED_SHADERS% -DCMAKE_RUNTIME_OUTPUT_DIRECTORY="%SR_RUNTIME_OUTPUT_DIR%"
 if errorlevel 1 exit /b 1
 cmake --build "%SR_BUILD_DIR%" --parallel 4
 if errorlevel 1 exit /b 1
