@@ -44,9 +44,10 @@ struct Host {
     VkAndroidSurfaceCreateInfoKHR surface_info{VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR};surface_info.window=window.window();VkSurfaceKHR surface=VK_NULL_HANDLE;
     if(!Check(create(context.instance,&surface_info,nullptr,&surface),"Create SDK window surface",e)) return false;
     VkPhysicalDeviceFeatures features{};features.shaderSampledImageArrayDynamicIndexing=features.shaderStorageBufferArrayDynamicIndexing=features.independentBlend=features.shaderClipDistance=features.shaderCullDistance=features.robustBufferAccess=VK_TRUE;
-    if(!context.OpenDevice(surface,config.gpu_uuid,e,&features,true)) return false;
+    if(!context.OpenDevice(surface,config.gpu_uuid,e,&features,true,false,config.global_resources)) return false;
     if(!(context.selected.queues[context.graphics_family].flags&VK_QUEUE_COMPUTE_BIT)) {e={"Game queue",VK_ERROR_FEATURE_NOT_PRESENT,"Graphics queue must also support compute resolves"};return false;}
     config.shaders.compiler_workers=2;
+    config.shaders.abi=config.global_resources?shaders::ShaderAbi::kGlobal:shaders::ShaderAbi::kPortable;
     shaders=std::make_unique<shaders::VulkanShaderService>(config.shaders,AndroidShaderProcess());
     REXLOG_INFO("native Vulkan: {} precompiled shaders from {}",shaders->PrecompiledCount(),config.shaders.library.string());
     if(!shaders->LibraryDiagnostic().empty()) REXLOG_WARN("native Vulkan: pre-shader library unavailable: {}; compiling misses at runtime",shaders->LibraryDiagnostic());
@@ -55,7 +56,7 @@ struct Host {
     game=std::make_unique<GameFrame>(context,gpu_mutex,std::move(lookup),std::move(decode));
     game->compilation_progress=[] {native::HangWatchdogBeat();};
     resources=std::make_unique<ResourceStore>(context);compositor=std::make_unique<FrontbufferCompositor>(context);immediate=std::make_unique<ImmediateRenderer>(context);
-    return game->Initialize(config.driver_cache,e) && compositor->Initialize(e) && immediate->Initialize(e);
+    return game->Initialize(config.driver_cache,e,config.global_resources) && compositor->Initialize(e) && immediate->Initialize(e);
   }
   bool Prepare(VkCommandBuffer command,uint64_t serial,Error& e) {
     if(!resources->BeginSubmission(command,serial,e)) return false;

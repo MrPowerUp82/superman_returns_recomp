@@ -4,11 +4,12 @@
 #include <fstream>
 #include <thread>
 #include <atomic>
+#include <algorithm>
 using namespace superman_returns::graphics::shaders;
 namespace {
 void Word(std::vector<uint8_t>& v,uint32_t n) {auto p=reinterpret_cast<uint8_t*>(&n);v.insert(v.end(),p,p+4);}
-std::vector<uint8_t> Wire() {
-  std::vector<uint8_t> v;for(uint32_t n:{0x33525653u,1u,1u,0u}) Word(v,n);
+std::vector<uint8_t> Wire(uint32_t abi=1) {
+  std::vector<uint8_t> v;for(uint32_t n:{0x33525653u,abi,1u,0u}) Word(v,n);
   for(uint32_t i=0;i<12;++i) Word(v,0); // requirements
   Word(v,0);Word(v,0);Word(v,20);
   for(uint32_t n:{0x07230203u,0x10300u,0u,1u,0u}) Word(v,n);
@@ -29,6 +30,42 @@ SR_TEST(shader_pair_rejects_mismatched_locations_and_types) {
   SR_CHECK(ValidateShaderPair(vs,ps).empty());
   ps.inputs[0].location=4;SR_CHECK(!ValidateShaderPair(vs,ps).empty());
   ps.inputs[0]={3,"uint32x4"};SR_CHECK(!ValidateShaderPair(vs,ps).empty());
+}
+SR_TEST(shader_service_rejects_results_from_a_different_abi) {
+  CompiledShader shader;std::string error;auto portable=Wire(),global=Wire(2);
+  SR_CHECK(!DecodeShaderResult(global,ShaderStage::kVertex,shader,error));
+  SR_CHECK(!DecodeShaderResult(portable,ShaderStage::kVertex,shader,error,ShaderAbi::kGlobal));
+  SR_CHECK(DecodeShaderResult(global,ShaderStage::kVertex,shader,error,ShaderAbi::kGlobal));
+  SR_CHECK(shader.abi==ShaderAbi::kGlobal);
+  SR_CHECK(DecodeShaderResult(portable,ShaderStage::kVertex,shader,error));
+  SR_CHECK(shader.abi==ShaderAbi::kPortable);
+}
+SR_TEST(shader_service_isolates_global_requests_and_forwards_profile) {
+  VulkanShaderConfig portable;portable.cache=std::filesystem::temp_directory_path()/std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+  VulkanShaderConfig global=portable;global.abi=ShaderAbi::kGlobal;
+  std::filesystem::path portable_raw,global_raw;
+  auto runner=[&](ShaderAbi abi,std::filesystem::path& captured) -> ShaderProcess {
+    return [&,abi](auto args,auto,std::stop_token,std::string&) {
+      captured=args[4];
+      SR_CHECK(args[1]=="-B");SR_CHECK(args[3]=="--container");
+      SR_CHECK(args[args.size()-2]=="--result");
+      auto flag=std::find(args.begin(),args.end(),std::filesystem::path("--profile"));
+      if(abi==ShaderAbi::kGlobal) {SR_CHECK(flag!=args.end());SR_CHECK(*(flag+1)=="global");}
+      auto bytes=Wire(uint32_t(abi));std::ofstream result(args.back(),std::ios::binary);result.write(reinterpret_cast<const char*>(bytes.data()),bytes.size());return true;
+    };
+  };
+  {
+    VulkanShaderService portable_service(portable,runner(ShaderAbi::kPortable,portable_raw));
+    VulkanShaderService global_service(global,runner(ShaderAbi::kGlobal,global_raw));
+    uint8_t source=3;auto first=portable_service.Request({&source,1},ShaderStage::kVertex),second=global_service.Request({&source,1},ShaderStage::kVertex);
+    auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+    while((portable_service.Poll(first).status==ShaderPoll::pending || global_service.Poll(second).status==ShaderPoll::pending) && std::chrono::steady_clock::now()<deadline) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    auto a=portable_service.Poll(first),b=global_service.Poll(second);
+    SR_CHECK(a.status==ShaderPoll::ready);SR_CHECK(b.status==ShaderPoll::ready);
+    SR_CHECK(a.artifact->abi==ShaderAbi::kPortable);SR_CHECK(b.artifact->abi==ShaderAbi::kGlobal);
+    SR_CHECK(portable_raw!=global_raw);SR_CHECK(portable_raw.parent_path().parent_path().filename()=="runtime_requests");
+  }
+  std::filesystem::remove_all(portable.cache);
 }
 SR_TEST(shader_service_owns_source_deduplicates_and_reports_process_failure) {
   VulkanShaderConfig config;config.cache=std::filesystem::temp_directory_path()/std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
@@ -99,8 +136,8 @@ SR_TEST(shader_service_cancels_all_inflight_workers_on_shutdown) {
   std::filesystem::remove_all(config.cache);
 }
 namespace {
-std::vector<uint8_t> Library(std::vector<uint8_t> body,uint32_t count=1) {
-  std::vector<uint8_t> bytes{'S','R','V','K','L','I','B',0};Word(bytes,1);Word(bytes,count);
+std::vector<uint8_t> Library(std::vector<uint8_t> body,uint32_t count=1,uint32_t abi=1) {
+  std::vector<uint8_t> bytes{'S','R','V','K','L','I','B',0};Word(bytes,abi);Word(bytes,count);
   uint64_t checksum=14695981039346656037ull;for(auto b:body) {checksum^=b;checksum*=1099511628211ull;}
   Word(bytes,uint32_t(checksum));Word(bytes,uint32_t(checksum>>32));bytes.insert(bytes.end(),body.begin(),body.end());return bytes;
 }
@@ -129,6 +166,20 @@ SR_TEST(shader_library_returns_ready_without_a_compiler_and_misses_use_runtime) 
     auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
     while(service.Poll(miss).status==ShaderPoll::pending && std::chrono::steady_clock::now()<deadline) std::this_thread::sleep_for(std::chrono::milliseconds(1));
     SR_CHECK(service.Poll(miss).status==ShaderPoll::ready);SR_CHECK_EQ(calls.load(),1u);
+  }
+  std::filesystem::remove_all(directory);
+}
+SR_TEST(shader_library_requires_matching_library_and_shader_abi) {
+  auto directory=std::filesystem::temp_directory_path()/std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());std::filesystem::create_directory(directory);
+  VulkanShaderConfig config;config.cache=directory;config.library=directory/"global.srvk";config.abi=ShaderAbi::kGlobal;
+  std::vector<uint8_t> original(24,7);
+  for(auto library_abi:{1u,2u}) for(auto shader_abi:{1u,2u}) {
+    WriteLibrary(config.library,Library(LibraryBody(ShaderStage::kVertex,original,Wire(shader_abi)),1,library_abi));
+    VulkanShaderService service(config,{});
+    const bool matches=library_abi==2 && shader_abi==2;
+    SR_CHECK_EQ(service.PrecompiledCount(),matches?1u:0u);
+    if(matches) {auto result=service.Poll(service.Request(original,ShaderStage::kVertex));SR_CHECK(result.artifact->abi==ShaderAbi::kGlobal);}
+    else SR_CHECK(!service.LibraryDiagnostic().empty());
   }
   std::filesystem::remove_all(directory);
 }

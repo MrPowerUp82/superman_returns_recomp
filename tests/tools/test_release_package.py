@@ -18,6 +18,7 @@ REQUIRED = (
     "shader_tools/vulkan/runtime_vulkan_shader.py", "shader_tools/vulkan/compile_vulkan.py",
     "shader_tools/vulkan/spirv_metadata.py", "shader_tools/vulkan/validate_vulkan_corpus.py",
     "shader_tools/vulkan/vulkan_contract.py", "shader_tools/python/python.exe",
+    "shader_tools/vulkan/vulkan_global_contract.py",
     "run.cmd", "run_keyboard.cmd", "LEIAME.txt", "THIRD_PARTY_NOTICES.txt", "version.json",
 )
 
@@ -44,6 +45,7 @@ def test_complete_package_is_accepted(tmp_path):
 @pytest.mark.parametrize("missing", [
     "SupermanReturnsLauncher.exe", "licenses/DOTNET-ThirdPartyNotices.txt",
     "shader_tools/vulkan/sr_xenosrecomp.exe", "shader_tools/python/python.exe",
+    "shader_tools/vulkan/vulkan_global_contract.py",
 ])
 def test_incomplete_package_is_rejected(tmp_path, missing):
     result = verify(tmp_path, missing=missing)
@@ -59,7 +61,7 @@ def test_empty_launcher_is_rejected(tmp_path):
 
 @pytest.mark.parametrize("extra", [
     "superman_returns_shaders.srsl", "superman_returns_shaders.pak",
-    "superman_returns_vulkan.srvk", "game/default.xex",
+    "superman_returns_vulkan.srvk", "superman_returns_vulkan_global.srvk", "game/default.xex",
 ])
 def test_local_game_data_is_rejected(tmp_path, extra):
     result = verify(tmp_path, extra=extra)

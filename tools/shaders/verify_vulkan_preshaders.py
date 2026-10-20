@@ -4,14 +4,15 @@ import struct
 from pathlib import Path
 from make_preshaders import fnv1a64, parse_header
 from make_vulkan_preshaders import MAGIC
-from runtime_vulkan_shader import ready
+from runtime_vulkan_shader import ready, profile_abi
 
 
-def verify(data):
+def verify(data, profile='portable'):
+    abi = profile_abi(profile)
     if len(data) < 24 or len(data) > 256 * 1024 * 1024 or data[:8] != MAGIC:
         raise ValueError('Invalid library size/magic')
     version, count, checksum = struct.unpack_from('<IIQ', data, 8)
-    if version != 1 or not 0 < count <= 16384 or fnv1a64(data[24:]) != checksum:
+    if version != abi or not 0 < count <= 16384 or fnv1a64(data[24:]) != checksum:
         raise ValueError('Invalid library version/count/checksum')
     position, seen = 24, set()
     for _ in range(count):
@@ -30,7 +31,7 @@ def verify(data):
         seen.add((stage, container))
         # Read the result's location tables to reach SPIR-V, then regenerate
         # the entire wire message from independent Python ABI reflection.
-        if len(result) < 72 or struct.unpack_from('<4I', result) != (0x33525653, 1, 1, stage):
+        if len(result) < 72 or struct.unpack_from('<4I', result) != (0x33525653, abi, 1, stage):
             raise ValueError('Invalid shader result')
         at = 64
         for _ in range(2):
@@ -51,7 +52,7 @@ def verify(data):
             raise ValueError('Missing SPIR-V size')
         size, = struct.unpack_from('<I', result, at)
         binary = result[at + 4:]
-        if size != len(binary) or ready('vs' if stage == 0 else 'ps', binary) != result:
+        if size != len(binary) or ready('vs' if stage == 0 else 'ps', binary, profile) != result:
             raise ValueError('SPIR-V metadata differs from production reflection')
     if position != len(data):
         raise ValueError('Trailing library bytes')
@@ -61,5 +62,6 @@ def verify(data):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('library', type=Path)
+    parser.add_argument('--profile', choices=('portable', 'global'), default='portable')
     args = parser.parse_args()
-    print(f'{verify(args.library.read_bytes())} pre-shaders verified: {args.library}')
+    print(f'{verify(args.library.read_bytes(), args.profile)} pre-shaders verified: {args.library}')

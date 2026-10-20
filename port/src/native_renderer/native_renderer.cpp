@@ -21,6 +21,7 @@
 #include "../graphics/guest/render_state.h"
 #include "../graphics/guest/edram_alias.h"
 #include "../graphics/guest/render_packet.h"
+#include "../graphics/guest/parallel_replay.h"
 #include "../graphics/guest/primitive_expansion.h"
 #include "../graphics/guest/pm4_capture.h"
 #include "../graphics/frame_timeline.h"
@@ -6458,7 +6459,15 @@ void Renderer::EndCmd(uint8_t* base) {
     batch_->Clear();
     return;
   }
-  if (batch_->cmds.size() >= 32 || batch_->bytes.size() >= (4u << 20)) {
+  // Coarse batches amortize replay-worker dispatch. Keep byte-pressure and
+  // explicit swap flushes unchanged; the original 32-command path is default.
+  static const size_t vulkan_batch_limit=[] {
+    const char* flag=std::getenv("SR_NATIVE_BATCH_COMMANDS");
+    if(flag && !std::strcmp(flag,"128"))return size_t(128);
+    if(flag && !std::strcmp(flag,"256"))return size_t(256);
+    return size_t(32);
+  }();
+  if (batch_->cmds.size() >= (packet_sink_?vulkan_batch_limit:32) || batch_->bytes.size() >= (4u << 20)) {
     FlushBatch();
   }
 }
@@ -6680,6 +6689,7 @@ namespace {
 struct SinkProfile {
   graphics::guest::ReplayProbe replay;
   uint64_t arena_setup_us=0;
+  uint64_t parallel_batches=0,parallel_decode_cpu_ns=0,parallel_arena_cpu_ns=0,parallel_prepare_ns=0;
   uint64_t swaps=0,packets=0,replay_us=0,sink_us=0,swap_us=0,idle_us=0;
   uint64_t draws=0,vs_same=0,ps_same=0,last_vs=~0ull,last_ps=~0ull;
 };
@@ -6693,6 +6703,18 @@ uint64_t ElapsedUs(std::chrono::steady_clock::time_point since) {return uint64_t
 
 void Renderer::WorkerMain() {
   compat::RegisterSampledThread(4, "sr_native_worker");
+  // Experimental A/B switch: retain only retired CPU packet backing memory.
+  // Aliases own the pool, so recorder teardown may safely finish after us.
+  const char* pool_flag=std::getenv("SR_NATIVE_REPLAY_POOL");
+  auto payload_pool=pool_flag && *pool_flag && *pool_flag!='0'
+      ?std::make_shared<graphics::guest::DrawPacketPool>():nullptr;
+  REXLOG_INFO("native renderer: replay packet pool {}",payload_pool?"enabled (idle limit 128 MiB / 128 blocks)":"disabled");
+  const char* threads_flag=std::getenv("SR_NATIVE_REPLAY_THREADS");
+  const unsigned replay_threads=threads_flag && !std::strcmp(threads_flag,"4")?4:
+      (threads_flag && !std::strcmp(threads_flag,"2")?2:1);
+  std::unique_ptr<graphics::guest::ParallelReplayDecoder> parallel;
+  if(packet_sink_ && replay_threads>1)parallel=std::make_unique<graphics::guest::ParallelReplayDecoder>(replay_threads);
+  REXLOG_INFO("native renderer: replay decode threads {} (ordered batches)",parallel?replay_threads:1);
   auto& timeline = graphics::FrameTimeline::Global();
   for (;;) {
     std::shared_ptr<const WorkBatch> batch;
@@ -6713,16 +6735,30 @@ void Renderer::WorkerMain() {
         return cmd.op==Op::kDraw || cmd.op==Op::kDrawIndexed || cmd.op==Op::kDrawInline;
       });
       std::optional<graphics::guest::DrawPacketArena> payloads;
-      if(packet_sink_ && draw_count) {
+      if(packet_sink_ && draw_count && !parallel) {
         const bool profile=SinkProfiling();
         const auto started=profile?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
-        payloads.emplace(size_t(draw_count),ReplayStorageEnabled());
+        payloads.emplace(size_t(draw_count),ReplayStorageEnabled(),payload_pool);
         if(profile) g_sink_profile.arena_setup_us+=ElapsedUs(started);
       }
+      std::vector<graphics::guest::ReplayResult> decoded;
+      if(parallel && !worker_stop_ && !packet_sink_failed_) {
+        graphics::guest::ReplayBatchProbe probe;
+        decoded=parallel->Decode(batch,mirror_,SinkProfiling()?&probe:nullptr,ReplayStorageEnabled(),payload_pool);
+        if(SinkProfiling()) {
+          auto& p=g_sink_profile;p.replay_us+=probe.wall_ns/1000;++p.parallel_batches;
+          p.replay.capture_ns+=probe.stages.capture_ns;p.replay.pm4_ns+=probe.stages.pm4_ns;
+          p.parallel_decode_cpu_ns+=probe.stages.decode_ns;p.parallel_arena_cpu_ns+=probe.arena_ns;
+          p.parallel_prepare_ns+=probe.prepare_ns;
+        }
+      }
+      size_t command_index=0;
       for (const WorkCmd& cmd : batch->cmds) {
+        if(parallel && command_index>=decoded.size())break;
         const auto started=CpuProfiling()?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
         const bool draw=cmd.op==Op::kDraw || cmd.op==Op::kDrawIndexed || cmd.op==Op::kDrawInline;
-        Execute(guest_base_, *batch, cmd,payloads && draw?payloads->Next():graphics::guest::DrawPacketOwner{},packet_sink_?batch:nullptr);
+        Execute(guest_base_, *batch, cmd,payloads && draw?payloads->Next():graphics::guest::DrawPacketOwner{},packet_sink_?batch:nullptr,parallel?&decoded[command_index]:nullptr);
+        ++command_index;
         if(CpuProfiling()) {
           auto& p=cpu_timings;
           p.execute_ns+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-started).count());
@@ -6763,18 +6799,21 @@ void Renderer::WorkerMain() {
   }
 }
 
-void Renderer::Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd,graphics::guest::DrawPacketOwner storage,std::shared_ptr<const WorkBatch> capture_owner) {
+void Renderer::Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd,graphics::guest::DrawPacketOwner storage,std::shared_ptr<const WorkBatch> capture_owner,graphics::guest::ReplayResult* prepared) {
   if(packet_sink_) {
     if(worker_stop_ || packet_sink_failed_) return;
     graphics::guest::RenderPacket packet;std::string error;
     const bool profile=SinkProfiling();const auto started=profile?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
-    bool ok=graphics::guest::ReplayCapturedRenderPacket(batch,cmd,mirror_,packet,error,std::move(storage),std::move(capture_owner),profile?&g_sink_profile.replay:nullptr);
+    bool ok;
+    if(prepared) {ok=prepared->ok;packet=std::move(prepared->packet);error=std::move(prepared->error);}
+    else ok=graphics::guest::ReplayCapturedRenderPacket(batch,cmd,mirror_,packet,error,std::move(storage),std::move(capture_owner),profile?&g_sink_profile.replay:nullptr);
     const bool swap=std::holds_alternative<graphics::guest::SwapPacket>(packet);
     const auto replayed=profile?std::chrono::steady_clock::now():started;
     if(profile && ok && graphics::guest::GetDraw(packet)) {
       auto& p=g_sink_profile;
-      ++p.draws;p.vs_same+=p.last_vs==mirror_.vs_version;p.ps_same+=p.last_ps==mirror_.ps_version;
-      p.last_vs=mirror_.vs_version;p.last_ps=mirror_.ps_version;
+      const auto vs=prepared?prepared->vs_version:mirror_.vs_version,ps=prepared?prepared->ps_version:mirror_.ps_version;
+      ++p.draws;p.vs_same+=p.last_vs==vs;p.ps_same+=p.last_ps==ps;
+      p.last_vs=vs;p.last_ps=ps;
     }
     if(ok) {
       // The swap hand-off waits for the previous frame's recording; count it as blocked, not busy.
@@ -6782,12 +6821,13 @@ void Renderer::Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd
       else ok=packet_sink_(std::move(packet),error);
     }
     if(profile) {
-      auto& p=g_sink_profile;++p.packets;p.replay_us+=uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(replayed-started).count());
+      auto& p=g_sink_profile;++p.packets;if(!prepared)p.replay_us+=uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(replayed-started).count());
       (swap?p.swap_us:p.sink_us)+=ElapsedUs(replayed);
       if(swap && ++p.swaps==120) {
         REXLOG_INFO("Vulkan worker profile (ms/frame over 120): replay={:.1f} sink={:.1f} swap_enqueue={:.1f} idle={:.1f} packets={}",p.replay_us/120000.0,p.sink_us/120000.0,p.swap_us/120000.0,p.idle_us/120000.0,p.packets/120);
         REXLOG_INFO("Vulkan constant banks (per frame over 120): draws={} unchanged_vs={} unchanged_ps={}",p.draws/120,p.vs_same/120,p.ps_same/120);
         REXLOG_INFO("Vulkan replay detail (ms/frame over 120): capture={:.2f} pm4={:.2f} decode={:.2f} arena_setup={:.2f}",p.replay.capture_ns/120000000.0,p.replay.pm4_ns/120000000.0,p.replay.decode_ns/120000000.0,p.arena_setup_us/120000.0);
+        if(p.parallel_batches)REXLOG_INFO("Vulkan parallel replay (over 120): batches/frame={} prepare_serial_ms={:.2f} decode_cpu_sum_ms={:.2f} arena_cpu_sum_ms={:.2f} (wall time included in replay)",p.parallel_batches/120,p.parallel_prepare_ns/120000000.0,p.parallel_decode_cpu_ns/120000000.0,p.parallel_arena_cpu_ns/120000000.0);
         p={};
       }
     }

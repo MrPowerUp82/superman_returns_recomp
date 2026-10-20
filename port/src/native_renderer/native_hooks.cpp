@@ -39,6 +39,7 @@
 #include "checked_guest_memory.h"
 #include "idle_yield.h"
 #include "xdk_constant_copy.h"
+#include "guest_cpu_profile.h"
 #include "resource_unlock_audit.h"
 
 namespace {
@@ -313,6 +314,8 @@ void superman_returns::native::ObserveTextureValidationForUnlockAudit(const uint
 #define SR_DEFINE_HOOK(addr) SR_DEFINE_HOOK_(addr)
 #define SR_ORIGINAL_(addr) __imp__sub_##addr
 #define SR_ORIGINAL(addr) SR_ORIGINAL_(addr)
+#define SR_ADDRESS_(addr) 0x##addr
+#define SR_ADDRESS(addr) SR_ADDRESS_(addr)
 
 namespace {
 bool NativeBulkConstantsEnabled() {
@@ -393,7 +396,7 @@ SR_DEFINE_HOOK(SR_ADDR_FRAME_HANDOFF) {
 SR_DEFINE_HOOK(SR_ADDR_DRAW_VERTICES) {
   const uint32_t dev = ctx.r3.u32, prim = ctx.r4.u32, start = ctx.r5.u32, count = ctx.r6.u32;
   OnDeviceCall("DrawVertices", dev, prim);
-  SR_ORIGINAL(SR_ADDR_DRAW_VERTICES)(ctx, base);
+  native::ProfileGuestGraphicsOriginal(SR_ADDRESS(SR_ADDR_DRAW_VERTICES),SR_ORIGINAL(SR_ADDR_DRAW_VERTICES),ctx,base);
   if (native::Enabled()) native::Renderer::Get().DrawVertices(base, prim, start, count);
 }
 #endif
@@ -404,7 +407,7 @@ SR_DEFINE_HOOK(SR_ADDR_DRAW_INDEXED_VERTICES) {
   const uint32_t dev = ctx.r3.u32, prim = ctx.r4.u32, base_vertex = ctx.r5.u32,
                  start = ctx.r6.u32, count = ctx.r7.u32;
   OnDeviceCall("DrawIndexedVertices", dev, prim);
-  SR_ORIGINAL(SR_ADDR_DRAW_INDEXED_VERTICES)(ctx, base);
+  native::ProfileGuestGraphicsOriginal(SR_ADDRESS(SR_ADDR_DRAW_INDEXED_VERTICES),SR_ORIGINAL(SR_ADDR_DRAW_INDEXED_VERTICES),ctx,base);
   if (native::Enabled()) {
     native::Renderer::Get().DrawIndexedVertices(base, prim, int32_t(base_vertex), start, count);
   }
@@ -418,7 +421,7 @@ SR_DEFINE_HOOK(SR_ADDR_DRAW_VERTICES_UP) {
                  stride = ctx.r7.u32;
   OnDeviceCall("DrawVerticesUP", dev, prim);
   t_in_draw_up = true;
-  SR_ORIGINAL(SR_ADDR_DRAW_VERTICES_UP)(ctx, base);
+  native::ProfileGuestGraphicsOriginal(SR_ADDRESS(SR_ADDR_DRAW_VERTICES_UP),SR_ORIGINAL(SR_ADDR_DRAW_VERTICES_UP),ctx,base);
   t_in_draw_up = false;
   if (native::Enabled()) native::Renderer::Get().DrawInlineVertices(base, prim, data, count, stride);
 }
@@ -430,7 +433,7 @@ SR_DEFINE_HOOK(SR_ADDR_DRAW_VERTICES_UP) {
 SR_DEFINE_HOOK(SR_ADDR_BEGIN_VERTICES) {
   const uint32_t dev = ctx.r3.u32, prim = ctx.r4.u32, count = ctx.r5.u32, stride = ctx.r6.u32;
   if (!t_in_draw_up) OnDeviceCall("BeginVertices", dev, prim);
-  SR_ORIGINAL(SR_ADDR_BEGIN_VERTICES)(ctx, base);
+  native::ProfileGuestGraphicsOriginal(SR_ADDRESS(SR_ADDR_BEGIN_VERTICES),SR_ORIGINAL(SR_ADDR_BEGIN_VERTICES),ctx,base);
   if (native::Enabled() && !t_in_draw_up) {
     g_pending_inline = {true, prim, count, stride, ctx.r3.u32};
   }
@@ -446,7 +449,7 @@ SR_DEFINE_HOOK(SR_ADDR_END_VERTICES) {
     native::Renderer::Get().DrawInlineVertices(base, g_pending_inline.prim, g_pending_inline.data,
                                                g_pending_inline.count, g_pending_inline.stride);
   }
-  SR_ORIGINAL(SR_ADDR_END_VERTICES)(ctx, base);
+  native::ProfileGuestGraphicsOriginal(SR_ADDRESS(SR_ADDR_END_VERTICES),SR_ORIGINAL(SR_ADDR_END_VERTICES),ctx,base);
 }
 #endif
 
@@ -466,7 +469,7 @@ SR_DEFINE_HOOK(SR_ADDR_RESOLVE) {
   OnDeviceCall("Resolve", dev, flags);
   // Original first: the resolve's RB_COPY_* registers land in the command
   // stream the PM4 mirror parses.
-  SR_ORIGINAL(SR_ADDR_RESOLVE)(ctx, base);
+  native::ProfileGuestGraphicsOriginal(SR_ADDRESS(SR_ADDR_RESOLVE),SR_ORIGINAL(SR_ADDR_RESOLVE),ctx,base);
   if (native::Enabled()) {
     native::Renderer::Get().Resolve(base, flags, rect, dest, point, clear_color, clear_z, clear_stencil,level,slice);
   }
@@ -481,7 +484,7 @@ SR_DEFINE_HOOK(SR_ADDR_BEGIN_TILING) {
     native::Renderer::Get().BeginTiling(base, ctx.r5.u32, ctx.r6.u32, ctx.r7.u32,
                                         float(ctx.f1.f64), ctx.r8.u32);
   }
-  SR_ORIGINAL(SR_ADDR_BEGIN_TILING)(ctx, base);
+  native::ProfileGuestGraphicsOriginal(SR_ADDRESS(SR_ADDR_BEGIN_TILING),SR_ORIGINAL(SR_ADDR_BEGIN_TILING),ctx,base);
 }
 #endif
 
@@ -489,7 +492,7 @@ SR_DEFINE_HOOK(SR_ADDR_BEGIN_TILING) {
 // D3DDevice_EndTiling: its per-tile resolves go through the Resolve hook.
 SR_DEFINE_HOOK(SR_ADDR_END_TILING) {
   OnDeviceCall("EndTiling", ctx.r3.u32, 0);
-  SR_ORIGINAL(SR_ADDR_END_TILING)(ctx, base);
+  native::ProfileGuestGraphicsOriginal(SR_ADDRESS(SR_ADDR_END_TILING),SR_ORIGINAL(SR_ADDR_END_TILING),ctx,base);
   if (native::Enabled()) native::Renderer::Get().EndTiling();
 }
 #endif
@@ -509,7 +512,7 @@ SR_DEFINE_HOOK(SR_ADDR_CLEAR) {
   }
   const float z = float(ctx.f1.f64);
   OnDeviceCall("Clear", dev, flags);
-  SR_ORIGINAL(SR_ADDR_CLEAR)(ctx, base);
+  native::ProfileGuestGraphicsOriginal(SR_ADDRESS(SR_ADDR_CLEAR),SR_ORIGINAL(SR_ADDR_CLEAR),ctx,base);
   if (native::Enabled()) {
     native::Renderer::Get().Clear(base, rect ? 1u : 0u, rect, flags, color, z, stencil);
   }

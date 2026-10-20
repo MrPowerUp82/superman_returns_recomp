@@ -491,7 +491,15 @@ void CheckHoldLifetime(Context& c) {
   };
   auto current=[&]() {return std::weak_ptr<TextureResource>(*resources.FindTexture(id));};
   auto expect=[](bool ok,const char* what) {if(!ok) throw std::runtime_error(what);};
-  auto retire=[&](uint64_t serial) {descriptors.Retire(serial);resources.Retire(serial);};
+  auto retire=[&](uint64_t serial) {
+    // This fixture never submits. Discard recorded references before releasing
+    // their resources, then start an empty command buffer for the next serial.
+    Require(c.f.vkResetCommandPool(c.device,fixture.pool,0),"Discard simulated submission");
+    descriptors.Retire(serial);resources.Retire(serial);
+    VkCommandBufferBeginInfo next{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    next.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    Require(c.f.vkBeginCommandBuffer(fixture.command,&next),"Begin simulated submission");
+  };
   // Submission 1 only uploads v1 and retires: from now on v1 is held by the store alone.
   begin(1);upload(1,10);retire(1);
   // Submission 2, cache miss: the draw binds v1, then v1 is replaced by v2 before the fence.

@@ -12,14 +12,28 @@ def word(n):return struct.pack('<I',int(n))
 def text(s):
     b=s.encode('utf-8')[:16384]
     return word(len(b))+b
-def failure(stage,diagnostic):
-    return struct.pack('<4I',0x33525653,1,0,0 if stage=='vs' else 1)+text(diagnostic)
-def ready(stage,binary):
-    m=inspect_spirv(binary);errors=contract_errors(m)
+def profile_abi(profile):
+    if profile not in ('portable','global'):raise ValueError('Unknown Vulkan compiler profile: '+str(profile))
+    return 2 if profile=='global' else 1
+
+def failure(stage,diagnostic,profile='portable'):
+    return struct.pack('<4I',0x33525653,profile_abi(profile),0,0 if stage=='vs' else 1)+text(diagnostic)
+def ready(stage,binary,profile='portable'):
+    abi=profile_abi(profile)
+    validate=contract_errors
+    if profile=='global':
+        from vulkan_global_contract import contract_errors as validate
+    m=inspect_spirv(binary);errors=validate(m)
     if len(m['entrypoints'])!=1 or m['entrypoints'][0]['model']!=(0 if stage=='vs' else 4):errors.append('Shader entry point/stage mismatch')
     if errors:raise ValueError('; '.join(errors))
     q=requirements(m,stage)
-    result=struct.pack('<4I',0x33525653,1,1,0 if stage=='vs' else 1)
+    if profile=='global':
+        # Runtime arrays encode no allocation size. ABI2 consumers validate
+        # heap capacities; reflected interface fields retain stage limits.
+        for kind in FIELDS[:4]:q[kind]=0
+        q['storage_buffer_dynamic_indexing']=True
+        q['sampled_image_dynamic_indexing']=False
+    result=struct.pack('<4I',0x33525653,abi,1,0 if stage=='vs' else 1)
     result+=b''.join(word(q[k]) for k in FIELDS)
     for category in ('inputs','outputs'):
         rows=[r for r in m[category] if 'location' in r]
@@ -30,11 +44,12 @@ def ready(stage,binary):
 def main():
     p=argparse.ArgumentParser()
     for name in ('container','cache','emitter','common','dxc','result'):p.add_argument('--'+name,type=Path,required=True)
-    p.add_argument('--stage',choices=('vs','ps'),required=True);a=p.parse_args()
+    p.add_argument('--stage',choices=('vs','ps'),required=True)
+    p.add_argument('--profile',choices=('portable','global'),default='portable');a=p.parse_args()
     try:
-        compiled=compile_shader(a.container,a.stage,a.cache,Toolchain(a.emitter,a.common,a.dxc))
-        data=ready(a.stage,compiled.binary_path.read_bytes()) if compiled.status=='ready' else failure(a.stage,compiled.diagnostic)
-    except (OSError,ValueError,TypeError) as e:data=failure(a.stage,str(e))
+        compiled=compile_shader(a.container,a.stage,a.cache,Toolchain(a.emitter,a.common,a.dxc),profile=a.profile)
+        data=ready(a.stage,compiled.binary_path.read_bytes(),a.profile) if compiled.status=='ready' else failure(a.stage,compiled.diagnostic,a.profile)
+    except (OSError,ValueError,TypeError) as e:data=failure(a.stage,str(e),a.profile)
     a.result.parent.mkdir(parents=True,exist_ok=True);temporary=a.result.with_suffix('.pending')
     temporary.write_bytes(data);os.replace(temporary,a.result)
     return 0

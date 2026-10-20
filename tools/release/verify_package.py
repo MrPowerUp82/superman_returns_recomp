@@ -14,11 +14,12 @@ REQUIRED = {
     "shader_tools/vulkan/runtime_vulkan_shader.py", "shader_tools/vulkan/compile_vulkan.py",
     "shader_tools/vulkan/spirv_metadata.py", "shader_tools/vulkan/validate_vulkan_corpus.py",
     "shader_tools/vulkan/vulkan_contract.py", "shader_tools/python/python.exe",
+    "shader_tools/vulkan/vulkan_global_contract.py",
     "run.cmd", "run_keyboard.cmd", "LEIAME.txt", "THIRD_PARTY_NOTICES.txt", "version.json",
 }
 LOCAL_LIBRARIES = {
     "superman_returns_shaders.srsl", "superman_returns_shaders.pak",
-    "superman_returns_vulkan.srvk",
+    "superman_returns_vulkan.srvk", "superman_returns_vulkan_global.srvk",
 }
 
 

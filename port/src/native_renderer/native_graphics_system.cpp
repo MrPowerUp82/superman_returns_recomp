@@ -21,6 +21,7 @@
 #include <fmt/format.h>
 #include <chrono>
 #include <cstring>
+#include <cstdlib>
 
 #include <rex/chrono/clock.h>
 #include <rex/cvar.h>
@@ -211,7 +212,10 @@ rex::X_STATUS D3D12NativeGraphicsSystem::SetupPresentation(rex::ui::WindowedAppC
     config.driver_cache=root/"build/vulkan-m3-runtime/driver.cache";
   }
   REXLOG_INFO("native Vulkan: shader tools from {} ({})",packaged?tools.string():std::string("source tree"),python.string());
-  config.shaders.library=exe_dir/"superman_returns_vulkan.srvk";
+  const char* global_resources=std::getenv("SR_VULKAN_GLOBAL_RESOURCES");
+  config.global_resources=global_resources && global_resources[0] && global_resources[0]!='0';
+  config.shaders.abi=config.global_resources?graphics::shaders::ShaderAbi::kGlobal:graphics::shaders::ShaderAbi::kPortable;
+  config.shaders.library=exe_dir/(config.global_resources?"superman_returns_vulkan_global.srvk":"superman_returns_vulkan.srvk");
   config.gpu_uuid=rex::cvar::Query<std::string>("sr_native_vulkan_gpu_uuid");
   config.frame_generation.enabled=rex::cvar::Query<bool>("sr_lsfg");
   config.frame_generation.dll=std::filesystem::u8path(rex::cvar::Query<std::string>("sr_lsfg_dll"));

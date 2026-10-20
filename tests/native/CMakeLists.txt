@@ -4,12 +4,14 @@
 #   ctest --test-dir build/tests-native --output-on-failure
 cmake_minimum_required(VERSION 3.20)
 project(sr_native_tests CXX)
+find_package(Threads REQUIRED)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(SR_NATIVE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../port/src/native_renderer")
 add_executable(sr_native_tests
     main.cpp
+    test_benchmark_input.cpp
     test_backend_selection.cpp
     test_checked_guest_memory.cpp
     test_idle_yield.cpp
@@ -27,6 +29,8 @@ add_executable(sr_native_tests
     test_shader_requirements.cpp
     test_guest_state.cpp
     test_render_packets.cpp
+    test_parallel_replay.cpp
+    "${SR_NATIVE_DIR}/../graphics/guest/parallel_replay.cpp"
     test_render_state.cpp
     test_vertex_layout.cpp
     test_primitive_expansion.cpp
@@ -49,6 +53,7 @@ add_executable(sr_native_tests
     "${SR_NATIVE_DIR}/pm4_mirror.cpp"
 )
 target_include_directories(sr_native_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${SR_NATIVE_DIR}")
+target_link_libraries(sr_native_tests PRIVATE Threads::Threads)
 if(WIN32)
     target_sources(sr_native_tests PRIVATE test_replay_storage_writes.cpp)
 endif()
@@ -85,6 +90,7 @@ add_test(NAME sr_capture_budget COMMAND sr_capture_budget)
 
 # Manual Release performance diagnostic; timing budgets do not belong in CTest.
 add_executable(sr_replay_storage_bench replay_storage_benchmark.cpp
+    "${SR_NATIVE_DIR}/../graphics/guest/parallel_replay.cpp"
     "${SR_NATIVE_DIR}/../graphics/guest/pm4_capture.cpp"
     "${SR_NATIVE_DIR}/../graphics/guest/render_packet.cpp"
     "${SR_NATIVE_DIR}/../graphics/guest/captured_batch.cpp"
@@ -93,6 +99,7 @@ add_executable(sr_replay_storage_bench replay_storage_benchmark.cpp
     "${SR_NATIVE_DIR}/../graphics/guest/draw_state.cpp"
     "${SR_NATIVE_DIR}/../graphics/guest/vertex_layout.cpp"
     "${SR_NATIVE_DIR}/pm4_mirror.cpp")
+target_link_libraries(sr_replay_storage_bench PRIVATE Threads::Threads)
 add_executable(sr_pm4_budget test_pm4_budget.cpp
     "${SR_NATIVE_DIR}/pm4_mirror.cpp"
     "${SR_NATIVE_DIR}/../graphics/guest/constant_snapshot.cpp")

@@ -28,6 +28,65 @@ void operator delete[](void* p, size_t) noexcept { ::operator delete(p); }
 
 int main() {
   using namespace superman_returns::graphics::guest;
+  {
+    // A warm arena must not allocate another draw-sized backing store.
+    // Count bytes, not pointer equality: malloc may reuse a just-freed address.
+    auto pool=std::make_shared<DrawPacketPool>();
+    {DrawPacketArena warm(32,true,pool);}
+    allocated_bytes=allocation_calls=0;counting=true;
+    {DrawPacketArena warm(32,true,pool);}
+    counting=false;
+    std::printf("Pooled arena: %zu bytes allocated for 32 warm draws\n",allocated_bytes);
+    if(allocated_bytes>=sizeof(DrawPacket)) {
+      std::fprintf(stderr,"Warm arena allocated a new draw backing store\n");return 1;
+    }
+    // The frontend flushes at 32 commands, not once per frame. All of a
+    // frame's small batches stay alive until the recorder consumes the frame.
+    std::vector<DrawPacketOwner> held;held.reserve(64);
+    auto batched=std::make_shared<DrawPacketPool>();
+    auto frame=[&] {
+      for(size_t i=0;i<64;++i) {
+        DrawPacketArena arena(32,true,batched);held.push_back(arena.Next());
+      }
+    };
+    frame();held.clear();
+    allocated_bytes=0;counting=true;frame();counting=false;
+    held.clear();
+    std::printf("Pooled batched frame: %zu allocated bytes for 64 warm batches\n",allocated_bytes);
+    if(allocated_bytes>=sizeof(DrawPacket)) {
+      std::fprintf(stderr,"Pool cannot retain a frame split into small batches\n");return 1;
+    }
+    // Byte and block limits are independent. Oversized blocks must be freed.
+    auto tiny=std::make_shared<DrawPacketPool>(sizeof(DrawPacket),1);
+    {DrawPacketArena oversized(32,true,tiny);}
+    allocated_bytes=0;counting=true;
+    {DrawPacketArena oversized(32,true,tiny);}
+    counting=false;
+    if(allocated_bytes<32*sizeof(DrawPacket)) {
+      std::fprintf(stderr,"Pool retained an oversized allocation\n");return 1;
+    }
+    auto none=std::make_shared<DrawPacketPool>(128ull*1024*1024,0);
+    {DrawPacketArena uncached(32,true,none);}
+    allocated_bytes=0;counting=true;
+    {DrawPacketArena uncached(32,true,none);}
+    counting=false;
+    if(allocated_bytes<32*sizeof(DrawPacket)) {
+      std::fprintf(stderr,"Zero-block pool retained an allocation\n");return 1;
+    }
+    // Two returned arenas must not exceed either total idle-byte or block cap.
+    for(bool byte_limited:{false,true}) {
+      auto bounded=std::make_shared<DrawPacketPool>(byte_limited?32*sizeof(DrawPacket):128ull*1024*1024,byte_limited?8:1);
+      {DrawPacketArena first(32,true,bounded),second(32,true,bounded);}
+      allocated_bytes=0;counting=true;
+      DrawPacketArena first(32,true,bounded);
+      counting=false;
+      if(allocated_bytes>=sizeof(DrawPacket)) {std::fprintf(stderr,"Pool failed to retain one eligible arena\n");return 1;}
+      allocated_bytes=0;counting=true;
+      DrawPacketArena second(32,true,bounded);
+      counting=false;
+      if(allocated_bytes<32*sizeof(DrawPacket)) {std::fprintf(stderr,"Pool exceeded its idle retention limit\n");return 1;}
+    }
+  }
   WorkBatch batch;
   WorkCmd cmd;
   cmd.op = Op::kDraw;
@@ -40,6 +99,10 @@ int main() {
   for (uint32_t i = 0; i < cmd.range_count; ++i)
     batch.ranges.push_back({0x1000 + i * 2048, 2048, 8 + i * 2048});
   superman_returns::native::Pm4Mirror mirror;
+  // Measure steady replay after initializing the captured PM4 version and its
+  // immutable banks. Their initial allocations are not per-command storage.
+  mirror.ScanCopy(nullptr,batch.bytes.data(),cmd.ring_bytes);
+  mirror.ShareFloatConstants(false);mirror.ShareFloatConstants(true);
   std::string error;
   {
     WorkBatch empty;WorkCmd draw;draw.op=Op::kDraw;draw.u[0]=4;

@@ -31,12 +31,12 @@ ShaderKey RequestHash(std::span<const uint8_t> bytes,ShaderStage stage) {
   auto hash=(HashBytes(bytes)^uint32_t(stage))*1099511628211ull;return hash?hash:1;
 }
 }
-bool DecodeShaderResult(std::span<const uint8_t> bytes,ShaderStage stage,CompiledShader& result,std::string& error) {
+bool DecodeShaderResult(std::span<const uint8_t> bytes,ShaderStage stage,CompiledShader& result,std::string& error,ShaderAbi expected) {
   try {
-    Reader r(bytes);if(r.Word()!=0x33525653 || r.Word()!=1) throw std::runtime_error("Shader result schema/ABI mismatch");
+    Reader r(bytes);if((expected!=ShaderAbi::kPortable && expected!=ShaderAbi::kGlobal) || r.Word()!=0x33525653 || r.Word()!=uint32_t(expected)) throw std::runtime_error("Shader result schema/ABI mismatch");
     uint32_t status=r.Word();if(r.Word()!=uint32_t(stage)) throw std::runtime_error("Shader result stage mismatch");
     if(status==0) throw std::runtime_error(r.Text());if(status!=1) throw std::runtime_error("Invalid shader status");
-    CompiledShader out;out.stage=stage;auto& q=out.requirements;
+    CompiledShader out;out.stage=stage;out.abi=expected;auto& q=out.requirements;
     q.storage_buffers=r.Word();q.uniform_buffers=r.Word();q.sampled_images=r.Word();q.samplers=r.Word();q.descriptor_sets=r.Word();q.vertex_attributes=r.Word();q.vertex_output_components=r.Word();q.fragment_input_components=r.Word();
     auto feature=[&]() {auto v=r.Word();if(v>1) throw std::runtime_error("Invalid shader feature flag");return bool(v);};
     q.sampled_image_dynamic_indexing=feature();q.storage_buffer_dynamic_indexing=feature();q.clip_distance=feature();q.cull_distance=feature();
@@ -67,7 +67,7 @@ struct VulkanShaderService::Impl {
     if(config.library.empty()) return;
     try {
       auto bytes=ReadFile(config.library,256*1024*1024);Reader r(bytes);
-      auto magic=r.Bytes(8);if(std::memcmp(magic.data(),"SRVKLIB\0",8) || r.Word()!=1) throw std::runtime_error("Vulkan shader library schema/ABI mismatch");
+      auto magic=r.Bytes(8);if(std::memcmp(magic.data(),"SRVKLIB\0",8) || r.Word()!=uint32_t(config.abi)) throw std::runtime_error("Vulkan shader library schema/ABI mismatch");
       auto count=r.Word();if(!count || count>16384) throw std::runtime_error("Invalid shader library count");
       uint64_t checksum=r.Word();checksum|=uint64_t(r.Word())<<32;
       if(HashBytes(std::span<const uint8_t>(bytes).subspan(24))!=checksum) throw std::runtime_error("Shader library checksum mismatch");
@@ -78,7 +78,7 @@ struct VulkanShaderService::Impl {
         if(stage_word>1 || reserved || container_size<24 || container_size>1024*1024 || result_size>17*1024*1024) throw std::runtime_error("Invalid shader library entry");
         auto stage=ShaderStage(stage_word);auto container=r.Bytes(container_size);auto wire=r.Bytes(result_size);
         auto artifact=std::make_shared<CompiledShader>();std::string error;
-        if(!DecodeShaderResult(wire,stage,*artifact,error)) throw std::runtime_error(error);
+        if(!DecodeShaderResult(wire,stage,*artifact,error,config.abi)) throw std::runtime_error(error);
         auto key=RequestHash(container,stage);
         for(;;) {
           auto found=loaded.find(key);if(found==loaded.end()) break;
@@ -99,12 +99,14 @@ struct VulkanShaderService::Impl {
       {std::unique_lock lock(mutex);cv.wait(lock,[&]{return stop || token.stop_requested() || !queue.empty();});if(stop || token.stop_requested()) return;key=queue.front();queue.pop_front();auto& j=jobs.at(key);stage=j.stage;container=j.container;}
       ShaderResult result;result.status=ShaderPoll::failed;
       try {
-        auto directory=config.cache/"runtime_requests"/std::to_string(key);std::filesystem::create_directories(directory);
+        auto directory=config.cache/(config.abi==ShaderAbi::kGlobal?"runtime_requests_global":"runtime_requests")/std::to_string(key);std::filesystem::create_directories(directory);
         auto raw=directory/(stage==ShaderStage::kVertex?"shader.vs.bin":"shader.ps.bin"),output=directory/"result.bin";
         {std::ofstream file(raw,std::ios::binary|std::ios::trunc);if(!file.write(reinterpret_cast<const char*>(container.data()),container.size())) throw std::runtime_error("Cannot write captured shader container");}
         std::error_code ignored;std::filesystem::remove(output,ignored);
         // -B: concurrent workers must not race writing the scripts' __pycache__.
-        std::vector<std::filesystem::path> args{config.python,"-B",config.script,"--container",raw,"--stage",stage==ShaderStage::kVertex?"vs":"ps","--cache",config.cache,"--emitter",config.emitter,"--common",config.common,"--dxc",config.dxc,"--result",output};
+        std::vector<std::filesystem::path> args{config.python,"-B",config.script,"--container",raw,"--stage",stage==ShaderStage::kVertex?"vs":"ps","--cache",config.cache,"--emitter",config.emitter,"--common",config.common,"--dxc",config.dxc};
+        if(config.abi==ShaderAbi::kGlobal) {args.emplace_back("--profile");args.emplace_back("global");}
+        args.emplace_back("--result");args.push_back(output);
         // A shader that fails to translate still writes a failure result. A
         // process that dies without one is retried: a transient fault must not
         // stop the game (seen once in a package smoke test, not reproducible).
@@ -114,7 +116,7 @@ struct VulkanShaderService::Impl {
           if(!ran && std::filesystem::is_regular_file(output)) break;
         }
         if(!ran) {if(result.diagnostic.empty()) result.diagnostic="Shader compiler process failed";}
-        else {auto artifact=std::make_shared<CompiledShader>();if(DecodeShaderResult(ReadFile(output),stage,*artifact,result.diagnostic)) {result.status=ShaderPoll::ready;result.artifact=std::move(artifact);}}
+        else {auto artifact=std::make_shared<CompiledShader>();if(DecodeShaderResult(ReadFile(output),stage,*artifact,result.diagnostic,config.abi)) {result.status=ShaderPoll::ready;result.artifact=std::move(artifact);}}
       } catch(const std::exception& e) {result.diagnostic=e.what();}
       {std::lock_guard lock(mutex);jobs.at(key).result=std::move(result);}
     }

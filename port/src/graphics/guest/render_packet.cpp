@@ -10,18 +10,17 @@
 #include <stdexcept>
 namespace superman_returns::graphics::guest {
 namespace {
+template<class State>
 bool DecodeCapturedPacket(const WorkBatch&, const WorkCmd&,
-                          const native::Pm4Mirror&, const CapturedMemory&,
+                          const State&, const CapturedMemory&,
                           RenderPacket&, std::string&,DrawPacketOwner={});
-}
-bool ReplayCapturedRenderPacket(const WorkBatch& batch,const WorkCmd& cmd,native::Pm4Mirror& mirror,RenderPacket& packet,std::string& error,DrawPacketOwner storage,std::shared_ptr<const WorkBatch> capture_owner,ReplayProbe* probe) {
+bool CaptureReplayMemory(const WorkBatch& batch,const WorkCmd& cmd,native::Pm4Mirror& mirror,CapturedMemory& memory,std::string& error,std::shared_ptr<const WorkBatch> capture_owner,ReplayProbe* probe) {
   error.clear();
   if(!cmd.pm4_capture_ok) {error="PM4 dependency capture failed";return false;}
   if(uint64_t(cmd.ring_offset)+cmd.ring_bytes>batch.bytes.size()) {error="Captured primary PM4 range exceeds batch";return false;}
   if(capture_owner && capture_owner.get()!=&batch) {error="Capture owner does not match replay batch";return false;}
   const auto now=[] {return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());};
   auto started=probe?now():0;
-  CapturedMemory memory;
   if(!(capture_owner?CapturedMemory::CaptureOwned(std::move(capture_owner),cmd,memory,error):
                     CapturedMemory::Capture(batch,cmd,memory,error))) return false;
   if(probe) {auto end=now();probe->capture_ns+=end-started;started=end;}
@@ -32,9 +31,33 @@ bool ReplayCapturedRenderPacket(const WorkBatch& batch,const WorkCmd& cmd,native
     });
     if(!missing.empty() || mirror.unreadable_alu_loads!=alu || mirror.unreadable_indirect_buffers!=indirect) {error=missing.empty()?"Captured PM4 dependency could not be read":missing;return false;}
   }
-  if(probe) {auto end=now();probe->pm4_ns+=end-started;started=end;}
+  if(probe) probe->pm4_ns+=now()-started;
+  return true;
+}
+}
+bool ReplayCapturedRenderPacket(const WorkBatch& batch,const WorkCmd& cmd,native::Pm4Mirror& mirror,RenderPacket& packet,std::string& error,DrawPacketOwner storage,std::shared_ptr<const WorkBatch> capture_owner,ReplayProbe* probe) {
+  CapturedMemory memory;
+  if(!CaptureReplayMemory(batch,cmd,mirror,memory,error,std::move(capture_owner),probe))return false;
+  const auto started=probe?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
   const bool ok=DecodeCapturedPacket(batch,cmd,mirror,memory,packet,error,std::move(storage));
-  if(probe) probe->decode_ns+=now()-started;
+  if(probe) probe->decode_ns+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-started).count());
+  return ok;
+}
+bool PrepareReplayCommand(const WorkBatch& batch,const WorkCmd& cmd,native::Pm4Mirror& mirror,
+    PreparedReplayCommand& prepared,std::string& error,std::shared_ptr<const WorkBatch> owner,ReplayProbe* probe) {
+  CapturedMemory memory;
+  if(!CaptureReplayMemory(batch,cmd,mirror,memory,error,std::move(owner),probe))return false;
+  PreparedReplayCommand next;next.memory=std::move(memory);
+  if(cmd.op==Op::kDraw || cmd.op==Op::kDrawIndexed || cmd.op==Op::kDrawInline)next.state=ReplayDrawState(mirror);
+  next.vs_version=mirror.vs_version;next.ps_version=mirror.ps_version;
+  prepared=std::move(next);return true;
+}
+bool DecodePreparedRenderPacket(const WorkBatch& batch,const WorkCmd& cmd,const PreparedReplayCommand& prepared,
+    RenderPacket& out,std::string& error,DrawPacketOwner storage,ReplayProbe* probe) {
+  error.clear();
+  const auto started=probe?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
+  const bool ok=DecodeCapturedPacket(batch,cmd,prepared.state,prepared.memory,out,error,std::move(storage));
+  if(probe)probe->decode_ns+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-started).count());
   return ok;
 }
 namespace {
@@ -97,8 +120,8 @@ SurfaceDesc Surface(const CapturedMemory &m, uint32_t object, bool depth) {
                                 U32(m, Address(object, 0x1c)),
                                 U32(m, Address(object, 0x24)), depth)};
 }
-void DeviceState(DrawPacket &d, uint32_t device,
-                 const native::Pm4Mirror &mirror) {
+template<class State>
+void DeviceState(DrawPacket &d, uint32_t device,const State &mirror) {
   const auto &layout = native::profile::kDevice;
   for (const auto &range : native::profile::kRegisterShadow) {
     const auto address=Address(device,range.offset);
@@ -241,8 +264,9 @@ const std::vector<VertexAttribute>& Declaration(const CapturedMemory& memory,uin
 namespace {
 // Replay and decoding share the same owned snapshot. Packets retain it after
 // the worker recycles the source batch; no live guest reads are introduced.
+template<class State>
 bool DecodeCapturedPacket(const WorkBatch &batch, const WorkCmd &cmd,
-                          const native::Pm4Mirror &mirror,
+                          const State &mirror,
                           const CapturedMemory &memory, RenderPacket &out,
                           std::string &error,DrawPacketOwner storage) {
   try {
@@ -268,8 +292,8 @@ bool DecodeCapturedPacket(const WorkBatch &batch, const WorkCmd &cmd,
       d.first = d.indexed ? cmd.u[2] : (d.inline_vertices ? 0 : cmd.u[1]);
       d.count = d.indexed ? cmd.u[3] : cmd.u[2];
       d.base_vertex = d.indexed ? int32_t(cmd.u[1]) : 0;
-      d.constants.vs=mirror.FloatConstants(false);
-      d.constants.ps=mirror.FloatConstants(true);
+      d.constants.vs.Share(mirror.ShareFloatConstants(false));
+      d.constants.ps.Share(mirror.ShareFloatConstants(true));
       for (uint32_t i = 0; i < 8; ++i) {
         auto v = mirror.reg(native::Pm4Mirror::kBoolConstantBase + i);
         std::memcpy(d.constants.shared.data() + 256 + i * 4, &v, 4);
@@ -328,10 +352,6 @@ bool DecodeCapturedPacket(const WorkBatch &batch, const WorkCmd &cmd,
                 s.stream, Address(s.offset, offset), s.stride, type};
         }
       }
-      static_assert(sizeof(d.vertex_fetch)==sizeof(d.constants.shared)-512,
-                    "Replay storage requires a complete shared metadata suffix");
-      std::memcpy(d.constants.shared.data() + 512, d.vertex_fetch.data(),
-                  sizeof(d.vertex_fetch));
       for(auto& stream:d.streams) {
         if(stream.update.bytes.empty()) continue;
         uint32_t stride=stream.stride;
@@ -359,8 +379,6 @@ bool DecodeCapturedPacket(const WorkBatch &batch, const WorkCmd &cmd,
               d.vertex_fetch[usage * 16 + index] = {stream, offset,
                                                     d.inline_stride, type};
           }
-          std::memcpy(d.constants.shared.data() + 512, d.vertex_fetch.data(),
-                      sizeof(d.vertex_fetch));
         }
         SwapVertexElements(d.inline_data,d.inline_stride,0,UINT32_MAX,d.attributes);
       }

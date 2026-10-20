@@ -8,12 +8,12 @@ class ConstantBankCache {
 public:
   struct Reuse {bool vs=false,ps=false;uint32_t vs_offset=0,ps_offset=0;};
   void Reset() {chunk_=nullptr;serial_=0;}
-  Reuse Find(uint64_t serial,const void* chunk,const guest::ConstantSnapshot& value) const {
+  template<class Constants> Reuse Find(uint64_t serial,const void* chunk,const Constants& value) const {
     if(!chunk || chunk!=chunk_ || !serial || serial!=serial_) return {};
     return {std::memcmp(vs_.data(),value.vs.data(),sizeof(vs_))==0,
             std::memcmp(ps_.data(),value.ps.data(),sizeof(ps_))==0,vs_offset_,ps_offset_};
   }
-  void Commit(uint64_t serial,const void* chunk,uint32_t offset,const guest::ConstantSnapshot& value,Reuse reuse) {
+  template<class Constants> void Commit(uint64_t serial,const void* chunk,uint32_t offset,const Constants& value,Reuse reuse) {
     if(chunk!=chunk_ || serial!=serial_) reuse={};
     if(!reuse.vs) {std::memcpy(vs_.data(),value.vs.data(),sizeof(vs_));vs_offset_=offset;}
     if(!reuse.ps) {std::memcpy(ps_.data(),value.ps.data(),sizeof(ps_));ps_offset_=offset;}
