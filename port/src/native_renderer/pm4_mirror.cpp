@@ -26,6 +26,15 @@ const std::array<uint32_t,1024>& Pm4Mirror::FloatConstants(bool pixel) const {
   }
   return float_cache_[bank];
 }
+const std::shared_ptr<const std::array<uint32_t,1024>>& Pm4Mirror::ShareFloatConstants(bool pixel) const {
+  const uint32_t bank=pixel?1:0;
+  const uint64_t version=pixel?ps_version:vs_version;
+  if(!float_snapshots_[bank] || float_snapshot_version_[bank]!=version) {
+    float_snapshots_[bank]=std::make_shared<const std::array<uint32_t,1024>>(FloatConstants(pixel));
+    float_snapshot_version_[bank]=version;
+  }
+  return float_snapshots_[bank];
+}
 
 namespace {
 

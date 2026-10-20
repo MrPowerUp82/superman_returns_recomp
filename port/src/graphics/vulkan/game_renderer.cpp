@@ -27,7 +27,13 @@ std::string Surface(const guest::SurfaceDesc& d) {
 constexpr guest::ResourceId MissingVertex=UINT64_MAX-4;
 bool Fail(Error& e,const char* message) {e={"Game renderer",VK_ERROR_INITIALIZATION_FAILED,message};return false;}
 }
-bool GameRenderer::Initialize(const std::filesystem::path& path,Error& e) {return descriptors_.Initialize(e) && pipelines_.Initialize(descriptors_.Layouts(),path,e);}
+bool GameRenderer::Initialize(const std::filesystem::path& path,Error& e,bool global_resources) {
+  if(!global_resources)return descriptors_.Initialize(e) && pipelines_.Initialize(descriptors_.Layouts(),path,e);
+  auto global=std::make_unique<GlobalDrawBindings>(c_);if(!global->Initialize(e))return false;
+  const VkDescriptorSetLayout layout=global->Layout();auto cache=path;if(!cache.empty())cache+=".global";
+  if(!pipelines_.Initialize(std::span(&layout,1),cache,e,shaders::ShaderAbi::kGlobal))return false;
+  global->EnableProfile(profiling_);global_=std::move(global);return true;
+}
 // SR_VULKAN_NO_STATE_FILTER=1 turns the redundant-command filter off (A/B diagnostics).
 bool GameRenderer::StateFilterEnabled() {
   const char* value=std::getenv("SR_VULKAN_NO_STATE_FILTER");
@@ -54,22 +60,23 @@ std::shared_ptr<TextureResource> GameRenderer::SelectFrontbuffer(const guest::Sw
 }
 bool GameRenderer::BeginSubmission(VkCommandBuffer command,uint64_t serial,Error& e,VkCommandBuffer upload) {
   constant_bank_cache_.Reset();
-  open_pass_.reset();bound_pipeline_=VK_NULL_HANDLE;shadow_.Invalidate();
+  open_pass_.reset();bound_pipeline_=VK_NULL_HANDLE;bound_global_set_=VK_NULL_HANDLE;shadow_.Invalidate();
   if(!resources_.BeginSubmission(command,serial,e,upload) || !targets_.BeginSubmission(command,serial,e)) return false;
   command_=command;serial_=serial;merge_passes_=upload!=VK_NULL_HANDLE;recording_.store(command,std::memory_order_relaxed);
   if(!dummies_) {float missing[]{0,0,0,1};if(!resources_.CreateDummies(e) || !resources_.UploadBuffer(MissingVertex,std::as_bytes(std::span(missing)),1,e)) return false;dummies_=true;}
+  if(global_ && !global_->BeginSubmission(resources_,serial,e))return false;
   e={};return true;
 }
 void GameRenderer::ClosePass() {
   if(!open_pass_) return;
-  c_.f.vkCmdEndRenderPass(command_);open_pass_.reset();bound_pipeline_=VK_NULL_HANDLE;shadow_.Invalidate();
+  c_.f.vkCmdEndRenderPass(command_);open_pass_.reset();bound_pipeline_=VK_NULL_HANDLE;bound_global_set_=VK_NULL_HANDLE;shadow_.Invalidate();
 }
 void GameRenderer::FinishSubmission() {
   ClosePass();resources_.FinishUploads();recording_.store(VK_NULL_HANDLE,std::memory_order_relaxed);
 }
 void GameRenderer::Retire(uint64_t serial) {
   for(auto it=transient_buffers_.begin();it!=transient_buffers_.end() && it->first<=serial;) {for(auto id:it->second) resources_.ForgetBuffer(id);it=transient_buffers_.erase(it);}
-  depth_resolver_.Retire(serial);descriptors_.Retire(serial);pipelines_.Retire(serial);targets_.Retire(serial);resources_.Retire(serial);if(serial>=serial_) command_=VK_NULL_HANDLE;
+  depth_resolver_.Retire(serial);if(global_)global_->Retire(serial);descriptors_.Retire(serial);pipelines_.Retire(serial);targets_.Retire(serial);resources_.Retire(serial);if(serial>=serial_) command_=VK_NULL_HANDLE;
 }
 bool GameRenderer::Upload(const guest::BufferUpdate& update,bool indices,uint64_t version,Error& e) {
   auto& p=update.plan;if(!p.key || !p.size || p.action>2 || p.begin>p.end || p.end>p.size) return Fail(e,"Invalid guest buffer update");
@@ -236,18 +243,24 @@ bool GameRenderer::Draw(const guest::DrawPacket& draw,VkCommandBuffer command,Er
     if(profiling_) {++profile_.texture_uploads;profile_.texture_bytes+=texture.data.size();}
   }
   lap(RecordProfile::kTextures);
-  TransientSlice constants;if(!resources_.MapTransient(sizeof(guest::ConstantSnapshot),constants,e)) return false;
-  auto reused=constant_bank_cache_enabled_ && constants.offset<=UINT32_MAX
-      ?constant_bank_cache_.Find(serial_,constants.chunk.get(),draw.constants):ConstantBankCache::Reuse{};
-  DrawBindings bindings;if(!BuildBindings(draw,constants.data,bindings,e,(reused.vs?0u:1u)|(reused.ps?0u:2u))) return false;
-  lap(RecordProfile::kBindings);
-  DescriptorDraw descriptors;if(!descriptors_.Prepare(bindings,draw.texture_fetch,resources_,serial_,constants,descriptors,e)) return false;
-  if(reused.vs) descriptors.dynamic_offsets[0]=reused.vs_offset;
-  if(reused.ps) descriptors.dynamic_offsets[1]=reused.ps_offset;
-  // Prepare flushed this slice; the chunk is held until completion and slices
-  // are never overwritten inside a submission. Offset bases remain unchanged.
-  if(constant_bank_cache_enabled_) constant_bank_cache_.Commit(serial_,constants.chunk.get(),uint32_t(constants.offset),draw.constants,reused);
-  lap(RecordProfile::kDescriptors);
+  DescriptorDraw descriptors;GlobalDrawBinding global_draw;
+  if(global_) {
+    if(!global_->Prepare(draw,resources_,serial_,global_draw,e))return false;
+    lap(RecordProfile::kBindings);lap(RecordProfile::kDescriptors);
+  } else {
+    TransientSlice constants;if(!resources_.MapTransient(sizeof(guest::ConstantSnapshot),constants,e)) return false;
+    auto reused=constant_bank_cache_enabled_ && constants.offset<=UINT32_MAX
+        ?constant_bank_cache_.Find(serial_,constants.chunk.get(),draw.constants):ConstantBankCache::Reuse{};
+    DrawBindings bindings;if(!BuildBindings(draw,constants.data,bindings,e,(reused.vs?0u:1u)|(reused.ps?0u:2u))) return false;
+    lap(RecordProfile::kBindings);
+    if(!descriptors_.Prepare(bindings,draw.texture_fetch,resources_,serial_,constants,descriptors,e)) return false;
+    if(reused.vs) descriptors.dynamic_offsets[0]=reused.vs_offset;
+    if(reused.ps) descriptors.dynamic_offsets[1]=reused.ps_offset;
+    // Prepare flushed this slice; the chunk is held until completion and slices
+    // are never overwritten inside a submission. Offset bases remain unchanged.
+    if(constant_bank_cache_enabled_) constant_bank_cache_.Commit(serial_,constants.chunk.get(),uint32_t(constants.offset),draw.constants,reused);
+    lap(RecordProfile::kDescriptors);
+  }
   auto pipeline=pipelines_.Acquire(draw,*pass,vs.artifact,ps.artifact,serial_,e);if(!pipeline) {e.message+="; VS="+std::to_string(draw.vertex_shader->hash)+", PS="+std::to_string(draw.pixel_shader?draw.pixel_shader->hash:0)+", RT0="+std::to_string(pass->formats[0])+", DS="+std::to_string(pass->depth_format);return false;}
   struct Binding {uint32_t slot;VkBuffer handle;VkDeviceSize offset;};
   std::array<Binding,33> vertices;uint32_t vertex_count=0;  // at most 32 streams (BuildBindings) plus the missing-vertex stub
@@ -257,9 +270,11 @@ bool GameRenderer::Draw(const guest::DrawPacket& draw,VkCommandBuffer command,Er
     if(!found) {e={"Buffer binding",VK_ERROR_INITIALIZATION_FAILED,"Buffer has no captured upload"};return nullptr;}
     resources_.Hold(*found);return found->get();
   };
-  if(draw.inline_vertices) {auto* b=held_buffer(InlineBufferBase|draw.command_serial);if(!b) return false;vertices[vertex_count++]={0,b->handle,b->offset};}
-  else for(auto& stream:draw.streams) {auto* b=held_buffer(stream.update.plan.key);if(!b || stream.offset>b->size) return Fail(e,"Vertex stream offset exceeds buffer");vertices[vertex_count++]={stream.stream,b->handle,b->offset+stream.offset};}
-  auto* missing=held_buffer(MissingVertex);if(!missing) return false;vertices[vertex_count++]={31,missing->handle,missing->offset};
+  if(!global_ || !pipeline->bindings.empty()) {
+    if(draw.inline_vertices) {auto* b=held_buffer(InlineBufferBase|draw.command_serial);if(!b) return false;vertices[vertex_count++]={0,b->handle,b->offset};}
+    else for(auto& stream:draw.streams) {auto* b=held_buffer(stream.update.plan.key);if(!b || stream.offset>b->size) return Fail(e,"Vertex stream offset exceeds buffer");vertices[vertex_count++]={stream.stream,b->handle,b->offset+stream.offset};}
+    auto* missing=held_buffer(MissingVertex);if(!missing) return false;vertices[vertex_count++]={31,missing->handle,missing->offset};
+  }
   const BufferResource* indices=nullptr;if(draw.indexed) {indices=held_buffer(index_id);if(!indices || uint64_t(draw.first+uint64_t(draw.count))*4>indices->size) {e={"Index draw",VK_ERROR_INITIALIZATION_FAILED,"Draw exceeds captured buffer: first="+std::to_string(draw.first)+", count="+std::to_string(draw.count)+", bytes="+std::to_string(indices?indices->size:0)+", plan="+std::to_string(draw.indices.plan.size)+", format="+std::to_string(draw.indices.plan.format)+", action="+std::to_string(draw.indices.plan.action)+", serial="+std::to_string(draw.command_serial)};return false;}}
   VkViewport viewport{draw.viewport.x,draw.viewport.y,draw.viewport.width,draw.viewport.height,draw.viewport.min_depth,draw.viewport.max_depth};
   if(viewport.width<=0 || viewport.height<=0) viewport={0,0,float(pass->extent.width),float(pass->extent.height),0,1};
@@ -277,7 +292,12 @@ bool GameRenderer::Draw(const guest::DrawPacket& draw,VkCommandBuffer command,Er
   // Set 0 (the constants) moves with every draw. Sets 1-3 only when their resources change: every game pipeline
   // shares one layout, so binding set 0 alone leaves sets 1-3 in place. The four dynamic states persist on the
   // command buffer across pipeline binds because every game pipeline declares the same four.
-  if(shadow_.enabled()) {
+  if(global_) {
+    if(bound_global_set_!=global_->Set()) {
+      auto set=global_->Set();c_.f.vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelines_.Layout(),0,1,&set,0,nullptr);bound_global_set_=set;
+    }
+    c_.f.vkCmdPushConstants(command,pipelines_.Layout(),VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,8,&global_draw);
+  } else if(shadow_.enabled()) {
     // One call covers set 0 and, when they changed, sets 1-3 (the dynamic offsets belong to set 0 either way).
     const bool shared_changed=shadow_.SetSharedSets(descriptors.sets.data()+1);
     c_.f.vkCmdBindDescriptorSets(command,VK_PIPELINE_BIND_POINT_GRAPHICS,pipelines_.Layout(),0,shared_changed?4:1,descriptors.sets.data(),uint32_t(descriptors.dynamic_offsets.size()),descriptors.dynamic_offsets.data());

@@ -10,14 +10,16 @@
 namespace superman_returns::graphics::shaders {
 using ShaderKey=uint64_t;
 enum class ShaderPoll {pending,ready,failed};
+enum class ShaderAbi:uint32_t {kPortable=1,kGlobal=2};
 struct ShaderLocation {uint32_t location;std::string type;};
 struct CompiledShader {
   ShaderStage stage=ShaderStage::kVertex;
+  ShaderAbi abi=ShaderAbi::kPortable;
   ShaderRequirements requirements;
   std::vector<ShaderLocation> inputs,outputs;
   std::vector<uint32_t> words;
 };
-bool DecodeShaderResult(std::span<const uint8_t>,ShaderStage,CompiledShader&,std::string&);
+bool DecodeShaderResult(std::span<const uint8_t>,ShaderStage,CompiledShader&,std::string&,ShaderAbi expected=ShaderAbi::kPortable);
 std::vector<std::string> ValidateShaderPair(const CompiledShader&,const CompiledShader&);
 struct ShaderResult {
   ShaderPoll status=ShaderPoll::pending;
@@ -30,6 +32,7 @@ struct VulkanShaderConfig {
   uint32_t compiler_workers=1;
   // Local, game-derived SPIR-V library; misses still use the runtime compiler.
   std::filesystem::path library;
+  ShaderAbi abi=ShaderAbi::kPortable;
 };
 // Platform runner receives individual arguments, never a shell command.
 using ShaderProcess=std::function<bool(std::span<const std::filesystem::path>,std::chrono::milliseconds,std::stop_token,std::string&)>;

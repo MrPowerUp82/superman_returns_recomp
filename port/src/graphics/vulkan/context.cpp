@@ -192,7 +192,7 @@ bool Context::EnumerateCandidates(VkSurfaceKHR target,
   return true;
 }
 bool Context::OpenDevice(VkSurfaceKHR owned, std::string_view uuid, Error &e,
-                         const VkPhysicalDeviceFeatures *requested_features,bool require_mirror_clamp,bool request_timeline) {
+                         const VkPhysicalDeviceFeatures *requested_features,bool require_mirror_clamp,bool request_timeline,bool request_global_descriptors) {
   if (device || surface) {
     e = {"OpenDevice", VK_ERROR_INITIALIZATION_FAILED,
          "Device already initialized"};
@@ -236,6 +236,35 @@ bool Context::OpenDevice(VkSurfaceKHR owned, std::string_view uuid, Error &e,
     extensions.push_back(VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME);
   }
   VkDeviceCreateInfo ci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+  VkPhysicalDeviceDescriptorIndexingFeatures indexing{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES};
+  VkPhysicalDeviceFeatures global_core=requested_features?*requested_features:VkPhysicalDeviceFeatures{};
+  if(request_global_descriptors) {
+    std::vector<VkExtensionProperties> available;
+    if(!Query<VkExtensionProperties>([&](auto* count,auto* values) {return f.vkEnumerateDeviceExtensionProperties(physical,nullptr,count,values);},available,"Global descriptor extensions",e))return false;
+    if(!f.vkGetPhysicalDeviceFeatures2 || std::none_of(available.begin(),available.end(),[](const auto& v){return std::strcmp(v.extensionName,VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME)==0;})) {
+      e={"Global descriptor extension",VK_ERROR_EXTENSION_NOT_PRESENT,"VK_EXT_descriptor_indexing required"};return false;
+    }
+    VkPhysicalDeviceDescriptorIndexingFeatures supported{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES};
+    VkPhysicalDeviceFeatures2 queried{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};queried.pNext=&supported;
+    f.vkGetPhysicalDeviceFeatures2(physical,&queried);
+    if(!queried.features.shaderStorageBufferArrayDynamicIndexing || !supported.runtimeDescriptorArray ||
+       !supported.shaderSampledImageArrayNonUniformIndexing || !supported.shaderStorageBufferArrayNonUniformIndexing ||
+       !supported.descriptorBindingPartiallyBound || !supported.descriptorBindingSampledImageUpdateAfterBind || !supported.descriptorBindingStorageBufferUpdateAfterBind) {
+      e={"Global descriptor features",VK_ERROR_FEATURE_NOT_PRESENT,"GPU does not support the requested global resource ABI"};return false;
+    }
+    if(global_core.robustBufferAccess) {
+      VkPhysicalDeviceDescriptorIndexingProperties properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES};
+      VkPhysicalDeviceProperties2 query{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};query.pNext=&properties;
+      f.vkGetPhysicalDeviceProperties2(physical,&query);
+      if(!properties.robustBufferAccessUpdateAfterBind) {
+        e={"Global descriptor robustness",VK_ERROR_FEATURE_NOT_PRESENT,"GPU cannot preserve robustBufferAccess with storage update-after-bind"};return false;
+      }
+    }
+    indexing.runtimeDescriptorArray=VK_TRUE;indexing.shaderSampledImageArrayNonUniformIndexing=VK_TRUE;
+    indexing.shaderStorageBufferArrayNonUniformIndexing=VK_TRUE;indexing.descriptorBindingPartiallyBound=VK_TRUE;
+    indexing.descriptorBindingSampledImageUpdateAfterBind=VK_TRUE;indexing.descriptorBindingStorageBufferUpdateAfterBind=VK_TRUE;
+    global_core.shaderStorageBufferArrayDynamicIndexing=VK_TRUE;extensions.push_back(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
+  }
   VkPhysicalDeviceTimelineSemaphoreFeatures timeline{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES};
   bool enable_timeline=false;
   if(request_timeline) {
@@ -250,15 +279,17 @@ bool Context::OpenDevice(VkSurfaceKHR owned, std::string_view uuid, Error &e,
     else Log("Frame generation unavailable: timeline semaphores not supported; using original Vulkan frames");
   }
   ci.queueCreateInfoCount = uint32_t(queues.size());
+  if(request_global_descriptors) {indexing.pNext=const_cast<void*>(ci.pNext);ci.pNext=&indexing;}
   ci.pQueueCreateInfos = queues.data();
   ci.enabledExtensionCount = uint32_t(extensions.size());
   ci.ppEnabledExtensionNames = extensions.data();
-  ci.pEnabledFeatures = requested_features;
+  ci.pEnabledFeatures = request_global_descriptors?&global_core:requested_features;
 
   if (!Check(f.vkCreateDevice(physical, &ci, nullptr, &device), "CreateDevice",
              e))
     return false;
-  enabled_features=requested_features?*requested_features:VkPhysicalDeviceFeatures{};
+  enabled_features=request_global_descriptors?global_core:(requested_features?*requested_features:VkPhysicalDeviceFeatures{});
+  descriptor_indexing_features=indexing;descriptor_indexing_features.pNext=nullptr;
   timeline_enabled=enable_timeline;
   mirror_clamp_enabled=require_mirror_clamp;
   if (!injected_ && !loader_.LoadDevice(f, device, e))

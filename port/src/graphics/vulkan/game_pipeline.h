@@ -47,7 +47,7 @@ class GamePipelineStore {
 public:
   explicit GamePipelineStore(Context& c):c_(c) {}
   ~GamePipelineStore();
-  bool Initialize(std::span<const VkDescriptorSetLayout>,const std::filesystem::path& cache,Error&);
+  bool Initialize(std::span<const VkDescriptorSetLayout>,const std::filesystem::path& cache,Error&,shaders::ShaderAbi abi=shaders::ShaderAbi::kPortable);
   std::shared_ptr<GamePipeline> Acquire(const guest::DrawPacket&,const TargetPass&,
     const shaders::CompiledShader&,const shaders::CompiledShader*,uint64_t submission,Error&);
   // Same result; retains the artifacts and caches their SPIR-V digest and
@@ -66,6 +66,7 @@ private:
   struct ShaderPair {std::shared_ptr<const shaders::CompiledShader> vs,ps;uint64_t vs_digest=0,ps_digest=0;};
   std::map<std::pair<const shaders::CompiledShader*,const shaders::CompiledShader*>,ShaderPair> validated_;
   Context& c_;VkPipelineLayout layout_=VK_NULL_HANDLE;VkPipelineCache driver_cache_=VK_NULL_HANDLE;
+  shaders::ShaderAbi abi_=shaders::ShaderAbi::kPortable;
   std::filesystem::path cache_path_;std::map<GamePipelineKey,std::shared_ptr<GamePipeline>> pipelines_;SubmissionResources pending_;
   bool cache_dirty_=false;
   GamePipelineMemo memo_;Stats stats_;

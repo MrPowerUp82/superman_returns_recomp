@@ -3,6 +3,100 @@
 using namespace superman_returns::graphics::vulkan;
 namespace guest=superman_returns::graphics::guest;
 namespace shaders=superman_returns::graphics::shaders;
+namespace {
+uint32_t layout_calls=0,layout_sets=0,layout_push_count=0,pipeline_calls=0;
+VkPushConstantRange layout_push{};
+VkResult VKAPI_CALL PipelineLayout(VkDevice,const VkPipelineLayoutCreateInfo* info,const VkAllocationCallbacks*,VkPipelineLayout* out) {
+  ++layout_calls;layout_sets=info->setLayoutCount;layout_push_count=info->pushConstantRangeCount;
+  layout_push=layout_push_count?info->pPushConstantRanges[0]:VkPushConstantRange{};
+  *out=reinterpret_cast<VkPipelineLayout>(1);return VK_SUCCESS;
+}
+VkResult VKAPI_CALL PipelineCache(VkDevice,const VkPipelineCacheCreateInfo*,const VkAllocationCallbacks*,VkPipelineCache* out) {*out=reinterpret_cast<VkPipelineCache>(2);return VK_SUCCESS;}
+VkResult VKAPI_CALL PipelineShader(VkDevice,const VkShaderModuleCreateInfo*,const VkAllocationCallbacks*,VkShaderModule* out) {*out=reinterpret_cast<VkShaderModule>(3);return VK_SUCCESS;}
+VkResult VKAPI_CALL GraphicsPipeline(VkDevice,VkPipelineCache,uint32_t,const VkGraphicsPipelineCreateInfo*,const VkAllocationCallbacks*,VkPipeline* out) {++pipeline_calls;*out=reinterpret_cast<VkPipeline>(4);return VK_SUCCESS;}
+void VKAPI_CALL FreePipelineLayout(VkDevice,VkPipelineLayout,const VkAllocationCallbacks*) {}
+void VKAPI_CALL FreePipelineCache(VkDevice,VkPipelineCache,const VkAllocationCallbacks*) {}
+void VKAPI_CALL FreePipelineShader(VkDevice,VkShaderModule,const VkAllocationCallbacks*) {}
+void VKAPI_CALL FreePipeline(VkDevice,VkPipeline,const VkAllocationCallbacks*) {}
+VkResult VKAPI_CALL PipelineIdle(VkDevice) {return VK_SUCCESS;}
+Dispatch PipelineDispatch() {
+  Dispatch f;f.vkCreatePipelineLayout=PipelineLayout;f.vkDestroyPipelineLayout=FreePipelineLayout;
+  f.vkCreatePipelineCache=PipelineCache;f.vkDestroyPipelineCache=FreePipelineCache;
+  f.vkCreateShaderModule=PipelineShader;f.vkDestroyShaderModule=FreePipelineShader;
+  f.vkCreateGraphicsPipelines=GraphicsPipeline;f.vkDestroyPipeline=FreePipeline;f.vkDeviceWaitIdle=PipelineIdle;return f;
+}
+void GlobalPipelineDevice(Context& c) {
+  c.device=reinterpret_cast<VkDevice>(1);
+  auto& l=c.properties.limits;l.maxPushConstantsSize=128;l.maxBoundDescriptorSets=1;l.maxVertexInputAttributes=16;l.maxVertexOutputComponents=64;l.maxFragmentInputComponents=64;
+  // Zero legacy descriptor limits deliberately cannot fit GameBindingLayout.
+  c.enabled_features.shaderStorageBufferArrayDynamicIndexing=true;
+  auto& f=c.descriptor_indexing_features;f.runtimeDescriptorArray=true;f.shaderSampledImageArrayNonUniformIndexing=true;f.shaderStorageBufferArrayNonUniformIndexing=true;
+  f.descriptorBindingPartiallyBound=true;f.descriptorBindingSampledImageUpdateAfterBind=true;f.descriptorBindingStorageBufferUpdateAfterBind=true;
+}
+shaders::CompiledShader PipelineArtifact(shaders::ShaderStage stage,shaders::ShaderAbi abi) {
+  shaders::CompiledShader shader;shader.stage=stage;shader.abi=abi;
+  shader.words={0x07230203,0x10300,0,2,0,(5u<<16)|15,stage==shaders::ShaderStage::kVertex?0u:4u,1,0x6e69616d,0};
+  shader.requirements.descriptor_sets=1;
+  if(abi==shaders::ShaderAbi::kGlobal) shader.requirements.storage_buffer_dynamic_indexing=true;
+  return shader;
+}
+}
+SR_TEST(game_pipeline_global_layout_requires_optin_and_declares_draw_push_constants) {
+  Context c(PipelineDispatch());GlobalPipelineDevice(c);Error e;
+  VkDescriptorSetLayout layouts[4]{};
+  {
+    GamePipelineStore portable(c);SR_CHECK(!portable.Initialize({layouts,1},{},e));
+    SR_CHECK(portable.Initialize(layouts,{},e));SR_CHECK_EQ(layout_sets,4u);SR_CHECK_EQ(layout_push_count,0u);
+  }
+  {
+    GamePipelineStore global(c);SR_CHECK(!global.Initialize(layouts,{},e,shaders::ShaderAbi::kGlobal));
+    SR_CHECK(global.Initialize({layouts,1},{},e,shaders::ShaderAbi::kGlobal));
+    SR_CHECK_EQ(layout_sets,1u);SR_CHECK_EQ(layout_push_count,1u);SR_CHECK_EQ(layout_push.offset,0u);SR_CHECK_EQ(layout_push.size,8u);
+    SR_CHECK_EQ(layout_push.stageFlags,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT);
+  }
+}
+SR_TEST(game_pipeline_global_profile_requires_enabled_heap_features_and_push_capacity) {
+  Context c(PipelineDispatch());GlobalPipelineDevice(c);Error e;VkDescriptorSetLayout layout{};
+  using Feature=VkBool32 VkPhysicalDeviceDescriptorIndexingFeatures::*;
+  for(Feature feature:{&VkPhysicalDeviceDescriptorIndexingFeatures::runtimeDescriptorArray,&VkPhysicalDeviceDescriptorIndexingFeatures::shaderSampledImageArrayNonUniformIndexing,
+      &VkPhysicalDeviceDescriptorIndexingFeatures::shaderStorageBufferArrayNonUniformIndexing,&VkPhysicalDeviceDescriptorIndexingFeatures::descriptorBindingPartiallyBound,
+      &VkPhysicalDeviceDescriptorIndexingFeatures::descriptorBindingSampledImageUpdateAfterBind,&VkPhysicalDeviceDescriptorIndexingFeatures::descriptorBindingStorageBufferUpdateAfterBind}) {
+    c.descriptor_indexing_features.*feature=false;auto before=layout_calls;GamePipelineStore store(c);
+    SR_CHECK(!store.Initialize({&layout,1},{},e,shaders::ShaderAbi::kGlobal));SR_CHECK_EQ(layout_calls,before);c.descriptor_indexing_features.*feature=true;
+  }
+  c.enabled_features.shaderStorageBufferArrayDynamicIndexing=false;
+  {GamePipelineStore store(c);SR_CHECK(!store.Initialize({&layout,1},{},e,shaders::ShaderAbi::kGlobal));}
+  c.enabled_features.shaderStorageBufferArrayDynamicIndexing=true;c.properties.limits.maxPushConstantsSize=7;
+  {GamePipelineStore store(c);SR_CHECK(!store.Initialize({&layout,1},{},e,shaders::ShaderAbi::kGlobal));}
+}
+SR_TEST(game_pipeline_profiles_reject_mixed_artifacts_before_pipeline_creation) {
+  Context c(PipelineDispatch());GlobalPipelineDevice(c);Error e;VkDescriptorSetLayout layouts[4]{};guest::DrawPacket d;TargetPass pass;
+  auto vs=PipelineArtifact(shaders::ShaderStage::kVertex,shaders::ShaderAbi::kGlobal),ps=PipelineArtifact(shaders::ShaderStage::kPixel,shaders::ShaderAbi::kGlobal);
+  pipeline_calls=0;
+  {
+    GamePipelineStore portable(c);SR_CHECK(portable.Initialize(layouts,{},e));
+    SR_CHECK(!portable.Acquire(d,pass,vs,&ps,1,e));SR_CHECK(e.message.find("ABI")!=std::string::npos);
+  }
+  {
+    GamePipelineStore global(c);SR_CHECK(global.Initialize({layouts,1},{},e,shaders::ShaderAbi::kGlobal));
+    ps.abi=shaders::ShaderAbi::kPortable;SR_CHECK(!global.Acquire(d,pass,vs,&ps,1,e));SR_CHECK_EQ(pipeline_calls,0u);
+    ps.abi=shaders::ShaderAbi::kGlobal;vs.abi=shaders::ShaderAbi::kPortable;SR_CHECK(!global.Acquire(d,pass,vs,&ps,1,e));SR_CHECK_EQ(pipeline_calls,0u);
+    vs.abi=shaders::ShaderAbi::kGlobal;
+    SR_CHECK(bool(global.Acquire(d,pass,vs,&ps,1,e)));SR_CHECK_EQ(pipeline_calls,1u);
+  }
+}
+SR_TEST(game_pipeline_global_profile_validates_static_stage_limits_without_legacy_layout_counts) {
+  Context c(PipelineDispatch());GlobalPipelineDevice(c);Error e;VkDescriptorSetLayout layout{};guest::DrawPacket d;TargetPass pass;
+  auto vs=PipelineArtifact(shaders::ShaderStage::kVertex,shaders::ShaderAbi::kGlobal),ps=PipelineArtifact(shaders::ShaderStage::kPixel,shaders::ShaderAbi::kGlobal);
+  GamePipelineStore store(c);SR_CHECK(store.Initialize({&layout,1},{},e,shaders::ShaderAbi::kGlobal));
+  auto reject=[&](auto change) {auto v=vs,p=ps;change(v.requirements,p.requirements);SR_CHECK(!store.Acquire(d,pass,v,&p,1,e));};
+  using R=shaders::ShaderRequirements&;
+  reject([](R v,R){v.vertex_attributes=17;});reject([](R v,R){v.vertex_output_components=65;});
+  reject([](R,R p){p.fragment_input_components=65;});reject([](R v,R){v.clip_distance=true;});reject([](R,R p){p.cull_distance=true;});
+  reject([](R v,R){v.descriptor_sets=2;});reject([](R v,R){v.storage_buffers=1;});
+  vs.requirements.vertex_output_components=64;ps.requirements.fragment_input_components=64;
+  SR_CHECK(bool(store.Acquire(d,pass,vs,&ps,1,e)));
+}
 SR_TEST(game_shader_entry_point_comes_from_spirv_instead_of_helper_names) {
   shaders::CompiledShader shader;shader.words={0x07230203,0x10300,0,2,0,(5u<<16)|15,0,1,0x6e69616d,0};Error e;
   SR_CHECK(ShaderEntryPoint(shader,e)=="main");SR_CHECK(e.message.empty());

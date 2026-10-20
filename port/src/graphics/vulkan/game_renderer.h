@@ -3,6 +3,7 @@
 #include "depth_resolve.h"
 #include "state_shadow.h"
 #include "constant_bank_cache.h"
+#include "global_draw_bindings.h"
 #include "../guest/texture_capture.h"
 #include <atomic>
 #include <chrono>
@@ -22,7 +23,7 @@ public:
     // Any barrier on the recording command buffer ends the open render pass.
     state_.before_barrier=[this](VkCommandBuffer command) {if(command && command==recording_.load(std::memory_order_relaxed)) ClosePass();};
   }
-  bool Initialize(const std::filesystem::path& driver_cache,Error&);
+  bool Initialize(const std::filesystem::path& driver_cache,Error&,bool global_resources=false);
   // With an upload command buffer (submitted before `command`), uploads are
   // hoisted there and consecutive draws to the same targets share one render
   // pass. Without it each draw records its own pass, as before.
@@ -37,9 +38,11 @@ public:
   ImageState& Images() {return state_;}
   ResourceStore& Resources() {return resources_;}
   const GameRenderStats& Stats() const {return stats_;}
+  GlobalBindingStats BindingStats() const {return global_?global_->Stats():GlobalBindingStats{};}
+  GlobalBindingStats TakeBindingStats() {return global_?global_->TakeStats():GlobalBindingStats{};}
   const GamePipelineStore::Stats& PipelineStats() const {return pipelines_.stats();}
   bool CheckpointCache(Error& e) {return pipelines_.CheckpointCache(e);}
-  void EnableProfile(bool on) {profiling_=on;}
+  void EnableProfile(bool on) {profiling_=on;if(global_)global_->EnableProfile(on);}
   RecordProfile TakeProfile() {auto p=profile_;profile_={};return p;}
   DescriptorStore::CacheStats TakeDescriptorStats() {return descriptors_.TakeCacheStats();}
   // Diagnostics (SR_VULKAN_DUMP_FRAME): while a dump is active, Record logs
@@ -60,6 +63,8 @@ private:
   bool constant_bank_cache_enabled_=ConstantBankCacheEnabled();
   ConstantBankCache constant_bank_cache_;
   Context& c_;ShaderLookup shaders_;TextureDecoder decoder_;ImageState state_;ResourceStore resources_;TargetStore targets_;DescriptorStore descriptors_;GamePipelineStore pipelines_;
+  std::unique_ptr<GlobalDrawBindings> global_;
+  VkDescriptorSet bound_global_set_=VK_NULL_HANDLE;
   DepthResolver depth_resolver_;bool depth_ready_=false;
   AliasOptions alias_options_;
   std::map<guest::ResourceId,std::vector<uint8_t>> cpu_buffers_;

@@ -198,9 +198,20 @@ bool GamePipelineStore::CheckpointCache(Error& e) {
   if(!replaced) {std::filesystem::remove(temporary,ec);return Fail(e,"Cannot replace driver cache checkpoint");}
   cache_dirty_=false;return true;
 }
-bool GamePipelineStore::Initialize(std::span<const VkDescriptorSetLayout> layouts,const std::filesystem::path& path,Error& e) {
-  if(layout_ || layouts.size()!=4) return Fail(e,"Invalid/already initialized pipeline layout");
+bool GamePipelineStore::Initialize(std::span<const VkDescriptorSetLayout> layouts,const std::filesystem::path& path,Error& e,shaders::ShaderAbi abi) {
+  if(abi!=shaders::ShaderAbi::kPortable && abi!=shaders::ShaderAbi::kGlobal) return Fail(e,"Unsupported game shader ABI");
+  const bool global=abi==shaders::ShaderAbi::kGlobal;
+  if(layout_ || layouts.size()!=(global?1u:4u)) return Fail(e,"Invalid/already initialized pipeline layout");
+  if(global) {
+    const auto& f=c_.descriptor_indexing_features;
+    if(!f.runtimeDescriptorArray || !f.shaderSampledImageArrayNonUniformIndexing || !f.shaderStorageBufferArrayNonUniformIndexing ||
+       !f.descriptorBindingPartiallyBound || !f.descriptorBindingSampledImageUpdateAfterBind || !f.descriptorBindingStorageBufferUpdateAfterBind ||
+       !c_.enabled_features.shaderStorageBufferArrayDynamicIndexing) return Fail(e,"Global shader ABI requires enabled descriptor indexing features");
+    if(c_.properties.limits.maxPushConstantsSize<8 || c_.properties.limits.maxBoundDescriptorSets<1) return Fail(e,"Global shader ABI push/layout limits unavailable");
+  }
   VkPipelineLayoutCreateInfo l{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};l.setLayoutCount=uint32_t(layouts.size());l.pSetLayouts=layouts.data();
+  VkPushConstantRange push{VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,8};
+  if(global) {l.pushConstantRangeCount=1;l.pPushConstantRanges=&push;}
   if(!Check(c_.f.vkCreatePipelineLayout(c_.device,&l,nullptr,&layout_),"Game pipeline layout",e)) return false;
   std::vector<uint8_t> initial;auto expected=CacheHeader(c_);
   if(!path.empty()) {std::ifstream file(path,std::ios::binary|std::ios::ate);auto size=file.tellg();if(file && size>=std::streamoff(expected.size()*4+32) && size<64*1024*1024) {file.seekg(0);std::vector<uint32_t> header(expected.size());file.read(reinterpret_cast<char*>(header.data()),header.size()*4);if(header==expected) {initial.resize(size_t(size)-header.size()*4);if(!file.read(reinterpret_cast<char*>(initial.data()),initial.size())) initial.clear();}}}
@@ -208,11 +219,20 @@ bool GamePipelineStore::Initialize(std::span<const VkDescriptorSetLayout> layout
   if(!initial.empty()) {uint32_t fields[4];std::memcpy(fields,initial.data(),16);if(fields[0]<32 || fields[0]>initial.size() || fields[1]!=VK_PIPELINE_CACHE_HEADER_VERSION_ONE || fields[2]!=c_.properties.vendorID || fields[3]!=c_.properties.deviceID || std::memcmp(initial.data()+16,c_.properties.pipelineCacheUUID,16)) initial.clear();}
   VkPipelineCacheCreateInfo cache{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};cache.initialDataSize=initial.size();cache.pInitialData=initial.data();
   if(!Check(c_.f.vkCreatePipelineCache(c_.device,&cache,nullptr,&driver_cache_),"Vulkan driver pipeline cache",e)) return false;
-  cache_path_=path;e={};return true;
+  abi_=abi;cache_path_=path;e={};return true;
 }
 bool GamePipelineStore::Validate(const shaders::CompiledShader& vs,const shaders::CompiledShader* ps,Error& e) const {
   if(!layout_ || !ValidSpirv(vs.words) || (ps && !ValidSpirv(ps->words))) return Fail(e,"Pipeline layout/serial/shaders invalid");
-  shaders::ShaderRequirements empty;auto errors=CheckDeviceRequirements(vs.requirements,ps?ps->requirements:empty,GameBindingLayout(),GetDeviceCaps(c_.properties.limits,c_.enabled_features));
+  if(vs.abi!=abi_ || (ps && (ps->abi!=abi_ || ps->abi!=vs.abi))) return Fail(e,"Game shader ABI does not match pipeline layout");
+  const bool global=abi_==shaders::ShaderAbi::kGlobal;
+  if(global) {
+    auto fixed_counts=[](const shaders::ShaderRequirements& r) {return r.storage_buffers || r.uniform_buffers || r.sampled_images || r.samplers || r.descriptor_sets>1;};
+    if(fixed_counts(vs.requirements) || (ps && fixed_counts(ps->requirements))) return Fail(e,"Global shader ABI requires runtime heap descriptor counts");
+  }
+  // Global heap initialization checked allocated capacities against the
+  // update-after-bind limits. Here only reflected static stage limits apply.
+  auto bindings=global?std::vector<LayoutBinding>{}:GameBindingLayout();
+  shaders::ShaderRequirements empty;auto errors=CheckDeviceRequirements(vs.requirements,ps?ps->requirements:empty,bindings,GetDeviceCaps(c_.properties.limits,c_.enabled_features));
   if(ps) {auto pair=shaders::ValidateShaderPair(vs,*ps);errors.insert(errors.end(),pair.begin(),pair.end());}
   if(!errors.empty()) {e={"Game pipeline requirements",VK_ERROR_FEATURE_NOT_PRESENT,errors.front()};return false;}
   return true;

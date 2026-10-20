@@ -131,7 +131,11 @@ bool ReferenceBuildBindings(const guest::DrawPacket& draw,std::byte* block,DrawB
       stream_index[stream.stream]=uint8_t(streams);out.vertex_buffers[streams++]=stream.update.plan.key;
     }
   }
-  std::memcpy(block,&draw.constants,sizeof(guest::ConstantSnapshot));
+  guest::ConstantSnapshot source;
+  std::copy(draw.constants.vs.begin(),draw.constants.vs.end(),source.vs.begin());
+  std::copy(draw.constants.ps.begin(),draw.constants.ps.end(),source.ps.begin());
+  std::copy(draw.constants.shared.begin(),draw.constants.shared.end(),source.shared.begin());
+  std::memcpy(block,&source,sizeof(source));
   std::byte* shared=block+kSharedConstantsOffset;
   for(uint32_t i=0;i<draw.vertex_fetch.size();++i) {
     auto meta=draw.vertex_fetch[i];
@@ -154,7 +158,7 @@ bool ReferenceBuildBindings(const guest::DrawPacket& draw,std::byte* block,DrawB
 // Fills every constant of the packet with distinct, non-zero bytes so a missed copy cannot hide.
 void FillConstants(guest::DrawPacket& p,uint32_t seed) {
   for(uint32_t i=0;i<1024;++i) {p.constants.vs[i]=seed*2654435761u+i*7u+1u;p.constants.ps[i]=seed*40503u+i*13u+3u;}
-  for(uint32_t i=0;i<4096;++i) p.constants.shared[i]=uint8_t(seed*31u+i*5u+1u);
+  for(uint32_t i=0;i<p.constants.shared.size();++i) p.constants.shared[i]=uint8_t(seed*31u+i*5u+1u);
 }
 void ExpectSameBlockAsReference(const guest::DrawPacket& p) {
   Block fresh,old;fresh.bytes.fill(std::byte{0xCD});old.bytes.fill(std::byte{0x5A});  // the arena is neither zeroed nor initialized

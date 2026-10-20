@@ -29,15 +29,22 @@ def requirements(m,stage):
  r.update(sampled_image_dynamic_indexing=29 in caps or any(x.get('dynamic_indexing') and (x['type'].startswith('sampled_image') or x['type']=='sampler') for x in rows),storage_buffer_dynamic_indexing=30 in caps or any(x.get('dynamic_indexing') and x['type']=='storage_buffer' for x in rows),clip_distance=32 in caps,cull_distance=33 in caps)
  return r
 
-def inspect_one(raw,root,tools,validator):
- stage=raw.stem.rsplit('.',1)[-1];result=compile_shader(raw,stage,root,tools)
+def inspect_one(raw,root,tools,validator,profile='portable'):
+ stage=raw.stem.rsplit('.',1)[-1];result=compile_shader(raw,stage,root,tools,profile=profile)
  row={'container':raw.name,'stage':stage,'status':result.status,'cache_key':result.cache_key,'diagnostic':result.diagnostic}
  if result.status!='ready':return row
  try:
-  m=inspect_spirv(result.binary_path.read_bytes());errors=contract_errors(m)
+  m=inspect_spirv(result.binary_path.read_bytes())
+  if profile=='global':
+   from vulkan_global_contract import contract_errors as global_errors
+   errors=global_errors(m)
+  else:errors=contract_errors(m)
   expected=0 if stage=='vs' else 4
   if len(m['entrypoints'])!=1 or m['entrypoints'][0]['model']!=expected:errors.append('Entry point/stage mismatch')
-  row['metadata']=m;row['requirements']=requirements(m,stage)
+  row['metadata']=m
+  # Runtime arrays do not encode allocated heap capacities. Reporting zero
+  # descriptors here would misrepresent the global renderer's requirements.
+  if profile=='portable':row['requirements']=requirements(m,stage)
   if validator:
    v=subprocess.run([str(validator),'--target-env','vulkan1.1',str(result.binary_path)],capture_output=True,text=True,timeout=30)
    if v.returncode:errors.append('spirv-val: '+v.stderr)
@@ -46,21 +53,28 @@ def inspect_one(raw,root,tools,validator):
  return row
 
 def main():
- ap=argparse.ArgumentParser();ap.add_argument('--corpus',type=Path,default=ROOT/'artifacts/shaders');ap.add_argument('--output',type=Path,default=ROOT/'artifacts/shaders/vulkan-m2/report.json')
+ ap=argparse.ArgumentParser();ap.add_argument('--corpus',type=Path,default=ROOT/'artifacts/shaders');ap.add_argument('--output',type=Path)
+ ap.add_argument('--profile',choices=('portable','global'),default='portable')
  ap.add_argument('--emitter',type=Path,default=ROOT/'build/vulkan-m2/emitter-build/XenosRecompCorpus.exe');ap.add_argument('--common',type=Path,default=ROOT/'build/vulkan-m2/emitter-tree/src/XenosRecomp/shader_common.h');ap.add_argument('--dxc',type=Path,default=ROOT/'.tools/dxc/bin/x64/dxc.exe');ap.add_argument('--jobs',type=int,default=4)
  a=ap.parse_args();raws=sorted((a.corpus/'raw').glob('*.bin'))
+ if a.output is None:a.output=ROOT/('artifacts/shaders/vulkan-global/report.json' if a.profile=='global' else 'artifacts/shaders/vulkan-m2/report.json')
  if not raws:ap.error('No local shader containers; empty corpus is not a pass')
  if a.jobs<1 or a.jobs>32:ap.error('jobs must be 1..32')
  tools=Toolchain(a.emitter,a.common,a.dxc)
  for path in (tools.emitter,tools.common,tools.dxc):
   if not path.is_file():ap.error('Missing tool '+str(path))
  validator=shutil.which('spirv-val') or shutil.which('spirv-val.exe')
- with concurrent.futures.ThreadPoolExecutor(max_workers=a.jobs) as pool:rows=list(pool.map(lambda raw:inspect_one(raw,a.output.parent,tools,validator),raws))
+ local_validator=ROOT/'.tools/vulkan-validation/Bin/spirv-val.exe'
+ if not validator and local_validator.is_file():validator=str(local_validator)
+ with concurrent.futures.ThreadPoolExecutor(max_workers=a.jobs) as pool:rows=list(pool.map(lambda raw:inspect_one(raw,a.output.parent,tools,validator,a.profile),raws))
  good=sum(r['status']=='ready' for r in rows)
  maxima={}
  for row in rows:
   for name,value in row.get('requirements',{}).items():maxima[name]=max(maxima.get(name,0),value)
- report={'schema':1,'abi':'sr-vulkan-buffers-v1','total':len(rows),'ready':good,'failed':len(rows)-good,'external_validation':str(validator) if validator else 'spirv-val absent; no external validator claim','maximum_requirements':maxima,'shaders':rows}
+ from vulkan_contract import build_contract
+ if a.profile=='global':from vulkan_global_contract import build_contract
+ contract=build_contract()
+ report={'schema':1,'abi':contract['abi'],'contract':contract,'total':len(rows),'ready':good,'failed':len(rows)-good,'external_validation':str(validator) if validator else 'spirv-val absent; no external validator claim','maximum_requirements':maxima,'shaders':rows}
  a.output.parent.mkdir(parents=True,exist_ok=True);a.output.write_text(json.dumps(report,indent=2),encoding='utf-8')
  print(f'Vulkan corpus: {good}/{len(rows)} ready, {len(rows)-good} failed. {report["external_validation"]}')
  for row in rows:

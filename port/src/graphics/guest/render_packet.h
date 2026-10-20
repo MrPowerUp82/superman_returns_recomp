@@ -1,9 +1,12 @@
 #pragma once
 #include "captured_batch.h"
 #include "constant_snapshot.h"
+#include "packet_constants.h"
+#include "replay_draw_state.h"
 #include "render_state.h"
 #include "vertex_layout.h"
 #include <array>
+#include <mutex>
 #include <stdexcept>
 #include <variant>
 namespace superman_returns::native {
@@ -30,9 +33,8 @@ struct DrawPacket {
   // Keep this user-provided: value-initialization must not add a whole-packet
   // zeroing pass before the individual members initialize themselves.
   DrawPacket() {}
-  // Only DecodeCapturedPacket may publish this storage: it fills both float
-  // banks, polygon offset registers and the shared metadata suffix before their
-  // first use. Shared prefix/device/vertex/fetch keep normal initialization.
+  // Only DecodeCapturedPacket may publish this storage. Float banks borrow
+  // immutable snapshots; device/vertex/fetch state keeps normal initialization.
   explicit DrawPacket(ReplayStorageTag) : constants(ConstantSnapshot::ReplayStorageTag{}) {}
   int pass = 0;
   Primitive primitive = Primitive::kTriangles;
@@ -41,7 +43,7 @@ struct DrawPacket {
   int32_t depth_bias=0;float slope_bias=0;
   int32_t base_vertex = 0;
   uint32_t first = 0, count = 0, inline_stride = 0;
-  ConstantSnapshot constants;
+  PacketConstants constants;
   CapturedMemory memory;
   std::vector<VertexStream> streams;
   std::vector<VertexAttribute> attributes;
@@ -124,17 +126,62 @@ struct DrawPacketOwner {
   DrawPacketOwner(DrawPacketOwner&&)=default;
   DrawPacketOwner& operator=(DrawPacketOwner&&)=default;
 };
+// Recycle empty backing vectors after the last payload alias releases them.
+// A frame spans many batches (the frontend flushes at 32 commands), so retain
+// enough small blocks for a frame while independently enforcing the byte cap.
+class DrawPacketPool : public std::enable_shared_from_this<DrawPacketPool> {
+public:
+  explicit DrawPacketPool(size_t byte_budget=128ull*1024*1024,size_t block_budget=128)
+      :byte_budget_(byte_budget),block_budget_(block_budget) {free_.reserve(block_budget_);}
+  std::shared_ptr<std::vector<DrawPacket>> Acquire(size_t count) {
+    auto pool=shared_from_this();
+    std::unique_ptr<std::vector<DrawPacket>> block;
+    {
+      std::lock_guard lock(mutex_);
+      auto best=free_.end();
+      for(auto it=free_.begin();it!=free_.end();++it)
+        if((*it)->capacity()>=count && (best==free_.end() || (*it)->capacity()<(*best)->capacity())) best=it;
+      if(best!=free_.end()) {
+        idle_bytes_-=(*best)->capacity()*sizeof(DrawPacket);
+        block=std::move(*best);free_.erase(best);
+      }
+    }
+    if(!block) block=std::make_unique<std::vector<DrawPacket>>();
+    return {block.release(),[pool=std::move(pool)](std::vector<DrawPacket>* raw) noexcept {
+      std::unique_ptr<std::vector<DrawPacket>> returned(raw);
+      // Runs on the last alias release, potentially on the recorder thread.
+      // Drop captures and other owned resources now, not on the next acquire.
+      returned->clear();
+      const size_t bytes=returned->capacity()*sizeof(DrawPacket);
+      if(!pool->block_budget_ || bytes>pool->byte_budget_) return;
+      std::lock_guard lock(pool->mutex_);
+      // Evict old idle capacities so small startup batches cannot permanently
+      // crowd out the larger gameplay arenas. In-flight blocks are never here.
+      while(!pool->free_.empty() &&
+            (pool->free_.size()>=pool->block_budget_ || bytes>pool->byte_budget_-pool->idle_bytes_)) {
+        pool->idle_bytes_-=pool->free_.front()->capacity()*sizeof(DrawPacket);
+        pool->free_.erase(pool->free_.begin());
+      }
+      pool->idle_bytes_+=bytes;pool->free_.push_back(std::move(returned));
+    }};
+  }
+private:
+  std::mutex mutex_;
+  std::vector<std::unique_ptr<std::vector<DrawPacket>>> free_;
+  size_t byte_budget_,block_budget_,idle_bytes_=0;
+};
 // One allocation for a batch's payloads instead of one large allocation per
 // draw. Each alias keeps the block alive after replay recycles the WorkBatch.
 // Next hands each freshly initialized element out at most once.
 class DrawPacketArena {
 public:
-  explicit DrawPacketArena(size_t count,bool replay_storage=false) {
-    if(!replay_storage) packets_=std::make_shared<std::vector<DrawPacket>>(count);
-    else {
-      packets_=std::make_shared<std::vector<DrawPacket>>();
-      packets_->reserve(count);
-      for(size_t i=0;i<count;++i) packets_->emplace_back(DrawPacket::ReplayStorageTag{});
+  explicit DrawPacketArena(size_t count,bool replay_storage=false,
+                           std::shared_ptr<DrawPacketPool> pool={}) {
+    packets_=pool?pool->Acquire(count):std::make_shared<std::vector<DrawPacket>>();
+    packets_->reserve(count);
+    for(size_t i=0;i<count;++i) {
+      if(replay_storage) packets_->emplace_back(DrawPacket::ReplayStorageTag{});
+      else packets_->emplace_back();
     }
   }
   DrawPacketArena(const DrawPacketArena&)=delete;
@@ -165,6 +212,15 @@ bool DecodeRenderPacket(const WorkBatch &, const WorkCmd &,
 // Optional storage must be a fresh payload returned by DrawPacketArena::Next.
 // Optional counters belong to the replay owner; null performs no clock reads.
 struct ReplayProbe { uint64_t capture_ns=0,pm4_ns=0,decode_ns=0; };
+struct PreparedReplayCommand {
+  CapturedMemory memory;
+  ReplayDrawState state;
+  uint64_t vs_version=0,ps_version=0;
+};
+bool PrepareReplayCommand(const WorkBatch&,const WorkCmd&,native::Pm4Mirror&,
+    PreparedReplayCommand&,std::string&,std::shared_ptr<const WorkBatch> ={},ReplayProbe* =nullptr);
+bool DecodePreparedRenderPacket(const WorkBatch&,const WorkCmd&,const PreparedReplayCommand&,
+    RenderPacket&,std::string&,DrawPacketOwner={},ReplayProbe* =nullptr);
 bool ReplayCapturedRenderPacket(const WorkBatch&,const WorkCmd&,native::Pm4Mirror&,RenderPacket&,std::string&,DrawPacketOwner storage={},std::shared_ptr<const WorkBatch> capture_owner={},ReplayProbe* probe=nullptr);
 // Original scale1/MSAA1 shader ABI state. Descriptor indices are populated by
 // the backend after binding resources; these semantic constants are common.

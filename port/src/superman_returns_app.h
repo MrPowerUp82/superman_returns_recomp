@@ -12,6 +12,7 @@
 #include <rex/cvar.h>
 
 #include "frame_stats.h"
+#include "benchmark_input_driver.h"
 #include "sr_settings.h"
 #include "graphics/backend_selection.h"
 #include "native_renderer/native_bridge.h"
@@ -121,7 +122,7 @@ class SupermanReturnsApp : public rex::ReXApp {
   }
 
   // Feed the F3 debug overlay with the guest frame rate.
-  void OnPostSetup() override { SetGuestFrameStats(SampleGuestFrameStats); }
+  void OnPostSetup() override { SetGuestFrameStats(SampleGuestFrameStats);InstallBenchmarkInput(*runtime()); }
 
   // Override virtual hooks for customization:
   // void OnPostInitLogging() override {}

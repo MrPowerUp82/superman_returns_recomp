@@ -89,7 +89,7 @@ New-Item -ItemType Directory -Force $vulkanTools | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Vulkan shader emitter build failed' }
 Copy-Item (Need (Join-Path $root 'build/vulkan-m2/emitter-build/XenosRecompCorpus.exe') '') (Join-Path $vulkanTools 'sr_xenosrecomp.exe')
 Copy-Item (Need (Join-Path $root 'build/vulkan-m2/emitter-tree/src/XenosRecomp/shader_common.h') '') $vulkanTools
-foreach ($script in 'runtime_vulkan_shader.py', 'compile_vulkan.py', 'spirv_metadata.py', 'validate_vulkan_corpus.py', 'vulkan_contract.py') {
+foreach ($script in 'runtime_vulkan_shader.py', 'compile_vulkan.py', 'spirv_metadata.py', 'validate_vulkan_corpus.py', 'vulkan_contract.py', 'vulkan_global_contract.py') {
   Copy-Item (Need (Join-Path $root "tools\shaders\$script") '') $vulkanTools
 }
 $python = (Get-Command python -ErrorAction Stop).Source

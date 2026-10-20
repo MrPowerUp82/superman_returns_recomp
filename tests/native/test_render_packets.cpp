@@ -14,7 +14,45 @@ SR_TEST(packet_check_cadence_limits_debug_capture) {
 #include <bit>
 #include <algorithm>
 #include <stdexcept>
+#include <thread>
 using namespace superman_returns::graphics::guest;
+SR_TEST(pooled_draws_remain_owned_until_last_alias_and_reset_on_reuse) {
+  auto pool=std::make_shared<DrawPacketPool>();
+  auto capture=std::make_shared<ShaderCapture>();
+  std::weak_ptr<ShaderCapture> weak_capture=capture;
+  DrawPacketOwner held;
+  {
+    DrawPacketArena arena(2,true,pool);
+    held=arena.Next();held.payload->count=47;held.payload->vertex_shader=capture;
+    held.payload->inline_data={1,2,3};held.payload->registers[0x104]=0x12345678;
+    auto other=arena.Next();other.payload->count=91;
+    DrawPacketArena concurrent(2,true,pool);
+    auto next=concurrent.Next();SR_CHECK(next.payload.get()!=held.payload.get());
+    SR_CHECK_EQ(held.payload->count,47u);SR_CHECK_EQ(other.payload->count,91u);
+  }
+  capture.reset();SR_CHECK(!weak_capture.expired());
+  held={};SR_CHECK(weak_capture.expired());
+  // Both returned blocks must be reconstructed: the first one may be the
+  // clean concurrent block, which alone would not exercise the dirty payload.
+  DrawPacketArena reset(2,false,pool),reset_second(2,false,pool);
+  for(auto* arena:{&reset,&reset_second}) {
+    auto next=arena->Next();
+    SR_CHECK_EQ(next.payload->count,0u);SR_CHECK(!next.payload->vertex_shader);
+    SR_CHECK(next.payload->inline_data.empty());SR_CHECK_EQ(next.payload->registers[0x104],0u);
+    for(auto word:next.payload->constants.vs) SR_CHECK_EQ(word,0u);
+  }
+}
+SR_TEST(pooled_draw_late_release_on_consumer_thread_is_safe) {
+  auto pool=std::make_shared<DrawPacketPool>();
+  std::weak_ptr<DrawPacketPool> weak_pool=pool;
+  DrawPacketOwner held;
+  {DrawPacketArena arena(1,true,pool);held=arena.Next();held.payload->count=37;}
+  pool.reset();SR_CHECK(!weak_pool.expired());
+  std::thread consumer([packet=std::move(held)]() mutable {
+    SR_CHECK_EQ(packet.payload->count,37u);packet={};
+  });
+  consumer.join();SR_CHECK(weak_pool.expired());
+}
 SR_TEST(draw_packet_keeps_replay_payload_below_24_kib) {
   // Bound per-draw memory independently of arena allocation count. At 3,008
   // draws, 4 KiB of unused state would add nearly 12 MiB to every batch.
@@ -38,6 +76,57 @@ SR_TEST(replay_preserves_polygon_offset_register_bits) {
     SR_CHECK_EQ(draw->depth_bias,-2);SR_CHECK_EQ(draw->slope_bias,4.0f);
   }
 }
+SR_TEST(replay_packet_avoids_inline_float_banks_and_duplicate_vertex_metadata) {
+  SR_CHECK(sizeof(DrawPacket)<14000);
+  SR_CHECK(sizeof(DrawPacket::constants)<=576);
+}
+SR_TEST(replay_float_snapshots_share_versions_and_survive_mirror_reset) {
+  superman_returns::native::Pm4Mirror mirror;
+  auto write=[&](uint32_t value) {
+    const uint8_t words[]{0,0,0x40,0,uint8_t(value>>24),uint8_t(value>>16),uint8_t(value>>8),uint8_t(value)};
+    mirror.ScanCopy(nullptr,words,sizeof(words));
+  };
+  WorkBatch batch;WorkCmd cmd;cmd.op=Op::kDraw;cmd.u[0]=4;cmd.u[2]=3;
+  RenderPacket first,second,third;std::string error;
+  write(0x3f800000);
+  SR_CHECK(ReplayCapturedRenderPacket(batch,cmd,mirror,first,error));
+  SR_CHECK(ReplayCapturedRenderPacket(batch,cmd,mirror,second,error));
+  const auto& a=*GetDraw(first);const auto& b=*GetDraw(second);
+  SR_CHECK(a.constants.vs.data()==b.constants.vs.data());
+  SR_CHECK(a.constants.ps.data()==b.constants.ps.data());
+  write(0x40000000);
+  SR_CHECK(ReplayCapturedRenderPacket(batch,cmd,mirror,third,error));
+  const auto& c=*GetDraw(third);
+  SR_CHECK(a.constants.vs.data()!=c.constants.vs.data());
+  SR_CHECK(a.constants.ps.data()==c.constants.ps.data());
+  SR_CHECK_EQ(a.constants.vs[0],0x3f800000u);SR_CHECK_EQ(c.constants.vs[0],0x40000000u);
+  mirror=superman_returns::native::Pm4Mirror{};
+  SR_CHECK_EQ(a.constants.vs[0],0x3f800000u);SR_CHECK_EQ(c.constants.vs[0],0x40000000u);
+  DrawPacket edit=a;edit.constants.vs[0]=0x40400000;
+  SR_CHECK_EQ(a.constants.vs[0],0x3f800000u);SR_CHECK_EQ(edit.constants.vs[0],0x40400000u);
+  SR_CHECK_EQ(b.constants.vs[0],0x3f800000u);
+}
+SR_TEST(packet_float_bank_editing_preserves_copies_and_normalized_snapshots) {
+  PacketConstants first;first.vs[0]=0x12345678;auto second=first;
+  second.vs.fill(0xabcdef);SR_CHECK_EQ(first.vs[0],0x12345678u);SR_CHECK_EQ(second.vs[0],0xabcdefu);
+  const PacketConstants empty;
+  for(auto value:empty.vs)SR_CHECK_EQ(value,0u);
+  superman_returns::native::Pm4Mirror mirror;
+  const uint8_t words[]{0,0,0x40,0,0x7f,0xc0,0,1};mirror.ScanCopy(nullptr,words,sizeof(words));
+  first.vs.Share(mirror.ShareFloatConstants(false));
+  SR_CHECK(first.vs==mirror.FloatConstants(false));
+  const auto normalized=mirror.FloatConstants(false)[0];
+  first.vs.data()[0]=0x98765432;
+  SR_CHECK_EQ(mirror.FloatConstants(false)[0],normalized);
+  ConstantSnapshot source;source.ps[4]=42;source.shared[511]=91;first=source;
+  first.ps[4]=43;SR_CHECK_EQ(source.ps[4],42u);SR_CHECK_EQ(first.shared[511],91u);
+}
+SR_TEST(packet_float_bank_copy_does_not_alias_an_exposed_mutable_pointer) {
+  PacketConstants first;auto* edit=first.vs.data();edit[9]=17;
+  const auto second=first;
+  edit[9]=42;
+  SR_CHECK_EQ(first.vs[9],42u);SR_CHECK_EQ(second.vs[9],17u);
+}
 SR_TEST(replay_probe_does_not_process_a_rejected_capture) {
   WorkBatch batch; WorkCmd cmd; cmd.pm4_capture_ok=false;
   superman_returns::native::Pm4Mirror mirror;
@@ -60,11 +149,22 @@ SR_TEST(replay_storage_matches_initialized_draw_after_complete_decode) {
                          0,0,0x44,0,0x3f,0x80,0,0,
                          0,0,0x20,0,0x12,0x34,0x56,0x78};
   mirror.ScanCopy(nullptr,words,sizeof(words));
-  DrawPacketArena arena(3,true);
+  auto pool=std::make_shared<DrawPacketPool>();
+  {
+    DrawPacketArena stale(3,true,pool);
+    for(size_t i=0;i<3;++i) {
+      auto packet=stale.Next();
+      packet.payload->registers.fill(0xdeadbeef);
+      packet.payload->texture_fetch.fill({1,2,3,4,5,6});
+      packet.payload->vertex_fetch.fill({9,8,7,6});
+      packet.payload->inline_data={1,2,3};
+      packet.payload->vertex_shader=std::make_shared<ShaderCapture>();
+    }
+  }
+  DrawPacketArena arena(3,true,pool);
   SR_CHECK(ReplayCapturedRenderPacket(batch,cmd,mirror,ordinary,error));
   auto storage=arena.Next();
-  // Decode must assign the complete suffix, even when there are no attributes.
-  std::fill(storage.payload->constants.shared.begin()+512,storage.payload->constants.shared.end(),0xa5);
+  // The compact shared prefix remains fully initialized even without attributes.
   SR_CHECK(ReplayCapturedRenderPacket(batch,cmd,mirror,prepared,error,std::move(storage)));
   const auto& a=*GetDraw(ordinary);const auto& b=*GetDraw(prepared);
   SR_CHECK(a.constants.vs==b.constants.vs);SR_CHECK(a.constants.ps==b.constants.ps);
@@ -72,6 +172,7 @@ SR_TEST(replay_storage_matches_initialized_draw_after_complete_decode) {
   SR_CHECK(a.registers==b.registers);SR_CHECK(a.polygon_offset_registers==b.polygon_offset_registers);
   SR_CHECK(a.texture_fetch==b.texture_fetch);
   SR_CHECK_EQ(std::memcmp(a.vertex_fetch.data(),b.vertex_fetch.data(),sizeof(a.vertex_fetch)),0);
+  SR_CHECK(!b.vertex_shader);SR_CHECK(b.inline_data.empty());
   cmd.u[0]=UINT32_MAX;
   auto* published=GetDraw(prepared);
   SR_CHECK(!ReplayCapturedRenderPacket(batch,cmd,mirror,prepared,error,arena.Next()));
@@ -508,7 +609,6 @@ SR_TEST(strip_and_ushort2_metadata_survive_packet) {
            std::vector<uint32_t>({1, UINT32_MAX, 2}));
   DrawPacketArena storage(1,true);RenderPacket replay;
   auto owner=storage.Next();
-  std::fill(owner.payload->constants.shared.begin()+512,owner.payload->constants.shared.end(),0xa5);
   SR_CHECK(ReplayCapturedRenderPacket(batch,cmd,mirror,replay,error,std::move(owner)));
   SR_CHECK(GetDraw(replay)->constants.shared==draw.constants.shared);
   SR_CHECK(std::memcmp(GetDraw(replay)->vertex_fetch.data(),draw.vertex_fetch.data(),sizeof(draw.vertex_fetch))==0);
@@ -518,7 +618,7 @@ SR_TEST(strip_and_ushort2_metadata_survive_packet) {
   SR_CHECK_EQ(draw.vertex_fetch[0].type, 0x2c2259);
   SR_CHECK_EQ(draw.vertex_fetch[0].stride, 4);
   VertexFetchMeta metadata;
-  std::memcpy(&metadata, draw.constants.shared.data() + 512, sizeof(metadata));
+  std::memcpy(&metadata, draw.vertex_fetch.data(), sizeof(metadata));
   SR_CHECK_EQ(metadata.type, 0x2c2259);
   // Reused guest addresses and later partial captures must invalidate/override
   // cached declaration bytes without changing an already-owned packet.

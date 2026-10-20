@@ -13,7 +13,7 @@ class GameFrame {
 public:
   GameFrame(Context&,std::mutex&,ShaderLookup,TextureDecoder);
   ~GameFrame();
-  bool Initialize(const std::filesystem::path&,Error&);
+  bool Initialize(const std::filesystem::path&,Error&,bool global_resources=false);
   bool Enqueue(guest::RenderPacket&&,std::shared_ptr<TextureResource>&,Error&);
   void Cancel();
   // Async mode: Enqueue(swap) hands the frame to a recording thread and

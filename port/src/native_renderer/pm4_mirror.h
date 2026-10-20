@@ -19,6 +19,7 @@
 #include <cstring>
 #include <functional>
 #include <span>
+#include <memory>
 
 namespace superman_returns::native {
 
@@ -57,6 +58,7 @@ public:
   // Owned by the same recording thread as this mirror. Callers copy the bank
   // into packets/uploads; the raw GPU register values remain untouched.
   const std::array<uint32_t,1024>& FloatConstants(bool pixel) const;
+  const std::shared_ptr<const std::array<uint32_t,1024>>& ShareFloatConstants(bool pixel) const;
   // Registers written at least once since startup (0x4000-0x4A00 range
   // tracked).
   bool written(uint32_t index) const {
@@ -103,6 +105,8 @@ private:
   bool written_[kTrackedCount] = {};
   mutable std::array<std::array<uint32_t,1024>,2> float_cache_{};
   mutable std::array<uint64_t,2> float_cache_version_{};
+  mutable std::array<std::shared_ptr<const std::array<uint32_t,1024>>,2> float_snapshots_;
+  mutable std::array<uint64_t,2> float_snapshot_version_{};
 };
 
 } // namespace superman_returns::native

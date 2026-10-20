@@ -8,6 +8,8 @@ static uint32_t version = VK_API_VERSION_1_1;
 static bool ext = true;
 static bool debug_available = false;
 static bool timeline_available=false,timeline_supported=true;
+static bool global_available=false,global_supported=true;
+static bool robust_global_supported=true,robust_seen=false;
 static PFN_vkDebugUtilsMessengerCallbackEXT debug_callback;
 static void *debug_user;
 static VkResult VKAPI_CALL Version(uint32_t *v) {
@@ -106,14 +108,18 @@ static void VKAPI_CALL DeviceProperties(VkPhysicalDevice,
                                         VkPhysicalDeviceProperties2 *p) {
   p->properties.apiVersion = VK_API_VERSION_1_1;
   p->properties.deviceType = VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+  for(auto* next=static_cast<VkBaseOutStructure*>(p->pNext);next;next=next->pNext)
+    if(next->sType==VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES)
+      reinterpret_cast<VkPhysicalDeviceDescriptorIndexingProperties*>(next)->robustBufferAccessUpdateAfterBind=robust_global_supported;
 }
 static VkResult VKAPI_CALL DeviceExtensions(VkPhysicalDevice, const char *,
                                             uint32_t *n,
                                             VkExtensionProperties *p) {
-  *n = timeline_available?2:1;
+  *n = 1+uint32_t(timeline_available)+uint32_t(global_available);
   if (p)
     std::strcpy(p->extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME);
   if(p && timeline_available) std::strcpy(p[1].extensionName,VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
+  if(p && global_available) std::strcpy(p[1+uint32_t(timeline_available)].extensionName,VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
   return VK_SUCCESS;
 }
 static void VKAPI_CALL DeviceFamilies(VkPhysicalDevice, uint32_t *n,
@@ -162,6 +168,60 @@ SR_TEST(optional_fg_timeline_does_not_change_the_off_device) {
     SR_CHECK(error.result==VK_ERROR_OUT_OF_DEVICE_MEMORY);
   }
   timeline_available=false;
+}
+static bool global_seen=false,global_timeline_seen=false;
+static void VKAPI_CALL GlobalFeatures(VkPhysicalDevice,VkPhysicalDeviceFeatures2* features) {
+  for(auto* next=static_cast<VkBaseOutStructure*>(features->pNext);next;next=next->pNext) {
+    if(next->sType==VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES)
+      reinterpret_cast<VkPhysicalDeviceTimelineSemaphoreFeatures*>(next)->timelineSemaphore=VK_TRUE;
+    if(next->sType==VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES) {
+      features->features.shaderStorageBufferArrayDynamicIndexing=global_supported;
+      auto& q=*reinterpret_cast<VkPhysicalDeviceDescriptorIndexingFeatures*>(next);
+      q.runtimeDescriptorArray=q.shaderSampledImageArrayNonUniformIndexing=q.shaderStorageBufferArrayNonUniformIndexing=
+        q.descriptorBindingPartiallyBound=q.descriptorBindingSampledImageUpdateAfterBind=q.descriptorBindingStorageBufferUpdateAfterBind=global_supported;
+    }
+  }
+}
+static VkResult VKAPI_CALL GlobalDevice(VkPhysicalDevice,const VkDeviceCreateInfo* info,const VkAllocationCallbacks*,VkDevice*) {
+  robust_seen=info->pEnabledFeatures && info->pEnabledFeatures->robustBufferAccess;
+  for(auto* next=static_cast<const VkBaseInStructure*>(info->pNext);next;next=next->pNext) {
+    if(next->sType==VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES)global_timeline_seen=true;
+    if(next->sType==VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES) {
+      const auto& q=*reinterpret_cast<const VkPhysicalDeviceDescriptorIndexingFeatures*>(next);
+      global_seen=q.runtimeDescriptorArray && q.shaderSampledImageArrayNonUniformIndexing && q.shaderStorageBufferArrayNonUniformIndexing &&
+        q.descriptorBindingPartiallyBound && q.descriptorBindingSampledImageUpdateAfterBind && q.descriptorBindingStorageBufferUpdateAfterBind;
+      SR_CHECK(!q.descriptorBindingStorageImageUpdateAfterBind && !q.shaderUniformBufferArrayNonUniformIndexing);
+      SR_CHECK(info->pEnabledFeatures && info->pEnabledFeatures->shaderStorageBufferArrayDynamicIndexing);
+    }
+  }
+  return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+}
+SR_TEST(global_descriptors_are_explicit_require_support_and_preserve_timeline_chain) {
+  for(bool requested:{false,true})for(bool available:{false,true})for(bool supported:{false,true})for(bool timeline:{false,true}) {
+    global_available=available;global_supported=supported;timeline_available=timeline;
+    global_seen=global_timeline_seen=false;
+    auto f=Fake();f.vkEnumeratePhysicalDevices=OneDevice;f.vkGetPhysicalDeviceProperties2=DeviceProperties;
+    f.vkEnumerateDeviceExtensionProperties=DeviceExtensions;f.vkGetPhysicalDeviceQueueFamilyProperties=DeviceFamilies;
+    f.vkGetPhysicalDeviceSurfaceSupportKHR=DevicePresent;f.vkGetPhysicalDeviceFeatures2=GlobalFeatures;f.vkCreateDevice=GlobalDevice;
+    Context c(f);Error error;SR_CHECK(c.CreateInstance({},false,error));
+    SR_CHECK(!c.OpenDevice(reinterpret_cast<VkSurfaceKHR>(2),"",error,nullptr,false,timeline,requested));
+    if(requested && (!available || !supported))SR_CHECK(error.result!=VK_ERROR_OUT_OF_DEVICE_MEMORY);
+    else {SR_CHECK(error.result==VK_ERROR_OUT_OF_DEVICE_MEMORY);SR_CHECK_EQ(global_seen,requested);SR_CHECK_EQ(global_timeline_seen,timeline);}
+  }
+  global_available=timeline_available=false;
+}
+SR_TEST(global_descriptors_preserve_robustness_or_reject_an_incompatible_device) {
+  for(bool supported:{false,true}) {
+    global_available=global_supported=true;robust_global_supported=supported;robust_seen=false;
+    auto f=Fake();f.vkEnumeratePhysicalDevices=OneDevice;f.vkGetPhysicalDeviceProperties2=DeviceProperties;
+    f.vkEnumerateDeviceExtensionProperties=DeviceExtensions;f.vkGetPhysicalDeviceQueueFamilyProperties=DeviceFamilies;
+    f.vkGetPhysicalDeviceSurfaceSupportKHR=DevicePresent;f.vkGetPhysicalDeviceFeatures2=GlobalFeatures;f.vkCreateDevice=GlobalDevice;
+    Context c(f);Error error;SR_CHECK(c.CreateInstance({},false,error));VkPhysicalDeviceFeatures core{};core.robustBufferAccess=VK_TRUE;
+    SR_CHECK(!c.OpenDevice(reinterpret_cast<VkSurfaceKHR>(2),"",error,&core,false,false,true));
+    if(supported){SR_CHECK(error.result==VK_ERROR_OUT_OF_DEVICE_MEMORY);SR_CHECK(robust_seen);}
+    else SR_CHECK(error.result==VK_ERROR_FEATURE_NOT_PRESENT);
+  }
+  global_available=false;robust_global_supported=true;
 }
 SR_TEST(partial_device_failure_cleans_surface_and_instance) {
   events.clear();

@@ -66,6 +66,7 @@ class D3D12Presenter;
 class D3D12Provider;
 }  // namespace rex::ui::d3d12
 
+namespace superman_returns::graphics::guest {struct ReplayResult;}
 namespace superman_returns::native {
 
 bool Enabled();
@@ -251,7 +252,7 @@ class Renderer : public NativeFrontend {
   } front_stream_cache_[17];
   // Worker.
   void WorkerMain();
-  void Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd,graphics::guest::DrawPacketOwner storage={},std::shared_ptr<const WorkBatch> capture_owner={});
+  void Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd,graphics::guest::DrawPacketOwner storage={},std::shared_ptr<const WorkBatch> capture_owner={},graphics::guest::ReplayResult* prepared=nullptr);
   std::thread worker_;
   std::mutex queue_mutex_;
   std::condition_variable queue_cv_, done_cv_;

@@ -36,8 +36,8 @@ GameFrame::~GameFrame() {
   for(auto fence:fences_) if(fence) c_.f.vkDestroyFence(c_.device,fence,nullptr);
   for(auto pool:pools_) if(pool) c_.f.vkDestroyCommandPool(c_.device,pool,nullptr);
 }
-bool GameFrame::Initialize(const std::filesystem::path& cache,Error& e) {
-  if(!renderer_.Initialize(cache,e)) return false;
+bool GameFrame::Initialize(const std::filesystem::path& cache,Error& e,bool global_resources) {
+  if(!renderer_.Initialize(cache,e,global_resources)) return false;
   for(size_t slot=0;slot<kSlots;++slot) {
     VkCommandPoolCreateInfo pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};pool.queueFamilyIndex=c_.graphics_family;
     if(!Check(c_.f.vkCreateCommandPool(c_.device,&pool,nullptr,&pools_[slot]),"Game command pool",e)) return false;
@@ -239,7 +239,7 @@ bool GameFrame::RecordFrame(std::vector<guest::RenderPacket>& packets_,const gue
     t.shaders_us+=us(started,shaders_ready);t.fence_us+=us(shaders_ready,fence_ready);t.record_us+=us(record_started,submit_started);
     t.queue_us+=us(submit_started,queue_ready);t.tail_us+=us(queue_ready,finished);last_swap_=finished;
     if(t.frames==120) {
-      auto p=renderer_.TakeProfile();auto cache=renderer_.TakeDescriptorStats();auto avg=[&](uint64_t v) {return std::to_string(v/1000/t.frames)+"."+std::to_string(v/100/t.frames%10);};
+      auto p=renderer_.TakeProfile();auto cache=renderer_.TakeDescriptorStats();auto bindings=renderer_.TakeBindingStats();auto avg=[&](uint64_t v) {return std::to_string(v/1000/t.frames)+"."+std::to_string(v/100/t.frames%10);};
       auto avg_ns=[&](uint64_t v) {return std::to_string(v/1000000/t.frames)+"."+std::to_string(v/100000/t.frames%10);};
       c_.Log("Vulkan profile (ms/frame over 120): interval="+avg(t.interval_us)+" shaders="+avg(t.shaders_us)+" fence="+avg(t.fence_us)+" record="+avg(t.record_us)+" queue="+avg(t.queue_us)+" tail="+avg(t.tail_us)
         +" | uploads="+avg_ns(p.ns[RecordProfile::kUploads])+" targets="+avg_ns(p.ns[RecordProfile::kTargets])+" textures="+avg_ns(p.ns[RecordProfile::kTextures])+" bindings="+avg_ns(p.ns[RecordProfile::kBindings])
@@ -247,6 +247,10 @@ bool GameFrame::RecordFrame(std::vector<guest::RenderPacket>& packets_,const gue
         +" | draws="+std::to_string(p.draws/t.frames)+" packets="+std::to_string(t.packets/t.frames)+" buffer_uploads="+std::to_string(p.buffer_uploads/t.frames)+" buffer_kb="+std::to_string(p.buffer_bytes/1024/t.frames)
         +" texture_uploads="+std::to_string(p.texture_uploads/t.frames)+" texture_kb="+std::to_string(p.texture_bytes/1024/t.frames)
         +" | descriptor_cache hits="+std::to_string(cache.hits/t.frames)+" misses="+std::to_string(cache.misses/t.frames)+" evicted="+std::to_string(cache.evicted/t.frames)+" entries="+std::to_string(cache.entries)
+        +" | global_bindings pages="+std::to_string(bindings.pages/t.frames)+" acquires="+std::to_string(bindings.resource_acquires/t.frames)+" allocations="+std::to_string(bindings.transient_allocations/t.frames)
+        +" layout_ms="+avg_ns(bindings.ns[GlobalBindingStats::kLayout])+" streams_ms="+avg_ns(bindings.ns[GlobalBindingStats::kStreams])+" page_ms="+avg_ns(bindings.ns[GlobalBindingStats::kPage])
+        +" constants_ms="+avg_ns(bindings.ns[GlobalBindingStats::kConstants])+" textures_ms="+avg_ns(bindings.ns[GlobalBindingStats::kTextures])+" finish_ms="+avg_ns(bindings.ns[GlobalBindingStats::kFinish])
+        +" texture_prepares="+std::to_string(bindings.texture_preparations/t.frames)+" texture_reuses="+std::to_string(bindings.texture_reuses/t.frames)
         +" | pipelines created="+std::to_string(renderer_.PipelineStats().created)+" plans="+std::to_string(renderer_.PipelineStats().plans)+" memo_hits="+std::to_string(renderer_.PipelineStats().memo_hits)
         +" | live buffers="+std::to_string(LiveMemory().buffers.load())+" ("+std::to_string(LiveMemory().buffer_bytes.load()>>20)+" MB) images="+std::to_string(LiveMemory().images.load())+" ("+std::to_string(LiveMemory().image_bytes.load()>>20)+" MB)");
       t={};
