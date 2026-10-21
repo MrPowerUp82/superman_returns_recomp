@@ -11,8 +11,13 @@ bool IsDraw(const WorkCmd& c) {
   return c.op==Op::kDraw || c.op==Op::kDrawIndexed || c.op==Op::kDrawInline;
 }
 }
-ParallelReplayDecoder::ParallelReplayDecoder(unsigned count) {
-  shards_=std::clamp(count,1u,4u);
+size_t ReplayExecutionLimit(std::span<const ReplayResult> results) noexcept {
+  for(size_t i=0;i<results.size();++i)if(!results[i].ok)return i+1;
+  return results.size();
+}
+ParallelReplayDecoder::ParallelReplayDecoder(unsigned count,ReplayScheduling scheduling)
+    :scheduling_(scheduling) {
+  shards_=std::clamp(count,1u,8u);
   try {
     for(size_t i=1;i<shards_;++i)threads_.emplace_back([this,i]{Worker(i);});
   } catch(...) {
@@ -39,27 +44,33 @@ void ParallelReplayDecoder::Worker(size_t shard) {
   }
 }
 void ParallelReplayDecoder::DecodeShard(size_t shard) noexcept {
-  const size_t begin=entries_.size()*shard/shards_,end=entries_.size()*(shard+1)/shards_;
+  const bool interleaved=scheduling_==ReplayScheduling::kInterleaved;
+  const size_t begin=interleaved?shard:entries_.size()*shard/shards_;
+  const size_t end=interleaved?entries_.size():entries_.size()*(shard+1)/shards_;
+  const size_t step=interleaved?shards_:1;
   try {
     size_t draws=0;
-    for(size_t i=begin;i<end;++i)draws+=entries_[i].ready && IsDraw(batch_->cmds[i]);
+    for(size_t i=begin;i<end;i+=step)draws+=entries_[i].ready && IsDraw(batch_->cmds[i]);
     const auto started=profile_?Now():0;
     std::optional<DrawPacketArena> arena;
     if(draws)arena.emplace(draws,replay_storage_,pool_);
     if(profile_)probes_[shard].arena_ns+=Now()-started;
-    for(size_t i=begin;i<end;++i) {
+    for(size_t i=begin;i<end;i+=step) {
       auto& entry=entries_[i];if(!entry.ready)continue;
+#ifdef SR_REPLAY_TEST_HOOKS
+      if(before_entry_)before_entry_(i);
+#endif
       entry.result.ok=DecodePreparedRenderPacket(*batch_,batch_->cmds[i],entry.prepared,
           entry.result.packet,entry.result.error,arena && IsDraw(batch_->cmds[i])?arena->Next():DrawPacketOwner{},
           profile_?&probes_[shard].stages:nullptr);
     }
   } catch(const std::exception& ex) {
     // Fail unfinished commands without stranding the caller at the join.
-    for(size_t i=begin;i<end;++i)if(entries_[i].ready && !entries_[i].result.ok) {
+    for(size_t i=begin;i<end;i+=step)if(entries_[i].ready && !entries_[i].result.ok) {
       try {entries_[i].result.error=ex.what();} catch(...) {}
     }
   } catch(...) {
-    for(size_t i=begin;i<end;++i)if(entries_[i].ready && !entries_[i].result.ok) {
+    for(size_t i=begin;i<end;i+=step)if(entries_[i].ready && !entries_[i].result.ok) {
       try {entries_[i].result.error="Replay worker failed";} catch(...) {}
     }
   }
