@@ -8,6 +8,7 @@
 #include <array>
 #include <atomic>
 #include <thread>
+#include <cstring>
 
 namespace {
 struct Fixture {
@@ -86,6 +87,72 @@ SR_TEST(runtime_optional_client_negotiates_and_releases_watches) {
   SR_CHECK_EQ(tracker.Stats().active_watches, 0u);
   tracker.Stop();
   SR_CHECK(!tracker.Sample(watch, std::span(&stamp, 1)));
+}
+
+SR_TEST(runtime_compare_missed_write_disqualifies_entire_allocation_generation) {
+  using namespace superman_returns::native;
+  Fixture f;
+  if (!f.session) return;
+  f.api->stop(f.session); f.session = 0;
+  ResourceWriteTracker tracker;
+  SR_CHECK(tracker.Start(f.memory));
+  SR_CHECK(f.Allocate());
+  auto* bytes = f.memory.TranslatePhysical<uint8_t*>(0x04000000);
+  std::memset(bytes, 7, 4096);
+  const RexTrackingRange range{0x04000000, 4096};
+  TextureTrackingEntry entry;
+  entry.owner = &tracker; entry.version = 1;
+  entry.watch = tracker.Watch(std::span(&range, 1));
+  const auto overlapping = tracker.Watch(std::span(&range, 1));
+  const RexTrackingRange neighbor_range{0x04001000, 4096};
+  const auto neighbor = tracker.Watch(std::span(&neighbor_range, 1));
+  entry.before.resize(1); entry.current.resize(1);
+  SR_CHECK(tracker.Sample(entry.watch, entry.before));
+  SR_CHECK(entry.before[0].coverage == RexTrackingCoverage::Complete);
+  const auto generation = entry.before[0].allocation_generation;
+  const auto hash_bytes = [&] {
+    uint64_t hash = 14695981039346656037ull;
+    for (size_t i = 0; i < 4096; ++i) hash = (hash ^ bytes[i]) * 1099511628211ull;
+    return hash;
+  };
+  const auto baseline_hash = hash_bytes();
+  SR_CHECK(entry.proof.Publish(entry.version, baseline_hash, entry.before, entry.before, entry.before));
+  entry.upload = {entry.watch, entry.before, entry.version};
+  SR_CHECK(!AuditAndInvalidateTextureProof(entry, baseline_hash));
+
+  // Test-only contract violation: bypass every runtime hook and guard fault.
+  DWORD old_protection = 0;
+  const bool writable = VirtualProtect(bytes, 4096, PAGE_READWRITE, &old_protection) != 0;
+  SR_CHECK(writable);
+  if (!writable) return;
+  bytes[31] = 19;
+  const auto changed_hash = hash_bytes();
+  SR_CHECK(changed_hash != baseline_hash);
+  SR_CHECK(tracker.Sample(entry.watch, entry.current));
+  SR_CHECK(SameCoveredContent(entry.before, entry.current));
+  SR_CHECK(AuditAndInvalidateTextureProof(entry, changed_hash));
+  SR_CHECK_EQ(entry.proof.version, 0u);
+  SR_CHECK_EQ(entry.upload.watch, 0u);
+  RexTrackingStamp stamp{};
+  for (const auto watch : {entry.watch, overlapping, neighbor}) {
+    SR_CHECK(tracker.Sample(watch, std::span(&stamp, 1)));
+    SR_CHECK(stamp.coverage == RexTrackingCoverage::Invalidated);
+    SR_CHECK_EQ(stamp.allocation_generation, generation);
+  }
+  const auto fresh = tracker.Watch(std::span(&range, 1));
+  SR_CHECK(tracker.Sample(fresh, std::span(&stamp, 1)));
+  SR_CHECK(stamp.coverage == RexTrackingCoverage::Invalidated);
+  // Retire old cache leases before freeing their backing allocation.
+  for (const auto watch : {entry.watch, overlapping, neighbor, fresh}) tracker.Unwatch(watch);
+  entry.watch = 0;
+  auto* heap = f.memory.LookupHeapByType(true, 65536);
+  SR_CHECK(heap->Release(0xA4000000));
+  SR_CHECK(f.Allocate());
+  const auto next_generation = tracker.Watch(std::span(&range, 1));
+  SR_CHECK(tracker.Sample(next_generation, std::span(&stamp, 1)));
+  SR_CHECK(stamp.coverage == RexTrackingCoverage::Complete);
+  SR_CHECK(stamp.allocation_generation != generation);
+  tracker.Unwatch(next_generation);
 }
 
 SR_TEST(runtime_stop_drains_inflight_faults) {

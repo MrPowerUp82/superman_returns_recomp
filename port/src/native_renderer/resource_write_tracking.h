@@ -40,4 +40,7 @@ struct TextureTrackingEntry {
   std::vector<RexTrackingStamp> before, current;
   ~TextureTrackingEntry() { if(owner && watch) owner->Unwatch(watch); }
 };
+// Shared by the renderer and real-memory audit regression. A missed write
+// disqualifies the allocation generation, including other cache entries.
+bool AuditAndInvalidateTextureProof(TextureTrackingEntry&, uint64_t current_hash);
 }  // namespace superman_returns::native

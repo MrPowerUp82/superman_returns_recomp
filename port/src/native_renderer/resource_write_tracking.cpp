@@ -5,6 +5,15 @@
 #endif
 
 namespace superman_returns::native {
+bool AuditAndInvalidateTextureProof(TextureTrackingEntry& entry, uint64_t current_hash) {
+  if (!entry.owner || !entry.watch ||
+      !entry.proof.AuditMismatch(entry.version, entry.before, current_hash, entry.current)) return false;
+  entry.owner->Invalidate(entry.watch);
+  entry.proof.Clear();
+  entry.upload = {};
+  return true;
+}
+
 bool ResourceWriteTracker::Start(rex::memory::Memory& memory) {
   if (session_) return true;
 #if defined(_WIN32)

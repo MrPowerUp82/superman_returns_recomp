@@ -3346,8 +3346,8 @@ uint32_t Renderer::GetTextureSrvIndex(uint8_t* base, const uint32_t fetch[6]) {
           if(stable && SameCoveredContent(tracking->proof.baseline,tracking->current))
             tracking_eligible_bytes_+=entry.guest_hash_bytes;
           if(!stable) ++tracking_races_;
-          if(tracking->proof.AuditMismatch(tracking->version,tracking->before,hash,tracking->current)) {
-            ++tracking_mismatches_; resource_write_tracker_.Invalidate(tracking->watch); tracking->proof.Clear();
+          if(AuditAndInvalidateTextureProof(*tracking,hash)) {
+            ++tracking_mismatches_;
             REXLOG_ERROR("native texture tracking: coverage mismatch base={:08X}; allocation disqualified",entry.guest_base);
           }
 

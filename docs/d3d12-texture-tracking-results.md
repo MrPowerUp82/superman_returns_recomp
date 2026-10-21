@@ -23,9 +23,15 @@ Runtime SHA256: `8445EE77A69376493FB494882A18A4397C40CE4AB4556D831B96F50681FB57D
 SDK fonte base: `f5337cdc947ff6d4c4196737e2c807a48f2a1fc2`, com patch e manifesto versionados.
 A árvore inclui alterações anteriores de reciclagem de descritores preservadas;
 elas são iguais em todos os modos e não pertencem aos commits deste plano.
+As medições pertencem ao binário anterior ao ajuste final da auditoria Compare;
+os hashes acima identificam essa evidência, não o executável reconstruído depois
+da revisão. A revisão independente examinou apenas os commits deste plano:
+não constitui validação isolada das alterações anteriores presentes no jogo medido.
 
 Os intervalos completos entre publicações de contadores dispensaram 99,318–99,343%
-dos bytes que a política anterior mandaria hashear. Isso não inclui texturas que
+dos bytes que a cadência anterior mandaria hashear dentro do cache On. On usa
+chave de descritor completa, portanto esse percentual não compara volumes de
+cache idênticos entre Off e On. Isso não inclui texturas que
 já ficavam sem hash pela política anterior. Não equivale a redução de 99% do custo
 de CPU. O tracker, consultas e hashes residuais também consomem tempo.
 
@@ -71,7 +77,7 @@ não foram iniciados nesta entrega.
 
 - Modelo puro e política: CTest nativo 2/2, 217 casos na árvore de trabalho.
 - Memória real, I/O parcial/erro/zero/scatter, rede, aliases, lifecycle e WARP/readback:
-  33 casos normais mais três processos de falha, CTest 4/4.
+  34 casos normais mais três processos de falha, CTest 4/4.
 - Cliente com SDK stock: CTest 1/1; export ausente mantém hash.
 - Ferramentas Python: 93 testes; fixtures PowerShell verificam ambiente, neutralização,
   processo exato e timestamps. Setup reproduzível validado sem sobrescrever edições.
@@ -102,6 +108,23 @@ StageTiming é diagnóstico e invalida aceitação de FPS. Relatório:
 retorna 2 quando a promoção é inconclusiva. Não confundir esse retorno com teste falho.
 
 ## Decisões registradas durante a execução
+
+A revisão independente do intervalo `05bdf7c..7e1c5ec` não encontrou defeito crítico
+nem itens menores. Identificou uma lacuna importante de verificação: o teste
+sintético de divergência não exercitava a invalidação real da alocação. O renderer
+agora compartilha essa ação com um teste de memória real. O teste remove a proteção
+diretamente para injetar uma escrita sem notificação, altera bytes e verifica que
+observadores sobrepostos, outra página e novos observadores ficam invalidados
+na geração atual. Após encerrar essas referências, uma nova alocação pode obter
+cobertura. Também limpa ambas as provas locais após a divergência.
+
+RED inicial: função compartilhada ausente. GREEN: CTest real 4/4, 34 casos normais.
+Uma mutação que remove apenas a invalidação real causou as quatro falhas esperadas;
+após restaurá-la, os quatro grupos passaram. Testes nativos 2/2, cliente stock 1/1
+e Python 93/93 passaram novamente. Nenhum item menor ficou adiado.
+Os executáveis Release completos com SDK stock e com runtime opcional também
+compilaram e linkaram após essa correção. Logs locais desta verificação e da
+mutação: `logs/texture_tracking_final_verification/`.
 
 - Ruling: Work in current folder on new branch as explicitly requested; no isolated checkout — user preference overrides skill default — other uncommitted changes require selective staging. Risco se a premissa estiver errada: misturar alterações anteriores ou dificultar reversão; staging seletivo preserva a separação.
 
@@ -134,3 +157,7 @@ retorna 2 quando a promoção é inconclusiva. Não confundir esse retorno com t
 - Task 6 Ruling: split benchmark into Launch/Input/Measure/Validate/Stop phases and read timestamped PNG evidence captured through computer-use — skill prohibits mixing direct PowerShell UI automation with sky — exact same 20s protocol, safer process/input cleanup; no automatic visual PASS. Risco se a premissa estiver errada: evidência inválida ou limpeza de processo/entrada incorreta.
 
 - Task 6 Ruling: image alignment/gate failed (including Off/Off) and total runtime cost is not fully accounted — apply spec stop-of-promotion, retain Off default and experimental On, do not infer >=30% total cost gain or 60 FPS from 99.3% skipped bytes — further repeated stage promotion runs withheld; one separate On profiling window identifies remaining worker cost (61.55–67.88ms, residual hash0.30–0.34ms). Four descriptive same-binary windows preserved; off_b automatic HUD false-negative remains recorded. Risco se a premissa estiver errada: deixar de promover uma otimização útil; não autorizar imagens/FPS sem evidência.
+
+- Final Ruling: preservar as alterações anteriores que a revisão deixou fora do escopo — as medições incluem essas alterações e não validam isoladamente só os commits deste plano. Risco se a premissa estiver errada: atribuir comportamento ou desempenho incorretamente a esta branch; o resultado permanece inconclusivo.
+
+- Final Ruling: manter a branch local, conforme a preferência do usuário por trabalhar nesta pasta numa nova branch — nenhuma integração remota foi solicitada. Risco se a premissa estiver errada: integração adiada; os commits continuam disponíveis.
