@@ -30,6 +30,7 @@
 #include "../graphics/guest/capture_batch_pool.h"
 #include "buffer_content.h"
 #include "shared_constants_cache.h"
+#include "resource_write_tracking.h"
 
 #include <atomic>
 #include <chrono>
@@ -557,9 +558,17 @@ class Renderer : public NativeFrontend {
   // Pipelines compiling asynchronously for draws that were skipped (EXP-053).
   std::unordered_set<uint64_t> async_pipelines_;
 
+  ResourceWriteTracker resource_write_tracker_;
+  TextureTrackingMode texture_tracking_mode_=TextureTrackingMode::Off;
+  uint64_t texture_tracking_version_=0, texture_tracking_start_frame_=UINT64_MAX;
+  uint64_t tracking_checks_=0, tracking_bytes_=0, tracking_eligible_bytes_=0;
+  uint64_t tracking_mismatches_=0, tracking_races_=0, tracking_candidates_=0;
+  uint64_t tracking_report_frame_=0, tracking_query_ns_=0;
+  uint64_t tracking_unknown_=0, tracking_invalidated_=0, tracking_active_=0, tracking_unchanged_lost_=0;
   struct TextureEntry {
     Microsoft::WRL::ComPtr<ID3D12Resource> resource;
     uint32_t srv_index = 0;
+    std::unique_ptr<TextureTrackingEntry> tracking;
     // Content validation: all decoder source ranges and their combined hash. Dynamic
     // textures (fog tables, CPU-written lookup tables) are rewritten in place.
     uint32_t guest_base = 0;
@@ -586,6 +595,7 @@ class Renderer : public NativeFrontend {
   std::atomic<uint64_t> completed_texture_writes_{0};
   bool texture_watch_ = false;
   uint32_t CreateTexture(const uint32_t fetch[6], TextureEntry& entry);
+  void CaptureTextureProof(const uint32_t fetch[6], TextureEntry& entry);
   void RetireSrvIndex(uint32_t index);
   void CopyDepthRegion(HostSurface& src, ResolveTexture& dst, uint32_t x1, uint32_t y1,
                        uint32_t x2, uint32_t y2, uint32_t dx, uint32_t dy);

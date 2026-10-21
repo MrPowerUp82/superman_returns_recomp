@@ -1,6 +1,7 @@
 #pragma once
 #include "../../../tools/rexglue-write-tracking/include/rex_memory_tracking_abi.h"
 #include <span>
+#include "texture_write_proof.h"
 
 namespace rex::memory { class Memory; }
 namespace superman_returns::native {
@@ -28,5 +29,14 @@ class ResourceWriteTracker {
   const RexMemoryTrackingApiV1* api_ = nullptr;
   RexTrackingSession session_ = 0;
   RexTrackingStatus last_status_ = RexTrackingStatus::Unsupported;
+};
+// Cache-owned lease; destroyed before its tracker. No renderer access in callbacks.
+struct TextureTrackingEntry {
+  ResourceWriteTracker* owner=nullptr;
+  RexTrackingWatch watch=0;
+  uint64_t version=0;
+  TextureWriteProof proof;
+  std::vector<RexTrackingStamp> before, current;
+  ~TextureTrackingEntry() { if(owner && watch) owner->Unwatch(watch); }
 };
 }  // namespace superman_returns::native

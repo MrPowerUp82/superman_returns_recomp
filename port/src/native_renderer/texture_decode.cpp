@@ -5,6 +5,7 @@
 // docs/native-port-plan.md section 2.
 //
 #include "texture_decode.h"
+#include "../graphics/guest/texture_capture.h"
 #include "../graphics/guest/texture_layout.h"
 #include "xenos_tiling.h"
 
@@ -97,6 +98,22 @@ HostFormat MapFormat(xenos::TextureFormat f) {
   }
 }
 
+bool ConvertLinear(graphics::guest::LinearTexture linear, DecodedTexture& out) {
+  DecodedTexture decoded;
+  decoded.width=linear.width; decoded.height=linear.height; decoded.depth=linear.depth;
+  decoded.mip_levels=linear.mip_levels; decoded.dimension=linear.dimension;
+  decoded.guest_format=linear.guest_format; decoded.base_address=linear.base_address;
+  decoded.base_size=linear.base_size;
+  decoded.format=MapFormat(static_cast<xenos::TextureFormat>(linear.guest_format)).format;
+  uint32_t mapping=1u<<12;
+  for(uint32_t i=0;i<4;++i) mapping|=linear.swizzle[i]<<(3*i);
+  decoded.component_mapping=mapping;
+  for(const auto& l:linear.levels) decoded.levels.push_back({l.width,l.height,l.row_pitch,l.rows,l.offset});
+  decoded.data=std::move(linear.data);
+  out=std::move(decoded);
+  return true;
+}
+
 }  // namespace
 
 bool GetTextureBaseRange(const uint32_t fetch_dwords[6], uint32_t& base, uint32_t& size) {
@@ -128,19 +145,17 @@ bool DecodeTexture(const uint32_t fetch_dwords[6], DecodedTexture& out, const ch
     if(reason) *reason=last_error.c_str();
     return false;
   }
-  DecodedTexture decoded;
-  decoded.width=linear.width; decoded.height=linear.height; decoded.depth=linear.depth;
-  decoded.mip_levels=linear.mip_levels; decoded.dimension=linear.dimension;
-  decoded.guest_format=linear.guest_format; decoded.base_address=linear.base_address;
-  decoded.base_size=linear.base_size;
-  decoded.format=MapFormat(static_cast<xenos::TextureFormat>(linear.guest_format)).format;
-  uint32_t mapping=1u<<12;
-  for(uint32_t i=0;i<4;++i) mapping|=linear.swizzle[i]<<(3*i);
-  decoded.component_mapping=mapping;
-  for(const auto& l:linear.levels) decoded.levels.push_back({l.width,l.height,l.row_pitch,l.rows,l.offset});
-  decoded.data=std::move(linear.data);
-  out=std::move(decoded);
-  return true;
+  return ConvertLinear(std::move(linear),out);
+}
+
+bool DecodeTexture(const graphics::guest::TextureCapture& capture, DecodedTexture& out, const char** reason) {
+  graphics::guest::LinearTexture linear;
+  std::string error;
+  if(!graphics::guest::DecodeTextureLayout(capture.fetch,capture.memory,linear,error)) {
+    thread_local std::string last_error;
+    last_error=std::move(error); if(reason) *reason=last_error.c_str(); return false;
+  }
+  return ConvertLinear(std::move(linear),out);
 }
 
 bool WriteDds(const DecodedTexture& tex, const char* path) {

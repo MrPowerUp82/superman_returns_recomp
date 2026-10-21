@@ -14,6 +14,8 @@
 
 #include <rex/ui/d3d12/d3d12_api.h>
 
+namespace superman_returns::graphics::guest { struct TextureCapture; }
+
 namespace superman_returns::native {
 
 struct DecodedTexture {
@@ -41,6 +43,7 @@ struct DecodedTexture {
 // fetch: the 6 fetch-constant dwords in host byte order.
 // Returns false (with a reason) for formats/dimensions not handled yet.
 bool DecodeTexture(const uint32_t fetch[6], DecodedTexture& out, const char** reason = nullptr);
+bool DecodeTexture(const graphics::guest::TextureCapture& capture, DecodedTexture& out, const char** reason = nullptr);
 // Guest memory range of the base level (what DecodeTexture reports as
 // base_address/base_size), without decoding.
 bool GetTextureBaseRange(const uint32_t fetch[6], uint32_t& base, uint32_t& size);

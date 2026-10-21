@@ -28,3 +28,32 @@ SR_TEST(tracking_missing_or_changed_stamp_rejects_proof) {
   changed = original; changed[0].coverage_generation = 0;
   SR_CHECK(!SameCoveredContent(changed, changed));
 }
+
+SR_TEST(proof_race_during_capture_rejects_publication) {
+  const std::array a{RexTrackingStamp{7,8,9,0,RexTrackingCoverage::Complete}};
+  auto changed=a; ++changed[0].invalidation_epoch;
+  TextureWriteProof proof;
+  SR_CHECK(!proof.Publish(1,42,a,changed,changed));
+  SR_CHECK(!proof.Publish(1,42,a,a,changed));
+  SR_CHECK(proof.Publish(1,42,a,a,a));
+  SR_CHECK(!proof.CanReuse(TextureTrackingMode::On,2,a));
+  SR_CHECK(!proof.CanReuse(TextureTrackingMode::On,1,changed));
+}
+SR_TEST(compare_never_skips_legacy_hash_or_upload) {
+  const std::array a{RexTrackingStamp{7,8,9,0,RexTrackingCoverage::Complete}};
+  TextureWriteProof proof; SR_CHECK(proof.Publish(1,42,a,a,a));
+  SR_CHECK(!proof.CanReuse(TextureTrackingMode::Off,1,a));
+  SR_CHECK(!proof.CanReuse(TextureTrackingMode::Compare,1,a));
+  SR_CHECK(proof.CanReuse(TextureTrackingMode::On,1,a));
+  SR_CHECK(ParseTextureTrackingMode("compare")==TextureTrackingMode::Compare);
+  SR_CHECK(ParseTextureTrackingMode("on")==TextureTrackingMode::On);
+  SR_CHECK(ParseTextureTrackingMode("invalid")==TextureTrackingMode::Off);
+}
+SR_TEST(compare_mismatch_disqualifies_allocation) {
+  const std::array a{RexTrackingStamp{7,8,9,0,RexTrackingCoverage::Complete}};
+  TextureWriteProof proof; SR_CHECK(proof.Publish(1,42,a,a,a));
+  auto raced=a; ++raced[0].invalidation_epoch;
+  SR_CHECK(!proof.AuditMismatch(1,a,43,raced));
+  SR_CHECK(proof.AuditMismatch(1,a,43,a));
+  proof.Clear(); SR_CHECK(!proof.CanReuse(TextureTrackingMode::On,1,a));
+}

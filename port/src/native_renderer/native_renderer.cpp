@@ -1069,6 +1069,8 @@ void Renderer::ShutdownWorker() {
     if(batch_) batch_->Clear();
   }
   if(worker_.joinable()) worker_.join();
+  for(auto& [key,entry]:textures_) entry.tracking.reset();
+  resource_write_tracker_.Stop();
   packet_sink_={};cancel_packet_sink_={};
 }
 
@@ -1082,6 +1084,15 @@ bool Renderer::EnsureInitialized() {
     return false;
   }
   init_failed_ = true;
+  const char* tracking_env=std::getenv("SR_D3D12_TEXTURE_WRITE_TRACKING");
+  texture_tracking_mode_=ParseTextureTrackingMode(tracking_env?tracking_env:"");
+  if(tracking_env && *tracking_env && texture_tracking_mode_==TextureTrackingMode::Off && std::string_view(tracking_env)!="off")
+    REXLOG_WARN("native texture tracking: invalid mode; using off");
+  if(texture_tracking_mode_==TextureTrackingMode::On) {
+    REXLOG_WARN("native texture tracking: on unavailable pending comparison validation; using off");
+    texture_tracking_mode_=TextureTrackingMode::Off;
+  }
+  REXLOG_INFO("native texture tracking: mode={}",texture_tracking_mode_==TextureTrackingMode::Compare?"compare":"off");
   render_scale_ = float(std::clamp(REXCVAR_GET(sr_native_render_scale), 1.0, 4.0));
   shadow_scale_ = float(std::clamp(REXCVAR_GET(sr_native_shadow_quality), 1, 4));
   shadow_mul_ = float(std::clamp(REXCVAR_GET(sr_native_shadow_scale_mul), 0.25, 1.0));
@@ -3277,6 +3288,12 @@ uint32_t Renderer::GetTextureSrvIndex(uint8_t* base, const uint32_t fetch[6]) {
         }
       }
       if (check) {
+        auto* tracking=entry.tracking.get();
+        const auto tracking_started=tracking?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
+        if(tracking) {
+          resource_write_tracker_.Sample(tracking->watch,tracking->before);
+          tracking_query_ns_+=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-tracking_started).count();
+        }
         entry.hashed_frame = frame_count_;
         // A clean watch is still armed. Reprotect only after a physical write
         // notification has unwatched its pages. Keep the per-frame hash above:
@@ -3298,6 +3315,34 @@ uint32_t Renderer::GetTextureSrvIndex(uint8_t* base, const uint32_t fetch[6]) {
         const double probe_ns = probe ? std::chrono::duration<double, std::nano>(
             std::chrono::steady_clock::now() - probe_start).count() : 0;
         hash_timer.Stop();
+        if(tracking) {
+          const auto tracking_finished=std::chrono::steady_clock::now();
+          resource_write_tracker_.Sample(tracking->watch,tracking->current);
+          tracking_query_ns_+=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-tracking_finished).count();
+          bool unknown=false,invalidated=false,active=false;
+          for(const auto stamp:tracking->current) {
+            unknown|=stamp.coverage==RexTrackingCoverage::Unknown;
+            invalidated|=stamp.coverage==RexTrackingCoverage::Invalidated;
+            active|=stamp.active_writers!=0;
+          }
+          tracking_unknown_+=unknown;tracking_invalidated_+=invalidated;tracking_active_+=active;
+          if(tracking->proof.version && hash==tracking->proof.hash && !SameCoveredContent(tracking->proof.baseline,tracking->current)) ++tracking_unchanged_lost_;
+          ++tracking_checks_; tracking_bytes_+=entry.guest_hash_bytes;
+          const bool stable=SameCoveredContent(tracking->before,tracking->current);
+          if(stable && SameCoveredContent(tracking->proof.baseline,tracking->current))
+            tracking_eligible_bytes_+=entry.guest_hash_bytes;
+          if(!stable) ++tracking_races_;
+          if(tracking->proof.AuditMismatch(tracking->version,tracking->before,hash,tracking->current)) {
+            ++tracking_mismatches_; resource_write_tracker_.Invalidate(tracking->watch); tracking->proof.Clear();
+            REXLOG_ERROR("native texture tracking: coverage mismatch base={:08X}; allocation disqualified",entry.guest_base);
+          }
+          if(frame_count_>=tracking_report_frame_+120) {
+            tracking_report_frame_=frame_count_;
+            const auto counters=resource_write_tracker_.Stats();
+            REXLOG_INFO("native texture tracking: frame={} checks={} bytes={} eligible_bytes={} candidates={} races={} mismatches={} watches={} guest_faults={} physical_faults={} io_begin={} io_end={} protection_failures={} coverage_losses={} query_ns={} unknown_checks={} invalidated_checks={} active_checks={} unchanged_lost_checks={}",
+              frame_count_,tracking_checks_,tracking_bytes_,tracking_eligible_bytes_,tracking_candidates_,tracking_races_,tracking_mismatches_,counters.active_watches,counters.guest_faults,counters.physical_faults,counters.io_begin,counters.io_end,counters.protection_failures,counters.coverage_losses,tracking_query_ns_,tracking_unknown_,tracking_invalidated_,tracking_active_,tracking_unchanged_lost_);
+          }
+        }
         if (probe) MeasureTextureSource(entry.guest_ranges,
             [](uint32_t address, uint32_t) { return REX_KERNEL_MEMORY()->TranslatePhysical<const uint8_t*>(address); },
             0, hash, probe_ns);
@@ -3371,7 +3416,49 @@ bool Renderer::TextureWrittenSince(uint32_t base, uint32_t size, uint32_t seq) c
   return false;
 }
 
+void Renderer::CaptureTextureProof(const uint32_t fetch[6],TextureEntry& entry) {
+  // One bounded session attempt per frame. A pending pre-session I/O may finish later.
+  if(texture_tracking_start_frame_!=frame_count_) {
+    texture_tracking_start_frame_=frame_count_;
+    if(!resource_write_tracker_.Start(*REX_KERNEL_MEMORY()) && frame_count_<2)
+      REXLOG_WARN("native texture tracking: session unavailable status={}",uint32_t(resource_write_tracker_.last_status()));
+  }
+  std::vector<graphics::guest::TextureRange> ranges;
+  std::string error;
+  if(!graphics::guest::DescribeTextureRanges(std::span<const uint32_t,6>(fetch,6),ranges,error)) return;
+  std::vector<RexTrackingRange> watched;
+  for(const auto r:ranges) watched.push_back({r.address,r.length});
+  auto candidate=std::make_unique<TextureTrackingEntry>();
+  candidate->owner=&resource_write_tracker_;
+  candidate->watch=resource_write_tracker_.Watch(watched);
+  if(!candidate->watch) return;
+  candidate->before.resize(ranges.size());candidate->current.resize(ranges.size());
+  if(texture_tracking_version_==UINT64_MAX) return;
+  candidate->version=++texture_tracking_version_;
+  entry.tracking=std::move(candidate);
+  auto& tracked=*entry.tracking;
+  resource_write_tracker_.Sample(tracked.watch,tracked.before);
+  if(!SameCoveredContent(tracked.before,tracked.before)) return;
+  std::shared_ptr<const graphics::guest::TextureCapture> snapshot;
+  if(!graphics::guest::CaptureTexture(std::span<const uint32_t,6>(fetch,6),tracked.version,
+      [](uint32_t address,uint32_t length)->std::span<const uint8_t> {
+        return {REX_KERNEL_MEMORY()->TranslatePhysical<const uint8_t*>(address-0xa0000000u),length};
+      },snapshot,error)) return;
+  resource_write_tracker_.Sample(tracked.watch,tracked.current);
+  if(!SameCoveredContent(tracked.before,tracked.current)) return;
+  DecodedTexture decoded_candidate;
+  if(!DecodeTexture(*snapshot,decoded_candidate)) return;
+  const auto hash=HashTextureContent(snapshot->ranges,[&](uint32_t address) {
+    for(const auto range:snapshot->ranges) if(range.address==address)
+      return snapshot->memory.Read(0xa0000000u+address,range.length).data();
+    return static_cast<const uint8_t*>(nullptr);
+  },TextureHash());
+  resource_write_tracker_.Sample(tracked.watch,tracked.current);
+  if(tracked.proof.Publish(tracked.version,hash,tracked.before,tracked.current,tracked.current)) ++tracking_candidates_;
+}
+
 uint32_t Renderer::CreateTexture(const uint32_t fetch[6], TextureEntry& entry) {
+  entry.tracking.reset();
   // Watch before reading: arm, hash, then decode. A guest write after arming
   // (e.g. a streaming loader filling the texture while the worker decodes it)
   // is always seen by the next revalidation.
@@ -3425,6 +3512,7 @@ uint32_t Renderer::CreateTexture(const uint32_t fetch[6], TextureEntry& entry) {
     }
     return 0;
   }
+  if(texture_tracking_mode_==TextureTrackingMode::Compare) CaptureTextureProof(fetch,entry);
   D3D12_HEAP_PROPERTIES heap{};
   heap.Type = D3D12_HEAP_TYPE_DEFAULT;
   D3D12_RESOURCE_DESC desc{};

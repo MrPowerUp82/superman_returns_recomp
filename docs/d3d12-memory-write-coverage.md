@@ -66,3 +66,11 @@ Compatibilidade do build fonte no Windows: o patch usa os arquivos reais de
 materializa como arquivos de texto. O build opcional também aplica
 `-march=x86-64-v2`, como o preset `windows-base` do SDK. O build stock passou após
 a introdução da opção, sem mudar seus flags.
+
+Comparação inicial (Task 4): título/attract, transição New Game, sequência de
+abertura em vídeo, gameplay parado e andando passaram sem divergências registradas.
+HUD, minimapa e capa foram inspecionados. Logs e PNGs: `logs/texture_tracking_compare1_*`.
+A execução ficou aberta durante a espera pelo aviso de firewall; totais cumulativos
+incluem attract. As janelas de gameplay têm 20 s cada e exigem diferenças de
+contadores. Este ensaio não aceita ganho de FPS nem substitui imagens alinhadas.
+On continua indisponível nesta task.
