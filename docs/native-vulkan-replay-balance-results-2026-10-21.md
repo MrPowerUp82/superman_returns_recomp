@@ -126,3 +126,5 @@ Registro completo das decisões e seus custos, na ordem em que foram tomadas:
 Não houve achado menor adiado pela revisão independente. O gate HUD e a ausência de séries aceitas no jogo permanecem limitações explícitas deste resultado negativo.
 
 Vulkan preparado-1 e contíguo-4 também chegaram a gameplay observado. Logs registram respectivamente prepared/1/contiguous e prepared/4/contiguous; screenshots em logs/rb_prepared1.png e logs/rb_contiguous4.png. O detector HUD recusou também a captura de prepared-1; nenhuma tolerância foi relaxada.
+
+- Final: Ruling: automatic approval review rejected removal of the verified plan scratch directory with reason blocked by policy — preserve scratch and copy evidence instead of retrying deletion; cost if wrong: extra local disk usage, no loss of source/evidence.
