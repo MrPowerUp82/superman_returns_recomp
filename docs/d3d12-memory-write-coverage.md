@@ -74,3 +74,12 @@ A execução ficou aberta durante a espera pelo aviso de firewall; totais cumula
 incluem attract. As janelas de gameplay têm 20 s cada e exigem diferenças de
 contadores. Este ensaio não aceita ganho de FPS nem substitui imagens alinhadas.
 On continua indisponível nesta task.
+
+Task 5: On experimental agora usa decode próprio e publica certificado somente
+após sucesso de recurso/SRV e nova consulta de stamps. Identidade contém seis
+palavras fetch e versão única; colisão no hash do cache não mistura descritores.
+A fixture WARP verificou pixels via readback para escrita antes/depois do upload
+e depois da publicação; 33 casos reais e três processos de falha passaram.
+Camada de debug indisponível. Smoke On/Off observou título, vídeo, transição,
+HUD/minimapa/capa e movimento. Imagens/FPS ainda não constituem aceitação formal:
+a captura final Off foi tardia e o HUD desapareceu. Mantém-se Off por padrão.

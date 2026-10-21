@@ -50,6 +50,8 @@
 #include "pipeline_cache.h"
 #include "pm4_mirror.h"
 
+namespace superman_returns::native { struct DecodedTexture; }
+
 namespace rex::system {
 class IGraphicsSystem;
 }
@@ -564,11 +566,14 @@ class Renderer : public NativeFrontend {
   uint64_t tracking_checks_=0, tracking_bytes_=0, tracking_eligible_bytes_=0;
   uint64_t tracking_mismatches_=0, tracking_races_=0, tracking_candidates_=0;
   uint64_t tracking_report_frame_=0, tracking_query_ns_=0;
+  uint64_t tracking_skipped_checks_=0, tracking_skipped_bytes_=0;
   uint64_t tracking_unknown_=0, tracking_invalidated_=0, tracking_active_=0, tracking_unchanged_lost_=0;
   struct TextureEntry {
     Microsoft::WRL::ComPtr<ID3D12Resource> resource;
     uint32_t srv_index = 0;
     std::unique_ptr<TextureTrackingEntry> tracking;
+    uint64_t resource_version=0;
+    std::array<uint32_t,6> descriptor{};
     // Content validation: all decoder source ranges and their combined hash. Dynamic
     // textures (fog tables, CPU-written lookup tables) are rewritten in place.
     uint32_t guest_base = 0;
@@ -595,7 +600,8 @@ class Renderer : public NativeFrontend {
   std::atomic<uint64_t> completed_texture_writes_{0};
   bool texture_watch_ = false;
   uint32_t CreateTexture(const uint32_t fetch[6], TextureEntry& entry);
-  void CaptureTextureProof(const uint32_t fetch[6], TextureEntry& entry);
+  bool CaptureTextureProof(const uint32_t fetch[6], TextureEntry& entry, DecodedTexture& decoded);
+  void ReportTextureTracking();
   void RetireSrvIndex(uint32_t index);
   void CopyDepthRegion(HostSurface& src, ResolveTexture& dst, uint32_t x1, uint32_t y1,
                        uint32_t x2, uint32_t y2, uint32_t dx, uint32_t dy);

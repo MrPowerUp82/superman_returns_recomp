@@ -57,3 +57,34 @@ SR_TEST(compare_mismatch_disqualifies_allocation) {
   SR_CHECK(proof.AuditMismatch(1,a,43,a));
   proof.Clear(); SR_CHECK(!proof.CanReuse(TextureTrackingMode::On,1,a));
 }
+
+SR_TEST(active_reuses_only_same_uploaded_resource) {
+  const std::vector a{RexTrackingStamp{7,8,9,0,RexTrackingCoverage::Complete}};
+  TextureUploadProof proof{12,a,55};
+  SR_CHECK(CanReuseTexture(proof,a,55));
+  SR_CHECK(!CanReuseTexture(proof,a,0));
+  SR_CHECK(!CanReuseTexture(proof,a,56)); // replaced resource or another view/format
+  auto b=a; ++b[0].allocation_generation;
+  SR_CHECK(!CanReuseTexture(proof,b,55));
+  proof.watch=0; SR_CHECK(!CanReuseTexture(proof,a,55));
+}
+SR_TEST(active_write_after_observation_invalidates_next_validation) {
+  const std::vector a{RexTrackingStamp{7,8,9,0,RexTrackingCoverage::Complete}};
+  TextureUploadProof proof{12,a,55};
+  SR_CHECK(CanReuseTexture(proof,a,55));
+  auto b=a; ++b[0].invalidation_epoch;b[0].coverage=RexTrackingCoverage::Invalidated;
+  SR_CHECK(!CanReuseTexture(proof,b,55));
+}
+SR_TEST(active_fallback_keeps_legacy_cadence) {
+  SR_CHECK(LegacyTextureValidationRequired(4096,true,false,2,1));
+  SR_CHECK(LegacyTextureValidationRequired(8<<20,true,true,2,1));
+  SR_CHECK(!LegacyTextureValidationRequired(8<<20,true,false,31,1));
+  SR_CHECK(!LegacyTextureValidationRequired(8<<20,false,false,30,1));
+  SR_CHECK(LegacyTextureValidationRequired(8<<20,false,false,31,1));
+}
+
+SR_TEST(active_descriptor_identity_checks_every_fetch_word_even_with_same_hash_bucket) {
+  const std::array<uint32_t,6> a{1,2,3,4,5,6};
+  SR_CHECK(TextureDescriptorMatches(a,a));
+  for(size_t i=0;i<a.size();++i) {auto b=a; b[i]^=1;SR_CHECK(!TextureDescriptorMatches(a,b));}
+}

@@ -15,7 +15,7 @@ if(SR_MEMORY_TRACKING_STOCK_CLIENT)
   target_sources(sr_memory_tracking_tests PRIVATE test_client_stock.cpp)
   target_compile_definitions(sr_memory_tracking_tests PRIVATE SR_TRACKING_STOCK_CLIENT=1)
 else()
-  target_sources(sr_memory_tracking_tests PRIVATE test_runtime_tracking.cpp test_runtime_io.cpp test_texture_upload.cpp ../native/test_texture_layout.cpp
+  target_sources(sr_memory_tracking_tests PRIVATE test_runtime_tracking.cpp test_runtime_io.cpp test_texture_upload.cpp test_texture_gpu.cpp ../native/test_texture_layout.cpp
     ../../port/src/native_renderer/texture_decode.cpp
     ../../port/src/graphics/guest/texture_capture.cpp
     ../../port/src/graphics/guest/texture_layout.cpp
@@ -24,7 +24,7 @@ endif()
 target_compile_features(sr_memory_tracking_tests PRIVATE cxx_std_23)
 target_link_libraries(sr_memory_tracking_tests PRIVATE rex::runtime)
 if(WIN32)
-  target_link_libraries(sr_memory_tracking_tests PRIVATE ws2_32)
+  target_link_libraries(sr_memory_tracking_tests PRIVATE ws2_32 d3d12 dxgi)
 endif()
 add_custom_command(TARGET sr_memory_tracking_tests POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:rex::runtime> $<TARGET_FILE_DIR:sr_memory_tracking_tests>)

@@ -3,6 +3,7 @@
 #include <span>
 #include <string_view>
 #include <vector>
+#include <algorithm>
 
 namespace superman_returns::native {
 inline bool SameCoveredContent(std::span<const RexTrackingStamp> before,
@@ -44,4 +45,21 @@ struct TextureWriteProof {
         SameCoveredContent(baseline,before) && SameCoveredContent(before,after);
   }
 };
+inline bool TextureDescriptorMatches(std::span<const uint32_t,6> stored,std::span<const uint32_t,6> incoming) {
+  return std::equal(stored.begin(),stored.end(),incoming.begin());
+}
+struct TextureUploadProof {
+  RexTrackingWatch watch=0;
+  std::vector<RexTrackingStamp> stamps;
+  uint64_t resource_version=0;
+};
+inline bool CanReuseTexture(const TextureUploadProof& proof,std::span<const RexTrackingStamp> current,
+                            uint64_t live_resource_version) {
+  return proof.watch && proof.resource_version && proof.resource_version==live_resource_version &&
+      SameCoveredContent(proof.stamps,current);
+}
+inline bool LegacyTextureValidationRequired(uint32_t base_size,bool watches,bool written,
+                                            uint64_t frame,uint64_t hashed_frame) {
+  return base_size<=(4096u<<10) || (watches?written:frame-hashed_frame>=30);
+}
 }  // namespace superman_returns::native

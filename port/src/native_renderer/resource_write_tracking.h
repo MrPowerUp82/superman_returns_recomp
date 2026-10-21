@@ -36,6 +36,7 @@ struct TextureTrackingEntry {
   RexTrackingWatch watch=0;
   uint64_t version=0;
   TextureWriteProof proof;
+  TextureUploadProof upload;
   std::vector<RexTrackingStamp> before, current;
   ~TextureTrackingEntry() { if(owner && watch) owner->Unwatch(watch); }
 };
