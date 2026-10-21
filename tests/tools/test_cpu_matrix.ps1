@@ -16,7 +16,7 @@ try {
   Assert ($plan[0].variant -eq $plan[5].variant -and $plan[2].variant -eq $plan[3].variant) 'Reverse alternate blocks'
   Reject {New-ReplayMatrixPlan @('direct','direct') 10}
   Reject {New-ReplayMatrixPlan @('contiguous-9') 10}
-  $env:SR_MATRIX_PRESENT='original';[Environment]::SetEnvironmentVariable('SR_MATRIX_ABSENT',$null,'Process')
+  $env:SR_MATRIX_PRESENT='original';Remove-Item -LiteralPath Env:SR_MATRIX_ABSENT -ErrorAction SilentlyContinue
   Reject {Invoke-ReplayEnvironment @{SR_MATRIX_PRESENT='changed';SR_MATRIX_ABSENT='new'} {Assert ($env:SR_MATRIX_PRESENT -eq 'changed') 'Child environment';throw 'simulated'}}
   Assert ($env:SR_MATRIX_PRESENT -eq 'original' -and $null -eq [Environment]::GetEnvironmentVariable('SR_MATRIX_ABSENT','Process')) 'Restore present and absent'
   $plan=@(New-ReplayMatrixPlan @('direct') 10)
@@ -29,6 +29,9 @@ try {
   Reject {Assert-ReplayDestination (Join-Path $scratch 'new') { @([pscustomobject]@{Id=123}) }}
   Assert-ReplayDestination (Join-Path $scratch 'new') { @() }
   . "$PSScriptRoot/../../tools/bench/bench_replay.ps1" -Action Library
+  $identityTime=[DateTime]::Parse('2026-10-21T18:42:50.7255412Z',[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind)
+  Assert ((Convert-ReplayUtc $identityTime).Ticks -eq $identityTime.ToUniversalTime().Ticks) 'Preserve typed PS7 JSON dates at process identity precision'
+  Assert ((Convert-ReplayUtc '2026-10-21T18:42:50.7255412Z').Ticks -eq $identityTime.ToUniversalTime().Ticks) 'Preserve PS5 JSON string dates'
   $now=[DateTime]::UtcNow
   Assert (Test-ReplayImageTime $now $now) 'Current evidence'
   Assert (-not(Test-ReplayImageTime $now.AddSeconds(-11) $now)) 'Old evidence rejected'

@@ -26,7 +26,7 @@ function Invoke-ReplayEnvironment([hashtable]$Changes,[scriptblock]$Body) {
   try {
     foreach($key in $Changes.Keys){$saved[$key]=[Environment]::GetEnvironmentVariable($key,'Process');[Environment]::SetEnvironmentVariable($key,$Changes[$key],'Process')}
     & $Body
-  } finally {foreach($key in $saved.Keys){[Environment]::SetEnvironmentVariable($key,$saved[$key],'Process')}}
+  } finally {foreach($key in $saved.Keys){if($null -eq $saved[$key]){Remove-Item -LiteralPath ("Env:"+$key) -ErrorAction SilentlyContinue}else{[Environment]::SetEnvironmentVariable($key,$saved[$key],'Process')}}}
 }
 function Invoke-ReplayMatrix([object[]]$Plan,[scriptblock]$Runner,[scriptblock]$Save={}) {
   foreach($run in $Plan) {

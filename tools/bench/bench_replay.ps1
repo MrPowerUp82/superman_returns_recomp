@@ -25,9 +25,16 @@ function Send-ReplayInput($Session,[int]$PadButtons,[int]$Axis,[int]$Hold) {
   $id=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
   Set-Content -LiteralPath $Session.input -Value "$id $Hold $PadButtons $Axis" -Encoding ascii -NoNewline
 }
+function Convert-ReplayUtc($Value) {
+  # PS7 ConvertFrom-Json returns DateTime; PS5 returns the original ISO string.
+  # Re-parsing a typed DateTime via its culture string loses fractional ticks.
+  if($Value -is [DateTime]){return $Value.ToUniversalTime()}
+  if($Value -is [DateTimeOffset]){return $Value.UtcDateTime}
+  return [DateTime]::Parse($Value,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+}
 function Get-ReplayProcess($Session) {
   $process=Get-Process -Id $Session.pid -ErrorAction Stop
-  $expected=[DateTime]::Parse($Session.process_start_utc,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+  $expected=Convert-ReplayUtc $Session.process_start_utc
   if($process.StartTime.ToUniversalTime().Ticks -ne $expected.Ticks -or -not [string]::Equals($process.MainModule.FileName,$Session.exe,[StringComparison]::OrdinalIgnoreCase)){throw 'Owned process identity changed'}
   return $process
 }
@@ -81,7 +88,7 @@ try {
   # Quote complete path arguments for Windows PowerShell's Start-Process join.
   $arguments=@(('"--game_data_root='+$root+'/game"'),('"--log_file='+$log+'"'),'--sr_renderer=native',"--sr_native_api=$Api",'--sr_preset=custom',"--sr_native_fps_limit=$FpsLimit",'--sr_native_render_scale=1','--sr_render_scale=100','--sr_native_msaa_samples=1','--sr_native_fxaa=false','--sr_native_shadow_quality=1','--sr_native_anisotropic_filtering=-1','--sr_lsfg=false','--vsync=true','--window_width=1280','--window_height=720','--fullscreen=false','--sr_skip_intro=true','--mnk_mode=false','--d3d12_adapter=-1','--sr_native_worker=true')
   $owned=Start-Process -FilePath $Exe -ArgumentList $arguments -WorkingDirectory (Split-Path $Exe) -WindowStyle Hidden -PassThru
-  foreach($key in $saved.Keys){[Environment]::SetEnvironmentVariable($key,$saved[$key],'Process')};$saved=@{}
+  foreach($key in $saved.Keys){if($null -eq $saved[$key]){Remove-Item -LiteralPath ("Env:"+$key) -ErrorAction SilentlyContinue}else{[Environment]::SetEnvironmentVariable($key,$saved[$key],'Process')}};$saved=@{}
   $session=[pscustomobject]@{pid=$owned.Id;process_start_utc=$owned.StartTime.ToUniversalTime().ToString('o');exe=$Exe;input=$inputFile;variant=$Variant;api=$Api;profiled=[bool]$StageTiming;args=$arguments;reference_image=$ReferenceImage;reference_sha256=(Get-FileHash -LiteralPath $ReferenceImage).Hash}
   $session|ConvertTo-Json -Depth 8|Set-Content -LiteralPath $statePath -Encoding UTF8
   Save-ReplayRequest 'launch'
@@ -133,7 +140,7 @@ try {
   Save-ReplayRequest 'complete'
 } catch {Save-ReplayRequest ('failed: '+$_.Exception.Message);throw}
 finally {
-  foreach($key in $saved.Keys){[Environment]::SetEnvironmentVariable($key,$saved[$key],'Process')}
+  foreach($key in $saved.Keys){if($null -eq $saved[$key]){Remove-Item -LiteralPath ("Env:"+$key) -ErrorAction SilentlyContinue}else{[Environment]::SetEnvironmentVariable($key,$saved[$key],'Process')}}
   if($session){try{Send-ReplayInput $session 0 0 1}finally{try{$process=Get-ReplayProcess $session;Stop-Process -Id $process.Id;$process.WaitForExit(10000)|Out-Null}catch{Write-Warning $_.Exception.Message}}}
   elseif($owned){Stop-Process -Id $owned.Id -ErrorAction SilentlyContinue}
 }
