@@ -1562,12 +1562,8 @@ void Renderer::Retire(ComPtr<ID3D12Resource> resource) {
 }
 
 uint32_t Renderer::AllocSrvIndex() {
-  if (!retired_srvs_.empty() && retired_srvs_.front().first <= fence_->GetCompletedValue()) {
-    uint32_t index = retired_srvs_.front().second;
-    retired_srvs_.erase(retired_srvs_.begin());
-    return index;
-  }
-  return srv_heap_next_ < kSrvHeapSize ? srv_heap_next_++ : 0;
+  return AllocateDescriptor(retired_srvs_, srv_completed_fence_, srv_heap_next_, kSrvHeapSize,
+                            [this] { return fence_->GetCompletedValue(); });
 }
 
 bool Renderer::Upload(size_t size, size_t alignment, UploadAlloc& out) {
@@ -1923,6 +1919,7 @@ bool Renderer::BeginFrame() {
     overflow_offset_ = overflow_size_ = 0;
   }
   uint64_t completed = fence_->GetCompletedValue();
+  if (completed != UINT64_MAX) srv_completed_fence_ = completed;
   retired_.erase(std::remove_if(retired_.begin(), retired_.end(),
                                 [completed](const auto& r) { return r.first <= completed; }),
                  retired_.end());

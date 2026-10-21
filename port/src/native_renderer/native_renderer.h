@@ -30,6 +30,7 @@
 #include "../graphics/guest/capture_batch_pool.h"
 #include "buffer_content.h"
 #include "shared_constants_cache.h"
+#include "descriptor_recycling.h"
 #include "resource_write_tracking.h"
 
 #include <atomic>
@@ -605,7 +606,8 @@ class Renderer : public NativeFrontend {
   void RetireSrvIndex(uint32_t index);
   void CopyDepthRegion(HostSurface& src, ResolveTexture& dst, uint32_t x1, uint32_t y1,
                        uint32_t x2, uint32_t y2, uint32_t dx, uint32_t dy);
-  std::vector<std::pair<uint64_t, uint32_t>> retired_srvs_;
+  RetiredDescriptors retired_srvs_;
+  uint64_t srv_completed_fence_ = 0;
   std::unordered_map<uint64_t, TextureEntry> textures_;
   std::unordered_map<uint64_t, uint32_t> samplers_;
   std::unordered_map<uint64_t, HostSurface> surfaces_;

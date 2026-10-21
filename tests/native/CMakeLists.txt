@@ -16,6 +16,7 @@ add_executable(sr_native_tests
     test_texture_write_proof.cpp
     "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/rexglue-write-tracking/src/write_tracking_state.cpp"
     test_benchmark_input.cpp
+    test_descriptor_recycling.cpp
     test_backend_selection.cpp
     test_checked_guest_memory.cpp
     test_idle_yield.cpp

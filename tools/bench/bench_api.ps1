@@ -1,8 +1,8 @@
 <#
 Roda tools\bench\bench.ps1 com os argumentos que o launcher passa para a API escolhida (janela 1280x720,
-limite de 30 FPS, opções de melhoria no padrão do jogo). O resultado vai para logs\bench_results.csv.
+limite de 30 FPS por padrão, opções de melhoria no padrão do jogo). O resultado vai para logs\bench_results.csv.
 
-Uso: tools\bench\bench_api.ps1 -Api vulkan|d3d12 -Name <rótulo> [-Profile] [-Timeline] [-TimelineDetail] [-Gate record|check] [-Exe <caminho>]
+Uso: tools\bench\bench_api.ps1 -Api vulkan|d3d12 -Name <rótulo> [-FpsLimit 60] [-Profile] [-Timeline] [-TimelineDetail] [-Gate record|check] [-Exe <caminho>]
   -Profile liga SR_VULKAN_PROFILE=1 e copia o log do jogo para logs\bench_<Name>.log.
   -Timeline liga SR_FRAME_TIMELINE, grava logs\timeline_<Name>.csv e imprime a tabela do estágio limitante
             (tools\analysis\frame_timeline_report.py), também salva em logs\timeline_<Name>.txt.
@@ -16,6 +16,7 @@ param(
   [Parameter(Mandatory)] [ValidateSet('vulkan', 'd3d12')] [string]$Api,
   [Parameter(Mandatory)] [string]$Name,
   [string]$Exe = '',
+  [ValidateRange(0, 1000)] [int]$FpsLimit = 30,
   [switch]$Profile,
   [switch]$Timeline,
   [switch]$TimelineDetail,
@@ -29,7 +30,7 @@ if (-not $Exe) { $Exe = "$root\port\out\build\win-amd64-dist\superman_returns.ex
 $gameArgs = @(
   '--sr_renderer=native', '--sr_preset=custom', "--sr_native_api=$Api", '--sr_render_scale=100',
   '--window_width=1280', '--window_height=720', '--vsync=true', '--d3d12_adapter=-1',
-  '--sr_native_fps_limit=30', '--sr_native_render_scale=1', '--sr_native_anisotropic_filtering=-1',
+  "--sr_native_fps_limit=$FpsLimit", '--sr_native_render_scale=1', '--sr_native_anisotropic_filtering=-1',
   '--sr_native_fxaa=false', '--sr_native_shadow_quality=1', '--sr_native_msaa_samples=1',
   '--mnk_mode=true', '--mnk_mouse=true'
 ) -join ' '
