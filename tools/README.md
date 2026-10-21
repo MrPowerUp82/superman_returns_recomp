@@ -60,6 +60,51 @@ são ferramentas sem dados do jogo. `shaders/generate_wasm_preshaders.mjs <game>
 exercita o mesmo fluxo da página em Node. Testes: `node --test tests/web/vulkan-preshaders.test.mjs`.
 Veja [cobertura e instruções](../docs/vulkan-preshaders.md).
 
+## Replay experimental: matriz de CPU
+
+`SR_NATIVE_REPLAY_THREADS` ausente mantém o serial direto. `1` seleciona agora o
+caminho preparado com um participante; `2`–`8` incluem o chamador e workers
+persistentes. `SR_NATIVE_REPLAY_SCHEDULING=contiguous|interleaved` mantém a ordem
+de publicação. Valores inválidos emitem aviso e usam fallback seguro. D3D12
+continua direto. Nenhuma dessas opções muda o padrão.
+
+```powershell
+powershell -NoProfile -File tools/bench/cpu_matrix.ps1 -Phase Isolated -Name rb_preview -Runs 10 -BatchCommands 32 -PlanOnly
+powershell -NoProfile -File tools/bench/cpu_matrix.ps1 -Phase Isolated -Name rb_iso32 -BenchExe build/tests-native/sr_replay_storage_bench.exe -Runs 10 -BatchCommands 32
+build/tests-native/sr_replay_storage_bench.exe --device --vary-banks --batch-draws=32 --threads=8 --schedule=interleaved --json=run8.json
+python tools/analysis/replay_balance_report.py --matrix artifacts/native-renderer-performance/rb_iso32/manifest.json --seed 20261021 --json=rb_iso32.json
+```
+
+O benchmark mantém dez rodadas internas, descarta duas e verifica checksum.
+A unidade independente é o processo: dez ou vinte blocos por variante,
+alternando a ordem direta/reversa. Lotes 32/256 e limites 30/60 são estratos
+separados. O manifesto preserva revisão, patch, hashes, ordem, arquivos e falhas.
+Nomes existentes são recusados; `-PlanOnly` não cria arquivos nem processos.
+Use `-Action Library` para carregar as funções de teste sem iniciar rodadas.
+
+`cpu_matrix.ps1 -Phase Game -Name rb_game -Exe <exe> -Variants direct,contiguous-4,interleaved-4`
+exige lista explícita. Em Windows PowerShell, passe arrays ao invocar o script
+com `&`/dot-source ou use `powershell -Command`, pois `-File` não expande listas.
+O jogo usa `SR_BENCH_INPUT`, aquecimento mínimo de 25 s e janelas de 20 s idle e
+forward. O executor não controla a UI do Windows. Acompanhe `request.json` em
+cada pasta de run: Computer Use deve ativar a janela e iniciar New Game; em
+`await-ready`, salvar `start.png` e executar `bench_replay.ps1 -Action Ready
+-Directory <run>`; em `await-end`, salvar `end.png` e executar `-Action End`.
+`-Action Input -Buttons 16|4096 -Milliseconds 700` envia Start/A pela API do jogo.
+As capturas precisam de HUD e timestamps próximos das janelas. O gate existente
+compara `start.png` à referência boa, sem sobrescrevê-la ou relaxar limites.
+Timeout, gate, processo encerrado e trace inválido ficam registrados como falhas.
+O término alcança somente o PID, caminho e instante de início da instância criada.
+
+Rodadas limpas desligam profile e timeline; `-StageTiming` usa as três flags
+necessárias para `<timeline>.replay.csv`. Nunca misture ambas na aceitação.
+Latência por quadro soma lotes sequenciais; a soma dos tempos de shards se
+sobrepõe e não mede CPU do sistema. O relatório inclui p50/p95/p99 por quadro
+somente com timeline instrumentada. Leituras periódicas de FPS são descritivas,
+não fornecem 1% low. O bootstrap pareado usa processos por bloco, com semente
+fixa, e mantém falhas/execuções sem par visíveis. Sem ganho convincente, preserve
+o serial direto. A instrumentação e o fluxo pela API de input têm custo próprio.
+
 ## Limpeza
 
 `tools\clean.ps1` mostra, sem apagar, o que ocuparia espaço e pode ser recriado: logs e screenshots, caches e builds de teste avulsos. Para apagar, passe `-Apply`; os grupos são `-Logs`, `-Caches` e `-TestBuilds`.
