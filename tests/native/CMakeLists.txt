@@ -35,6 +35,8 @@ add_executable(sr_native_tests
     test_render_packets.cpp
     test_parallel_replay.cpp
     test_replay_options.cpp
+    test_replay_trace.cpp
+    "${SR_NATIVE_DIR}/../graphics/guest/replay_trace.cpp"
     "${SR_NATIVE_DIR}/../graphics/guest/parallel_replay.cpp"
     test_render_state.cpp
     test_vertex_layout.cpp
