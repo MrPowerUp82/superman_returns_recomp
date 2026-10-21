@@ -1,7 +1,7 @@
 # Baseline e balanceamento do replay nativo
 
 Data: 21/10/2026.
-Status: desenho em conversa aprovado; especificação escrita pendente de revisão do usuário.
+Status: especificação escrita aprovada pelo usuário em 21/10/2026; plano de implementação em revisão.
 
 ## Intenção e sucesso esperado
 
