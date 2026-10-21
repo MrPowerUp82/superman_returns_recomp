@@ -49,6 +49,7 @@ def test_interval_and_fps(tmp_path):
 def test_stage_stats(tmp_path):
     stages = ftr.analyze(ftr.load(make(tmp_path)))["stages"]
     assert stages["worker"]["mean"] == pytest.approx(25.0)
+    assert stages["worker"]["p95"] == pytest.approx(25.0)
     assert stages["worker"]["blocked_mean"] == pytest.approx(3.0)
     assert stages["worker"]["util"] == pytest.approx(25.0 / 33.3, rel=0.01)
     assert stages["worker"]["headroom_p99_ms"] == pytest.approx(1000 / 30 - 25.0, rel=0.01)
