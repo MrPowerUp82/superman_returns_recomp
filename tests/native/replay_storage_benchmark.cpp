@@ -9,9 +9,14 @@
 #include <cstdio>
 #include <string_view>
 #include <charconv>
+#include <fstream>
+#include <iomanip>
+#include <locale>
+#include <string>
 using namespace superman_returns::graphics::guest;
 int main(int argc,char** argv) {
   bool pooled=false,batched=false,vary=false,device=false;size_t blocks=128,requested_batch=32;unsigned threads=0;
+  ReplayScheduling scheduling=ReplayScheduling::kContiguous;std::string json_path;
   for(int i=1;i<argc;++i) {
     std::string_view arg(argv[i]);
     if(arg=="--pool") pooled=true;
@@ -25,8 +30,11 @@ int main(int argc,char** argv) {
     }
     else if(arg.starts_with("--threads=")) {
       arg.remove_prefix(10);auto result=std::from_chars(arg.data(),arg.data()+arg.size(),threads);
-      if(result.ec!=std::errc{} || result.ptr!=arg.data()+arg.size() || threads<1 || threads>4)return 4;
+      if(result.ec!=std::errc{} || result.ptr!=arg.data()+arg.size() || threads<1 || threads>8)return 4;
     }
+    else if(arg=="--schedule=contiguous")scheduling=ReplayScheduling::kContiguous;
+    else if(arg=="--schedule=interleaved")scheduling=ReplayScheduling::kInterleaved;
+    else if(arg.starts_with("--json=")){json_path=arg.substr(7);if(json_path.empty())return 4;}
     else if(arg.starts_with("--pool-blocks=")) {
       arg.remove_prefix(14);
       auto result=std::from_chars(arg.data(),arg.data()+arg.size(),blocks);
@@ -38,7 +46,8 @@ int main(int argc,char** argv) {
   auto batch=std::make_shared<WorkBatch>();WorkCmd cmd;cmd.op=Op::kDraw;cmd.u[0]=4;cmd.u[2]=3;
   if(device) {
     namespace profile=superman_returns::native::profile;
-    batch->bytes.resize(0x4000);batch->ranges={{0x10000,0x4000,0}};cmd.device=0x10000;cmd.range_count=1;
+    // WorkBatch's default-init allocator intentionally leaves resize bytes raw.
+    batch->bytes.resize(0x4000,0);batch->ranges={{0x10000,0x4000,0}};cmd.device=0x10000;cmd.range_count=1;
     auto store=[&](uint32_t offset,uint32_t value) {
       for(uint32_t i=0;i<4;++i)batch->bytes[offset+i]=uint8_t(value>>(24-i*8));
     };
@@ -59,7 +68,7 @@ int main(int argc,char** argv) {
   }
   superman_returns::native::Pm4Mirror mirror;
   std::unique_ptr<ParallelReplayDecoder> decoder;
-  if(threads)decoder=std::make_unique<ParallelReplayDecoder>(threads);
+  if(threads)decoder=std::make_unique<ParallelReplayDecoder>(threads,scheduling);
   const size_t batch_draws=batched?requested_batch:draws;
   std::vector<std::shared_ptr<WorkBatch>> batches;
   for(size_t offset=0;offset<draws;offset+=batch_draws) {
@@ -118,6 +127,16 @@ int main(int argc,char** argv) {
   }
   auto median=[](auto values){std::sort(values.begin(),values.end());return (values[values.size()/2-1]+values[values.size()/2])/2;};
   if(checksum!=rounds*(draws*(draws+1)/2+expected_banks)) return 3;
+  if(!json_path.empty()) {
+    // A new evidence file only. Do not silently replace a prior process sample.
+    if(std::ifstream(json_path).good())return 4;
+    std::ofstream out(json_path);out.imbue(std::locale::classic());out<<std::setprecision(12);
+    out<<"{\"schema\":1,\"mode\":\""<<(threads?"prepared":"direct")<<"\",\"threads\":"<<(threads?threads:1)
+       <<",\"scheduling\":\""<<(scheduling==ReplayScheduling::kInterleaved?"interleaved":"contiguous")
+       <<"\",\"batch_draws\":"<<batch_draws<<",\"rounds\":"<<rounds<<",\"warmup_rounds\":2,\"checksum\":"<<checksum<<",\"samples\":[";
+    for(size_t i=0;i<cycle.size();++i){if(i)out<<',';out<<"{\"arena_ms\":"<<setup[i]<<",\"decode_ms\":"<<decode[i]<<",\"total_ms\":"<<total[i]<<",\"release_ms\":"<<release[i]<<",\"cycle_ms\":"<<cycle[i]<<'}';}
+    out<<"]}\n";out.flush();if(!out)return 5;
+  }
   std::printf("replay_storage_bench threads=%u pool=%d vary_banks=%d device=%d packet_bytes=%zu packet_constants_bytes=%zu batch_draws=%zu pool_blocks=%zu overlap=2 draws=%zu rounds=%zu arena_ms=%.4f decode_ms=%.4f total_ms=%.4f release_ms=%.4f cycle_ms=%.4f checksum=%llu\n",
               threads,int(pooled),int(vary),int(device),sizeof(DrawPacket),sizeof(PacketConstants),batch_draws,blocks,draws,rounds-2,median(setup),median(decode),median(total),median(release),median(cycle),static_cast<unsigned long long>(checksum));
 }

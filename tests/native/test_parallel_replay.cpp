@@ -24,8 +24,9 @@ std::shared_ptr<WorkBatch> ChangingBatch() {
 }
 }
 SR_TEST(parallel_replay_preserves_command_order_and_constant_versions) {
-  for(unsigned threads:{1u,2u,4u}) {
-    ParallelReplayDecoder decoder(threads);Pm4Mirror serial,parallel;
+  for(auto schedule:{ReplayScheduling::kContiguous,ReplayScheduling::kInterleaved})
+  for(unsigned threads:{1u,2u,3u,4u,5u,6u,7u,8u}) {
+    ParallelReplayDecoder decoder(threads,schedule);Pm4Mirror serial,parallel;
     auto b=ChangingBatch();auto results=decoder.Decode(b,parallel);
     SR_CHECK_EQ(results.size(),b->cmds.size());
     for(size_t i=0;i<results.size();++i) {
@@ -93,7 +94,9 @@ SR_TEST(parallel_replay_decode_failure_does_not_publish_partial_draw) {
 }
 SR_TEST(parallel_device_decode_preserves_overlays_fetch_fallback_and_geometry) {
   namespace profile=superman_returns::native::profile;
-  auto batch=std::make_shared<WorkBatch>();batch->bytes.resize(0x4080);
+  // WorkBatch intentionally default-initializes bytes without zeroing. This
+  // fixture needs a zeroed device image and POSITION0 declaration padding.
+  auto batch=std::make_shared<WorkBatch>();batch->bytes.resize(0x4080,0);
   auto store=[&](uint32_t offset,uint32_t value) {
     for(uint32_t j=0;j<4;++j)batch->bytes[offset+j]=uint8_t(value>>(24-j*8));
   };
@@ -116,8 +119,9 @@ SR_TEST(parallel_device_decode_preserves_overlays_fetch_fallback_and_geometry) {
     c.ring_offset=uint32_t(batch->bytes.size());Word(*batch,0x4800);Word(*batch,300+i);c.ring_bytes=8;
     batch->cmds.push_back(c);
   }
-  for(unsigned threads:{2u,4u}) {
-    ParallelReplayDecoder decoder(threads);Pm4Mirror m,serial;
+  for(auto schedule:{ReplayScheduling::kContiguous,ReplayScheduling::kInterleaved})
+  for(unsigned threads:{1u,2u,3u,4u,5u,6u,7u,8u}) {
+    ParallelReplayDecoder decoder(threads,schedule);Pm4Mirror m,serial;
     auto results=decoder.Decode(batch,m);
     for(size_t i=0;i<results.size();++i) {
       SR_CHECK(results[i].ok);if(!results[i].ok)continue;
@@ -135,7 +139,113 @@ SR_TEST(parallel_device_decode_preserves_overlays_fetch_fallback_and_geometry) {
       SR_CHECK(actual->indices.normalized==std::vector<uint32_t>({1,2,3}));
       SR_CHECK(actual->indices.normalized==expected->indices.normalized);
       SR_CHECK(actual->streams[0].update.bytes==expected->streams[0].update.bytes);
+      if(actual->vertex_fetch[0].type!=0x2c2259u) {
+        std::printf("device fixture schedule=%u threads=%u command=%zu attrs=%zu reference=%x source=%02x%02x%02x%02x usage=%u index=%u\n",
+            unsigned(schedule),threads,i,actual->attributes.size(),expected->vertex_fetch[0].type,
+            batch->bytes[0x4038],batch->bytes[0x4039],batch->bytes[0x403a],batch->bytes[0x403b],batch->bytes[0x403d],batch->bytes[0x403e]);
+        for(const auto& a:actual->attributes)std::printf("attribute stream=%u offset=%u type=%x usage=%u index=%u\n",a.stream,a.offset,a.type,a.usage,a.index);
+      }
       SR_CHECK_EQ(actual->vertex_fetch[0].type,0x2c2259u);
     }
+  }
+}
+namespace superman_returns::graphics::guest {
+struct ReplayTestAccess {
+  static inline size_t failure_index=0;
+  static void Before(size_t index) {if(index==failure_index)throw std::runtime_error("Injected shard failure");}
+  static void FailAt(ParallelReplayDecoder& decoder,size_t index) {
+    failure_index=index;decoder.before_entry_=&Before;
+  }
+  static void Clear(ParallelReplayDecoder& decoder) {decoder.before_entry_=nullptr;}
+};
+}
+SR_TEST(replay_execution_limit_includes_first_error_only) {
+  std::vector<ReplayResult> results(9);
+  SR_CHECK_EQ(ReplayExecutionLimit({}),0u);
+  for(auto& result:results)result.ok=true;
+  SR_CHECK_EQ(ReplayExecutionLimit(results),9u);
+  results[5].ok=false;SR_CHECK_EQ(ReplayExecutionLimit(results),6u);
+  results[0].ok=false;SR_CHECK_EQ(ReplayExecutionLimit(results),1u);
+}
+SR_TEST(parallel_replay_small_and_mixed_batches_preserve_results) {
+  for(auto schedule:{ReplayScheduling::kContiguous,ReplayScheduling::kInterleaved})
+  for(unsigned n=1;n<=8;++n) {
+    ParallelReplayDecoder decoder(n,schedule);
+    for(size_t count:{0u,1u,3u,65u}) {
+      auto batch=ChangingBatch();batch->cmds.resize(count);
+      if(count>3){WorkCmd resolve;resolve.op=Op::kResolve;batch->cmds.insert(batch->cmds.begin()+2,resolve);}
+      Pm4Mirror mirror,serial;auto results=decoder.Decode(batch,mirror);
+      SR_CHECK_EQ(results.size(),batch->cmds.size());
+      for(size_t i=0;i<results.size();++i) {
+        RenderPacket reference;std::string error;
+        SR_CHECK(ReplayCapturedRenderPacket(*batch,batch->cmds[i],serial,reference,error,{},batch));
+        SR_CHECK(results[i].ok);SR_CHECK_EQ(results[i].packet.index(),reference.index());
+        if(auto* actual=GetDraw(results[i].packet)) {
+          const auto* expected=GetDraw(reference);SR_CHECK(expected);if(!expected)continue;
+          SR_CHECK(actual->constants.vs==expected->constants.vs);
+          SR_CHECK(actual->constants.ps==expected->constants.ps);
+          SR_CHECK_EQ(actual->command_serial,expected->command_serial);
+        }
+      }
+    }
+  }
+}
+SR_TEST(parallel_replay_injected_shard_exception_joins_and_recovers) {
+  for(auto schedule:{ReplayScheduling::kContiguous,ReplayScheduling::kInterleaved})
+  for(unsigned n=1;n<=8;++n) {
+    ParallelReplayDecoder decoder(n,schedule);
+    for(unsigned shard=0;shard<n;++shard) {
+      auto batch=ChangingBatch();batch->cmds.resize(65);
+      const size_t failure=schedule==ReplayScheduling::kContiguous?65*shard/n:shard;
+      ReplayTestAccess::FailAt(decoder,failure);
+      Pm4Mirror mirror;auto results=decoder.Decode(batch,mirror);
+      SR_CHECK_EQ(results.size(),65u);SR_CHECK(!results[failure].ok);
+      SR_CHECK(!results[failure].error.empty());SR_CHECK(!GetDraw(results[failure].packet));
+      SR_CHECK_EQ(ReplayExecutionLimit(results),failure+1);
+      ReplayTestAccess::Clear(decoder);
+      auto again=decoder.Decode(batch,mirror);
+      for(const auto& result:again)SR_CHECK(result.ok);
+      batch->cmds[8].pm4_capture_ok=false;
+      auto prefix=decoder.Decode(batch,mirror);
+      SR_CHECK_EQ(prefix.size(),9u);SR_CHECK(!prefix.back().ok);
+      for(size_t i=0;i<8;++i)SR_CHECK(prefix[i].ok);
+    }
+  }
+}
+SR_TEST(replay_probe_counts_each_entry_once) {
+  for(auto schedule:{ReplayScheduling::kContiguous,ReplayScheduling::kInterleaved})
+  for(unsigned n=1;n<=8;++n) {
+    ParallelReplayDecoder decoder(n,schedule);Pm4Mirror mirror;
+    auto batch=ChangingBatch();ReplayBatchProbe probe;
+    auto results=decoder.Decode(batch,mirror,&probe);
+    SR_CHECK_EQ(probe.shard_count,n);size_t commands=0,draws=0;
+    SR_CHECK(probe.wall_ns>=probe.prepare_ns);
+    SR_CHECK(probe.parallel_ns>=probe.join_wait_ns);
+    for(unsigned s=0;s<n;++s) {
+      const auto& p=probe.shards[s];commands+=p.commands;draws+=p.draws;
+      SR_CHECK(p.begin_ns>=probe.dispatch_ns);SR_CHECK(p.end_ns>=p.begin_ns);
+      SR_CHECK(p.end_ns-p.begin_ns>=p.arena_ns);
+    }
+    SR_CHECK_EQ(commands,batch->cmds.size());SR_CHECK_EQ(draws,65u);
+    for(const auto& r:results)SR_CHECK(r.ok);
+  }
+}
+SR_TEST(replay_probe_empty_shards_are_not_work) {
+  ParallelReplayDecoder decoder(8,ReplayScheduling::kInterleaved);Pm4Mirror mirror;
+  auto batch=ChangingBatch();batch->cmds.resize(1);ReplayBatchProbe probe;
+  auto result=decoder.Decode(batch,mirror,&probe);SR_CHECK(result[0].ok);
+  SR_CHECK_EQ(probe.shards[0].commands,1u);
+  for(unsigned s=1;s<8;++s) {
+    SR_CHECK_EQ(probe.shards[s].commands,0u);SR_CHECK_EQ(probe.shards[s].draws,0u);
+  }
+}
+SR_TEST(replay_probe_is_reset_between_calls) {
+  ParallelReplayDecoder decoder(8);Pm4Mirror mirror;ReplayBatchProbe probe;
+  decoder.Decode(ChangingBatch(),mirror,&probe);
+  auto empty=std::make_shared<WorkBatch>();decoder.Decode(empty,mirror,&probe);
+  SR_CHECK_EQ(probe.shard_count,8u);SR_CHECK_EQ(probe.prepare_ns<=probe.wall_ns,true);
+  SR_CHECK_EQ(probe.parallel_ns,0u);SR_CHECK_EQ(probe.join_wait_ns,0u);
+  for(const auto& shard:probe.shards) {
+    SR_CHECK_EQ(shard.commands,0u);SR_CHECK_EQ(shard.draws,0u);SR_CHECK_EQ(shard.begin_ns,0u);
   }
 }

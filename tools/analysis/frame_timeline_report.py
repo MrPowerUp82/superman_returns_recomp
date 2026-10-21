@@ -54,6 +54,7 @@ def _summary(busy_ms, blocked_ms, mean_interval, budget_ms):
     return {
         "mean": mean,
         "p50": percentile(busy_ms, 50),
+        "p95": percentile(busy_ms, 95),
         "p99": p99,
         "blocked_mean": sum(blocked_ms) / len(blocked_ms),
         "samples": len(busy_ms),

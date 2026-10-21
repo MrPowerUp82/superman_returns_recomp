@@ -22,6 +22,7 @@
 #include "../graphics/guest/edram_alias.h"
 #include "../graphics/guest/render_packet.h"
 #include "../graphics/guest/parallel_replay.h"
+#include "../graphics/guest/replay_trace.h"
 #include "../graphics/guest/primitive_expansion.h"
 #include "../graphics/guest/pm4_capture.h"
 #include "../graphics/frame_timeline.h"
@@ -6820,6 +6821,7 @@ bool SinkProfiling() {static const bool on=[]{const char* v=std::getenv("SR_VULK
 // switch for comparisons against the former eager initialization path.
 bool ReplayStorageEnabled() {static const bool on=[]{const char* v=std::getenv("SR_NATIVE_REPLAY_STORAGE");return !v || !*v || *v!='0';}();return on;}
 uint64_t ElapsedUs(std::chrono::steady_clock::time_point since) {return uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-since).count());}
+thread_local graphics::guest::ReplayBatchSample* replay_trace_sample=nullptr;
 }
 
 void Renderer::WorkerMain() {
@@ -6831,12 +6833,52 @@ void Renderer::WorkerMain() {
       ?std::make_shared<graphics::guest::DrawPacketPool>():nullptr;
   REXLOG_INFO("native renderer: replay packet pool {}",payload_pool?"enabled (idle limit 128 MiB / 128 blocks)":"disabled");
   const char* threads_flag=std::getenv("SR_NATIVE_REPLAY_THREADS");
-  const unsigned replay_threads=threads_flag && !std::strcmp(threads_flag,"4")?4:
-      (threads_flag && !std::strcmp(threads_flag,"2")?2:1);
+  const char* scheduling_flag=std::getenv("SR_NATIVE_REPLAY_SCHEDULING");
+  const auto replay_options=graphics::guest::ParseReplayOptions(
+      threads_flag?threads_flag:"",scheduling_flag?scheduling_flag:"",bool(packet_sink_));
+  if(replay_options.invalid_threads)REXLOG_WARN("native replay: invalid SR_NATIVE_REPLAY_THREADS; using direct replay");
+  if(replay_options.invalid_scheduling)REXLOG_WARN("native replay: invalid SR_NATIVE_REPLAY_SCHEDULING; using contiguous scheduling");
+  const unsigned replay_threads=replay_options.shards;
   std::unique_ptr<graphics::guest::ParallelReplayDecoder> parallel;
-  if(packet_sink_ && replay_threads>1)parallel=std::make_unique<graphics::guest::ParallelReplayDecoder>(replay_threads);
+  if(replay_options.prepared)parallel=std::make_unique<graphics::guest::ParallelReplayDecoder>(replay_threads,replay_options.scheduling);
   REXLOG_INFO("native renderer: replay decode threads {} (ordered batches)",parallel?replay_threads:1);
+  const char* batch_flag=std::getenv("SR_NATIVE_BATCH_COMMANDS");
+  const unsigned batch_limit=packet_sink_ && batch_flag && !std::strcmp(batch_flag,"256")?256:
+      (packet_sink_ && batch_flag && !std::strcmp(batch_flag,"128")?128:32);
+  REXLOG_INFO("native renderer: replay mode={} api={} threads={} scheduling={} batch_limit={}",
+      parallel?"prepared":"direct",packet_sink_?"vulkan":"d3d12",replay_threads,
+      replay_options.scheduling==graphics::guest::ReplayScheduling::kInterleaved?"interleaved":"contiguous",batch_limit);
   auto& timeline = graphics::FrameTimeline::Global();
+  std::ofstream trace_output;
+  std::unique_ptr<graphics::guest::ReplayTraceWriter> trace_writer;
+  bool trace_invalid=false;
+  auto invalidate_trace=[&](const char* reason) {
+    if(!trace_invalid)REXLOG_ERROR("replay_trace_invalid=1 reason={}",reason);
+    trace_invalid=true;trace_writer.reset();
+  };
+  if(packet_sink_ && timeline.enabled() && graphics::FrameTimeline::Detail() && SinkProfiling()) {
+    const auto path=graphics::FrameTimeline::PathFromEnvironment()+".replay.csv";
+    std::error_code ec;
+    const bool exists=std::filesystem::exists(path,ec);
+    if(exists || ec)invalidate_trace("trace path exists or cannot be inspected");
+    else {
+      trace_output.open(path,std::ios::out);
+      const auto clock_anchor=graphics::FrameTimeline::NowNs();
+      const auto utc_anchor=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+      if(trace_output)trace_writer=std::make_unique<graphics::guest::ReplayTraceWriter>(trace_output,clock_anchor,utc_anchor);
+      if(!trace_writer || !trace_writer->good())invalidate_trace("trace open/header write failed");
+    }
+  }
+  auto close_trace=[&] {
+    replay_trace_sample=nullptr;
+    if(trace_output.is_open()) {
+      trace_output.flush();
+      if(!trace_output.good())invalidate_trace("trace flush failed");
+      trace_output.close();
+      if(trace_output.fail())invalidate_trace("trace close failed");
+    }
+  };
+  uint64_t trace_sequence=0;
   for (;;) {
     std::shared_ptr<const WorkBatch> batch;
     {
@@ -6844,28 +6886,38 @@ void Renderer::WorkerMain() {
       const auto idle_started=std::chrono::steady_clock::now();
       queue_cv_.wait(lock, [this] { return worker_stop_ || !work_queue_.empty(); });
       if(SinkProfiling()) g_sink_profile.idle_us+=ElapsedUs(idle_started);
-      if(work_queue_.empty() && worker_stop_) return;
+      if(work_queue_.empty() && worker_stop_) {close_trace();return;}
       batch = batch_pool_->Freeze(std::move(work_queue_.front()));
       work_queue_.pop_front();
     }
     const uint64_t timeline_begin_ns = timeline.enabled() ? graphics::FrameTimeline::NowNs() : 0;
     graphics::TakeTimelineBlockedNs();  // drop waits recorded outside a batch
+    std::optional<graphics::guest::ReplayBatchSample> trace_sample;
+    if(trace_writer) {
+      trace_sample.emplace();trace_sample->sequence=++trace_sequence;
+      trace_sample->options=replay_options;trace_sample->commands=batch->cmds.size();
+      if(!batch->cmds.empty() && batch->cmds.back().op==Op::kSwap)trace_sample->closing_swap=batch->cmds.back().u64;
+      replay_trace_sample=&*trace_sample;
+    }
     {
       std::lock_guard<std::recursive_mutex> lock(mutex_);
       const auto draw_count=std::count_if(batch->cmds.begin(),batch->cmds.end(),[](const WorkCmd& cmd) {
         return cmd.op==Op::kDraw || cmd.op==Op::kDrawIndexed || cmd.op==Op::kDrawInline;
       });
+      if(trace_sample)trace_sample->draws=size_t(draw_count);
       std::optional<graphics::guest::DrawPacketArena> payloads;
       if(packet_sink_ && draw_count && !parallel) {
         const bool profile=SinkProfiling();
         const auto started=profile?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
         payloads.emplace(size_t(draw_count),ReplayStorageEnabled(),payload_pool);
+        if(trace_sample)trace_sample->direct_arena_ns=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-started).count());
         if(profile) g_sink_profile.arena_setup_us+=ElapsedUs(started);
       }
       std::vector<graphics::guest::ReplayResult> decoded;
       if(parallel && !worker_stop_ && !packet_sink_failed_) {
         graphics::guest::ReplayBatchProbe probe;
         decoded=parallel->Decode(batch,mirror_,SinkProfiling()?&probe:nullptr,ReplayStorageEnabled(),payload_pool);
+        if(trace_sample)trace_sample->prepared=probe;
         if(SinkProfiling()) {
           auto& p=g_sink_profile;p.replay_us+=probe.wall_ns/1000;++p.parallel_batches;
           p.replay.capture_ns+=probe.stages.capture_ns;p.replay.pm4_ns+=probe.stages.pm4_ns;
@@ -6874,8 +6926,9 @@ void Renderer::WorkerMain() {
         }
       }
       size_t command_index=0;
+      const auto execution_limit=parallel?graphics::guest::ReplayExecutionLimit(decoded):batch->cmds.size();
       for (const WorkCmd& cmd : batch->cmds) {
-        if(parallel && command_index>=decoded.size())break;
+        if(command_index>=execution_limit)break;
         const auto started=CpuProfiling()?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
         const bool draw=cmd.op==Op::kDraw || cmd.op==Op::kDrawIndexed || cmd.op==Op::kDrawInline;
         Execute(guest_base_, *batch, cmd,payloads && draw?payloads->Next():graphics::guest::DrawPacketOwner{},packet_sink_?batch:nullptr,parallel?&decoded[command_index]:nullptr);
@@ -6898,6 +6951,8 @@ void Renderer::WorkerMain() {
         }
       }
     }
+    replay_trace_sample=nullptr;
+    if(trace_sample && trace_writer && !trace_writer->Write(*trace_sample))invalidate_trace("trace batch write failed");
     if (timeline.enabled()) {
       // OnSwap flushes the batch right after the swap command, so a swap always ends its batch.
       const uint64_t batch_end_ns = graphics::FrameTimeline::NowNs();
@@ -6930,6 +6985,7 @@ void Renderer::Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd
     else ok=graphics::guest::ReplayCapturedRenderPacket(batch,cmd,mirror_,packet,error,std::move(storage),std::move(capture_owner),profile?&g_sink_profile.replay:nullptr);
     const bool swap=std::holds_alternative<graphics::guest::SwapPacket>(packet);
     const auto replayed=profile?std::chrono::steady_clock::now():started;
+    if(replay_trace_sample && !prepared)replay_trace_sample->direct_decode_ns+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(replayed-started).count());
     if(profile && ok && graphics::guest::GetDraw(packet)) {
       auto& p=g_sink_profile;
       const auto vs=prepared?prepared->vs_version:mirror_.vs_version,ps=prepared?prepared->ps_version:mirror_.ps_version;

@@ -31,9 +31,13 @@ param(
   [int]$TitleTimeout = 60,
   [int]$Settle = 25,
   [int]$Window = 20,
-  [int]$WorldTimeout = 90
+  [int]$WorldTimeout = 90,
+  [string]$WindowMetadata = ''
 )
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot/bench_window_metadata.ps1"
+$script:benchWindows=New-Object System.Collections.ArrayList
+if($WindowMetadata -and (Test-Path -LiteralPath $WindowMetadata)){throw 'Window metadata already exists; use a new label'}
 $root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $exe = if ($Exe) { $Exe } else { "$root\port\out\build\win-amd64-release\superman_returns.exe" }
 $log = "$root\logs\game.log"
@@ -162,6 +166,7 @@ function Capture-IsBlack() {
 function Measure-Window($proc, $scenario) {
   $lines0 = @(Get-Content $log).Count
   $proc.Refresh(); $cpu0 = $proc.TotalProcessorTime.TotalSeconds
+  $windowBegin=[DateTimeOffset]::UtcNow
   $timer = [System.Diagnostics.Stopwatch]::StartNew()
   $gpu = Get-Counter "\GPU Engine(pid_$($proc.Id)*engtype_3D)\Utilization Percentage" `
     -SampleInterval $Window -MaxSamples 1 -ErrorAction SilentlyContinue
@@ -169,11 +174,17 @@ function Measure-Window($proc, $scenario) {
   $remaining = $Window - $timer.Elapsed.TotalSeconds
   if ($remaining -gt 0) { Start-Sleep -Milliseconds ([int][math]::Ceiling($remaining * 1000)) }
   $timer.Stop()
+  $windowEnd=[DateTimeOffset]::UtcNow
   $proc.Refresh(); $cores = ($proc.TotalProcessorTime.TotalSeconds - $cpu0) / $timer.Elapsed.TotalSeconds
   $gpuPct = ($gpu.CounterSamples | Measure-Object CookedValue -Sum).Sum
   $fps = @(Get-Content $log | Select-Object -Skip $lines0 | Select-String 'guest fps: ([\d.]+)' |
     ForEach-Object { [double]::Parse($_.Matches[0].Groups[1].Value, [System.Globalization.CultureInfo]::InvariantCulture) })
   if (-not $fps.Count) { throw "No guest FPS samples during $scenario; benchmark is invalid" }
+  if($WindowMetadata) {
+    $metadata=New-BenchWindowMetadata $Name $scenario $windowBegin $windowEnd
+    $metadata | Add-Member -NotePropertyName fps_samples -NotePropertyValue @($fps)
+    [void]$script:benchWindows.Add($metadata)
+  }
   Screenshot "$root\logs\bench_${Name}_$scenario.png"
   $row = [pscustomobject]@{
     time = Get-Date -Format s; name = $Name; scenario = $scenario
@@ -266,4 +277,8 @@ try {
   throw
 } finally {
   if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+  if($WindowMetadata) {
+    [pscustomobject]@{schema=1;name=$Name;windows=@($script:benchWindows.ToArray())} |
+      ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $WindowMetadata -Encoding UTF8
+  }
 }

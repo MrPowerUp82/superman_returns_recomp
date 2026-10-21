@@ -35,6 +35,9 @@ add_executable(sr_native_tests
     test_guest_state.cpp
     test_render_packets.cpp
     test_parallel_replay.cpp
+    test_replay_options.cpp
+    test_replay_trace.cpp
+    "${SR_NATIVE_DIR}/../graphics/guest/replay_trace.cpp"
     "${SR_NATIVE_DIR}/../graphics/guest/parallel_replay.cpp"
     test_render_state.cpp
     test_vertex_layout.cpp
@@ -59,6 +62,7 @@ add_executable(sr_native_tests
 )
 target_include_directories(sr_native_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${SR_NATIVE_DIR}")
 target_link_libraries(sr_native_tests PRIVATE Threads::Threads)
+target_compile_definitions(sr_native_tests PRIVATE SR_REPLAY_TEST_HOOKS=1)
 if(WIN32)
     target_sources(sr_native_tests PRIVATE test_replay_storage_writes.cpp)
 endif()
@@ -81,6 +85,7 @@ endif()
 
 enable_testing()
 add_test(NAME sr_native_tests COMMAND sr_native_tests)
+set_tests_properties(sr_native_tests PROPERTIES TIMEOUT 30)
 
 add_executable(sr_capture_budget test_capture_budget.cpp
     "${SR_NATIVE_DIR}/../graphics/guest/pm4_capture.cpp"
