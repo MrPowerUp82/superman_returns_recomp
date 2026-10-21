@@ -4,11 +4,10 @@ import csv
 import json
 import math
 import random
+import re
 import statistics
 from collections import defaultdict
 from pathlib import Path
-
-import frame_timeline_report as timeline_report
 
 HEADER = 'schema,kind,sequence,closing_swap,api,path,shards,scheduling,commands,draws,wall_ns,prepare_ns,parallel_ns,join_wait_ns,direct_decode_ns,direct_arena_ns,dispatch_ns,shard,begin_ns,end_ns,arena_ns,decode_ns,clock_anchor_ns,clock_anchor_utc_ns'.split(',')
 IDENTITY = ('api', 'path', 'shards', 'scheduling', 'clock_anchor_ns', 'clock_anchor_utc_ns')
@@ -115,6 +114,8 @@ def aggregate_frames(batches):
             continue
         if previous_swap is not None and swap <= previous_swap:
             raise ValueError('Duplicate/backwards swap number')
+        if previous_swap is not None and swap != previous_swap+1:
+            raise ValueError('Missing closing swap; ambiguous frame interval')
         if previous_swap is None:
             prefix = len(pending)
         else:
@@ -143,10 +144,61 @@ def _read_json(path):
         return json.load(handle)
 
 
-def analyze(replay, timeline, windows):
+def load_timeline_strict(path):
+    frames = defaultdict(dict)
+    fields = ['frame', 'stage', 'begin_ns', 'end_ns', 'busy_ns', 'blocked_ns']
+    with Path(path).open(newline='', encoding='utf-8-sig') as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames != fields:
+            raise ValueError('Unknown/truncated timeline header')
+        for row in reader:
+            if None in row or any(v is None or v == '' for v in row.values()):
+                raise ValueError('Truncated/empty timeline row')
+            try:
+                numbers = {k:int(row[k]) for k in fields if k != 'stage'}
+            except ValueError as error:
+                raise ValueError('Invalid timeline integer') from error
+            if any(v < 0 for v in numbers.values()) or numbers['end_ns'] < numbers['begin_ns']:
+                raise ValueError('Negative/backwards timeline measurement')
+            frame = numbers.pop('frame')
+            if row['stage'] in frames[frame]:
+                raise ValueError('Duplicate timeline frame/stage')
+            frames[frame][row['stage']] = numbers
+    if not frames:
+        raise ValueError('Empty timeline evidence')
+    return frames
+
+
+def expected_configuration(variant, batch):
+    if batch not in (32, 256):
+        raise ValueError('Invalid batch configuration stratum')
+    if variant == 'direct':
+        return dict(api='vulkan', path='direct', shards=1, scheduling='contiguous', batch_commands=batch)
+    match = re.fullmatch(r'(contiguous|interleaved)-([1-8])', variant)
+    if not match:
+        raise ValueError('Unknown replay configuration variant')
+    return dict(api='vulkan', path='prepared', shards=int(match[2]), scheduling=match[1], batch_commands=batch)
+
+
+def validate_game_configuration(log, variant, batch):
+    expected = expected_configuration(variant, batch)
+    text = Path(log).read_text(encoding='utf-8-sig')
+    found = re.findall(r'native renderer: replay mode=(\w+) api=(\w+) threads=(\d+) scheduling=(\w+) batch_limit=(\d+)', text)
+    if len(found) != 1 or 'replay_trace_invalid=1' in text:
+        raise ValueError('Missing/ambiguous/invalid game configuration evidence')
+    mode, api, shards, policy, limit = found[0]
+    effective = dict(api=api, path=mode, shards=int(shards), scheduling=policy, batch_commands=int(limit))
+    if effective != expected:
+        raise ValueError('Game effective configuration disagrees with matrix')
+    return effective
+
+
+def analyze(replay, timeline, windows, *, require_populations=True):
     batches = load_replay(replay)
     grouped = aggregate_frames(batches)
-    timeline_frames = timeline_report.load(timeline)
+    timeline_frames = load_timeline_strict(timeline)
+    if not batches:
+        raise ValueError('Empty replay evidence')
     metadata = _read_json(windows)
     if metadata.get('schema') != 1:
         raise ValueError('Unknown window metadata schema')
@@ -182,6 +234,8 @@ def analyze(replay, timeline, windows):
         metrics['frame_interval_ms'] = intervals
         for name_stage in ('game', 'worker', 'record', 'gpu'):
             metrics[name_stage+'_ms'] = [s[name_stage]['busy_ns']/1e6 for _, s in selected if name_stage in s]
+        if require_populations and any(not metrics[k] for k in ('replay_ms', 'game_ms', 'worker_ms')):
+            raise ValueError(f'No usable instrumented timing population for {name}')
         for name_metric in ('prepare_ns', 'sum_batch_max_shard_ns', 'max_shard_total_ns'):
             metrics[name_metric.removesuffix('_ns')+'_ms'] = [f[name_metric]/1e6 for f, _ in selected if f[name_metric] is not None]
         shard_ms, dispatch_ms, batch_ms = [], [], defaultdict(list)
@@ -213,7 +267,10 @@ def analyze(replay, timeline, windows):
                                imbalance_max_over_mean=summarize(imbalances),
                                batches_by_command_count={str(k):summarize(v) for k, v in batch_ms.items()},
                                missing_timeline_frames=dropped)
-    return dict(scenarios=scenarios, dropped_prefix_batches=grouped['dropped_prefix_batches'],
+    if not scenarios:
+        raise ValueError('No measurement windows')
+    return dict(scenarios=scenarios, configuration={k:batches[0][k] for k in ('api','path','shards','scheduling')},
+                dropped_prefix_batches=grouped['dropped_prefix_batches'],
                 dropped_suffix_batches=grouped['dropped_suffix_batches'],
                 timing='instrumented; sums of shard durations overlap and are not OS CPU time')
 
@@ -250,14 +307,24 @@ def analyze_matrix(manifest, seed=20261021):
             continue
         files = run['scenario_files']
         values = {}
+        configuration = expected_configuration(run['variant'], matrix.get('settings', {}).get('batch_commands'))
         if matrix['phase'] == 'Isolated':
             data = _read_json(resolve(files, 'isolated'))
             if data.get('schema') != 1 or not data.get('samples'):
                 raise ValueError('Missing isolated process samples')
             if data.get('checksum') != 31793585826180:
                 raise ValueError('Isolated checksum mismatch')
+            effective = dict(api='vulkan', path=data.get('mode'), shards=data.get('threads'),
+                             scheduling=data.get('scheduling'), batch_commands=data.get('batch_draws'))
+            if effective != configuration:
+                raise ValueError('Isolated effective configuration disagrees with matrix')
+            if data.get('rounds') != 10 or data.get('warmup_rounds') != 2 or len(data['samples']) != 8:
+                raise ValueError('Invalid isolated process round population')
+            if any(not math.isfinite(s['cycle_ms']) or s['cycle_ms'] <= 0 for s in data['samples']):
+                raise ValueError('Invalid isolated cycle measurement')
             values['isolated:cycle_ms'] = statistics.median(s['cycle_ms'] for s in data['samples'])
         else:
+            validate_game_configuration(resolve(files, 'log'), run['variant'], configuration['batch_commands'])
             metadata = _read_json(resolve(files, 'windows'))
             if metadata.get('schema') != 1:
                 raise ValueError('Unknown window metadata schema')
@@ -269,6 +336,8 @@ def analyze_matrix(manifest, seed=20261021):
                 values[window['scenario']+':periodic_fps_reciprocal_ms'] = 1000/statistics.fmean(fps)
             if run['profiled']:
                 detail = analyze(resolve(files, 'replay'), resolve(files, 'timeline'), resolve(files, 'windows'))
+                if detail['configuration'] != {k:v for k,v in configuration.items() if k != 'batch_commands'}:
+                    raise ValueError('Replay CSV effective configuration disagrees with matrix')
                 for scenario, metrics in detail['scenarios'].items():
                     for metric in ('replay_ms', 'worker_ms', 'game_ms', 'record_ms', 'gpu_ms'):
                         if metrics[metric]['samples']:
@@ -282,7 +351,7 @@ def analyze_matrix(manifest, seed=20261021):
             if block in measurements[key]:
                 raise ValueError('Duplicate process in a variant/block')
             measurements[key][block] = value
-        runs.append(dict(run, measurements=values))
+        runs.append(dict(run, configuration=configuration, measurements=values))
     comparisons = []
     for (profiled, metric, variant), candidates in measurements.items():
         if variant == 'direct':

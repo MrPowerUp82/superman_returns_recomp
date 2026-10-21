@@ -88,7 +88,9 @@ com `&`/dot-source ou use `powershell -Command`, pois `-File` não expande lista
 O jogo usa `SR_BENCH_INPUT`, aquecimento mínimo de 25 s e janelas de 20 s idle e
 forward. O executor não controla a UI do Windows. Acompanhe `request.json` em
 cada pasta de run: Computer Use deve ativar a janela e iniciar New Game; em
-`await-ready`, salvar `start.png` e executar `bench_replay.ps1 -Action Ready
+`await-gameplay`, salvar `gameplay.png` com HUD e executar `bench_replay.ps1
+-Action Gameplay -Directory <run>`. Após os 25 s de aquecimento em gameplay, em
+`await-ready`, salvar uma captura nova `start.png` e executar `bench_replay.ps1 -Action Ready
 -Directory <run>`; em `await-end`, salvar `end.png` e executar `-Action End`.
 `-Action Input -Buttons 16|4096 -Milliseconds 700` envia Start/A pela API do jogo.
 As capturas precisam de HUD e timestamps próximos das janelas. O gate existente
@@ -104,6 +106,9 @@ somente com timeline instrumentada. Leituras periódicas de FPS são descritivas
 não fornecem 1% low. O bootstrap pareado usa processos por bloco, com semente
 fixa, e mantém falhas/execuções sem par visíveis. Sem ganho convincente, preserve
 o serial direto. A instrumentação e o fluxo pela API de input têm custo próprio.
+Swaps ausentes, timelines vazias/duplicadas e cenários instrumentados sem
+quadros utilizáveis invalidam a análise. Modo, participantes, scheduling e lote
+devem corresponder aos valores efetivos no JSON/log/CSV, não apenas ao rótulo.
 
 ## Limpeza
 

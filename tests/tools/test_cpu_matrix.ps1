@@ -34,6 +34,9 @@ try {
   Assert (-not(Test-ReplayImageTime $now.AddSeconds(-11) $now)) 'Old evidence rejected'
   Reject {Assert-ReplayTrace $true (Join-Path $scratch 'absent.csv') @('normal log')}
   Reject {Assert-ReplayTrace $false '' @('replay_trace_invalid=1 reason=write')}
+  $script:warmupEvents=@()
+  Invoke-ReplayWarmup { $script:warmupEvents+=@('gameplay-ready') } {param($seconds)$script:warmupEvents+=@("sleep-$seconds")} { $script:warmupEvents+=@('fresh-start-evidence') }
+  Assert (($script:warmupEvents -join ',') -eq 'gameplay-ready,sleep-25,fresh-start-evidence') 'Warmup follows gameplay readiness, even if launch/menu took over 25 seconds'
   $preview=@(& "$PSScriptRoot/../../tools/bench/cpu_matrix.ps1" -Phase Isolated -Name test_preview -BenchExe 'C:/path with space/bench.exe' -Runs 10 -Variants direct -PlanOnly)
   Assert ($preview.Count -eq 10 -and $preview[0].command -match 'path with space') 'Preview paths and count'
   if($cliBenchExe) {

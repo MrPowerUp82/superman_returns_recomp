@@ -2,7 +2,7 @@
    submit Ready/End. Input is the game's SR_BENCH_INPUT file, never Windows UI.
    A missing/late image, HUD, golden gate or trace prevents a successful run. #>
 param(
-  [ValidateSet('Library','Run','Status','Input','Ready','End')][string]$Action='Status',
+  [ValidateSet('Library','Run','Status','Input','Gameplay','Ready','End')][string]$Action='Status',
   [string]$Directory='', [string]$Exe='', [string]$Variant='direct',
   [ValidateSet(32,256)][int]$BatchCommands=32,[ValidateSet(30,60)][int]$FpsLimit=30,
   [ValidateSet('vulkan','d3d12')][string]$Api='vulkan',[switch]$StageTiming,[string]$ReferenceImage='',
@@ -11,6 +11,11 @@ param(
 )
 $ErrorActionPreference='Stop'
 function Test-ReplayImageTime([DateTime]$Image,[DateTime]$Event){$delta=($Event.ToUniversalTime()-$Image.ToUniversalTime()).TotalSeconds;return $delta -ge 0 -and $delta -le 10}
+function Invoke-ReplayWarmup([scriptblock]$WaitGameplay,[scriptblock]$Delay,[scriptblock]$WaitFreshEvidence) {
+  & $WaitGameplay
+  & $Delay 25
+  & $WaitFreshEvidence
+}
 function Assert-ReplayTrace([bool]$Profiled,[string]$Trace,[string[]]$Log) {
   if($Log -match 'replay_trace_invalid=1'){throw 'Replay trace marked invalid'}
   if($Profiled -and (-not(Test-Path -LiteralPath $Trace -PathType Leaf) -or (Get-Item -LiteralPath $Trace).Length -eq 0)){throw 'Replay trace absent/empty'}
@@ -45,9 +50,9 @@ if($Action -ne 'Run') {
   $session=Get-Content -LiteralPath $statePath -Raw|ConvertFrom-Json
   if($Action -eq 'Input'){Send-ReplayInput $session $Buttons $Forward $Milliseconds;return}
   $state=(Get-Content -LiteralPath $requestPath -Raw|ConvertFrom-Json).state
-  $expected=if($Action -eq 'Ready'){'await-ready'}else{'await-end'}
+  $expected=if($Action -eq 'Gameplay'){'await-gameplay'}elseif($Action -eq 'Ready'){'await-ready'}else{'await-end'}
   if($state -ne $expected){throw "Expected $expected, got $state"}
-  $file=if($Action -eq 'Ready'){'start.png'}else{'end.png'}
+  $file=if($Action -eq 'Gameplay'){'gameplay.png'}elseif($Action -eq 'Ready'){'start.png'}else{'end.png'}
   $image=Join-Path $Directory $file
   if(-not(Test-ReplayImageTime (Get-Item -LiteralPath $image).LastWriteTimeUtc ([DateTime]::UtcNow))){throw 'Image evidence older than ten seconds'}
   Assert-ReplayHud $image
@@ -90,9 +95,13 @@ try {
     }
   }
   # Computer Use activates the observed window, enters New Game, then waits for
-  # gameplay. Ready must follow at least 25 s of process warmup and HUD evidence.
-  Start-Sleep -Seconds 25
-  Wait-ReplayControl 'ready.json' 'await-ready'
+  # gameplay. Warmup begins only after the observed gameplay HUD; the start
+  # screenshot is fresh evidence after warmup, independent of menu/startup time.
+  Invoke-ReplayWarmup {Wait-ReplayControl 'gameplay.json' 'await-gameplay'} {
+    param($seconds)
+    Save-ReplayRequest 'warmup-gameplay'
+    Start-Sleep -Seconds $seconds
+  } {Wait-ReplayControl 'ready.json' 'await-ready'}
   $start=Get-Item -LiteralPath (Join-Path $Directory 'start.png')
   if(-not(Test-ReplayImageTime $start.LastWriteTimeUtc ([DateTime]::UtcNow))){throw 'Start screenshot is stale'}
   . "$PSScriptRoot/image_gate_lib.ps1"
