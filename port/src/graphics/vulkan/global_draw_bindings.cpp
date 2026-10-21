@@ -28,15 +28,31 @@ bool PlanGlobalVertexLayout(const guest::DrawPacket& draw,GlobalVertexLayout& ou
   if(!draw.attributes.empty()) {
     for(const auto& a:draw.attributes)if(a.usage<14 && a.index<16)
       if(!attribute(a.usage*16+a.index,draw.inline_vertices?0:a.stream,a.offset,a.type))return false;
-  } else for(uint32_t i=0;i<224;++i) {
-    const auto& meta=draw.vertex_fetch[i];if(!meta.type)continue;
-    uint32_t stream=draw.inline_vertices?0:meta.buffer,base=0;
-    if(!draw.inline_vertices) {
-      auto found=std::find_if(draw.streams.begin(),draw.streams.end(),[&](const auto& s){return s.stream==stream;});
-      if(found==draw.streams.end() || meta.offset<found->offset)return Fail(e,"Vertex metadata references an invalid stream offset");
-      base=found->offset;
+  } else {
+    // Many draws expose the full 224-entry legacy fetch table. Index the
+    // stream bases once instead of linearly searching draw.streams per
+    // attribute. On duplicates, the first stream wins (the old find_if rule).
+    std::array<uint32_t,32> stream_bases{};
+    std::array<bool,32> stream_present{};
+    if(!draw.inline_vertices)for(const auto& s:draw.streams)if(s.stream<32 && !stream_present[s.stream]) {
+      stream_bases[s.stream]=s.offset;stream_present[s.stream]=true;
     }
-    if(!attribute(i,stream,meta.offset-base,meta.type))return false;
+    for(uint32_t i=0;i<224;++i) {
+      const auto& meta=draw.vertex_fetch[i];if(!meta.type)continue;
+      uint32_t stream=draw.inline_vertices?0:meta.buffer,base=0;
+      if(!draw.inline_vertices) {
+        if(stream<32) {
+          if(!stream_present[stream] || meta.offset<stream_bases[stream])return Fail(e,"Vertex metadata references an invalid stream offset");
+          base=stream_bases[stream];
+        } else {
+          // Preserve legacy diagnostics for out-of-range stream IDs.
+          auto found=std::find_if(draw.streams.begin(),draw.streams.end(),[&](const auto& s){return s.stream==stream;});
+          if(found==draw.streams.end() || meta.offset<found->offset)return Fail(e,"Vertex metadata references an invalid stream offset");
+          base=found->offset;
+        }
+      }
+      if(!attribute(i,stream,meta.offset-base,meta.type))return false;
+    }
   }
   out=next;e={};return true;
 }
