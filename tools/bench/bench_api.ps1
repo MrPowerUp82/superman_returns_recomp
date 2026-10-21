@@ -19,6 +19,7 @@ param(
   [switch]$Profile,
   [switch]$Timeline,
   [switch]$TimelineDetail,
+  [string]$WindowMetadata = '',
   [switch]$FrameGeneration,
   [string]$FrameGenerationDll = 'C:\Program Files (x86)\Steam\steamapps\common\Lossless Scaling\Lossless.dll',
   [ValidateSet('', 'record', 'check')] [string]$Gate = ''
@@ -49,7 +50,7 @@ try {
     $env:SR_FRAME_TIMELINE = $timelineCsv
     if ($TimelineDetail) { $env:SR_FRAME_TIMELINE_DETAIL = '1' }
   }
-  & "$PSScriptRoot\bench.ps1" -Name $Name -Exe $Exe -ExtraArgs $gameArgs -TitleTimeout 180 -WorldTimeout 200
+  & "$PSScriptRoot\bench.ps1" -Name $Name -Exe $Exe -ExtraArgs $gameArgs -TitleTimeout 180 -WorldTimeout 200 -WindowMetadata $WindowMetadata
   if ($Gate) { & "$PSScriptRoot\image_gate.ps1" -Name $Name -Mode $Gate }
 } finally {
   # O jogo já terminou: restaura as variáveis de ambiente primeiro, para que nenhuma falha abaixo

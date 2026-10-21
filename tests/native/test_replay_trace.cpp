@@ -45,3 +45,8 @@ SR_TEST(replay_trace_reports_stream_failure) {
   std::ostream output(nullptr);ReplayTraceWriter writer(output,100,1000);
   SR_CHECK(!writer.Write(ReplayBatchSample{}));SR_CHECK(!writer.good());
 }
+SR_TEST(replay_trace_detects_buffered_failure_at_batch_boundary) {
+  struct FailingFlush:std::stringbuf {int sync() override {return -1;}} buffer;
+  std::ostream output(&buffer);ReplayTraceWriter writer(output,100,1000);
+  SR_CHECK(!writer.Write(ReplayBatchSample{}));SR_CHECK(!writer.good());
+}

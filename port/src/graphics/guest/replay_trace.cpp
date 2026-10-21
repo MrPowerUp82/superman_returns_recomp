@@ -29,6 +29,9 @@ bool ReplayTraceWriter::Write(const ReplayBatchSample& sample) {
     output_<<p.commands<<','<<p.draws<<",,,,,,,,"<<i<<','<<p.begin_ns<<','<<p.end_ns<<','
         <<p.arena_ns<<','<<p.decode_ns;suffix();
   }
+  // The existing benchmark can terminate the process. Commit complete batches
+  // to the stream, and detect buffered I/O errors before accepting evidence.
+  output_.flush();
   return good();
 }
 } // namespace superman_returns::graphics::guest
