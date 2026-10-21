@@ -1,7 +1,8 @@
 # Cobertura de escritas físicas no runtime D3D12
 
 Revisão base: ReXGlue v0.10.0, `f5337cdc947ff6d4c4196737e2c807a48f2a1fc2`.
-Estado: integração em desenvolvimento; **não há autorização mecânica de pular hashes**.
+Estado: contrato v1 implementado. On é experimental e exige prova do snapshot/recurso GPU;
+a promoção por correção de imagem e desempenho ainda não foi aprovada.
 
 O SDK stock não exporta o contrato v1. O teste real de memória falhou, como esperado,
 por export ausente nos três casos iniciais. O build opcional usa checkout completo
@@ -39,8 +40,8 @@ inicial deve entrar na medição de criação de watches.
 
 O contrato anuncia a máscara completa (`15`) somente no runtime opcional com
 os hooks deste inventário. O cliente rejeita DLL stock, versão/tamanho incompatível,
-funções ausentes e capacidades incompletas. Ainda não existe integração de hash
-skipping no renderer nem certificação de uploads D3D12.
+funções ausentes e capacidades incompletas. A cobertura sozinha não autoriza dispensar hashes: o renderer também exige prova
+do snapshot realmente enviado ao recurso vigente (ver relatório final).
 
 Scopes são registrados mesmo antes de existir uma sessão: I/O pendente impede
 instalação de sessão/watch. Stop restaura suas guardas e separa a sessão; scopes
@@ -83,3 +84,5 @@ e depois da publicação; 33 casos reais e três processos de falha passaram.
 Camada de debug indisponível. Smoke On/Off observou título, vídeo, transição,
 HUD/minimapa/capa e movimento. Imagens/FPS ainda não constituem aceitação formal:
 a captura final Off foi tardia e o HUD desapareceu. Mantém-se Off por padrão.
+
+Resultado final e limites: [relatório](d3d12-texture-tracking-results.md).

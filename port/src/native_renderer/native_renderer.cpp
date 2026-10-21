@@ -311,7 +311,7 @@ namespace {
 
 bool CpuProfiling() {
   static const bool enabled=[] {
-    for (const char* name : {"SR_NATIVE_CPU_PROFILE", "SR_VULKAN_PROFILE", "SR_NATIVE_TEXTURE_AUDIT"}) {
+    for (const char* name : {"SR_NATIVE_CPU_PROFILE", "SR_VULKAN_PROFILE", "SR_NATIVE_TEXTURE_AUDIT", "SR_D3D12_TEXTURE_TRACKING_TIMING"}) {
       const char* value=std::getenv(name);
       if(value && *value && *value!='0') return true;
     }
@@ -3326,6 +3326,10 @@ uint32_t Renderer::GetTextureSrvIndex(uint8_t* base, const uint32_t fetch[6]) {
         const double probe_ns = probe ? std::chrono::duration<double, std::nano>(
             std::chrono::steady_clock::now() - probe_start).count() : 0;
         hash_timer.Stop();
+        if(texture_tracking_mode_!=TextureTrackingMode::Off) {
+          ++tracking_checks_;tracking_bytes_+=entry.guest_hash_bytes;
+          if(!tracking) ++tracking_unknown_;
+        }
         if(tracking) {
           const auto tracking_finished=tracking_timed?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
           resource_write_tracker_.Sample(tracking->watch,tracking->current);
@@ -3338,7 +3342,6 @@ uint32_t Renderer::GetTextureSrvIndex(uint8_t* base, const uint32_t fetch[6]) {
           }
           tracking_unknown_+=unknown;tracking_invalidated_+=invalidated;tracking_active_+=active;
           if(tracking->proof.version && hash==tracking->proof.hash && !SameCoveredContent(tracking->proof.baseline,tracking->current)) ++tracking_unchanged_lost_;
-          ++tracking_checks_; tracking_bytes_+=entry.guest_hash_bytes;
           const bool stable=SameCoveredContent(tracking->before,tracking->current);
           if(stable && SameCoveredContent(tracking->proof.baseline,tracking->current))
             tracking_eligible_bytes_+=entry.guest_hash_bytes;
@@ -3427,7 +3430,7 @@ void Renderer::ReportTextureTracking() {
   if(texture_tracking_mode_!=TextureTrackingMode::Off && frame_count_>=tracking_report_frame_+120) {
     tracking_report_frame_=frame_count_;
     const auto counters=resource_write_tracker_.Stats();
-    REXLOG_INFO("native texture tracking: frame={} checks={} bytes={} eligible_bytes={} candidates={} races={} mismatches={} watches={} guest_faults={} physical_faults={} io_begin={} io_end={} protection_failures={} coverage_losses={} skipped_checks={} skipped_bytes={} query_ns={} unknown_checks={} invalidated_checks={} active_checks={} unchanged_lost_checks={}",
+    REXLOG_INFO("native texture tracking: frame={} checks={} bytes={} eligible_bytes={} candidates={} uncovered_checks={} mismatches={} watches={} guest_faults={} physical_faults={} io_begin={} io_end={} protection_failures={} coverage_losses={} skipped_checks={} skipped_bytes={} query_ns={} unknown_checks={} invalidated_checks={} active_checks={} unchanged_lost_checks={}",
       frame_count_,tracking_checks_,tracking_bytes_,tracking_eligible_bytes_,tracking_candidates_,tracking_races_,tracking_mismatches_,counters.active_watches,counters.guest_faults,counters.physical_faults,counters.io_begin,counters.io_end,counters.protection_failures,counters.coverage_losses,tracking_skipped_checks_,tracking_skipped_bytes_,tracking_query_ns_,tracking_unknown_,tracking_invalidated_,tracking_active_,tracking_unchanged_lost_);
   }
 }
