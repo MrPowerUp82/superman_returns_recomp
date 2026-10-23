@@ -139,6 +139,9 @@ REXCVAR_DEFINE_STRING(sr_native_trace_trigger_path, "", "Superman Returns Native
 REXCVAR_DEFINE_BOOL(sr_native_stacked_resolves, false, "Superman Returns Native",
                    "Experimental D3D12 stacked color resolves via Texture3D; mip 0, one sample")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_INT32(sr_native_buffer_srv_cache, 0, "Superman Returns Native",
+                    "Experimental D3D12 resident buffer SRV cache capacity (0 disables, max 8192)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_STRING(sr_native_pass_mask, "", "Superman Returns Native",
                       "Debug: comma-separated pass indices whose draws are rendered natively "
                       "(empty = all). Pass 0 = draws outside any pass.");
@@ -355,6 +358,7 @@ struct StreamDetailTimings {
   uint64_t setup_ns=0,apply_ns=0,ia_ns=0,srv_ns=0,declaration_ns=0,metadata_ns=0;
   uint64_t calls=0,streams=0,ia_binds=0,missing=0,failed_calls=0,dynamic_streams=0;
   uint64_t srv_created=0,srv_reused=0,srv_failed=0,declaration_reads=0,attributes=0,metadata_writes=0;
+  uint64_t srv_retained_hits=0,cache_evicted=0,cache_invalidated=0;
   uint64_t actions[4]{}; // Plan actions 0/1/2/other, not actual upload counts.
 };
 thread_local StreamDetailTimings stream_detail_timings;
@@ -1137,6 +1141,11 @@ bool Renderer::EnsureInitialized() {
   REXLOG_INFO("native texture tracking: mode={}",texture_tracking_mode_==TextureTrackingMode::On?"on":texture_tracking_mode_==TextureTrackingMode::Compare?"compare":"off");
   render_scale_ = float(std::clamp(REXCVAR_GET(sr_native_render_scale), 1.0, 4.0));
   stacked_resolves_ = !packet_sink_ && REXCVAR_GET(sr_native_stacked_resolves);
+  const auto srv_capacity=std::clamp(REXCVAR_GET(sr_native_buffer_srv_cache),0,8192);
+  if(!packet_sink_ && srv_capacity) buffer_srv_cache_.emplace(size_t(srv_capacity));
+  if(packet_sink_ && srv_capacity)
+    REXLOG_WARN("native: sr_native_buffer_srv_cache is D3D12-only; ignored for Vulkan capture");
+  REXLOG_INFO("native buffer SRV cache: capacity={}",buffer_srv_cache_?srv_capacity:0);
   if(packet_sink_ && REXCVAR_GET(sr_native_stacked_resolves))
     REXLOG_WARN("native: sr_native_stacked_resolves is D3D12-only; ignored for Vulkan capture");
   shadow_scale_ = float(std::clamp(REXCVAR_GET(sr_native_shadow_quality), 1, 4));
@@ -4985,6 +4994,12 @@ const Renderer::BufferEntry* Renderer::ApplyBuffer(uint8_t* base, const BufferPl
   }
   std::memcpy(upload.cpu, scratch.data(), size);
   if (!reuse) {
+    if(buffer_srv_cache_) {
+      if(auto lease=buffer_srv_cache_->Erase(entry.resource_generation)) {
+        RetireSrvIndex(lease->index);
+        if(StreamDetailProfiling()) ++stream_detail_timings.cache_invalidated;
+      }
+    }
     if (entry.resource) Retire(entry.resource);
     D3D12_HEAP_PROPERTIES heap{};
     heap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -5004,6 +5019,7 @@ const Renderer::BufferEntry* Renderer::ApplyBuffer(uint8_t* base, const BufferPl
     }
     entry.raw_srv = 0;
     entry.raw_srv_fence = 0;
+    if(buffer_srv_cache_) entry.resource_generation=next_buffer_generation_++;
   } else {
     Transition(entry.resource.Get(), entry.state, D3D12_RESOURCE_STATE_COPY_DEST);
   }
@@ -5380,7 +5396,14 @@ bool Renderer::BindVertexStreams(uint8_t* base, const WorkBatch& batch, const Wo
     CpuTimer srv_timer(timings.srv_ns,detail);
     if(detail) ++timings.dynamic_streams;
     BufferEntry& entry = buffers_.at(sp.buffer.key);
-    if (!entry.raw_srv || entry.raw_srv_fence != next_fence_value_) {
+    bool retained_hit=false;
+    if(buffer_srv_cache_) {
+      // The entry field may still name an evicted index. Only the lease cache
+      // owns it across submissions, keyed by the actual host resource lifetime.
+      entry.raw_srv=buffer_srv_cache_->Find(entry.resource_generation);
+      retained_hit=entry.raw_srv && entry.raw_srv_fence!=next_fence_value_;
+    }
+    if (!entry.raw_srv || (!buffer_srv_cache_ && entry.raw_srv_fence != next_fence_value_)) {
       entry.raw_srv = AllocSrvIndex();
       if (!entry.raw_srv) { if(detail) ++timings.srv_failed; ok = false; continue; }
       D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
@@ -5391,13 +5414,22 @@ bool Renderer::BindVertexStreams(uint8_t* base, const WorkBatch& batch, const Wo
       srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
       device_->CreateShaderResourceView(entry.resource.Get(), &srv,
           provider_->OffsetViewDescriptor(srv_heap_->GetCPUDescriptorHandleForHeapStart(), entry.raw_srv));
-      // The descriptor is only cached for this submission. Transient game
-      // buffers accumulate across frames; retaining one SRV for each would
-      // exhaust the heap within minutes. Recycle after the GPU fence.
-      entry.raw_srv_fence = next_fence_value_;
-      retired_srvs_.emplace_back(next_fence_value_, entry.raw_srv);
+      if(buffer_srv_cache_) {
+        if(auto lease=buffer_srv_cache_->Insert(entry.resource_generation,entry.raw_srv)) {
+          RetireSrvIndex(lease->index);
+          if(detail) ++timings.cache_evicted;
+        }
+      } else {
+        // Default: retain only for this submission. The opt-in cache above
+        // bounds residency instead of keeping one view per transient buffer.
+        retired_srvs_.emplace_back(next_fence_value_, entry.raw_srv);
+      }
       if(detail) ++timings.srv_created;
-    } else if(detail) ++timings.srv_reused;
+    } else if(detail) {
+      ++timings.srv_reused;
+      if(retained_hit) ++timings.srv_retained_hits;
+    }
+    entry.raw_srv_fence=next_fence_value_;
     srv_timer.Stop();
     const uint32_t decl = sp.buffer.decl;
     CpuTimer declaration_timer(timings.declaration_ns,detail);
@@ -7120,6 +7152,7 @@ void Renderer::WorkerMain() {
               const auto& d=stream_detail_timings;
               REXLOG_INFO("native CPU stream detail (ms/frame over 120, disjoint within streams): setup={:.4f} apply={:.4f} ia={:.4f} srv={:.4f} declaration={:.4f} metadata={:.4f}",d.setup_ns/120000000.0,d.apply_ns/120000000.0,d.ia_ns/120000000.0,d.srv_ns/120000000.0,d.declaration_ns/120000000.0,d.metadata_ns/120000000.0);
               REXLOG_INFO("native CPU stream totals (120 swaps): calls={} streams={} ia_binds={} missing={} failed_calls={} dynamic_streams={} srv_created={} srv_reused={} srv_failed={} declaration_reads={} attributes={} metadata_writes={} action0={} action1={} action2={} action_other={}",d.calls,d.streams,d.ia_binds,d.missing,d.failed_calls,d.dynamic_streams,d.srv_created,d.srv_reused,d.srv_failed,d.declaration_reads,d.attributes,d.metadata_writes,d.actions[0],d.actions[1],d.actions[2],d.actions[3]);
+              REXLOG_INFO("native buffer SRV cache interval: retained_hits={} evicted={} invalidated={} live={}",d.srv_retained_hits,d.cache_evicted,d.cache_invalidated,buffer_srv_cache_?buffer_srv_cache_->size():0);
               stream_detail_timings={};
             }
             p.execute_ns=p.prepare_ns=p.constants_ns=p.streams_ns=p.swaps=0;

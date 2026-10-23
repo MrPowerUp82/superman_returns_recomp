@@ -31,6 +31,7 @@
 #include "buffer_content.h"
 #include "shared_constants_cache.h"
 #include "descriptor_recycling.h"
+#include "buffer_srv_cache.h"
 #include "resource_write_tracking.h"
 
 #include <atomic>
@@ -41,6 +42,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <type_traits>
 
@@ -697,6 +699,7 @@ class Renderer : public NativeFrontend {
     Microsoft::WRL::ComPtr<ID3D12Resource> resource;
     uint32_t raw_srv = 0;
     uint64_t raw_srv_fence = 0;
+    uint64_t resource_generation = 0;
     uint32_t address = 0, size = 0;
     uint32_t decl = 0, stride = 0, index_format = 0, phase = 0;
     uint32_t reset_index = UINT32_MAX;
@@ -704,6 +707,8 @@ class Renderer : public NativeFrontend {
     D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
   };
   std::unordered_map<uint64_t, BufferEntry> buffers_;
+  std::optional<BufferSrvCache> buffer_srv_cache_;
+  uint64_t next_buffer_generation_ = 1;
   uint32_t vertex_fetch_[224][4] = {}; // semantic -> SRV, offset, stride, XDK type
   // 64 KB guest page -> tracked buffer keys overlapping it (fast Unlock
   // invalidation, guest side).
