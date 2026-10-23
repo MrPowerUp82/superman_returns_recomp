@@ -344,6 +344,20 @@ struct ConstantDetailTimings {
   uint64_t vs_bytes=0,ps_bytes=0,allocation_failures=0,ring_requests=0;
 };
 thread_local ConstantDetailTimings constant_detail_timings;
+bool StreamDetailProfiling() {
+  static const bool enabled=[] {
+    const char* value=std::getenv("SR_NATIVE_STREAMS_PROFILE");
+    return value && *value && *value!='0';
+  }();
+  return enabled && CpuProfiling();
+}
+struct StreamDetailTimings {
+  uint64_t setup_ns=0,apply_ns=0,ia_ns=0,srv_ns=0,declaration_ns=0,metadata_ns=0;
+  uint64_t calls=0,streams=0,ia_binds=0,missing=0,failed_calls=0,dynamic_streams=0;
+  uint64_t srv_created=0,srv_reused=0,srv_failed=0,declaration_reads=0,attributes=0,metadata_writes=0;
+  uint64_t actions[4]{}; // Plan actions 0/1/2/other, not actual upload counts.
+};
+thread_local StreamDetailTimings stream_detail_timings;
 bool NativeTraceTriggered() {
   static const std::filesystem::path path=REXCVAR_GET(sr_native_trace_trigger_path);
   if (path.empty()) return false;
@@ -5324,14 +5338,25 @@ bool Renderer::PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRan
 // with the guest-side tracking.
 bool Renderer::BindVertexStreams(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd) {
   CpuTimer cpu_timer(cpu_timings.streams_ns);
+  const bool detail=StreamDetailProfiling();
+  auto& timings=stream_detail_timings;
+  CpuTimer setup_timer(timings.setup_ns,detail);
+  if(detail) ++timings.calls;
   bool ok = cmd.streams_ok;
   std::memset(vertex_fetch_, 0, sizeof(vertex_fetch_));
   const uint32_t dev = GuestDevice(base);
   const bool dynamic_fetch = dev && DynamicVertexFetch(base, dev);
+  setup_timer.Stop();
   for (uint32_t i = 0; i < cmd.stream_count; ++i) {
     const StreamPlan& sp = batch.streams[cmd.stream_first + i];
-    const BufferEntry* vb = ApplyBuffer(base, sp.buffer);
+    if(detail) {++timings.streams;++timings.actions[sp.buffer.action<3?sp.buffer.action:3];}
+    const BufferEntry* vb;
+    {
+      CpuTimer timer(timings.apply_ns,detail);
+      vb=ApplyBuffer(base,sp.buffer);
+    }
     if (!vb) {
+      if(detail) ++timings.missing;
       static int logged = 0;
       if (logged++ < 20) {
         REXLOG_WARN("native: vertex stream {} of draw {} has no host buffer (addr {:08X} size {} stride {} "
@@ -5341,17 +5366,23 @@ bool Renderer::BindVertexStreams(uint8_t* base, const WorkBatch& batch, const Wo
       ok = false;
       continue;
     }
+    {
+    CpuTimer timer(timings.ia_ns,detail);
     D3D12_VERTEX_BUFFER_VIEW view{vb->resource->GetGPUVirtualAddress() + sp.offset, sp.size,
                                   sp.stride};
     command_list_->IASetVertexBuffers(sp.stream, 1, &view);
     if (sp.stream < 16) guest_vertex_views_[sp.stream] = view;
+    if(detail) ++timings.ia_binds;
+    }
     if (!dynamic_fetch) continue;
     // Static IA draws need no descriptor: allocate only for shader-driven
     // instancing, otherwise transient vertex buffers would fill the SRV heap.
+    CpuTimer srv_timer(timings.srv_ns,detail);
+    if(detail) ++timings.dynamic_streams;
     BufferEntry& entry = buffers_.at(sp.buffer.key);
     if (!entry.raw_srv || entry.raw_srv_fence != next_fence_value_) {
       entry.raw_srv = AllocSrvIndex();
-      if (!entry.raw_srv) { ok = false; continue; }
+      if (!entry.raw_srv) { if(detail) ++timings.srv_failed; ok = false; continue; }
       D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
       srv.Format = DXGI_FORMAT_R32_TYPELESS;
       srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
@@ -5365,9 +5396,16 @@ bool Renderer::BindVertexStreams(uint8_t* base, const WorkBatch& batch, const Wo
       // exhaust the heap within minutes. Recycle after the GPU fence.
       entry.raw_srv_fence = next_fence_value_;
       retired_srvs_.emplace_back(next_fence_value_, entry.raw_srv);
-    }
+      if(detail) ++timings.srv_created;
+    } else if(detail) ++timings.srv_reused;
+    srv_timer.Stop();
     const uint32_t decl = sp.buffer.decl;
-    for (const auto& attribute : ReadVertexDeclaration(base,decl)) {
+    CpuTimer declaration_timer(timings.declaration_ns,detail);
+    const auto& declaration=ReadVertexDeclaration(base,decl);
+    declaration_timer.Stop();
+    if(detail) {++timings.declaration_reads;timings.attributes+=declaration.size();}
+    CpuTimer metadata_timer(timings.metadata_ns,detail);
+    for (const auto& attribute : declaration) {
       if (attribute.stream != sp.stream) continue;
       const uint32_t usage = attribute.usage, index = attribute.index;
       if (usage >= 14 || index >= 16) continue;
@@ -5376,9 +5414,11 @@ bool Renderer::BindVertexStreams(uint8_t* base, const WorkBatch& batch, const Wo
       meta[1] = sp.offset + attribute.offset;
       meta[2] = vb->raw_srv ? sp.stride : 0;
       meta[3] = attribute.type;
+      if(detail) ++timings.metadata_writes;
     }
   }
   if (!ok) {
+    if(detail) ++timings.failed_calls;
     ++stats_.skip_vb;
     LogUnsupportedOnce("vertex stream", 0);
   }
@@ -7076,6 +7116,12 @@ void Renderer::WorkerMain() {
           if(cmd.op==Op::kSwap && ++p.swaps==120) {
             REXLOG_INFO("native CPU worker (ms/frame over 120, nested): api={} execute={:.2f} prepare={:.2f} constants={:.2f} streams={:.2f}",packet_sink_?"vulkan":"d3d12",p.execute_ns/120000000.0,p.prepare_ns/120000000.0,p.constants_ns/120000000.0,p.streams_ns/120000000.0);
             REXLOG_INFO("native CPU constants (ms/frame over 120, nested): floats={:.2f} slots={:.2f} texture_lookup={:.2f} texture_hash={:.2f} samplers={:.2f} shared_other={:.2f} | draws={} slot_hits={} slot_misses={} hash_checks={} hash_kb={}",p.constant_float_ns/120000000.0,p.constant_slots_ns/120000000.0,p.texture_lookup_ns/120000000.0,p.texture_hash_ns/120000000.0,p.sampler_ns/120000000.0,(p.constants_ns-p.constant_float_ns-p.constant_slots_ns)/120000000.0,p.constant_draws/120,p.slot_hits/120,p.slot_misses/120,p.texture_hash_checks/120,p.texture_hash_bytes/120/1024);
+            if(StreamDetailProfiling()) {
+              const auto& d=stream_detail_timings;
+              REXLOG_INFO("native CPU stream detail (ms/frame over 120, disjoint within streams): setup={:.4f} apply={:.4f} ia={:.4f} srv={:.4f} declaration={:.4f} metadata={:.4f}",d.setup_ns/120000000.0,d.apply_ns/120000000.0,d.ia_ns/120000000.0,d.srv_ns/120000000.0,d.declaration_ns/120000000.0,d.metadata_ns/120000000.0);
+              REXLOG_INFO("native CPU stream totals (120 swaps): calls={} streams={} ia_binds={} missing={} failed_calls={} dynamic_streams={} srv_created={} srv_reused={} srv_failed={} declaration_reads={} attributes={} metadata_writes={} action0={} action1={} action2={} action_other={}",d.calls,d.streams,d.ia_binds,d.missing,d.failed_calls,d.dynamic_streams,d.srv_created,d.srv_reused,d.srv_failed,d.declaration_reads,d.attributes,d.metadata_writes,d.actions[0],d.actions[1],d.actions[2],d.actions[3]);
+              stream_detail_timings={};
+            }
             p.execute_ns=p.prepare_ns=p.constants_ns=p.streams_ns=p.swaps=0;
             REXLOG_INFO("native CPU texture watches (ms/frame over 120, nested in texture_lookup): watch={:.2f} rearms={} reloads={}",p.texture_watch_ns/120000000.0,p.texture_watch_rearms/120,p.texture_hash_changes/120);
             p.texture_watch_ns=p.texture_watch_rearms=p.texture_hash_changes=0;
