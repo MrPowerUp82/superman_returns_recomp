@@ -271,7 +271,7 @@ class Renderer : public NativeFrontend {
                               uint32_t stride);
   void ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect, uint32_t dest_texture,
                    uint32_t dest_point, uint32_t clear_color, float clear_z,
-                   uint32_t clear_stencil);
+                   uint32_t clear_stencil,uint32_t level,uint32_t slice);
   void ExecBeginTiling(uint8_t* base, uint32_t count, uint32_t rects, uint32_t clear_color,
                        float clear_z, uint32_t clear_stencil);
   void ExecEndTiling();
@@ -379,6 +379,8 @@ class Renderer : public NativeFrontend {
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
     DXGI_FORMAT srv_format = DXGI_FORMAT_UNKNOWN;
     uint32_t width = 0, height = 0;  // guest pixels
+    uint32_t layers = 1;
+    bool stacked_volume = false;   // host Texture3D for validated stacked color resolves
     float scale = 1.0f;              // host pixels per guest pixel (source surface)
     bool shadow = false;             // resolved from a shadow map target
     uint32_t plain_srv = 0;          // default-mapped SRV (soft particles' scene depth)
@@ -474,6 +476,7 @@ class Renderer : public NativeFrontend {
   float render_scale_ = 1.0f, shadow_scale_ = 1.0f, bloom_scale_ = 1.0f;
   float shadow_mul_ = 1.0f;  // sr_native_shadow_scale_mul (shape-detected shadow map)
   bool full_scene_resolution_ = false, foliage_aa_ = false;
+  bool stacked_resolves_ = false;
   uint32_t msaa_samples_ = 0;
   int32_t anisotropy_ = -1;
   uint32_t output_width_ = kOutputWidth, output_height_ = kOutputHeight;

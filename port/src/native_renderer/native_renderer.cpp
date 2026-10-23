@@ -18,6 +18,7 @@
 #include "texture_content.h"
 #include "texture_hash_replay.h"
 #include "texture_source_probe.h"
+#include "stacked_resolve_policy.h"
 #include "../graphics/guest/render_state.h"
 #include "../graphics/guest/edram_alias.h"
 #include "../graphics/guest/render_packet.h"
@@ -134,6 +135,9 @@ REXCVAR_DEFINE_DOUBLE(sr_native_trace_frame_at_s, 0.0, "Superman Returns Native"
                       "this many seconds");
 REXCVAR_DEFINE_STRING(sr_native_trace_trigger_path, "", "Superman Returns Native",
                      "Debug: trace one frame when this file exists; empty disables file polling")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(sr_native_stacked_resolves, false, "Superman Returns Native",
+                   "Experimental D3D12 stacked color resolves via Texture3D; mip 0, one sample")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_STRING(sr_native_pass_mask, "", "Superman Returns Native",
                       "Debug: comma-separated pass indices whose draws are rendered natively "
@@ -1118,6 +1122,9 @@ bool Renderer::EnsureInitialized() {
     REXLOG_WARN("native texture tracking: invalid mode; using off");
   REXLOG_INFO("native texture tracking: mode={}",texture_tracking_mode_==TextureTrackingMode::On?"on":texture_tracking_mode_==TextureTrackingMode::Compare?"compare":"off");
   render_scale_ = float(std::clamp(REXCVAR_GET(sr_native_render_scale), 1.0, 4.0));
+  stacked_resolves_ = !packet_sink_ && REXCVAR_GET(sr_native_stacked_resolves);
+  if(packet_sink_ && REXCVAR_GET(sr_native_stacked_resolves))
+    REXLOG_WARN("native: sr_native_stacked_resolves is D3D12-only; ignored for Vulkan capture");
   shadow_scale_ = float(std::clamp(REXCVAR_GET(sr_native_shadow_quality), 1, 4));
   shadow_mul_ = float(std::clamp(REXCVAR_GET(sr_native_shadow_scale_mul), 0.25, 1.0));
   {
@@ -3207,6 +3214,13 @@ uint32_t Renderer::GetTextureSrvIndex(uint8_t* base, const uint32_t fetch[6]) {
                                              : resolve_textures_.end();
   if (rit != resolve_textures_.end()) {
     ResolveTexture& rt = rit->second;
+    if(rt.stacked_volume) {
+      const auto plan=PlanStackedResolve(std::span<const uint32_t,6>(fetch,6),0,0);
+      if(!plan || plan->width!=rt.width || plan->height!=rt.height || plan->layers!=rt.layers) {
+        LogUnsupportedOnce("stacked resolve binding",base_address,"fetch does not match the host volume");
+        return 0;
+      }
+    }
     xenos::xe_gpu_texture_fetch_t f;
     std::memcpy(&f, fetch, sizeof(f));
     // Component mapping from the fetch swizzle (source components clamped to
@@ -3257,11 +3271,13 @@ uint32_t Renderer::GetTextureSrvIndex(uint8_t* base, const uint32_t fetch[6]) {
       return sit->second;
     }
     uint32_t index = AllocSrvIndex();
+    if(!index && rt.stacked_volume) return 0;
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
     srv.Format = rt.srv_format;
-    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.ViewDimension = rt.stacked_volume?D3D12_SRV_DIMENSION_TEXTURE3D:D3D12_SRV_DIMENSION_TEXTURE2D;
     srv.Shader4ComponentMapping = encoded;
-    srv.Texture2D.MipLevels = 1;
+    if(rt.stacked_volume) srv.Texture3D.MipLevels=1;
+    else srv.Texture2D.MipLevels = 1;
     device_->CreateShaderResourceView(
         rt.resource.Get(), &srv,
         provider_->OffsetViewDescriptor(srv_heap_->GetCPUDescriptorHandleForHeapStart(), index));
@@ -4211,7 +4227,17 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
                   srv, src);
     }
     // Each dimension reads its own descriptor heap view; the others get nulls.
-    uint32_t dimension = (fetch[5] >> 9) & 3;
+    bool resolved_volume=false;
+    if(stacked_resolves_ && IsStacked2DFetch(fetch)) {
+      auto latest=resolve_latest_.find(GuestPhysical(fetch[1]&0xFFFFF000u));
+      if(latest!=resolve_latest_.end()) {
+        auto resource=resolve_textures_.find(latest->second);
+        resolved_volume=resource!=resolve_textures_.end() && resource->second.resource && resource->second.stacked_volume;
+      }
+    }
+    uint32_t dimension = ResolvedFetchDimension(fetch,resolved_volume);
+    if(trace_state_==1 && IsStacked2DFetch(fetch))
+      REXLOG_INFO("trace stacked binding slot={} volume={} dimension={} srv={} heap3d={}",slot,resolved_volume,dimension,srv,dimension==2 && srv?srv:1);
     s[slot] = dimension <= 1 ? srv : 0;
     s[16 + slot] = dimension == 2 && srv ? srv : 1;
     s[32 + slot] = dimension == 3 && srv ? srv : 2;
@@ -4359,9 +4385,14 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
     for (int r = 160; r < 168; ++r)
       vc += fmt::format(" c{}=({} {} {} {})", r, v[r * 4], v[r * 4 + 1], v[r * 4 + 2], v[r * 4 + 3]);
     REXLOG_INFO("trace   vs{}", vc);
+    std::string first_bank;
+    for (int r = 0; r < 8; ++r)
+      first_bank += fmt::format(" c{}=({} {} {} {})", r, v[r * 4], v[r * 4 + 1], v[r * 4 + 2], v[r * 4 + 3]);
+    REXLOG_INFO("trace constants vs {:016X}{}",current_vs_hash_,first_bank);
     const float* c = reinterpret_cast<const float*>(mirror_.regs() + Pm4Mirror::kAluConstantBase + 1024);
     REXLOG_INFO("trace   ps c160 ({} {} {} {}) c161 ({} {} {} {})", c[640], c[641], c[642], c[643],
                 c[644], c[645], c[646], c[647]);
+    REXLOG_INFO("trace constants ps {:016X} c48=({} {} {} {})",current_ps_hash_,c[192],c[193],c[194],c[195]);
   }
   derived_timer.Stop();
   CpuTimer shared_upload_timer(cpu_timings.shared_upload_ns);
@@ -5696,7 +5727,7 @@ void Renderer::CopyDepthRegion(HostSurface& src, ResolveTexture& dst, uint32_t x
 
 void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
                            uint32_t dest_texture, uint32_t dest_point, uint32_t clear_color,
-                           float clear_z, uint32_t clear_stencil) {
+                           float clear_z, uint32_t clear_stencil,uint32_t level,uint32_t slice) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!BeginFrame()) return;
   uint32_t dev = GuestDevice(base);
@@ -5763,6 +5794,13 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
     uint32_t dest_base = GuestPhysical(fetch[1] & 0xFFFFF000u);
     uint32_t dest_w = (fetch[2] & 0x1FFF) + 1;
     uint32_t dest_h = ((fetch[2] >> 13) & 0x1FFF) + 1;
+    const auto stack_plan=stacked_resolves_?PlanStackedResolve(fetch,level,slice):std::nullopt;
+    const bool volume=stack_plan.has_value() && !depth && src->samples==1 &&
+        HostPx(stack_plan->width,src->scale)<=D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION &&
+        HostPx(stack_plan->height,src->scale)<=D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION;
+    const uint32_t layers=volume?stack_plan->layers:1;
+    if(stacked_resolves_ && IsStacked2DFetch(fetch) && !volume)
+      LogUnsupportedOnce("stacked resolve",dest_base,"requires one mip, color, one sample and host size <=2048; using legacy path");
     // Depth resolves become R32_FLOAT textures written by a shader copy (depth
     // formats only allow whole-subresource copies; the shadow atlas needs
     // region copies at a destination point).
@@ -5775,7 +5813,7 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
     ResolveTexture& dst = resolve_textures_[resolve_key];
     std::memcpy(dst.guest_fetch, fetch, sizeof(fetch));
     if (!dst.resource || dst.width != dest_w || dst.height != dest_h ||
-        dst.scale != src->scale) {
+        dst.scale != src->scale || dst.layers!=layers || dst.stacked_volume!=volume) {
       Retire(dst.resource);
       for (auto& [mapping, index] : dst.srv_by_mapping) RetireSrvIndex(index);
       D3D12_CPU_DESCRIPTOR_HANDLE rtv = dst.rtv, raw_rtv = dst.raw_rtv;
@@ -5787,16 +5825,18 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
       dst.raw_rtv = raw_rtv;
       dst.width = dest_w;
       dst.height = dest_h;
+      dst.layers = layers;
+      dst.stacked_volume = volume;
       dst.scale = src->scale;
       dst.shadow = src->shadow;
       ++stats_.resolve_textures_created;
       dst.format = dst_format;
       dst.srv_format = depth ? DXGI_FORMAT_R32_FLOAT : src->srv_format;
       D3D12_RESOURCE_DESC desc{};
-      desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+      desc.Dimension = volume?D3D12_RESOURCE_DIMENSION_TEXTURE3D:D3D12_RESOURCE_DIMENSION_TEXTURE2D;
       desc.Width = HostPx(dest_w, dst.scale);
       desc.Height = HostPx(dest_h, dst.scale);
-      desc.DepthOrArraySize = 1;
+      desc.DepthOrArraySize = uint16_t(layers);
       desc.MipLevels = 1;
       desc.Format = dst.format;
       desc.SampleDesc.Count = 1;
@@ -5809,6 +5849,25 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
         resolve_textures_.erase(resolve_key);
         resolve_latest_.erase(dest_base);
         return;
+      }
+      if(volume) {
+        // Initialize every slice, including padding slices not written by the game.
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+        UINT64 bytes=0;
+        device_->GetCopyableFootprints(&desc,0,1,0,&footprint,nullptr,nullptr,&bytes);
+        UploadAlloc zeros;
+        if(!Upload(size_t(bytes),D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT,zeros)) {
+          resolve_textures_.erase(resolve_key);resolve_latest_.erase(dest_base);
+          return;
+        }
+        std::memset(zeros.cpu,0,size_t(bytes));
+        footprint.Offset+=zeros.offset;
+        D3D12_TEXTURE_COPY_LOCATION from{},to{};
+        from.pResource=zeros.resource;from.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        from.PlacedFootprint=footprint;
+        to.pResource=dst.resource.Get();to.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        command_list_->CopyTextureRegion(&to,0,0,0,&from,nullptr);
+        REXLOG_INFO("native stacked resolve: created volume base={:08X} size={}x{}x{} format={}",dest_base,dest_w,dest_h,layers,uint32_t(dst.format));
       }
       if (depth) {
         if (!dst.rtv.ptr) {
@@ -5900,7 +5959,9 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
                                                 src->resource_format, D3D12_RESOLVE_MODE_AVERAGE);
         Breadcrumb("msaa resolve");
       } else {
-        command_list_->CopyTextureRegion(&d, dx, dy, 0, &s, &box);
+        command_list_->CopyTextureRegion(&d, dx, dy, volume?stack_plan->destination_z:0, &s, &box);
+        if(volume && trace_state_==1)
+          REXLOG_INFO("trace stacked resolve base={:08X} mip={} slice={} host_z={} layers={}",dest_base,level,slice,stack_plan->destination_z,layers);
         Breadcrumb("color resolve");
       }
       Transition(dst.resource.Get(), dst.state,
@@ -7181,7 +7242,9 @@ void Renderer::Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd
       ExecDrawInlineVertices(base, cmd.u[0], cmd.u[1], cmd.u[2], cmd.u[3]);
       break;
     case Op::kResolve:
-      ExecResolve(base, cmd.u[0], cmd.u[1], cmd.u[2], cmd.u[3], cmd.u[4], cmd.f, cmd.u[5]);
+      if (trace_state_ == 1)
+        REXLOG_INFO("trace resolve arguments level={} slice={} flags={:08X}",cmd.u[6],cmd.u[7],cmd.u[0]);
+      ExecResolve(base, cmd.u[0], cmd.u[1], cmd.u[2], cmd.u[3], cmd.u[4], cmd.f, cmd.u[5],cmd.u[6],cmd.u[7]);
       break;
     case Op::kBeginTiling:
       ExecBeginTiling(base, cmd.u[0], cmd.u[1], cmd.u[2], cmd.f, cmd.u[3]);
