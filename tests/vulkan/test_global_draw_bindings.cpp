@@ -20,3 +20,36 @@ SR_TEST(global_layout_fallback_and_inline_preserve_legacy_fetch_addresses) {
   SR_CHECK(PlanGlobalVertexLayout(draw,out,e));SR_CHECK_EQ(out.attributes[223][0],0u);SR_CHECK_EQ(out.attributes[223][1],2u);SR_CHECK_EQ(out.streams_used,1u);
   draw.inline_vertices=false;draw.streams.clear();SR_CHECK(!PlanGlobalVertexLayout(draw,out,e));
 }
+
+SR_TEST(global_layout_fallback_indexes_all_streams_without_changing_offsets) {
+  guest::DrawPacket draw;
+  for(uint32_t i=32;i-->0;) {
+    guest::VertexStream stream{};stream.stream=i;stream.offset=i*16;stream.stride=16;
+    draw.streams.push_back(stream);
+  }
+  for(uint32_t i=0;i<224;++i) {
+    const uint32_t stream=i%32;
+    draw.vertex_fetch[i]={stream,stream*16+3,4,0x2c235fu};
+  }
+  GlobalVertexLayout out;Error e;
+  SR_CHECK(PlanGlobalVertexLayout(draw,out,e));
+  SR_CHECK_EQ(out.streams_used,0xffffffffu);
+  for(uint32_t i=0;i<224;++i) {
+    SR_CHECK_EQ(out.attributes[i][0],i%32);
+    SR_CHECK_EQ(out.attributes[i][1],3u);
+  }
+  std::vector<uint32_t> before,after;
+  SR_CHECK(GlobalVertexLayoutKey(draw,before,e));
+  // Legacy behavior: the first stream with a given ID determines its base.
+  guest::VertexStream duplicate{};duplicate.stream=5;duplicate.offset=500;
+  draw.streams.push_back(duplicate);
+  SR_CHECK(PlanGlobalVertexLayout(draw,out,e));
+  SR_CHECK_EQ(out.attributes[5][1],3u);
+  SR_CHECK(GlobalVertexLayoutKey(draw,after,e));
+  SR_CHECK(before==after);
+
+  // A missing source stream must still fail rather than emit a bad offset.
+  guest::DrawPacket missing;
+  missing.vertex_fetch[0]={31,4,4,0x2c235fu};
+  SR_CHECK(!PlanGlobalVertexLayout(missing,out,e));
+}
