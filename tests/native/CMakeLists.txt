@@ -17,6 +17,8 @@ add_executable(sr_native_tests
     "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/rexglue-write-tracking/src/write_tracking_state.cpp"
     test_benchmark_input.cpp
     test_descriptor_recycling.cpp
+    test_buffer_srv_cache.cpp
+    test_cpu_bundle.cpp
     test_backend_selection.cpp
     test_checked_guest_memory.cpp
     test_idle_yield.cpp
@@ -24,6 +26,7 @@ add_executable(sr_native_tests
     test_frame_generation_policy.cpp
     test_guest_hash.cpp
     test_shared_constants_cache.cpp
+    test_stacked_resolve.cpp
     test_texture_content.cpp
     test_texture_capture_cache.cpp
     test_texture_ranges.cpp

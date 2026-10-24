@@ -31,6 +31,9 @@
 #include "buffer_content.h"
 #include "shared_constants_cache.h"
 #include "descriptor_recycling.h"
+#include "buffer_srv_cache.h"
+#include "cpu_bundle.h"
+#include "resolve_identity.h"
 #include "resource_write_tracking.h"
 
 #include <atomic>
@@ -41,6 +44,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <type_traits>
 
@@ -271,7 +275,7 @@ class Renderer : public NativeFrontend {
                               uint32_t stride);
   void ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect, uint32_t dest_texture,
                    uint32_t dest_point, uint32_t clear_color, float clear_z,
-                   uint32_t clear_stencil);
+                   uint32_t clear_stencil,uint32_t level,uint32_t slice);
   void ExecBeginTiling(uint8_t* base, uint32_t count, uint32_t rects, uint32_t clear_color,
                        float clear_z, uint32_t clear_stencil);
   void ExecEndTiling();
@@ -379,6 +383,8 @@ class Renderer : public NativeFrontend {
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
     DXGI_FORMAT srv_format = DXGI_FORMAT_UNKNOWN;
     uint32_t width = 0, height = 0;  // guest pixels
+    uint32_t layers = 1;
+    bool stacked_volume = false;   // host Texture3D for validated stacked color resolves
     float scale = 1.0f;              // host pixels per guest pixel (source surface)
     bool shadow = false;             // resolved from a shadow map target
     uint32_t plain_srv = 0;          // default-mapped SRV (soft particles' scene depth)
@@ -474,6 +480,7 @@ class Renderer : public NativeFrontend {
   float render_scale_ = 1.0f, shadow_scale_ = 1.0f, bloom_scale_ = 1.0f;
   float shadow_mul_ = 1.0f;  // sr_native_shadow_scale_mul (shape-detected shadow map)
   bool full_scene_resolution_ = false, foliage_aa_ = false;
+  bool stacked_resolves_ = false;
   uint32_t msaa_samples_ = 0;
   int32_t anisotropy_ = -1;
   uint32_t output_width_ = kOutputWidth, output_height_ = kOutputHeight;
@@ -614,6 +621,9 @@ class Renderer : public NativeFrontend {
   // Keyed by (guest base address, host format): the game aliases the same
   // guest memory for differently formatted resolve targets within a frame.
   std::unordered_map<uint64_t, ResolveTexture> resolve_textures_;
+  ResolveIdentities resolve_identities_;
+  bool complete_resolve_identity_ = false;
+  bool stage_shared_constants_ = false;
   // Latest resolve written to each guest base address (what a later bind of
   // that address should read).
   std::unordered_map<uint32_t, uint64_t> resolve_latest_;
@@ -694,6 +704,7 @@ class Renderer : public NativeFrontend {
     Microsoft::WRL::ComPtr<ID3D12Resource> resource;
     uint32_t raw_srv = 0;
     uint64_t raw_srv_fence = 0;
+    uint64_t resource_generation = 0;
     uint32_t address = 0, size = 0;
     uint32_t decl = 0, stride = 0, index_format = 0, phase = 0;
     uint32_t reset_index = UINT32_MAX;
@@ -701,6 +712,8 @@ class Renderer : public NativeFrontend {
     D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
   };
   std::unordered_map<uint64_t, BufferEntry> buffers_;
+  std::optional<BufferSrvCache> buffer_srv_cache_;
+  uint64_t next_buffer_generation_ = 1;
   uint32_t vertex_fetch_[224][4] = {}; // semantic -> SRV, offset, stride, XDK type
   // 64 KB guest page -> tracked buffer keys overlapping it (fast Unlock
   // invalidation, guest side).

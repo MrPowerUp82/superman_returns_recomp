@@ -7,11 +7,13 @@
 #include "pm4_mirror.h"
 #include "../graphics/guest/constant_snapshot.h"
 #include <algorithm>
+#include <chrono>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include "checked_guest_memory.h"
 #endif
 
 namespace superman_returns::native {
@@ -50,11 +52,12 @@ constexpr uint32_t kPhysicalView = 0xA0000000u;
 // True when [p, p + bytes) is committed, readable host memory. The packets are
 // scanned from guest command buffers that can already be recycled or hold a
 // stale address; a read there must not take the process down.
-bool HostReadable(const uint8_t *p, size_t bytes) {
+bool HostReadable(const uint8_t *p, size_t bytes, Pm4Mirror::AluReadProfile* profile) {
 #ifdef _WIN32
   const uint8_t *end = p + bytes;
   while (p < end) {
     MEMORY_BASIC_INFORMATION mbi;
+    if (profile) ++profile->queries;
     if (!VirtualQuery(p, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT ||
         (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) || !mbi.Protect) {
       return false;
@@ -195,14 +198,47 @@ void Pm4Mirror::ScanFrom(const uint8_t *base, const uint8_t *stream,
         }
         uint32_t src = kPhysicalView + (address & 0x1FFFFFFF);
         std::span<const uint8_t> captured;
+        const uint8_t* source = nullptr;
         if (reader)
           captured = (*reader)(src, size * 4);
-        if (reader ? captured.size() < size * 4
-                   : !HostReadable(base + src, size * 4)) {
+        bool readable;
+        if (reader) {
+          readable = captured.size() >= size * 4;
+          source = captured.data();
+        } else {
+          auto* profile = alu_read_profile.enabled ? &alu_read_profile : nullptr;
+          const auto begin = profile ? std::chrono::steady_clock::now()
+                                    : std::chrono::steady_clock::time_point{};
+#ifdef _WIN32
+          if (bounded_alu_reads) {
+            // WriteRange consumes this span synchronously. No source span
+            // survives into the next ALU load or a nested command scan.
+            thread_local CheckedGuestReads reads;
+            reads.Reset();
+            captured = reads.Read(base + src, size * 4);
+            readable = captured.size() >= size * 4;
+            source = captured.data();
+            if (profile) ++profile->bounded_calls;
+          } else
+#endif
+          {
+            readable = HostReadable(base + src, size * 4, profile);
+            source = base + src;
+          }
+          if (profile) {
+            const auto end = std::chrono::steady_clock::now();
+            ++profile->calls;
+            profile->bytes += size * 4;
+            profile->failures += !readable;
+            profile->validation_ns += uint64_t(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin).count());
+          }
+        }
+        if (!readable) {
           ++unreadable_alu_loads;
           break;
         }
-        WriteRange(first,reader?captured.data():base+src,size);
+        WriteRange(first,source,size);
         break;
       }
       case 0x22:                        // DRAW_INDX

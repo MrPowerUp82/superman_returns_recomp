@@ -42,6 +42,57 @@ SR_TEST(constant_nan_sanitizer_preserves_infinity) {
       !CaptureFloatConstants(std::span(source).first(20), false, out, error));
   SR_CHECK_EQ(out[0], 42);
 }
+SR_TEST(constant_capture_preserves_ieee_bits_in_both_byte_orders) {
+  std::array<uint32_t,1024> host{},source{},out{};
+  std::string error;
+  uint32_t random=0xCE34F712;
+  for(uint32_t bank=0;bank<64;++bank) {
+    for(size_t i=0;i<host.size();++i) {
+      random^=random<<13;random^=random>>17;random^=random<<5;
+      // First banks cover every sign/exponent and exact/edge mantissas.
+      const uint32_t mantissas[]={0,1,0x400000,0x7FFFFF};
+      host[i]=bank<2?(((uint32_t(i)/4)&255u)<<23)|((bank&1u)<<31)|mantissas[i%4]:random;
+    }
+    for(bool be:{false,true}) {
+      for(size_t i=0;i<host.size();++i) {
+        const auto v=host[i];
+        source[i]=be?(v>>24)|((v>>8)&0xFF00)|((v<<8)&0xFF0000)|(v<<24):v;
+      }
+      SR_CHECK(CaptureFloatConstants(source,be,out,error));
+      SR_CHECK(error.empty());
+      for(size_t i=0;i<out.size();++i) {
+        const uint32_t magnitude=host[i]&0x7FFFFFFF;
+        SR_CHECK_EQ(out[i],magnitude>0x7F800000?0u:host[i]);
+      }
+    }
+  }
+}
+SR_TEST(constant_capture_handles_in_place_and_unaligned_longer_source) {
+  alignas(16) std::array<uint32_t,1028> storage{};
+  auto source=std::span(storage).subspan(1);
+  source[0]=0x7FA00001;source[1]=0x80000000;source[1023]=0xFF800000;
+  std::array<uint32_t,1024> out{};
+  std::string error;
+  SR_CHECK(CaptureFloatConstants(source,false,out,error));
+  SR_CHECK_EQ(out[0],0u);SR_CHECK_EQ(out[1],0x80000000u);SR_CHECK_EQ(out[1023],0xFF800000u);
+  out[0]=0x0100C07F; // guest-order NaN
+  out[1]=0x0000807F; // guest-order infinity
+  SR_CHECK(CaptureFloatConstants(out,true,out,error));
+  SR_CHECK_EQ(out[0],0u);SR_CHECK_EQ(out[1],0x7F800000u);
+  SR_CHECK(CaptureFloatConstants(out,false,out,error));
+  SR_CHECK_EQ(out[1],0x7F800000u);
+}
+SR_TEST(constant_capture_rejects_truncation_without_changing_output) {
+  std::array<uint32_t,1024> source{},out{};out.fill(0x87654321);
+  const auto original=out;
+  std::string error;
+  for(bool be:{false,true}) for(size_t length:{size_t(0),size_t(1023)}) {
+    SR_CHECK(!CaptureFloatConstants(std::span(source).first(length),be,out,error));
+    SR_CHECK(!error.empty());SR_CHECK(out==original);
+  }
+  SR_CHECK(CaptureFloatConstants(source,false,out,error));
+  SR_CHECK(error.empty());
+}
 SR_TEST(indices_reject_truncated_and_overflowing_ranges) {
   std::array<uint8_t, 3> bytes{};
   std::vector<uint32_t> out{42};

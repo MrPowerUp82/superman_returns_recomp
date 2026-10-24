@@ -8,6 +8,9 @@
 
 #include "pm4_mirror.h"
 #include "test_main.h"
+#ifdef _WIN32
+#include "checked_guest_memory.h"
+#endif
 
 namespace {
 
@@ -201,6 +204,135 @@ SR_TEST(load_alu_constant_reads_guest_memory) {
   SR_CHECK_EQ(m.reg(Pm4Mirror::kAluConstantBase + 16), 0xDEADBEEFu);
   SR_CHECK_EQ(m.reg(Pm4Mirror::kAluConstantBase + 17), 0xCAFEF00Du);
 }
+
+SR_TEST(pm4_alu_read_profile_counts_live_validation_without_changing_constants) {
+  GuestMemory mem;
+  mem.Store(0x100, 0xDEADBEEF);mem.Store(0x104, 0xCAFEF00D);
+  Stream s;s.Type3(0x2F, {0x100, 16, 2});
+  Pm4Mirror m;m.alu_read_profile.enabled=true;
+  m.ScanCopy(mem.base(),s.bytes.data(),s.size());
+  const auto version=m.vs_version;
+  m.ScanCopy(mem.base(),s.bytes.data(),s.size());
+  SR_CHECK_EQ(m.reg(Pm4Mirror::kAluConstantBase+16),0xDEADBEEFu);
+  SR_CHECK_EQ(m.reg(Pm4Mirror::kAluConstantBase+17),0xCAFEF00Du);
+  SR_CHECK_EQ(m.vs_version,version);
+  SR_CHECK_EQ(m.alu_read_profile.calls,2u);
+  SR_CHECK_EQ(m.alu_read_profile.bytes,16u);
+  SR_CHECK_EQ(m.alu_read_profile.failures,0u);
+#ifdef _WIN32
+  SR_CHECK(m.alu_read_profile.queries>=2u);
+#endif
+}
+
+SR_TEST(pm4_alu_read_profile_stays_idle_when_disabled_or_using_owned_reader) {
+  GuestMemory mem;mem.Store(0x100,0x12345678);
+  Stream s;s.Type3(0x2F,{0x100,16,1});
+  Pm4Mirror m;
+  SR_CHECK(!m.alu_read_profile.enabled);
+  m.ScanCopy(mem.base(),s.bytes.data(),s.size());
+  SR_CHECK_EQ(m.alu_read_profile.calls,0u);
+  SR_CHECK_EQ(m.alu_read_profile.validation_ns,0u);
+  m.alu_read_profile.enabled=true;
+  m.ScanCopyUsing(s.bytes.data(),s.size(),[&](uint32_t address,uint32_t length) {
+    SR_CHECK_EQ(address,0xA0000100u);
+    return std::span<const uint8_t>(mem.page.data()+0x100,length);
+  });
+  SR_CHECK_EQ(m.reg(Pm4Mirror::kAluConstantBase+16),0x12345678u);
+  SR_CHECK_EQ(m.alu_read_profile.calls,0u);
+  SR_CHECK_EQ(m.alu_read_profile.queries,0u);
+  SR_CHECK_EQ(m.alu_read_profile.validation_ns,0u);
+}
+
+#ifdef _WIN32
+SR_TEST(pm4_bounded_alu_reads_refresh_live_bytes_and_match_query_state) {
+  GuestMemory mem;mem.Store(0x100,0x3f800000);mem.Store(0x104,0x7fc01234);
+  Stream load;load.Type3(0x2F,{0x100,16,2});
+  Pm4Mirror reference,m;
+  SR_CHECK(!m.bounded_alu_reads);
+  m.bounded_alu_reads=true;m.alu_read_profile.enabled=true;
+  for(unsigned round=0;round<2;++round) {
+    mem.Store(0x100,round?0x40000000:0x3f800000);
+    reference.ScanCopy(mem.base(),load.bytes.data(),load.size());
+    m.ScanCopy(mem.base(),load.bytes.data(),load.size());
+    for(uint32_t i=0;i<Pm4Mirror::kRegisterCount;++i)SR_CHECK_EQ(m.reg(i),reference.reg(i));
+    SR_CHECK_EQ(m.vs_version,reference.vs_version);
+    SR_CHECK_EQ(m.ps_version,reference.ps_version);
+  }
+  SR_CHECK_EQ(m.reg(Pm4Mirror::kAluConstantBase+16),0x40000000u);
+  SR_CHECK_EQ(m.alu_read_profile.calls,2u);
+  SR_CHECK_EQ(m.alu_read_profile.bounded_calls,2u);
+  SR_CHECK_EQ(m.alu_read_profile.queries,0u);
+  SR_CHECK_EQ(m.alu_read_profile.bytes,16u);
+  SR_CHECK_EQ(m.alu_read_profile.failures,0u);
+  // A zero-length load changes no register and does not read its source.
+  const auto version=m.vs_version;
+  Stream zero;zero.Type3(0x2F,{0x100,16,0});
+  m.ScanCopy(mem.base(),zero.bytes.data(),zero.size());
+  SR_CHECK_EQ(m.vs_version,version);
+  SR_CHECK_EQ(m.unreadable_alu_loads,0u);
+  const auto calls=m.alu_read_profile.calls;
+  m.ScanCopyUsing(load.bytes.data(),load.size(),[&](uint32_t,uint32_t length) {
+    return std::span<const uint8_t>(mem.page.data()+0x100,length);
+  });
+  SR_CHECK_EQ(m.alu_read_profile.calls,calls);
+}
+
+SR_TEST(pm4_bounded_alu_read_rejects_partial_source_without_partial_register_write) {
+  SYSTEM_INFO system;GetSystemInfo(&system);
+  const size_t page_size=system.dwPageSize;
+  auto* pages=static_cast<uint8_t*>(VirtualAlloc(nullptr,2*page_size,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE));
+  SR_CHECK(pages!=nullptr);if(!pages)return;
+  DWORD old=0;
+  const bool protected_ok=VirtualProtect(pages+page_size,page_size,PAGE_NOACCESS,&old)!=0;
+  SR_CHECK(protected_ok);
+  if(protected_ok) {
+    auto* base=reinterpret_cast<const uint8_t*>(reinterpret_cast<uintptr_t>(pages)-0xA0000000u);
+    Pm4Mirror m;m.bounded_alu_reads=true;m.alu_read_profile.enabled=true;
+    Stream seed;seed.Type0(Pm4Mirror::kAluConstantBase+16,{11,22});
+    m.ScanCopy(nullptr,seed.bytes.data(),seed.size());
+    const auto version=m.vs_version;
+    Stream load;load.Type3(0x2F,{uint32_t(page_size-4),16,2});
+    m.ScanCopy(base,load.bytes.data(),load.size());
+    SR_CHECK_EQ(m.unreadable_alu_loads,1u);
+    SR_CHECK_EQ(m.reg(Pm4Mirror::kAluConstantBase+16),11u);
+    SR_CHECK_EQ(m.reg(Pm4Mirror::kAluConstantBase+17),22u);
+    SR_CHECK_EQ(m.vs_version,version);
+    SR_CHECK_EQ(m.alu_read_profile.calls,1u);
+    SR_CHECK_EQ(m.alu_read_profile.bounded_calls,1u);
+    SR_CHECK_EQ(m.alu_read_profile.queries,0u);
+    SR_CHECK_EQ(m.alu_read_profile.failures,1u);
+  }
+  SR_CHECK(VirtualFree(pages,0,MEM_RELEASE));
+}
+
+SR_TEST(pm4_alu_read_profile_counts_failed_region_and_preserves_registers) {
+  SYSTEM_INFO system;GetSystemInfo(&system);
+  const size_t page_size=system.dwPageSize;
+  auto* pages=static_cast<uint8_t*>(VirtualAlloc(nullptr,2*page_size,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE));
+  SR_CHECK(pages!=nullptr);if(!pages)return;
+  DWORD old=0;
+  const bool protected_ok=VirtualProtect(pages+page_size,page_size,PAGE_NOACCESS,&old)!=0;
+  SR_CHECK(protected_ok);
+  if(protected_ok) {
+    auto* base=reinterpret_cast<const uint8_t*>(reinterpret_cast<uintptr_t>(pages)-0xA0000000u);
+    Pm4Mirror m;m.alu_read_profile.enabled=true;
+    Stream seed;seed.Type0(Pm4Mirror::kAluConstantBase+16,{11,22});
+    m.ScanCopy(nullptr,seed.bytes.data(),seed.size());
+    const auto version=m.vs_version;
+    Stream load;load.Type3(0x2F,{uint32_t(page_size-4),16,2});
+    m.ScanCopy(base,load.bytes.data(),load.size());
+    SR_CHECK_EQ(m.unreadable_alu_loads,1u);
+    SR_CHECK_EQ(m.reg(Pm4Mirror::kAluConstantBase+16),11u);
+    SR_CHECK_EQ(m.reg(Pm4Mirror::kAluConstantBase+17),22u);
+    SR_CHECK_EQ(m.vs_version,version);
+    SR_CHECK_EQ(m.alu_read_profile.calls,1u);
+    SR_CHECK_EQ(m.alu_read_profile.bytes,8u);
+    SR_CHECK_EQ(m.alu_read_profile.queries,2u);
+    SR_CHECK_EQ(m.alu_read_profile.failures,1u);
+  }
+  SR_CHECK(VirtualFree(pages,0,MEM_RELEASE));
+}
+#endif
 
 SR_TEST(indirect_buffer_is_followed) {
   GuestMemory mem;

@@ -18,6 +18,7 @@
 #include "texture_content.h"
 #include "texture_hash_replay.h"
 #include "texture_source_probe.h"
+#include "stacked_resolve_policy.h"
 #include "../graphics/guest/render_state.h"
 #include "../graphics/guest/edram_alias.h"
 #include "../graphics/guest/render_packet.h"
@@ -26,6 +27,7 @@
 #include "../graphics/guest/primitive_expansion.h"
 #include "../graphics/guest/pm4_capture.h"
 #include "../graphics/frame_timeline.h"
+#include "../graphics/d3d12/device_capabilities.h"
 
 #include <dxgi1_4.h>
 
@@ -131,6 +133,15 @@ REXCVAR_DEFINE_INT32(sr_native_dump_before_resolve, -1, "Superman Returns Native
 REXCVAR_DEFINE_DOUBLE(sr_native_trace_frame_at_s, 0.0, "Superman Returns Native",
                       "Debug: log render target binds, clears and resolves of one frame after "
                       "this many seconds");
+REXCVAR_DEFINE_STRING(sr_native_trace_trigger_path, "", "Superman Returns Native",
+                     "Debug: trace one frame when this file exists; empty disables file polling")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(sr_native_stacked_resolves, false, "Superman Returns Native",
+                   "Experimental D3D12 stacked color resolves via Texture3D; mip 0, one sample")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_INT32(sr_native_buffer_srv_cache, 0, "Superman Returns Native",
+                    "Experimental D3D12 resident buffer SRV cache capacity (0 disables, max 8192)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_STRING(sr_native_pass_mask, "", "Superman Returns Native",
                       "Debug: comma-separated pass indices whose draws are rendered natively "
                       "(empty = all). Pass 0 = draws outside any pass.");
@@ -146,6 +157,16 @@ REXCVAR_DEFINE_INT32(sr_native_dump_swap, 0, "Superman Returns Native",
 REXCVAR_DEFINE_BOOL(sr_native_pm4_mirror, true, "Superman Returns Native",
                     "Take shader/fetch constants from the parsed command stream (GPU truth) "
                     "instead of the XDK device shadow");
+REXCVAR_DEFINE_BOOL(sr_native_pm4_bounded_reads, false, "Superman Returns Native",
+                    "Experiment: copy live PM4 constant sources with bounded checked reads "
+                    "instead of VirtualQuery validation (D3D12, restart required)");
+REXCVAR_DEFINE_BOOL(sr_native_cpu_bundle, false, "Superman Returns Native",
+                    "Experiment: combine verified texture tracking, bounded PM4 reads, CPU "
+                    "upload staging and complete resolve reuse (D3D12, restart required)");
+REXCVAR_DEFINE_BOOL(sr_native_shared_staging, false, "Superman Returns Native",
+                    "Assemble shared constants in CPU memory before one upload (restart required)");
+REXCVAR_DEFINE_BOOL(sr_native_resolve_identity_cache, false, "Superman Returns Native",
+                    "Keep resolve allocation variants by complete identity (restart required)");
 REXCVAR_DEFINE_BOOL(sr_native_packet_check, false, "Superman Returns Native",
                     "Development: decode captured neutral render packets alongside D3D12; "
                     "reports capture errors and does not select Vulkan");
@@ -320,6 +341,43 @@ bool CpuProfiling() {
   }();
   return enabled;
 }
+bool ConstantDetailProfiling() {
+  static const bool enabled=[] {
+    const char* value=std::getenv("SR_NATIVE_CONSTANTS_PROFILE");
+    return value && *value && *value!='0';
+  }();
+  return enabled && CpuProfiling();
+}
+// Diagnostic only: clocks and counters stay off unless both profile flags are on.
+struct ConstantDetailTimings {
+  uint64_t flush_ns=0,shared_alloc_ns=0,vs_alloc_ns=0,vs_copy_ns=0,ps_alloc_ns=0,ps_copy_ns=0;
+  uint64_t vs_capture_ns=0,vs_write_ns=0,ps_capture_ns=0,ps_write_ns=0;
+  uint64_t setup_ns=0,derived_ns=0,bindings_ns=0;
+  uint64_t draws=0,mirror_draws=0,vs_uploads=0,vs_reuses=0,ps_uploads=0,ps_reuses=0;
+  uint64_t vs_bytes=0,ps_bytes=0,allocation_failures=0,ring_requests=0;
+};
+thread_local ConstantDetailTimings constant_detail_timings;
+bool StreamDetailProfiling() {
+  static const bool enabled=[] {
+    const char* value=std::getenv("SR_NATIVE_STREAMS_PROFILE");
+    return value && *value && *value!='0';
+  }();
+  return enabled && CpuProfiling();
+}
+struct StreamDetailTimings {
+  uint64_t setup_ns=0,apply_ns=0,ia_ns=0,srv_ns=0,declaration_ns=0,metadata_ns=0;
+  uint64_t calls=0,streams=0,ia_binds=0,missing=0,failed_calls=0,dynamic_streams=0;
+  uint64_t srv_created=0,srv_reused=0,srv_failed=0,declaration_reads=0,attributes=0,metadata_writes=0;
+  uint64_t srv_retained_hits=0,cache_evicted=0,cache_invalidated=0;
+  uint64_t actions[4]{}; // Plan actions 0/1/2/other, not actual upload counts.
+};
+thread_local StreamDetailTimings stream_detail_timings;
+bool NativeTraceTriggered() {
+  static const std::filesystem::path path=REXCVAR_GET(sr_native_trace_trigger_path);
+  if (path.empty()) return false;
+  std::error_code error;
+  return std::filesystem::exists(path,error) && !error;
+}
 struct CpuTimings {
   uint64_t capture_ns=0,wait_ns=0,execute_ns=0,prepare_ns=0,constants_ns=0,streams_ns=0,swaps=0;
   uint64_t constant_float_ns=0,constant_slots_ns=0,texture_lookup_ns=0,texture_hash_ns=0,sampler_ns=0;
@@ -364,9 +422,10 @@ void FlushTextureAudit(const char* api,uint64_t frame) {
 }
 struct CpuTimer {
   uint64_t& total;
-  bool active=CpuProfiling();
-  std::chrono::steady_clock::time_point start=active?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
-  explicit CpuTimer(uint64_t& value):total(value) {}
+  bool active;
+  std::chrono::steady_clock::time_point start;
+  explicit CpuTimer(uint64_t& value, bool enabled=CpuProfiling())
+      :total(value),active(enabled),start(enabled?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{}) {}
   void Stop() {if(active) {total+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-start).count());active=false;}}
   ~CpuTimer() {Stop();}
 };
@@ -1085,12 +1144,35 @@ bool Renderer::EnsureInitialized() {
     return false;
   }
   init_failed_ = true;
+  const auto cpu_options=SelectCpuBundle(REXCVAR_GET(sr_native_cpu_bundle), !packet_sink_,
+      REXCVAR_GET(sr_native_pm4_bounded_reads), REXCVAR_GET(sr_native_shared_staging),
+      REXCVAR_GET(sr_native_resolve_identity_cache),
+      uint32_t(std::clamp(REXCVAR_GET(sr_native_buffer_srv_cache),0,8192)));
+  complete_resolve_identity_=cpu_options.resolve_identity;
+  stage_shared_constants_=cpu_options.shared_staging;
   const char* tracking_env=std::getenv("SR_D3D12_TEXTURE_WRITE_TRACKING");
-  texture_tracking_mode_=ParseTextureTrackingMode(tracking_env?tracking_env:"");
+  texture_tracking_mode_=cpu_options.tracking_on?TextureTrackingMode::On:ParseTextureTrackingMode(tracking_env?tracking_env:"");
   if(tracking_env && *tracking_env && texture_tracking_mode_==TextureTrackingMode::Off && std::string_view(tracking_env)!="off")
     REXLOG_WARN("native texture tracking: invalid mode; using off");
   REXLOG_INFO("native texture tracking: mode={}",texture_tracking_mode_==TextureTrackingMode::On?"on":texture_tracking_mode_==TextureTrackingMode::Compare?"compare":"off");
+  const char* pm4_reads_profile=std::getenv("SR_NATIVE_PM4_READ_PROFILE");
+  mirror_.bounded_alu_reads = cpu_options.bounded_reads;
+  mirror_.alu_read_profile.enabled = !packet_sink_ && CpuProfiling() &&
+      pm4_reads_profile && *pm4_reads_profile && *pm4_reads_profile!='0';
+  REXLOG_INFO("native PM4 live read profiling: {}",mirror_.alu_read_profile.enabled?"on":"off");
+  REXLOG_INFO("native PM4 live read mode: {}",mirror_.bounded_alu_reads?"bounded copy":"query validation");
   render_scale_ = float(std::clamp(REXCVAR_GET(sr_native_render_scale), 1.0, 4.0));
+  stacked_resolves_ = !packet_sink_ && REXCVAR_GET(sr_native_stacked_resolves);
+  const auto srv_capacity=cpu_options.srv_capacity;
+  if(!packet_sink_ && srv_capacity) buffer_srv_cache_.emplace(size_t(srv_capacity));
+  if(packet_sink_ && REXCVAR_GET(sr_native_buffer_srv_cache))
+    REXLOG_WARN("native: sr_native_buffer_srv_cache is D3D12-only; ignored for Vulkan capture");
+  REXLOG_INFO("native buffer SRV cache: capacity={}",buffer_srv_cache_?srv_capacity:0);
+  REXLOG_INFO("native CPU bundle: requested={} selected={} tracking={} bounded_reads={} shared_staging={} resolve_identity={} buffer_srvs={}",
+      REXCVAR_GET(sr_native_cpu_bundle),cpu_options.tracking_on,cpu_options.tracking_on,
+      mirror_.bounded_alu_reads,stage_shared_constants_,complete_resolve_identity_,srv_capacity);
+  if(packet_sink_ && REXCVAR_GET(sr_native_stacked_resolves))
+    REXLOG_WARN("native: sr_native_stacked_resolves is D3D12-only; ignored for Vulkan capture");
   shadow_scale_ = float(std::clamp(REXCVAR_GET(sr_native_shadow_quality), 1, 4));
   shadow_mul_ = float(std::clamp(REXCVAR_GET(sr_native_shadow_scale_mul), 0.25, 1.0));
   {
@@ -1144,6 +1226,7 @@ bool Renderer::EnsureInitialized() {
   });
   provider_ = &presenter_->provider();
   device_ = provider_->GetDevice();
+  graphics::d3d12::LogDeviceCapabilities(device_);
   queue_ = provider_->GetDirectQueue();
   if (REXCVAR_GET(sr_native_own_queue)) {
     D3D12_COMMAND_QUEUE_DESC queue_desc{};
@@ -3179,6 +3262,13 @@ uint32_t Renderer::GetTextureSrvIndex(uint8_t* base, const uint32_t fetch[6]) {
                                              : resolve_textures_.end();
   if (rit != resolve_textures_.end()) {
     ResolveTexture& rt = rit->second;
+    if(rt.stacked_volume) {
+      const auto plan=PlanStackedResolve(std::span<const uint32_t,6>(fetch,6),0,0);
+      if(!plan || plan->width!=rt.width || plan->height!=rt.height || plan->layers!=rt.layers) {
+        LogUnsupportedOnce("stacked resolve binding",base_address,"fetch does not match the host volume");
+        return 0;
+      }
+    }
     xenos::xe_gpu_texture_fetch_t f;
     std::memcpy(&f, fetch, sizeof(f));
     // Component mapping from the fetch swizzle (source components clamped to
@@ -3229,11 +3319,13 @@ uint32_t Renderer::GetTextureSrvIndex(uint8_t* base, const uint32_t fetch[6]) {
       return sit->second;
     }
     uint32_t index = AllocSrvIndex();
+    if(!index && rt.stacked_volume) return 0;
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
     srv.Format = rt.srv_format;
-    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.ViewDimension = rt.stacked_volume?D3D12_SRV_DIMENSION_TEXTURE3D:D3D12_SRV_DIMENSION_TEXTURE2D;
     srv.Shader4ComponentMapping = encoded;
-    srv.Texture2D.MipLevels = 1;
+    if(rt.stacked_volume) srv.Texture3D.MipLevels=1;
+    else srv.Texture2D.MipLevels = 1;
     device_->CreateShaderResourceView(
         rt.resource.Get(), &srv,
         provider_->OffsetViewDescriptor(srv_heap_->GetCPUDescriptorHandleForHeapStart(), index));
@@ -3938,11 +4030,24 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
   CpuTimer cpu_timer(cpu_timings.constants_ns);
   CpuTimer float_timer(cpu_timings.constant_float_ns);
   if(CpuProfiling()) ++cpu_timings.constant_draws;
-  FlushRingConstants(base, dev);
+  const bool detail=ConstantDetailProfiling();
+  auto& d=constant_detail_timings;
+  if(detail) {++d.draws; d.ring_requests+=pending_ring_constants_.size();}
+  {
+    CpuTimer timer(d.flush_ns,detail);
+    FlushRingConstants(base, dev);
+  }
   const bool cache_shared = SharedConstantsCaching();
   UploadAlloc shared;
-  if (!cache_shared && !Upload(4096, 256, shared)) return false;
+  if (!cache_shared) {
+    CpuTimer timer(d.shared_alloc_ns,detail);
+    if (!Upload(4096, 256, shared)) {
+      if(detail) ++d.allocation_failures;
+      return false;
+    }
+  }
   bool use_mirror = REXCVAR_GET(sr_native_pm4_mirror);
+  if(detail && use_mirror) ++d.mirror_draws;
   // Debug: sr_native_debug_ps_const=<ps hash hex>:<register>:<x>,<y>,<z>,<w>
   static const struct Override {
     uint64_t hash = 0;
@@ -3965,8 +4070,12 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
   // NaN (same as the Xenos-path E041 sanitizer). Source: the PM4 mirror (GPU
   // truth, host order) or the byte-swapped device shadow.
   auto fill = [&](uint32_t mirror_base, uint32_t shadow_offset, uint32_t* dst) {
+    const bool pixel=mirror_base!=Pm4Mirror::kAluConstantBase;
+    CpuTimer capture_timer(pixel?d.ps_capture_ns:d.vs_capture_ns,detail);
     if(use_mirror) {
-      const auto& captured=mirror_.FloatConstants(mirror_base!=Pm4Mirror::kAluConstantBase);
+      const auto& captured=mirror_.FloatConstants(pixel);
+      capture_timer.Stop();
+      CpuTimer write_timer(pixel?d.ps_write_ns:d.vs_write_ns,detail);
       std::memcpy(dst,captured.data(),sizeof(captured));
       return;
     }
@@ -3975,15 +4084,27 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
     std::array<uint32_t,1024> captured;
     std::string error;
     graphics::guest::CaptureFloatConstants({src,1024}, !use_mirror, captured, error);
+    capture_timer.Stop();
+    CpuTimer write_timer(pixel?d.ps_write_ns:d.vs_write_ns,detail);
     std::memcpy(dst,captured.data(),sizeof(captured));
   };
   if (!use_mirror || cb_vs_version_ != mirror_.vs_version || !cb_vs_gpu_) {
     UploadAlloc vs;
-    if (!Upload(4096, 256, vs)) return false;
-    fill(Pm4Mirror::kAluConstantBase, kDevVsConstants, reinterpret_cast<uint32_t*>(vs.cpu));
+    {
+      CpuTimer timer(d.vs_alloc_ns,detail);
+      if (!Upload(4096, 256, vs)) {
+        if(detail) ++d.allocation_failures;
+        return false;
+      }
+    }
+    {
+      CpuTimer timer(d.vs_copy_ns,detail);
+      fill(Pm4Mirror::kAluConstantBase, kDevVsConstants, reinterpret_cast<uint32_t*>(vs.cpu));
+    }
+    if(detail) {++d.vs_uploads; d.vs_bytes+=4096;}
     cb_vs_gpu_ = vs.gpu;
     cb_vs_version_ = use_mirror ? mirror_.vs_version : 0;
-  }
+  } else if(detail) ++d.vs_reuses;
   if (!REXCVAR_GET(sr_native_debug_vs).empty() && use_mirror &&
       current_vs_hash_ == std::strtoull(REXCVAR_GET(sr_native_debug_vs).c_str(), nullptr, 16)) {
     static int logged = 0;
@@ -4021,20 +4142,31 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
   }
   if (!use_mirror || override_ps || cb_ps_version_ != mirror_.ps_version || !cb_ps_gpu_) {
     UploadAlloc ps;
-    if (!Upload(4096, 256, ps)) return false;
+    {
+      CpuTimer timer(d.ps_alloc_ns,detail);
+      if (!Upload(4096, 256, ps)) {
+        if(detail) ++d.allocation_failures;
+        return false;
+      }
+    }
     uint32_t* ps_dst = reinterpret_cast<uint32_t*>(ps.cpu);
-    fill(Pm4Mirror::kAluConstantBase + 1024, kDevPsConstants, ps_dst);
-    if (override_ps) std::memcpy(ps_dst + ps_override.reg * 4, ps_override.v, 16);
+    {
+      CpuTimer timer(d.ps_copy_ns,detail);
+      fill(Pm4Mirror::kAluConstantBase + 1024, kDevPsConstants, ps_dst);
+      if (override_ps) std::memcpy(ps_dst + ps_override.reg * 4, ps_override.v, 16);
+    }
+    if(detail) {++d.ps_uploads; d.ps_bytes+=4096;}
     cb_ps_gpu_ = ps.gpu;
     cb_ps_version_ = (use_mirror && !override_ps) ? mirror_.ps_version : 0;
-  }
+  } else if(detail) ++d.ps_reuses;
   float_timer.Stop();
+  CpuTimer setup_timer(d.setup_ns,detail);
   // Assemble all derived state in ordinary CPU memory. Upload only after the
   // final bytes are known; matching PM4 versions alone would miss derived SRVs,
   // scale, alpha testing and vertex metadata.
   SharedConstantBlock shared_data;
   static_assert(512 + sizeof(vertex_fetch_) == sizeof(shared_data));
-  uint32_t* s = cache_shared ? shared_data.data() : reinterpret_cast<uint32_t*>(shared.cpu);
+  uint32_t* s = (cache_shared || stage_shared_constants_) ? shared_data.data() : reinterpret_cast<uint32_t*>(shared.cpu);
   std::memset(s, 0, 512);
   // Also describe IA inputs for inline draws: they don't pass through
   // BindVertexStreams. The shader needs the type to undo USHORT2 UNORM.
@@ -4045,6 +4177,7 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
       vertex_fetch_[attribute.usage * 16 + attribute.index][3] = attribute.type;
   }
   std::memcpy(s + 128, vertex_fetch_, sizeof(vertex_fetch_));
+  setup_timer.Stop();
   CpuTimer slots_timer(cpu_timings.constant_slots_ns);
   for (uint32_t slot = 0; slot < 16; ++slot) {
     uint32_t fetch[6];
@@ -4142,13 +4275,24 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
                   srv, src);
     }
     // Each dimension reads its own descriptor heap view; the others get nulls.
-    uint32_t dimension = (fetch[5] >> 9) & 3;
+    bool resolved_volume=false;
+    if(stacked_resolves_ && IsStacked2DFetch(fetch)) {
+      auto latest=resolve_latest_.find(GuestPhysical(fetch[1]&0xFFFFF000u));
+      if(latest!=resolve_latest_.end()) {
+        auto resource=resolve_textures_.find(latest->second);
+        resolved_volume=resource!=resolve_textures_.end() && resource->second.resource && resource->second.stacked_volume;
+      }
+    }
+    uint32_t dimension = ResolvedFetchDimension(fetch,resolved_volume);
+    if(trace_state_==1 && IsStacked2DFetch(fetch))
+      REXLOG_INFO("trace stacked binding slot={} volume={} dimension={} srv={} heap3d={}",slot,resolved_volume,dimension,srv,dimension==2 && srv?srv:1);
     s[slot] = dimension <= 1 ? srv : 0;
     s[16 + slot] = dimension == 2 && srv ? srv : 1;
     s[32 + slot] = dimension == 3 && srv ? srv : 2;
     s[48 + slot] = sampler;
   }
   slots_timer.Stop();
+  CpuTimer derived_timer(d.derived_ns,detail);
   for (uint32_t i = 0; i < 4; ++i) {
     s[64 + i] = GpuConstant(base, dev, Pm4Mirror::kBoolConstantBase + i, kDevVsBools + 4 * i);
     s[68 + i] = GpuConstant(base, dev, Pm4Mirror::kBoolConstantBase + 4 + i, kDevPsBools + 4 * i);
@@ -4289,22 +4433,34 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
     for (int r = 160; r < 168; ++r)
       vc += fmt::format(" c{}=({} {} {} {})", r, v[r * 4], v[r * 4 + 1], v[r * 4 + 2], v[r * 4 + 3]);
     REXLOG_INFO("trace   vs{}", vc);
+    std::string first_bank;
+    for (int r = 0; r < 8; ++r)
+      first_bank += fmt::format(" c{}=({} {} {} {})", r, v[r * 4], v[r * 4 + 1], v[r * 4 + 2], v[r * 4 + 3]);
+    REXLOG_INFO("trace constants vs {:016X}{}",current_vs_hash_,first_bank);
     const float* c = reinterpret_cast<const float*>(mirror_.regs() + Pm4Mirror::kAluConstantBase + 1024);
     REXLOG_INFO("trace   ps c160 ({} {} {} {}) c161 ({} {} {} {})", c[640], c[641], c[642], c[643],
                 c[644], c[645], c[646], c[647]);
+    REXLOG_INFO("trace constants ps {:016X} c48=({} {} {} {})",current_ps_hash_,c[192],c[193],c[194],c[195]);
   }
+  derived_timer.Stop();
   CpuTimer shared_upload_timer(cpu_timings.shared_upload_ns);
   uint64_t shared_gpu = cache_shared ? shared_constants_cache_.Find(shared_data) : shared.gpu;
+  if (!cache_shared && stage_shared_constants_)
+    std::memcpy(shared.cpu,shared_data.data(),sizeof(shared_data));
   if (cache_shared && shared_gpu) {
     if (CpuProfiling()) ++cpu_timings.shared_hits;
   } else if (cache_shared) {
-    if (!Upload(sizeof(shared_data), 256, shared)) return false;
+    if (!Upload(sizeof(shared_data), 256, shared)) {
+      if(detail) ++d.allocation_failures;
+      return false;
+    }
     std::memcpy(shared.cpu, shared_data.data(), sizeof(shared_data));
     shared_gpu = shared.gpu;
     shared_constants_cache_.Commit(shared_data, shared_gpu);
     if (CpuProfiling()) ++cpu_timings.shared_uploads;
   }
   shared_upload_timer.Stop();
+  CpuTimer bindings_timer(d.bindings_ns,detail);
   command_list_->SetGraphicsRootConstantBufferView(0, cb_vs_gpu_);
   command_list_->SetGraphicsRootConstantBufferView(1, cb_ps_gpu_);
   command_list_->SetGraphicsRootConstantBufferView(2, shared_gpu);
@@ -4865,6 +5021,12 @@ const Renderer::BufferEntry* Renderer::ApplyBuffer(uint8_t* base, const BufferPl
   }
   std::memcpy(upload.cpu, scratch.data(), size);
   if (!reuse) {
+    if(buffer_srv_cache_) {
+      if(auto lease=buffer_srv_cache_->Erase(entry.resource_generation)) {
+        RetireSrvIndex(lease->index);
+        if(StreamDetailProfiling()) ++stream_detail_timings.cache_invalidated;
+      }
+    }
     if (entry.resource) Retire(entry.resource);
     D3D12_HEAP_PROPERTIES heap{};
     heap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -4884,6 +5046,7 @@ const Renderer::BufferEntry* Renderer::ApplyBuffer(uint8_t* base, const BufferPl
     }
     entry.raw_srv = 0;
     entry.raw_srv_fence = 0;
+    if(buffer_srv_cache_) entry.resource_generation=next_buffer_generation_++;
   } else {
     Transition(entry.resource.Get(), entry.state, D3D12_RESOURCE_STATE_COPY_DEST);
   }
@@ -5218,14 +5381,25 @@ bool Renderer::PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRan
 // with the guest-side tracking.
 bool Renderer::BindVertexStreams(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd) {
   CpuTimer cpu_timer(cpu_timings.streams_ns);
+  const bool detail=StreamDetailProfiling();
+  auto& timings=stream_detail_timings;
+  CpuTimer setup_timer(timings.setup_ns,detail);
+  if(detail) ++timings.calls;
   bool ok = cmd.streams_ok;
   std::memset(vertex_fetch_, 0, sizeof(vertex_fetch_));
   const uint32_t dev = GuestDevice(base);
   const bool dynamic_fetch = dev && DynamicVertexFetch(base, dev);
+  setup_timer.Stop();
   for (uint32_t i = 0; i < cmd.stream_count; ++i) {
     const StreamPlan& sp = batch.streams[cmd.stream_first + i];
-    const BufferEntry* vb = ApplyBuffer(base, sp.buffer);
+    if(detail) {++timings.streams;++timings.actions[sp.buffer.action<3?sp.buffer.action:3];}
+    const BufferEntry* vb;
+    {
+      CpuTimer timer(timings.apply_ns,detail);
+      vb=ApplyBuffer(base,sp.buffer);
+    }
     if (!vb) {
+      if(detail) ++timings.missing;
       static int logged = 0;
       if (logged++ < 20) {
         REXLOG_WARN("native: vertex stream {} of draw {} has no host buffer (addr {:08X} size {} stride {} "
@@ -5235,17 +5409,30 @@ bool Renderer::BindVertexStreams(uint8_t* base, const WorkBatch& batch, const Wo
       ok = false;
       continue;
     }
+    {
+    CpuTimer timer(timings.ia_ns,detail);
     D3D12_VERTEX_BUFFER_VIEW view{vb->resource->GetGPUVirtualAddress() + sp.offset, sp.size,
                                   sp.stride};
     command_list_->IASetVertexBuffers(sp.stream, 1, &view);
     if (sp.stream < 16) guest_vertex_views_[sp.stream] = view;
+    if(detail) ++timings.ia_binds;
+    }
     if (!dynamic_fetch) continue;
     // Static IA draws need no descriptor: allocate only for shader-driven
     // instancing, otherwise transient vertex buffers would fill the SRV heap.
+    CpuTimer srv_timer(timings.srv_ns,detail);
+    if(detail) ++timings.dynamic_streams;
     BufferEntry& entry = buffers_.at(sp.buffer.key);
-    if (!entry.raw_srv || entry.raw_srv_fence != next_fence_value_) {
+    bool retained_hit=false;
+    if(buffer_srv_cache_) {
+      // The entry field may still name an evicted index. Only the lease cache
+      // owns it across submissions, keyed by the actual host resource lifetime.
+      entry.raw_srv=buffer_srv_cache_->Find(entry.resource_generation);
+      retained_hit=entry.raw_srv && entry.raw_srv_fence!=next_fence_value_;
+    }
+    if (!entry.raw_srv || (!buffer_srv_cache_ && entry.raw_srv_fence != next_fence_value_)) {
       entry.raw_srv = AllocSrvIndex();
-      if (!entry.raw_srv) { ok = false; continue; }
+      if (!entry.raw_srv) { if(detail) ++timings.srv_failed; ok = false; continue; }
       D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
       srv.Format = DXGI_FORMAT_R32_TYPELESS;
       srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
@@ -5254,14 +5441,30 @@ bool Renderer::BindVertexStreams(uint8_t* base, const WorkBatch& batch, const Wo
       srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
       device_->CreateShaderResourceView(entry.resource.Get(), &srv,
           provider_->OffsetViewDescriptor(srv_heap_->GetCPUDescriptorHandleForHeapStart(), entry.raw_srv));
-      // The descriptor is only cached for this submission. Transient game
-      // buffers accumulate across frames; retaining one SRV for each would
-      // exhaust the heap within minutes. Recycle after the GPU fence.
-      entry.raw_srv_fence = next_fence_value_;
-      retired_srvs_.emplace_back(next_fence_value_, entry.raw_srv);
+      if(buffer_srv_cache_) {
+        if(auto lease=buffer_srv_cache_->Insert(entry.resource_generation,entry.raw_srv)) {
+          RetireSrvIndex(lease->index);
+          if(detail) ++timings.cache_evicted;
+        }
+      } else {
+        // Default: retain only for this submission. The opt-in cache above
+        // bounds residency instead of keeping one view per transient buffer.
+        retired_srvs_.emplace_back(next_fence_value_, entry.raw_srv);
+      }
+      if(detail) ++timings.srv_created;
+    } else if(detail) {
+      ++timings.srv_reused;
+      if(retained_hit) ++timings.srv_retained_hits;
     }
+    entry.raw_srv_fence=next_fence_value_;
+    srv_timer.Stop();
     const uint32_t decl = sp.buffer.decl;
-    for (const auto& attribute : ReadVertexDeclaration(base,decl)) {
+    CpuTimer declaration_timer(timings.declaration_ns,detail);
+    const auto& declaration=ReadVertexDeclaration(base,decl);
+    declaration_timer.Stop();
+    if(detail) {++timings.declaration_reads;timings.attributes+=declaration.size();}
+    CpuTimer metadata_timer(timings.metadata_ns,detail);
+    for (const auto& attribute : declaration) {
       if (attribute.stream != sp.stream) continue;
       const uint32_t usage = attribute.usage, index = attribute.index;
       if (usage >= 14 || index >= 16) continue;
@@ -5270,9 +5473,11 @@ bool Renderer::BindVertexStreams(uint8_t* base, const WorkBatch& batch, const Wo
       meta[1] = sp.offset + attribute.offset;
       meta[2] = vb->raw_srv ? sp.stride : 0;
       meta[3] = attribute.type;
+      if(detail) ++timings.metadata_writes;
     }
   }
   if (!ok) {
+    if(detail) ++timings.failed_calls;
     ++stats_.skip_vb;
     LogUnsupportedOnce("vertex stream", 0);
   }
@@ -5621,7 +5826,7 @@ void Renderer::CopyDepthRegion(HostSurface& src, ResolveTexture& dst, uint32_t x
 
 void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
                            uint32_t dest_texture, uint32_t dest_point, uint32_t clear_color,
-                           float clear_z, uint32_t clear_stencil) {
+                           float clear_z, uint32_t clear_stencil,uint32_t level,uint32_t slice) {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
   if (!BeginFrame()) return;
   uint32_t dev = GuestDevice(base);
@@ -5688,6 +5893,13 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
     uint32_t dest_base = GuestPhysical(fetch[1] & 0xFFFFF000u);
     uint32_t dest_w = (fetch[2] & 0x1FFF) + 1;
     uint32_t dest_h = ((fetch[2] >> 13) & 0x1FFF) + 1;
+    const auto stack_plan=stacked_resolves_?PlanStackedResolve(fetch,level,slice):std::nullopt;
+    const bool volume=stack_plan.has_value() && !depth && src->samples==1 &&
+        HostPx(stack_plan->width,src->scale)<=D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION &&
+        HostPx(stack_plan->height,src->scale)<=D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION;
+    const uint32_t layers=volume?stack_plan->layers:1;
+    if(stacked_resolves_ && IsStacked2DFetch(fetch) && !volume)
+      LogUnsupportedOnce("stacked resolve",dest_base,"requires one mip, color, one sample and host size <=2048; using legacy path");
     // Depth resolves become R32_FLOAT textures written by a shader copy (depth
     // formats only allow whole-subresource copies; the shadow atlas needs
     // region copies at a destination point).
@@ -5696,11 +5908,17 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
     // downsample chains): one host texture per size, never recreated per frame.
     uint64_t resolve_key = (uint64_t(dest_base) << 32) | (uint32_t(dst_format) & 0xFF) |
                            (((dest_w - 1) & 0x1FFF) << 8) | (((dest_h - 1) & 0x7FF) << 21);
+    if (complete_resolve_identity_) {
+      uint32_t scale_bits;
+      std::memcpy(&scale_bits,&src->scale,sizeof(scale_bits));
+      resolve_key=resolve_identities_.Get({dest_base,uint32_t(dst_format),dest_w,dest_h,
+                                         scale_bits,layers,volume,depth,src->shadow});
+    }
     resolve_latest_[dest_base] = resolve_key;
     ResolveTexture& dst = resolve_textures_[resolve_key];
     std::memcpy(dst.guest_fetch, fetch, sizeof(fetch));
     if (!dst.resource || dst.width != dest_w || dst.height != dest_h ||
-        dst.scale != src->scale) {
+        dst.scale != src->scale || dst.layers!=layers || dst.stacked_volume!=volume) {
       Retire(dst.resource);
       for (auto& [mapping, index] : dst.srv_by_mapping) RetireSrvIndex(index);
       D3D12_CPU_DESCRIPTOR_HANDLE rtv = dst.rtv, raw_rtv = dst.raw_rtv;
@@ -5712,16 +5930,18 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
       dst.raw_rtv = raw_rtv;
       dst.width = dest_w;
       dst.height = dest_h;
+      dst.layers = layers;
+      dst.stacked_volume = volume;
       dst.scale = src->scale;
       dst.shadow = src->shadow;
       ++stats_.resolve_textures_created;
       dst.format = dst_format;
       dst.srv_format = depth ? DXGI_FORMAT_R32_FLOAT : src->srv_format;
       D3D12_RESOURCE_DESC desc{};
-      desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+      desc.Dimension = volume?D3D12_RESOURCE_DIMENSION_TEXTURE3D:D3D12_RESOURCE_DIMENSION_TEXTURE2D;
       desc.Width = HostPx(dest_w, dst.scale);
       desc.Height = HostPx(dest_h, dst.scale);
-      desc.DepthOrArraySize = 1;
+      desc.DepthOrArraySize = uint16_t(layers);
       desc.MipLevels = 1;
       desc.Format = dst.format;
       desc.SampleDesc.Count = 1;
@@ -5734,6 +5954,25 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
         resolve_textures_.erase(resolve_key);
         resolve_latest_.erase(dest_base);
         return;
+      }
+      if(volume) {
+        // Initialize every slice, including padding slices not written by the game.
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+        UINT64 bytes=0;
+        device_->GetCopyableFootprints(&desc,0,1,0,&footprint,nullptr,nullptr,&bytes);
+        UploadAlloc zeros;
+        if(!Upload(size_t(bytes),D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT,zeros)) {
+          resolve_textures_.erase(resolve_key);resolve_latest_.erase(dest_base);
+          return;
+        }
+        std::memset(zeros.cpu,0,size_t(bytes));
+        footprint.Offset+=zeros.offset;
+        D3D12_TEXTURE_COPY_LOCATION from{},to{};
+        from.pResource=zeros.resource;from.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        from.PlacedFootprint=footprint;
+        to.pResource=dst.resource.Get();to.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        command_list_->CopyTextureRegion(&to,0,0,0,&from,nullptr);
+        REXLOG_INFO("native stacked resolve: created volume base={:08X} size={}x{}x{} format={}",dest_base,dest_w,dest_h,layers,uint32_t(dst.format));
       }
       if (depth) {
         if (!dst.rtv.ptr) {
@@ -5825,7 +6064,9 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
                                                 src->resource_format, D3D12_RESOLVE_MODE_AVERAGE);
         Breadcrumb("msaa resolve");
       } else {
-        command_list_->CopyTextureRegion(&d, dx, dy, 0, &s, &box);
+        command_list_->CopyTextureRegion(&d, dx, dy, volume?stack_plan->destination_z:0, &s, &box);
+        if(volume && trace_state_==1)
+          REXLOG_INFO("trace stacked resolve base={:08X} mip={} slice={} host_z={} layers={}",dest_base,level,slice,stack_plan->destination_z,layers);
         Breadcrumb("color resolve");
       }
       Transition(dst.resource.Get(), dst.state,
@@ -5939,11 +6180,10 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
     // Guest display gamma ramp (Xenos applies it at scan-out; Xenia too).
     UploadAlloc gamma;
     if (Upload(1024 + 16, 256, gamma)) {
-      uint32_t* g = reinterpret_cast<uint32_t*>(gamma.cpu);
-      bool any = false;
-      if (!GuestGammaRamp256(g)) std::memset(g, 0, 1024);
-      for (uint32_t i = 0; i < 256; ++i) any |= g[i] != 0;
-      g[256] = (any && REXCVAR_GET(sr_native_gamma_ramp)) ? 1 : 0;
+      std::array<uint32_t,256> ramp{};
+      if (!GuestGammaRamp256(ramp.data())) ramp.fill(0);
+      const auto data=BuildGammaUpload(ramp,REXCVAR_GET(sr_native_gamma_ramp));
+      std::memcpy(gamma.cpu,data.data(),sizeof(data));
       command_list_->SetGraphicsRootConstantBufferView(1, gamma.gpu);
     }
     command_list_->SetPipelineState(blit_pipeline_.Get());
@@ -6076,10 +6316,11 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
              ((REXCVAR_GET(sr_native_trace_swap) > 0 &&
                swap_number_ + 1 == uint64_t(REXCVAR_GET(sr_native_trace_swap))) ||
               (REXCVAR_GET(sr_native_trace_frame_at_s) > 0 &&
-               compat::BenchElapsedMs() >= REXCVAR_GET(sr_native_trace_frame_at_s) * 1000.0))) {
+               compat::BenchElapsedMs() >= REXCVAR_GET(sr_native_trace_frame_at_s) * 1000.0) ||
+              NativeTraceTriggered())) {
     trace_state_ = 1;
     trace_draws_ = 0;
-    REXLOG_INFO("trace begin frame {}", frame_count_ + 1);
+    REXLOG_INFO("trace begin frame {} after_guest_swap={}", frame_count_ + 1, swap_number_);
   }
   frame_index_ = (frame_index_ + 1) % kFramesInFlight;
   ++frame_count_;
@@ -6415,8 +6656,8 @@ void Renderer::DumpFrameResources(const std::string& prefix, bool surfaces_only,
   for (auto& [key, rt] : resolve_textures_) {
     if (surfaces_only || output_only) break;
     char n[96];
-    std::snprintf(n, sizeof(n), "resolve_%08X_f%u_%ux%u", uint32_t(key >> 32), uint32_t(key) & 0xFF,
-                  rt.width, rt.height);
+    std::snprintf(n, sizeof(n), "resolve_%08X_f%u_%ux%u_id%llX", GuestPhysical(rt.guest_fetch[1]&0xFFFFF000u),
+                  uint32_t(rt.format),rt.width, rt.height,static_cast<unsigned long long>(key));
     items.push_back({n, rt.resource.Get(), &rt.state});
   }
   uint32_t written = 0;
@@ -6938,12 +7179,33 @@ void Renderer::WorkerMain() {
           p.execute_ns+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-started).count());
           if(cmd.op==Op::kSwap && ++p.swaps==120) {
             REXLOG_INFO("native CPU worker (ms/frame over 120, nested): api={} execute={:.2f} prepare={:.2f} constants={:.2f} streams={:.2f}",packet_sink_?"vulkan":"d3d12",p.execute_ns/120000000.0,p.prepare_ns/120000000.0,p.constants_ns/120000000.0,p.streams_ns/120000000.0);
+            if (mirror_.alu_read_profile.enabled) {
+              const auto& r=mirror_.alu_read_profile;
+              REXLOG_INFO("native CPU PM4 live reads (120 swaps, validation nested in execute): calls={} bytes={} queries={} bounded_calls={} failures={} validation_ns={} validation_ms={:.4f}",r.calls,r.bytes,r.queries,r.bounded_calls,r.failures,r.validation_ns,r.validation_ns/120000000.0);
+              mirror_.alu_read_profile={};
+              mirror_.alu_read_profile.enabled=true;
+            }
             REXLOG_INFO("native CPU constants (ms/frame over 120, nested): floats={:.2f} slots={:.2f} texture_lookup={:.2f} texture_hash={:.2f} samplers={:.2f} shared_other={:.2f} | draws={} slot_hits={} slot_misses={} hash_checks={} hash_kb={}",p.constant_float_ns/120000000.0,p.constant_slots_ns/120000000.0,p.texture_lookup_ns/120000000.0,p.texture_hash_ns/120000000.0,p.sampler_ns/120000000.0,(p.constants_ns-p.constant_float_ns-p.constant_slots_ns)/120000000.0,p.constant_draws/120,p.slot_hits/120,p.slot_misses/120,p.texture_hash_checks/120,p.texture_hash_bytes/120/1024);
+            if(StreamDetailProfiling()) {
+              const auto& d=stream_detail_timings;
+              REXLOG_INFO("native CPU stream detail (ms/frame over 120, disjoint within streams): setup={:.4f} apply={:.4f} ia={:.4f} srv={:.4f} declaration={:.4f} metadata={:.4f}",d.setup_ns/120000000.0,d.apply_ns/120000000.0,d.ia_ns/120000000.0,d.srv_ns/120000000.0,d.declaration_ns/120000000.0,d.metadata_ns/120000000.0);
+              REXLOG_INFO("native CPU stream totals (120 swaps): calls={} streams={} ia_binds={} missing={} failed_calls={} dynamic_streams={} srv_created={} srv_reused={} srv_failed={} declaration_reads={} attributes={} metadata_writes={} action0={} action1={} action2={} action_other={}",d.calls,d.streams,d.ia_binds,d.missing,d.failed_calls,d.dynamic_streams,d.srv_created,d.srv_reused,d.srv_failed,d.declaration_reads,d.attributes,d.metadata_writes,d.actions[0],d.actions[1],d.actions[2],d.actions[3]);
+              REXLOG_INFO("native buffer SRV cache interval: retained_hits={} evicted={} invalidated={} live={}",d.srv_retained_hits,d.cache_evicted,d.cache_invalidated,buffer_srv_cache_?buffer_srv_cache_->size():0);
+              stream_detail_timings={};
+            }
             p.execute_ns=p.prepare_ns=p.constants_ns=p.streams_ns=p.swaps=0;
             REXLOG_INFO("native CPU texture watches (ms/frame over 120, nested in texture_lookup): watch={:.2f} rearms={} reloads={}",p.texture_watch_ns/120000000.0,p.texture_watch_rearms/120,p.texture_hash_changes/120);
             p.texture_watch_ns=p.texture_watch_rearms=p.texture_hash_changes=0;
             REXLOG_INFO("native CPU shared constants (ms/frame over 120, nested): compare_upload={:.2f} hits={} uploads={} saved_kb={}",p.shared_upload_ns/120000000.0,p.shared_hits/120,p.shared_uploads/120,p.shared_hits*4/120);
             p.shared_hits=p.shared_uploads=p.shared_upload_ns=0;
+            if(ConstantDetailProfiling()) {
+              const auto& d=constant_detail_timings;
+              REXLOG_INFO("native CPU constant detail (ms/frame over 120, disjoint within constants): flush={:.4f} shared_alloc={:.4f} vs_alloc={:.4f} vs_copy={:.4f} ps_alloc={:.4f} ps_copy={:.4f} setup={:.4f} derived={:.4f} bindings={:.4f}",d.flush_ns/120000000.0,d.shared_alloc_ns/120000000.0,d.vs_alloc_ns/120000000.0,d.vs_copy_ns/120000000.0,d.ps_alloc_ns/120000000.0,d.ps_copy_ns/120000000.0,d.setup_ns/120000000.0,d.derived_ns/120000000.0,d.bindings_ns/120000000.0);
+              // Raw totals preserve exact reconciliation, rather than rounding counts per frame.
+              REXLOG_INFO("native CPU constant detail totals (120 swaps): draws={} mirror_draws={} vs_uploads={} vs_reuses={} ps_uploads={} ps_reuses={} vs_bytes={} ps_bytes={} allocation_failures={} ring_requests={}",d.draws,d.mirror_draws,d.vs_uploads,d.vs_reuses,d.ps_uploads,d.ps_reuses,d.vs_bytes,d.ps_bytes,d.allocation_failures,d.ring_requests);
+              REXLOG_INFO("native CPU constant transfers (ms/frame over 120, nested in vs_copy/ps_copy): vs_capture={:.4f} vs_write={:.4f} ps_capture={:.4f} ps_write={:.4f}",d.vs_capture_ns/120000000.0,d.vs_write_ns/120000000.0,d.ps_capture_ns/120000000.0,d.ps_write_ns/120000000.0);
+              constant_detail_timings={};
+            }
             if(!packet_sink_) FlushTextureAudit("d3d12",frame_count_);
             p.constant_float_ns=p.constant_slots_ns=p.texture_lookup_ns=p.texture_hash_ns=p.sampler_ns=0;
             p.texture_hash_bytes=p.texture_hash_checks=p.slot_hits=p.slot_misses=p.constant_draws=0;
@@ -7097,7 +7359,9 @@ void Renderer::Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd
       ExecDrawInlineVertices(base, cmd.u[0], cmd.u[1], cmd.u[2], cmd.u[3]);
       break;
     case Op::kResolve:
-      ExecResolve(base, cmd.u[0], cmd.u[1], cmd.u[2], cmd.u[3], cmd.u[4], cmd.f, cmd.u[5]);
+      if (trace_state_ == 1)
+        REXLOG_INFO("trace resolve arguments level={} slice={} flags={:08X}",cmd.u[6],cmd.u[7],cmd.u[0]);
+      ExecResolve(base, cmd.u[0], cmd.u[1], cmd.u[2], cmd.u[3], cmd.u[4], cmd.f, cmd.u[5],cmd.u[6],cmd.u[7]);
       break;
     case Op::kBeginTiling:
       ExecBeginTiling(base, cmd.u[0], cmd.u[1], cmd.u[2], cmd.f, cmd.u[3]);
