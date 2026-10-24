@@ -276,6 +276,23 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
                            "need --sr_native_shader_dir")
         endif()
 
+        # Optional observed PSO descriptions for precompilation on first launch.
+        # The file contains hashes/state only; its native format/version is
+        # checked by PipelineCache before any record is used.
+        set(SR_NATIVE_PIPELINE_SEED "" CACHE FILEPATH "Observed native PSO seed (CNPS)")
+        if(SR_NATIVE STREQUAL "RENDERER" AND SR_NATIVE_PIPELINE_SEED)
+            if(NOT EXISTS "${SR_NATIVE_PIPELINE_SEED}")
+                message(FATAL_ERROR "Native pipeline seed missing: ${SR_NATIVE_PIPELINE_SEED}")
+            endif()
+            enable_language(RC)
+            file(TO_CMAKE_PATH "${SR_NATIVE_PIPELINE_SEED}" SR_NATIVE_PIPELINE_SEED_RC_PATH)
+            set(SR_NATIVE_PIPELINES_RC "${CMAKE_CURRENT_BINARY_DIR}/superman_returns_pipelines.rc")
+            file(WRITE "${SR_NATIVE_PIPELINES_RC}" "3 RCDATA \"${SR_NATIVE_PIPELINE_SEED_RC_PATH}\"\n")
+            set_source_files_properties("${SR_NATIVE_PIPELINES_RC}" PROPERTIES
+                OBJECT_DEPENDS "${SR_NATIVE_PIPELINE_SEED}")
+            target_sources(superman_returns PRIVATE "${SR_NATIVE_PIPELINES_RC}")
+        endif()
+
         # Pre-shader library next to the executable (sr_native_preshaders): the
         # original containers + their DXIL, how the renderer recognises shaders.
         get_filename_component(SR_NATIVE_CORPUS_DIR "${SR_NATIVE_SHADER_DIR}" DIRECTORY)

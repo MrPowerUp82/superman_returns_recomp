@@ -32,6 +32,8 @@
 #include "shared_constants_cache.h"
 #include "descriptor_recycling.h"
 #include "buffer_srv_cache.h"
+#include "cpu_bundle.h"
+#include "resolve_identity.h"
 #include "resource_write_tracking.h"
 
 #include <atomic>
@@ -619,6 +621,9 @@ class Renderer : public NativeFrontend {
   // Keyed by (guest base address, host format): the game aliases the same
   // guest memory for differently formatted resolve targets within a frame.
   std::unordered_map<uint64_t, ResolveTexture> resolve_textures_;
+  ResolveIdentities resolve_identities_;
+  bool complete_resolve_identity_ = false;
+  bool stage_shared_constants_ = false;
   // Latest resolve written to each guest base address (what a later bind of
   // that address should read).
   std::unordered_map<uint32_t, uint64_t> resolve_latest_;

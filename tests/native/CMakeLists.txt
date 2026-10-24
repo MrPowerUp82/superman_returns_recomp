@@ -18,6 +18,7 @@ add_executable(sr_native_tests
     test_benchmark_input.cpp
     test_descriptor_recycling.cpp
     test_buffer_srv_cache.cpp
+    test_cpu_bundle.cpp
     test_backend_selection.cpp
     test_checked_guest_memory.cpp
     test_idle_yield.cpp

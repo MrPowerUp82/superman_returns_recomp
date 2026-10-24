@@ -160,6 +160,13 @@ REXCVAR_DEFINE_BOOL(sr_native_pm4_mirror, true, "Superman Returns Native",
 REXCVAR_DEFINE_BOOL(sr_native_pm4_bounded_reads, false, "Superman Returns Native",
                     "Experiment: copy live PM4 constant sources with bounded checked reads "
                     "instead of VirtualQuery validation (D3D12, restart required)");
+REXCVAR_DEFINE_BOOL(sr_native_cpu_bundle, false, "Superman Returns Native",
+                    "Experiment: combine verified texture tracking, bounded PM4 reads, CPU "
+                    "upload staging and complete resolve reuse (D3D12, restart required)");
+REXCVAR_DEFINE_BOOL(sr_native_shared_staging, false, "Superman Returns Native",
+                    "Assemble shared constants in CPU memory before one upload (restart required)");
+REXCVAR_DEFINE_BOOL(sr_native_resolve_identity_cache, false, "Superman Returns Native",
+                    "Keep resolve allocation variants by complete identity (restart required)");
 REXCVAR_DEFINE_BOOL(sr_native_packet_check, false, "Superman Returns Native",
                     "Development: decode captured neutral render packets alongside D3D12; "
                     "reports capture errors and does not select Vulkan");
@@ -1137,24 +1144,33 @@ bool Renderer::EnsureInitialized() {
     return false;
   }
   init_failed_ = true;
+  const auto cpu_options=SelectCpuBundle(REXCVAR_GET(sr_native_cpu_bundle), !packet_sink_,
+      REXCVAR_GET(sr_native_pm4_bounded_reads), REXCVAR_GET(sr_native_shared_staging),
+      REXCVAR_GET(sr_native_resolve_identity_cache),
+      uint32_t(std::clamp(REXCVAR_GET(sr_native_buffer_srv_cache),0,8192)));
+  complete_resolve_identity_=cpu_options.resolve_identity;
+  stage_shared_constants_=cpu_options.shared_staging;
   const char* tracking_env=std::getenv("SR_D3D12_TEXTURE_WRITE_TRACKING");
-  texture_tracking_mode_=ParseTextureTrackingMode(tracking_env?tracking_env:"");
+  texture_tracking_mode_=cpu_options.tracking_on?TextureTrackingMode::On:ParseTextureTrackingMode(tracking_env?tracking_env:"");
   if(tracking_env && *tracking_env && texture_tracking_mode_==TextureTrackingMode::Off && std::string_view(tracking_env)!="off")
     REXLOG_WARN("native texture tracking: invalid mode; using off");
   REXLOG_INFO("native texture tracking: mode={}",texture_tracking_mode_==TextureTrackingMode::On?"on":texture_tracking_mode_==TextureTrackingMode::Compare?"compare":"off");
   const char* pm4_reads_profile=std::getenv("SR_NATIVE_PM4_READ_PROFILE");
-  mirror_.bounded_alu_reads = !packet_sink_ && REXCVAR_GET(sr_native_pm4_bounded_reads);
+  mirror_.bounded_alu_reads = cpu_options.bounded_reads;
   mirror_.alu_read_profile.enabled = !packet_sink_ && CpuProfiling() &&
       pm4_reads_profile && *pm4_reads_profile && *pm4_reads_profile!='0';
   REXLOG_INFO("native PM4 live read profiling: {}",mirror_.alu_read_profile.enabled?"on":"off");
   REXLOG_INFO("native PM4 live read mode: {}",mirror_.bounded_alu_reads?"bounded copy":"query validation");
   render_scale_ = float(std::clamp(REXCVAR_GET(sr_native_render_scale), 1.0, 4.0));
   stacked_resolves_ = !packet_sink_ && REXCVAR_GET(sr_native_stacked_resolves);
-  const auto srv_capacity=std::clamp(REXCVAR_GET(sr_native_buffer_srv_cache),0,8192);
+  const auto srv_capacity=cpu_options.srv_capacity;
   if(!packet_sink_ && srv_capacity) buffer_srv_cache_.emplace(size_t(srv_capacity));
-  if(packet_sink_ && srv_capacity)
+  if(packet_sink_ && REXCVAR_GET(sr_native_buffer_srv_cache))
     REXLOG_WARN("native: sr_native_buffer_srv_cache is D3D12-only; ignored for Vulkan capture");
   REXLOG_INFO("native buffer SRV cache: capacity={}",buffer_srv_cache_?srv_capacity:0);
+  REXLOG_INFO("native CPU bundle: requested={} selected={} tracking={} bounded_reads={} shared_staging={} resolve_identity={} buffer_srvs={}",
+      REXCVAR_GET(sr_native_cpu_bundle),cpu_options.tracking_on,cpu_options.tracking_on,
+      mirror_.bounded_alu_reads,stage_shared_constants_,complete_resolve_identity_,srv_capacity);
   if(packet_sink_ && REXCVAR_GET(sr_native_stacked_resolves))
     REXLOG_WARN("native: sr_native_stacked_resolves is D3D12-only; ignored for Vulkan capture");
   shadow_scale_ = float(std::clamp(REXCVAR_GET(sr_native_shadow_quality), 1, 4));
@@ -4150,7 +4166,7 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
   // scale, alpha testing and vertex metadata.
   SharedConstantBlock shared_data;
   static_assert(512 + sizeof(vertex_fetch_) == sizeof(shared_data));
-  uint32_t* s = cache_shared ? shared_data.data() : reinterpret_cast<uint32_t*>(shared.cpu);
+  uint32_t* s = (cache_shared || stage_shared_constants_) ? shared_data.data() : reinterpret_cast<uint32_t*>(shared.cpu);
   std::memset(s, 0, 512);
   // Also describe IA inputs for inline draws: they don't pass through
   // BindVertexStreams. The shader needs the type to undo USHORT2 UNORM.
@@ -4429,6 +4445,8 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
   derived_timer.Stop();
   CpuTimer shared_upload_timer(cpu_timings.shared_upload_ns);
   uint64_t shared_gpu = cache_shared ? shared_constants_cache_.Find(shared_data) : shared.gpu;
+  if (!cache_shared && stage_shared_constants_)
+    std::memcpy(shared.cpu,shared_data.data(),sizeof(shared_data));
   if (cache_shared && shared_gpu) {
     if (CpuProfiling()) ++cpu_timings.shared_hits;
   } else if (cache_shared) {
@@ -5890,6 +5908,12 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
     // downsample chains): one host texture per size, never recreated per frame.
     uint64_t resolve_key = (uint64_t(dest_base) << 32) | (uint32_t(dst_format) & 0xFF) |
                            (((dest_w - 1) & 0x1FFF) << 8) | (((dest_h - 1) & 0x7FF) << 21);
+    if (complete_resolve_identity_) {
+      uint32_t scale_bits;
+      std::memcpy(&scale_bits,&src->scale,sizeof(scale_bits));
+      resolve_key=resolve_identities_.Get({dest_base,uint32_t(dst_format),dest_w,dest_h,
+                                         scale_bits,layers,volume,depth,src->shadow});
+    }
     resolve_latest_[dest_base] = resolve_key;
     ResolveTexture& dst = resolve_textures_[resolve_key];
     std::memcpy(dst.guest_fetch, fetch, sizeof(fetch));
@@ -6156,11 +6180,10 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
     // Guest display gamma ramp (Xenos applies it at scan-out; Xenia too).
     UploadAlloc gamma;
     if (Upload(1024 + 16, 256, gamma)) {
-      uint32_t* g = reinterpret_cast<uint32_t*>(gamma.cpu);
-      bool any = false;
-      if (!GuestGammaRamp256(g)) std::memset(g, 0, 1024);
-      for (uint32_t i = 0; i < 256; ++i) any |= g[i] != 0;
-      g[256] = (any && REXCVAR_GET(sr_native_gamma_ramp)) ? 1 : 0;
+      std::array<uint32_t,256> ramp{};
+      if (!GuestGammaRamp256(ramp.data())) ramp.fill(0);
+      const auto data=BuildGammaUpload(ramp,REXCVAR_GET(sr_native_gamma_ramp));
+      std::memcpy(gamma.cpu,data.data(),sizeof(data));
       command_list_->SetGraphicsRootConstantBufferView(1, gamma.gpu);
     }
     command_list_->SetPipelineState(blit_pipeline_.Get());
@@ -6633,8 +6656,8 @@ void Renderer::DumpFrameResources(const std::string& prefix, bool surfaces_only,
   for (auto& [key, rt] : resolve_textures_) {
     if (surfaces_only || output_only) break;
     char n[96];
-    std::snprintf(n, sizeof(n), "resolve_%08X_f%u_%ux%u", uint32_t(key >> 32), uint32_t(key) & 0xFF,
-                  rt.width, rt.height);
+    std::snprintf(n, sizeof(n), "resolve_%08X_f%u_%ux%u_id%llX", GuestPhysical(rt.guest_fetch[1]&0xFFFFF000u),
+                  uint32_t(rt.format),rt.width, rt.height,static_cast<unsigned long long>(key));
     items.push_back({n, rt.resource.Get(), &rt.state});
   }
   uint32_t written = 0;
