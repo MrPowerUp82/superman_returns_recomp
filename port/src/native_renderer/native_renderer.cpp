@@ -157,6 +157,9 @@ REXCVAR_DEFINE_INT32(sr_native_dump_swap, 0, "Superman Returns Native",
 REXCVAR_DEFINE_BOOL(sr_native_pm4_mirror, true, "Superman Returns Native",
                     "Take shader/fetch constants from the parsed command stream (GPU truth) "
                     "instead of the XDK device shadow");
+REXCVAR_DEFINE_BOOL(sr_native_pm4_bounded_reads, false, "Superman Returns Native",
+                    "Experiment: copy live PM4 constant sources with bounded checked reads "
+                    "instead of VirtualQuery validation (D3D12, restart required)");
 REXCVAR_DEFINE_BOOL(sr_native_packet_check, false, "Superman Returns Native",
                     "Development: decode captured neutral render packets alongside D3D12; "
                     "reports capture errors and does not select Vulkan");
@@ -1139,6 +1142,12 @@ bool Renderer::EnsureInitialized() {
   if(tracking_env && *tracking_env && texture_tracking_mode_==TextureTrackingMode::Off && std::string_view(tracking_env)!="off")
     REXLOG_WARN("native texture tracking: invalid mode; using off");
   REXLOG_INFO("native texture tracking: mode={}",texture_tracking_mode_==TextureTrackingMode::On?"on":texture_tracking_mode_==TextureTrackingMode::Compare?"compare":"off");
+  const char* pm4_reads_profile=std::getenv("SR_NATIVE_PM4_READ_PROFILE");
+  mirror_.bounded_alu_reads = !packet_sink_ && REXCVAR_GET(sr_native_pm4_bounded_reads);
+  mirror_.alu_read_profile.enabled = !packet_sink_ && CpuProfiling() &&
+      pm4_reads_profile && *pm4_reads_profile && *pm4_reads_profile!='0';
+  REXLOG_INFO("native PM4 live read profiling: {}",mirror_.alu_read_profile.enabled?"on":"off");
+  REXLOG_INFO("native PM4 live read mode: {}",mirror_.bounded_alu_reads?"bounded copy":"query validation");
   render_scale_ = float(std::clamp(REXCVAR_GET(sr_native_render_scale), 1.0, 4.0));
   stacked_resolves_ = !packet_sink_ && REXCVAR_GET(sr_native_stacked_resolves);
   const auto srv_capacity=std::clamp(REXCVAR_GET(sr_native_buffer_srv_cache),0,8192);
@@ -7147,6 +7156,12 @@ void Renderer::WorkerMain() {
           p.execute_ns+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-started).count());
           if(cmd.op==Op::kSwap && ++p.swaps==120) {
             REXLOG_INFO("native CPU worker (ms/frame over 120, nested): api={} execute={:.2f} prepare={:.2f} constants={:.2f} streams={:.2f}",packet_sink_?"vulkan":"d3d12",p.execute_ns/120000000.0,p.prepare_ns/120000000.0,p.constants_ns/120000000.0,p.streams_ns/120000000.0);
+            if (mirror_.alu_read_profile.enabled) {
+              const auto& r=mirror_.alu_read_profile;
+              REXLOG_INFO("native CPU PM4 live reads (120 swaps, validation nested in execute): calls={} bytes={} queries={} bounded_calls={} failures={} validation_ns={} validation_ms={:.4f}",r.calls,r.bytes,r.queries,r.bounded_calls,r.failures,r.validation_ns,r.validation_ns/120000000.0);
+              mirror_.alu_read_profile={};
+              mirror_.alu_read_profile.enabled=true;
+            }
             REXLOG_INFO("native CPU constants (ms/frame over 120, nested): floats={:.2f} slots={:.2f} texture_lookup={:.2f} texture_hash={:.2f} samplers={:.2f} shared_other={:.2f} | draws={} slot_hits={} slot_misses={} hash_checks={} hash_kb={}",p.constant_float_ns/120000000.0,p.constant_slots_ns/120000000.0,p.texture_lookup_ns/120000000.0,p.texture_hash_ns/120000000.0,p.sampler_ns/120000000.0,(p.constants_ns-p.constant_float_ns-p.constant_slots_ns)/120000000.0,p.constant_draws/120,p.slot_hits/120,p.slot_misses/120,p.texture_hash_checks/120,p.texture_hash_bytes/120/1024);
             if(StreamDetailProfiling()) {
               const auto& d=stream_detail_timings;

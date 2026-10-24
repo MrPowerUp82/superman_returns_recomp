@@ -25,6 +25,14 @@ namespace superman_returns::native {
 
 class Pm4Mirror {
 public:
+  // Optional live LOAD_ALU_CONSTANT validation probe. Owned readers bypass it.
+  struct AluReadProfile {
+    bool enabled = false;
+    uint64_t calls = 0, bytes = 0, queries = 0, failures = 0, validation_ns = 0;
+    uint64_t bounded_calls = 0;
+  } alu_read_profile;
+  // Windows live-source experiment. The default keeps VirtualQuery validation.
+  bool bounded_alu_reads = false;
   using MemoryReader =
       std::function<std::span<const uint8_t>(uint32_t, uint32_t)>;
   static constexpr uint32_t kRegisterCount = 0x5003;
