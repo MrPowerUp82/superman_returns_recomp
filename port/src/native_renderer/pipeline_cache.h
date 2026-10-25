@@ -93,6 +93,7 @@ class PipelineCache {
 
  private:
   void Worker();
+  void SaveWorker();
 
   ID3D12Device* device_ = nullptr;
   ID3D12RootSignature* root_signature_ = nullptr;
@@ -112,6 +113,10 @@ class PipelineCache {
   bool startup_logged_ = false;
   std::unordered_map<uint64_t, Microsoft::WRL::ComPtr<ID3D12PipelineState>> ready_;
   std::vector<std::thread> threads_;
+  // New PSOs are persisted on a separate thread; Record never waits for disk I/O.
+  std::vector<PsoRecord> save_queue_;
+  std::condition_variable save_cv_;
+  std::thread save_thread_;
   std::atomic<bool> stop_{false};
   uint64_t compiled_ = 0;
   double compile_ms_ = 0.0;

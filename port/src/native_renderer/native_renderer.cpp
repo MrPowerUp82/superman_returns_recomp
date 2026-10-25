@@ -171,9 +171,9 @@ REXCVAR_DEFINE_BOOL(sr_native_pm4_bounded_reads, true, "Superman Returns Native"
 REXCVAR_DEFINE_BOOL(sr_native_cpu_bundle, false, "Superman Returns Native",
                     "Experiment: combine verified texture tracking, bounded PM4 reads, CPU "
                     "upload staging and complete resolve reuse (D3D12, restart required)");
-REXCVAR_DEFINE_BOOL(sr_native_shared_staging, false, "Superman Returns Native",
+REXCVAR_DEFINE_BOOL(sr_native_shared_staging, true, "Superman Returns Native",
                     "Assemble shared constants in CPU memory before one upload (restart required)");
-REXCVAR_DEFINE_BOOL(sr_native_resolve_identity_cache, false, "Superman Returns Native",
+REXCVAR_DEFINE_BOOL(sr_native_resolve_identity_cache, true, "Superman Returns Native",
                     "Keep resolve allocation variants by complete identity (restart required)");
 REXCVAR_DEFINE_BOOL(sr_native_packet_check, false, "Superman Returns Native",
                     "Development: decode captured neutral render packets alongside D3D12; "

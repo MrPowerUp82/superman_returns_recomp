@@ -168,8 +168,12 @@ void PipelineCache::Start(ID3D12Device* device, ID3D12RootSignature* root_signat
   {
     std::lock_guard<std::mutex> lock(mutex_);
     auto enqueue = [&](const PsoRecord& r) {
+      // Every loaded key is already persisted, even when another key has the
+      // same D3D12 description. Otherwise Record() appends those aliases to
+      // the local cache again on every launch.
+      const bool new_key = known_.insert(r.key).second;
       uint64_t dh = DescHash(r);
-      if (by_desc_.count(dh) || !known_.insert(r.key).second) return false;
+      if (!new_key || by_desc_.count(dh)) return false;
       by_desc_[dh] = r.key;
       queue_.push_back(r);
       return true;
@@ -222,12 +226,27 @@ void PipelineCache::Start(ID3D12Device* device, ID3D12RootSignature* root_signat
         std::fwrite(&nh, sizeof(nh), 1, w);
         std::fclose(w);
       }
+    } else {
+      // An interrupted append may leave a partial record. Drop only that
+      // incomplete tail before the background writer appends new records.
+      std::error_code ec;
+      const auto bytes = std::filesystem::file_size(path_, ec);
+      if (!ec) {
+        const auto complete = sizeof(FileHeader) +
+            ((bytes - sizeof(FileHeader)) / sizeof(PsoRecord)) * sizeof(PsoRecord);
+        if (bytes != complete) {
+          std::filesystem::resize_file(path_, complete, ec);
+          if (ec) REXLOG_WARN("native: could not repair incomplete pipeline cache tail");
+        }
+      }
     }
   }
   REXLOG_INFO("native: pipeline cache: {} pipelines to precompile ({} embedded, {} local, {} "
               "settings variants for {}x MSAA{})",
               queue_.size(), embedded, records.size() - embedded, variants, msaa_samples,
               foliage_a2c ? " + foliage A2C" : "");
+  // File writes must not stall the game's render worker when a new PSO appears.
+  save_thread_ = std::thread([this] { SaveWorker(); });
   start_time_ = std::chrono::steady_clock::now();
   // Leave cores for the game: a few background threads at low priority.
   unsigned threads = std::clamp(std::thread::hardware_concurrency() / 4, 1u, 4u);
@@ -356,11 +375,38 @@ bool PipelineCache::TakeByDesc(const PsoRecord& record,
 void PipelineCache::Record(const PsoRecord& record) {
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    // Start is skipped when pipeline caching is disabled.
+    if (path_.empty()) return;
     if (!known_.insert(record.key).second) return;
+    save_queue_.push_back(record);
   }
-  if (std::FILE* f = _wfopen(path_.c_str(), L"ab")) {
-    std::fwrite(&record, sizeof(record), 1, f);
-    std::fclose(f);
+  save_cv_.notify_one();
+}
+
+void PipelineCache::SaveWorker() {
+  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+  SetThreadDescription(GetCurrentThread(), L"Native PSO cache writer");
+  std::vector<PsoRecord> batch;
+  while (true) {
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      save_cv_.wait(lock, [&] { return stop_ || !save_queue_.empty(); });
+      if (save_queue_.empty() && stop_) break;
+      batch.swap(save_queue_);
+    }
+    // Drain the whole batch per open/close. Closing flushes records so the
+    // next launch can load them even after a normal renderer shutdown.
+    std::FILE* f = _wfopen(path_.c_str(), L"ab");
+    if (!f) {
+      REXLOG_WARN("native: failed to open pipeline cache for {} new records", batch.size());
+    } else {
+      const size_t written = std::fwrite(batch.data(), sizeof(PsoRecord), batch.size(), f);
+      const int closed = std::fclose(f);
+      if (written != batch.size() || closed != 0)
+        REXLOG_WARN("native: failed to persist all pipeline records ({} of {} written)",
+                    written, batch.size());
+    }
+    batch.clear();
   }
 }
 
@@ -370,9 +416,11 @@ PipelineCache::~PipelineCache() {
     stop_ = true;
   }
   work_cv_.notify_all();
+  save_cv_.notify_all();
   for (std::thread& t : threads_) {
     if (t.joinable()) t.join();
   }
+  if (save_thread_.joinable()) save_thread_.join();
 }
 
 }  // namespace superman_returns::native
