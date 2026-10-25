@@ -1,4 +1,5 @@
 #include "shader_translator.h"
+#include "../graphics/rt_shadow_shader.h"
 
 #include <algorithm>
 #include <atomic>
@@ -92,7 +93,7 @@ fs::path FirstWith(const std::vector<fs::path>& dirs, const char* file) {
   return {};
 }
 
-Tools FindTools() {
+Tools FindTools(bool rt_shadow = false) {
   Tools t;
   const fs::path exe = rex::filesystem::GetExecutableFolder();
   std::vector<fs::path> dirs;
@@ -144,6 +145,10 @@ Tools FindTools() {
     }
   }
   t.cache = root / fingerprint;
+  if (rt_shadow) {
+    const auto patch = graphics::RtShadowShaderCacheIdentity();
+    t.cache /= fmt::format("rt-shadow-v1-{:016X}", XXH3_64bits(patch.data(), patch.size()));
+  }
   if (!WritableDir(t.cache) || !WritableDir(t.cache / "tmp")) {
     t.why = "cache folder not writable: " + t.cache.string();
     return t;
@@ -214,12 +219,12 @@ struct Entry {
 
 class Impl {
  public:
-  Impl() {
+  explicit Impl(bool rt_shadow = false) : rt_shadow_(rt_shadow) {
     if (!REXCVAR_GET(sr_native_runtime_shaders)) {
       REXLOG_INFO("runtime shaders: disabled (sr_native_runtime_shaders=false)");
       return;
     }
-    tools_ = FindTools();
+    tools_ = FindTools(rt_shadow_);
     if (!tools_.ok) {
       REXLOG_WARN("runtime shaders: unavailable ({}); only the pre-shader library and the "
                   "embedded pack can supply shaders", tools_.why);
@@ -227,7 +232,7 @@ class Impl {
     }
     REXLOG_INFO("runtime shaders: {} + {}, cache {}", tools_.translator.filename().string(),
                 tools_.dxc.filename().string(), tools_.cache.string());
-    const int n = std::clamp(REXCVAR_GET(sr_native_runtime_shader_threads), 1, 8);
+    const int n = rt_shadow_ ? 1 : std::clamp(REXCVAR_GET(sr_native_runtime_shader_threads), 1, 8);
     for (int i = 0; i < n; ++i) threads_.emplace_back([this] { Worker(); });
     enabled_ = true;
   }
@@ -250,11 +255,11 @@ class Impl {
     if (entries_.count(key)) return;
     Entry& e = entries_[key];
     e.vertex = vertex;
-    if (fs::exists(DxilPath(hash, vertex))) {
+    if (!rt_shadow_ && fs::exists(DxilPath(hash, vertex))) {
       e.state = TranslateState::kReady;  // loaded on first Get
       return;
     }
-    if (fs::exists(FailedPath(hash, vertex))) {
+    if (!rt_shadow_ && fs::exists(FailedPath(hash, vertex))) {
       e.state = TranslateState::kFailed;
       return;
     }
@@ -315,6 +320,18 @@ class Impl {
     return ReadFile(DxilPath(hash, vertex), dxil) && !dxil.empty();
   }
 
+  TranslateState FetchNonBlocking(uint64_t hash, std::vector<uint8_t>& dxil) {
+    dxil.clear();
+    if (!enabled_) return TranslateState::kUnknown;
+    std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) return TranslateState::kPending;
+    const auto it = entries_.find(Key(hash, false));
+    if (it == entries_.end()) return TranslateState::kUnknown;
+    const Entry& e = it->second;
+    if (e.state == TranslateState::kReady && e.dxil) dxil = *e.dxil;
+    return e.state;
+  }
+
  private:
   static uint64_t Key(uint64_t hash, bool vertex) { return hash ^ (vertex ? 0x9E3779B97F4A7C15ull : 0); }
 
@@ -348,7 +365,17 @@ class Impl {
       const auto start = std::chrono::steady_clock::now();
       std::string reason;
       std::vector<uint8_t> dxil;
-      const bool ok = Translate(hash, vertex, container, dxil, reason);
+      bool ok;
+      // Variant disk I/O always belongs to this worker. Fetch only observes
+      // in-memory state, even on a warm cache or while the worker owns mutex_.
+      if (rt_shadow_ && ReadFile(DxilPath(hash, vertex), dxil) && !dxil.empty()) {
+        ok = true;
+      } else if (rt_shadow_ && fs::exists(FailedPath(hash, vertex))) {
+        reason = "cached RT specialization failure";
+        ok = false;
+      } else {
+        ok = Translate(hash, vertex, container, dxil, reason);
+      }
       const double ms = std::chrono::duration<double, std::milli>(
                             std::chrono::steady_clock::now() - start).count();
       {
@@ -413,6 +440,17 @@ class Impl {
     }
     std::vector<uint8_t> src;
     ReadFile(hlsl, src);
+    if (rt_shadow_) {
+      std::string specialized;
+      if (!graphics::SpecializeRtShadowShader(hash,
+              std::string_view(reinterpret_cast<const char*>(src.data()), src.size()),
+              specialized, reason)) {
+        WriteFailed(hash, vertex, reason);
+        cleanup();
+        return false;
+      }
+      src.assign(specialized.begin(), specialized.end());
+    }
     {
       std::ofstream f(std_hlsl, std::ios::binary);
       f.write(reinterpret_cast<const char*>(src.data()), std::streamsize(src.size()));
@@ -425,7 +463,8 @@ class Impl {
       f.write(kSpec, sizeof(kSpec) - 1);
     }
     // 2. HLSL -> DXIL (signed: dxil.dll sits next to dxcompiler.dll).
-    const std::wstring args2 = std::wstring(L"-T ") + (vertex ? L"vs_6_0" : L"ps_6_0") +
+    const std::wstring args2 = std::wstring(L"-T ") +
+                               (rt_shadow_ ? L"ps_6_5" : (vertex ? L"vs_6_0" : L"ps_6_0")) +
                                L" -HV 2021 -all-resources-bound -Wno-ignored-attributes "
                                L"-Qstrip_debug \"" + std_hlsl.wstring() + L"\" -Fo \"" +
                                dx.wstring() + L"\"";
@@ -456,6 +495,7 @@ class Impl {
   }
 
   Tools tools_;
+  const bool rt_shadow_;
   bool enabled_ = false;
   bool stop_ = false;
   std::mutex mutex_;
@@ -472,6 +512,19 @@ Impl& Instance() {
   return *impl;
 }
 
+// Fetch must not perform lazy tool discovery, filesystem work, or wait for a
+// concurrent Offer. Publish the immutable-enabled Impl only after construction.
+std::atomic<Impl*> g_rt_shadow_instance{nullptr};
+
+Impl& RtShadowInstance() {
+  static Impl* impl = [] {
+    auto* value = new Impl(true);  // same lifetime as base background workers
+    g_rt_shadow_instance.store(value, std::memory_order_release);
+    return value;
+  }();
+  return *impl;
+}
+
 }  // namespace
 
 ShaderTranslator& ShaderTranslator::Get() {
@@ -483,10 +536,23 @@ bool ShaderTranslator::Enabled() { return Instance().enabled(); }
 
 void ShaderTranslator::Offer(uint64_t hash, bool vertex, const uint8_t* container, size_t size) {
   Instance().Offer(hash, vertex, container, size);
+  if (!vertex) OfferRtShadowVariant(hash, container, size);
 }
 
 TranslateState ShaderTranslator::Fetch(uint64_t hash, bool vertex, std::vector<uint8_t>& dxil) {
   return Instance().Fetch(hash, vertex, dxil);
+}
+
+void ShaderTranslator::OfferRtShadowVariant(uint64_t hash, const uint8_t* container, size_t size) {
+  if (graphics::IsRtShadowShader(hash) && container && size)
+    RtShadowInstance().Offer(hash, false, container, size);
+}
+
+TranslateState ShaderTranslator::FetchRtShadowVariant(uint64_t hash, std::vector<uint8_t>& dxil) {
+  dxil.clear();
+  if (!graphics::IsRtShadowShader(hash)) return TranslateState::kUnknown;
+  Impl* impl = g_rt_shadow_instance.load(std::memory_order_acquire);
+  return impl ? impl->FetchNonBlocking(hash, dxil) : TranslateState::kUnknown;
 }
 
 bool ShaderTranslator::LoadCached(uint64_t hash, bool vertex, std::vector<uint8_t>& dxil) {

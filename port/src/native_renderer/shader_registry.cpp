@@ -46,6 +46,7 @@
 #include "shader_container.h"
 #include "shader_library.h"
 #include "shader_translator.h"
+#include "../graphics/rt_shadow_shader.h"
 
 REXCVAR_DEFINE_STRING(sr_native_dump_shader_dir, "", "Superman Returns Native",
                       "Write every shader container seen by the XDK CreateShader hooks to "
@@ -271,10 +272,23 @@ void DumpContainer(uint8_t* base, uint32_t container, const GuestShaderInfo& inf
 
 // Hands the container to the runtime translator (shader_translator.h) when no
 // library supplies the shader: the hash is then the creation hash of these
-// very bytes, which is what LoadShader will ask for.
+// very bytes, which is what LoadShader will ask for. The audited RT variant
+// always gets original bytes, including when a pre-shader supplies the base.
 void OfferTranslation(uint8_t* base, uint32_t container, const GuestShaderInfo& info) {
   if (const ShaderLibrary* lib = PreShaderLibrary();
-      lib && lib->Find(info.container_hash, info.is_vertex)) return;
+      lib) {
+    if (const PreShader* shader = lib->Find(info.container_hash, info.is_vertex)) {
+      if (!info.is_vertex && graphics::IsRtShadowShader(info.container_hash)) {
+        ShaderTranslator::Get().OfferRtShadowVariant(info.container_hash,
+            shader->container.data(), shader->container.size());
+      }
+      return;
+    }
+  }
+  if (!info.is_vertex && graphics::IsRtShadowShader(info.container_hash) && info.capture) {
+    ShaderTranslator::Get().OfferRtShadowVariant(info.container_hash,
+        info.capture->container.data(), info.capture->container.size());
+  }
   ShaderTranslator& translator = ShaderTranslator::Get();
   if (!translator.Enabled()) return;
   static std::mutex mutex;
@@ -383,7 +397,9 @@ void TryRegisterInlineShaders(uint8_t* base, uint32_t vs_obj, uint32_t ps_obj) {
     if (!GuestRange(obj, kPSContainerOffset + 16)) continue;
     if (g_shaders.count(obj) || g_unknown.count(obj)) continue;
     GuestShaderInfo info;
-    if (ResolveInline(base, obj, vertex, info)) {
+    if (uint32_t c = ResolveInline(base, obj, vertex, info)) {
+      if (!info.is_vertex && graphics::IsRtShadowShader(info.container_hash))
+        OfferTranslation(base, c, info);
       RegisterLocked(obj, info, "draw-time");
       continue;
     }

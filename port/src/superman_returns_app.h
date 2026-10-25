@@ -16,6 +16,12 @@
 #include "sr_settings.h"
 #include "graphics/backend_selection.h"
 #include "native_renderer/native_bridge.h"
+#if SR_HAS_NATIVE
+#include "graphics/graphics_options_dialog.h"
+#include "graphics/graphics_options_runtime.h"
+#include "graphics/graphics_settings.h"
+#include <imgui.h>
+#endif
 #if SR_HAS_TRACE_GPU
 #include "native_renderer/sr_graphics_system.h"
 #endif
@@ -36,6 +42,9 @@ class SupermanReturnsApp : public rex::ReXApp {
   // sr_renderer=native (docs/native-port-plan.md) uses the native renderer
   // when the build and the game profile allow it, else xenos.
   void OnPreSetup(rex::RuntimeConfig& config) override {
+#if SR_HAS_NATIVE
+    superman_returns::graphics::InitializeGraphicsSettings(graphics_preferences_path_);
+#endif
     // Before anything reads the options a preset manages (sr_post_effects
     // below, sr_render_scale in render_scale.cpp).
     ApplySrPreset();
@@ -125,6 +134,36 @@ class SupermanReturnsApp : public rex::ReXApp {
   void OnPostSetup() override { SetGuestFrameStats(SampleGuestFrameStats);InstallBenchmarkInput(*runtime()); }
 
   // Override virtual hooks for customization:
+#if SR_HAS_NATIVE
+  void OnConfigureFonts(ImFontAtlas* atlas) override {
+    const char* windows=std::getenv("WINDIR");
+    if(!windows) return;
+    const auto path=std::filesystem::path(windows)/"Fonts"/"arialbi.ttf";
+    if(std::filesystem::is_regular_file(path))
+      superman_returns::graphics::SetGraphicsOptionsFont(atlas->AddFontFromFileTTF(path.string().c_str(),22));
+  }
+  void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
+    graphics_dialog_=superman_returns::graphics::GraphicsOptionsDialog::Install(drawer);
+  }
+  void OnGuestThreadExit(rex::system::XThread*) override {
+    superman_returns::graphics::ClearGraphicsGuestPause();
+  }
+  void OnShutdown() override {
+    superman_returns::graphics::SynchronizeGraphicsSettings(true);
+    delete graphics_dialog_; // Persistent dialog never self-closes; drawer is still alive here.
+    graphics_dialog_=nullptr;
+  }
+  bool OnWindowCloseRequested() override {
+    // ReXGlue's normal OnClosing path hard-exits after TerminateTitle and does
+    // not reach OnShutdown. Persist intent before that path starts.
+    superman_returns::graphics::SynchronizeGraphicsSettings(true);
+    return true;
+  }
+  void OnConfigurePaths(rex::PathConfig& paths) override {
+    graphics_preferences_path_=paths.config_path;
+    if(!graphics_preferences_path_.empty()) graphics_preferences_path_+=L".graphics.toml";
+  }
+#endif
   // void OnPostInitLogging() override {}
   // void OnLoadXexImage(std::string& xex_image) override {}
   // void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {}
@@ -133,5 +172,10 @@ class SupermanReturnsApp : public rex::ReXApp {
   // CreateAchievementNotificationDialog() override;
   // void OnShutdown() override {}
   // void OnConfigurePaths(rex::PathConfig& paths) override {}
+#if SR_HAS_NATIVE
+ private:
+  superman_returns::graphics::GraphicsOptionsDialog* graphics_dialog_=nullptr;
+  std::filesystem::path graphics_preferences_path_;
+#endif
 };
 

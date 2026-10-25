@@ -52,6 +52,23 @@
 #include "../graphics/guest/captured_batch.h"
 #include "../graphics/guest/texture_capture.h"
 #include "../graphics/guest/render_packet.h"
+#include "../graphics/temporal_frame.h"
+#include "../graphics/camera_candidate_probe.h"
+#include "../graphics/surface_sequence.h"
+#include "../graphics/geometry_submission_probe.h"
+#include "../graphics/post_vertex_geometry.h"
+#include "../graphics/shadow_projection.h"
+#include "../graphics/shadow_caster_geometry.h"
+#include "../graphics/ray_shadow_execution.h"
+#include "../graphics/rt_shadow_shader.h"
+#include "../graphics/temporal_geometry_history.h"
+#include "../graphics/temporal_vertex_fetch.h"
+#include "../graphics/static_world_shader_dependencies.h"
+#include "../graphics/d3d12/post_vertex_clip_capture.h"
+#include "../graphics/d3d12/temporal_motion.h"
+#include "../graphics/d3d12/post_vertex_capture.h"
+#include "../graphics/d3d12/ray_tracing_scene.h"
+#include "../graphics/d3d12/dlss_super_resolution.h"
 #include "pipeline_cache.h"
 #include "pm4_mirror.h"
 
@@ -369,13 +386,15 @@ class Renderer : public NativeFrontend {
     // undefined contents on Xenos and must not carry data across (feedback).
     uint32_t edram_tiles = 0;
     uint64_t last_write = 0;
+    uint64_t motion_write_frame=0,motion_write_serial=0; // Opt-in actual draw stamps; never bind stamps.
   };
   HostSurface* GetSurface(uint8_t* base, uint32_t surface_object, bool depth,
                           uint32_t min_width = 0, uint32_t min_height = 0);
   void Transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES& state,
                   D3D12_RESOURCE_STATES after);
   bool BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_formats[4],
-                         uint32_t& rt_count, DXGI_FORMAT& dsv_format);
+                         uint32_t& rt_count, DXGI_FORMAT& dsv_format,
+                         const graphics::SurfaceDrawMetadata& draw_metadata);
 
   // Host texture written by resolves, keyed by guest base address.
   struct ResolveTexture {
@@ -385,6 +404,8 @@ class Renderer : public NativeFrontend {
     uint32_t width = 0, height = 0;  // guest pixels
     uint32_t layers = 1;
     bool stacked_volume = false;   // host Texture3D for validated stacked color resolves
+    uint64_t motion_source_frame=0,motion_source_serial=0,motion_source_resource=0;
+    bool motion_full_color_copy=false;
     float scale = 1.0f;              // host pixels per guest pixel (source surface)
     bool shadow = false;             // resolved from a shadow map target
     uint32_t plain_srv = 0;          // default-mapped SRV (soft particles' scene depth)
@@ -436,6 +457,11 @@ class Renderer : public NativeFrontend {
   bool DynamicVertexFetch(uint8_t* base, uint32_t dev);
   bool RefreshTrackedBuffer(TrackedBuffer& t);
   bool BindVertexStreams(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd);
+  // Records evidence only. No BLAS content identity or guest scene semantics
+  // can be inferred from the captured buffer plan alone.
+  void RecordGeometrySubmission(uint8_t* base, const WorkBatch* batch, const WorkCmd* cmd,
+                                graphics::GeometrySubmission submission,
+                                uint32_t surface_draw_before);
 
   uint32_t AllocSrvIndex();
 
@@ -467,6 +493,121 @@ class Renderer : public NativeFrontend {
   uint32_t frame_index_ = 0;
   uint64_t frame_count_ = 0;
   bool frame_open_ = false;
+  // Diagnostic-only temporal prerequisites; never applies an upscaler or DXR effect.
+  bool temporal_probe_ = false;
+  graphics::TemporalFrameState temporal_;
+  bool camera_candidate_probe_enabled_ = false;
+  graphics::CameraCandidateProbe camera_candidate_probe_;
+  // Opt-in one-frame RT/depth sequence for identifying game pass boundaries.
+  bool surface_probe_ = false;
+  bool surface_probe_done_ = false;
+  graphics::SurfaceSequence<192> surface_sequence_;
+  graphics::GeometrySubmissionProbe<32> geometry_probe_;
+  // Only populated from CPU scratch belonging to this draw's complete host
+  // upload; never inferred by rereading live guest or GPU default memory.
+  graphics::PositionValueEvidence position_draw_value_{};
+  std::unique_ptr<graphics::d3d12::PostVertexCapture> post_vertex_capture_;
+  bool post_vertex_active_=false, post_vertex_done_=false;
+  std::unordered_map<uint64_t, Microsoft::WRL::ComPtr<ID3D12PipelineState>> post_vertex_pipelines_;
+  ID3D12PipelineState* current_raster_pipeline_=nullptr;
+  graphics::Matrix4 post_vertex_inverse_{};
+  bool post_vertex_projection_valid_=false, post_vertex_camera_conflict_=false;
+  std::array<float,3> post_vertex_camera_{};
+  Microsoft::WRL::ComPtr<ID3D12Resource> post_vertex_depth_snapshot_;
+  Microsoft::WRL::ComPtr<ID3D12Resource> post_vertex_color_snapshot_;
+  graphics::ShadowProjection post_vertex_caster_projection_,post_vertex_receiver_projection_;
+  bool post_vertex_caster_valid_=false,post_vertex_receiver_valid_=false,post_vertex_light_conflict_=false;
+  Microsoft::WRL::ComPtr<ID3D12Resource> rt_visibility_readback_[3];
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT rt_visibility_layout_[3]{};
+  uint64_t rt_visibility_size_[3]{};
+  uint64_t rt_visibility_swap_[3]{};
+  void RecordCapturedVisibility();
+  Microsoft::WRL::ComPtr<ID3D12Resource> rt_depth_results_[3],rt_depth_readback_[3];
+  uint32_t rt_depth_count_[3]{};
+  void SnapshotPostVertexDepth();
+  void RecordDepthReceiverProbe();
+  std::unique_ptr<graphics::d3d12::RayTracingScene> rt_capture_scene_;
+  std::unique_ptr<graphics::d3d12::DlssSuperResolution> dlss_;
+  uint64_t graphics_options_epoch_=0;
+  bool ray_tracing_capable_=false;
+  bool rt_shadow_wave_capable_=false,rt_shadow_requested_=false,rt_shadow_built_=false;
+  bool rt_shadow_attempted_=false,rt_shadow_draw_active_=false,rt_shadow_counter_recorded_=false;
+  bool post_vertex_diagnostic_=false;
+  graphics::GraphicsOptionsSnapshot graphics_frame_request_;
+  graphics::RtShadowDrawConstants rt_shadow_constants_{};
+  std::vector<uint8_t> rt_shadow_shader_;
+  std::unique_ptr<graphics::d3d12::RayTracingScene> rt_shadow_scene_;
+  Microsoft::WRL::ComPtr<ID3D12Resource> rt_shadow_counter_[3],rt_shadow_counter_readback_[3],rt_shadow_zero_;
+  D3D12_RESOURCE_STATES rt_shadow_counter_state_[3]{D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+      D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+  graphics::RayShadowExecution rt_shadow_execution_;
+  void BeginRayShadows();
+  void BuildRayShadowScene();
+  bool ConfigureRayShadowDraw(uint8_t* base,uint32_t dev,uint64_t vs,uint64_t ps);
+  void RecordRayShadowCounter();
+  void HarvestRayShadowExecution();
+  struct MotionRaster {
+    uint64_t shader=0;
+    uint32_t depth_control=0,blend_control=0,color_control=0,color_mask=0;
+    D3D12_CULL_MODE cull=D3D12_CULL_MODE_NONE;
+    bool front_ccw=false,opaque=false,full_viewport=false,stencil_enabled=false,z_write=false;
+    int32_t depth_bias=0;float slope_bias=0;
+    D3D12_RECT scissor{};
+  } current_motion_raster_;
+  struct MotionReadback {
+    Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout{};
+    uint64_t size=0,swap=0;uint32_t slot=0;std::string name;
+  };
+  std::unique_ptr<graphics::d3d12::PostVertexClipCapture> motion_clips_;
+  std::unique_ptr<graphics::d3d12::TemporalMotion> temporal_motion_;
+  std::unique_ptr<graphics::d3d12::TemporalMotion> motion_static_candidate_;
+  graphics::TemporalGeometryHistory motion_history_;
+  std::vector<MotionRaster> motion_rasters_;
+  std::vector<MotionReadback> motion_readbacks_;
+  std::unordered_map<uint64_t,Microsoft::WRL::ComPtr<ID3D12PipelineState>> motion_clip_pipelines_;
+  uint32_t motion_capture_phase_=0;
+  uint32_t motion_signature_reports_=0;
+  std::vector<std::array<uint64_t,2>> motion_color_pairs_;
+  struct MotionColorSource {
+    uint64_t resource=0,source=0,frame=0,serial=0;
+    uint32_t descriptor=0,guest_base=0;bool full_copy=false;
+  } motion_color_sources_[3];
+  uint64_t motion_color_serial_=0;
+  uint32_t motion_color_reports_=0;
+  bool motion_capture_active_=false,motion_scene_finished_=false,motion_capture_done_=false;
+  bool motion_camera_valid_=false,motion_camera_conflict_=false,motion_previous_camera_bad_=false;
+  bool motion_pre_hud_pending_=false;
+  std::array<uint32_t,16> motion_camera_words_{};
+  std::array<uint32_t,6> motion_clip_fixup_{}; // Exact uploaded ScreenXform + HalfPixelOffset bits.
+  Microsoft::WRL::ComPtr<ID3D12Resource> motion_depth_snapshot_;
+  Microsoft::WRL::ComPtr<ID3D12Resource> motion_captured_depth_,motion_captured_color_;
+  uint32_t motion_captured_color_edram_=0,motion_captured_color_width_=0,motion_captured_color_height_=0;
+  float motion_captured_color_scale_=0;
+  void BeginMotionCapture();
+  void CaptureMotionClipDraw(uint8_t* base,uint32_t dev,D3D12_PRIMITIVE_TOPOLOGY topology,
+      bool indexed,uint32_t count,uint32_t first,int32_t base_vertex,
+      D3D12_INDEX_BUFFER_STRIP_CUT_VALUE cut,const WorkBatch* batch,const WorkCmd* cmd);
+  void FinishMotionScene(HostSurface* depth);
+  void MaybeFinishMotionBeforeDepthWrite(HostSurface* depth,bool writes_depth,const char* reason);
+  void EndMotionCapture();
+  void QueueMotionReadback(ID3D12Resource* texture,D3D12_RESOURCE_STATES state,const std::string& name);
+  void ReportMotionReadbacks(uint32_t slot);
+  void BeforeMotionColorDraw();
+  void CaptureMotionInlineColorGeometry(uint8_t* base,uint32_t declaration,
+      std::span<const uint8_t> vertices,uint32_t stride,uint32_t count,
+      D3D12_PRIMITIVE_TOPOLOGY topology,bool quads);
+  void AfterMotionColorDraw();
+  void RecordMotionColorBinding(uint32_t slot,const uint32_t* fetch,uint32_t descriptor);
+  void PublishGraphicsOptions();
+  Microsoft::WRL::ComPtr<ID3D12Resource> rt_probe_results_[3], rt_probe_readback_[3];
+  uint32_t rt_probe_ray_count_[3]{};
+  void RecordCapturedRayProbe();
+  void ReportCapturedRayProbe(uint32_t slot);
+  void CapturePostVertexDraw(uint8_t* base, uint32_t dev,
+                             D3D12_PRIMITIVE_TOPOLOGY topology, bool indexed,
+                             uint32_t count, uint32_t first, int32_t base_vertex=0,
+                             D3D12_INDEX_BUFFER_STRIP_CUT_VALUE cut=D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED);
 
   // Presentation: fullscreen blit of the resolved front buffer into the
   // presenter's guest output (R10G10B10A2).
@@ -705,6 +846,9 @@ class Renderer : public NativeFrontend {
     uint32_t raw_srv = 0;
     uint64_t raw_srv_fence = 0;
     uint64_t resource_generation = 0;
+    // Incremented after each worker-side upload, including partial writes.
+    // This stamps host content, not the lifetime of a guest mesh/instance.
+    uint64_t content_version = 0;
     uint32_t address = 0, size = 0;
     uint32_t decl = 0, stride = 0, index_format = 0, phase = 0;
     uint32_t reset_index = UINT32_MAX;
@@ -714,6 +858,7 @@ class Renderer : public NativeFrontend {
   std::unordered_map<uint64_t, BufferEntry> buffers_;
   std::optional<BufferSrvCache> buffer_srv_cache_;
   uint64_t next_buffer_generation_ = 1;
+  uint64_t next_buffer_content_version_ = 1;
   uint32_t vertex_fetch_[224][4] = {}; // semantic -> SRV, offset, stride, XDK type
   // 64 KB guest page -> tracked buffer keys overlapping it (fast Unlock
   // invalidation, guest side).
@@ -723,7 +868,9 @@ class Renderer : public NativeFrontend {
   // need_begin/need_end: byte range (relative to address) the draw reads;
   // [0, size) when unknown.
   // Worker: host buffer for a guest-side plan (creates / uploads as planned).
-  const BufferEntry* ApplyBuffer(uint8_t* base, const BufferPlan& plan);
+  const BufferEntry* ApplyBuffer(uint8_t* base, const BufferPlan& plan,
+                                 uint32_t position_sample_offset = UINT32_MAX,
+                                 graphics::PositionValueEvidence* position_sample = nullptr);
   // Byte-swaps [begin, end) of the guest buffer into `dst` (host order).
   void SwapBufferRange(uint8_t* base, const BufferEntry& entry, uint32_t begin, uint32_t end,
                        uint8_t* dst);

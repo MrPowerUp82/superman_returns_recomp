@@ -24,6 +24,31 @@ add_executable(sr_native_tests
     test_idle_yield.cpp
     test_xma_flush_policy.cpp
     test_frame_generation_policy.cpp
+    test_temporal_frame.cpp
+    test_camera_candidate_probe.cpp
+    test_surface_sequence.cpp
+    test_geometry_submission_probe.cpp
+    test_post_vertex_geometry.cpp
+    test_graphics_options.cpp
+    test_graphics_options_input.cpp
+    test_graphics_options_guest_pause.cpp
+    test_graphics_preferences.cpp
+    test_shadow_projection.cpp
+    test_readback_rows.cpp
+    test_shadow_caster_geometry.cpp
+    test_ray_shadow_execution.cpp
+    test_temporal_geometry_history.cpp
+    test_temporal_vertex_fetch.cpp
+    test_static_world_shader_dependencies.cpp
+    test_scene_color_boundary.cpp
+    test_scene_color_geometry.cpp
+    test_scene_color_vertex_input.cpp
+    test_motion_depth_boundary.cpp
+    test_rt_shadow_shader.cpp
+    "${SR_NATIVE_DIR}/../graphics/rt_shadow_shader.cpp"
+    "${SR_NATIVE_DIR}/../graphics/graphics_preferences.cpp"
+    "${SR_NATIVE_DIR}/../graphics/graphics_options.cpp"
+    "${SR_NATIVE_DIR}/../graphics/graphics_options_runtime.cpp"
     test_guest_hash.cpp
     test_shared_constants_cache.cpp
     test_stacked_resolve.cpp
@@ -88,6 +113,10 @@ else()
 endif()
 
 enable_testing()
+add_executable(sr_dlss_contract_tests dlss_super_resolution_test.cpp
+    "${SR_NATIVE_DIR}/../graphics/d3d12/dlss_super_resolution.cpp")
+target_compile_definitions(sr_dlss_contract_tests PRIVATE SR_HAS_DLSS=0)
+add_test(NAME sr_dlss_contract_tests COMMAND sr_dlss_contract_tests)
 add_test(NAME sr_native_tests COMMAND sr_native_tests)
 set_tests_properties(sr_native_tests PROPERTIES TIMEOUT 30)
 

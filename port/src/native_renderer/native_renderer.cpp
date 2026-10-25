@@ -28,6 +28,7 @@
 #include "../graphics/guest/pm4_capture.h"
 #include "../graphics/frame_timeline.h"
 #include "../graphics/d3d12/device_capabilities.h"
+#include "../graphics/graphics_options_runtime.h"
 
 #include <dxgi1_4.h>
 
@@ -62,6 +63,9 @@
 #include "game_profile.h"
 #include "index_endian.h"
 #include "../graphics/guest/constant_snapshot.h"
+#include "../graphics/readback_rows.h"
+#include "../graphics/motion_depth_boundary.h"
+#include "../graphics/scene_color_vertex_input.h"
 #include "native_bridge.h"
 #include "native_graphics_system.h"
 #include "sdk_compat.h"
@@ -84,6 +88,8 @@ REXCVAR_DEFINE_INT32(sr_native_dump_after_pass, -1, "Superman Returns Native",
                      "Debug: with sr_native_dump_frame_at_s, dump at the end of this pass instead of "
                      "at the end of the frame");
 REXCVAR_DEFINE_STRING(sr_native_dump_dir, "", "Superman Returns Native", "Directory for sr_native_dump_frame_at_s");
+REXCVAR_DEFINE_STRING(sr_native_motion_capture_trigger_path, "", "Superman Returns Native",
+    "Opt-in: capture two consecutive main-scene post-VS clip frames after this file appears; no DLSS application");
 REXCVAR_DEFINE_INT32(sr_native_dump_before_draw, -1, "Superman Returns Native",
                      "Debug: with sr_native_dump_frame_at_s, dump every native surface into "
                      "sr_native_dump_dir right before the Nth draw call (0-based, drawn or "
@@ -245,6 +251,17 @@ REXCVAR_DEFINE_DOUBLE(sr_native_render_scale, 1.0, "Superman Returns Native",
                       "Internal render resolution multiplier of 720p, may be fractional (1 = 720p, "
                       "1.5 = 1080p, 2 = 1440p, 3 = 2160p, 4 = 2880p)")
     .range(1.0, 4.0);
+REXCVAR_DEFINE_BOOL(sr_native_temporal_probe, false, "Superman Returns Native",
+                    "Diagnose missing D3D12 temporal inputs for future DLSS/RT (no visual effect)");
+REXCVAR_DEFINE_INT32(sr_native_rt_capture_swap, 0, "Superman Returns Native",
+                     "Extract audited post-VS world triangles on this guest swap for DXR validation (0=off)");
+REXCVAR_DEFINE_STRING(sr_native_rt_capture_trigger_path, "", "Superman Returns Native",
+                      "Extract audited post-VS world triangles once after this file appears (diagnostic, empty=off)");
+REXCVAR_DEFINE_BOOL(sr_native_camera_candidate_probe, false, "Superman Returns Native",
+                    "Diagnose gViewProjectionXform VS c0 on city draws (no visual effect)");
+REXCVAR_DEFINE_INT32(sr_native_surface_probe_swap, 0, "Superman Returns Native",
+                    "Diagnose D3D12 render-target/depth draw sequence near this guest swap (0 disables)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_INT32(sr_native_shadow_quality, 1, "Superman Returns Native",
                      "Shadow map resolution multiplier (1 = original 1024, 2 = 2048, 4 = 4096)")
     .range(1, 4);
@@ -1129,6 +1146,18 @@ void Renderer::ShutdownWorker() {
     if(batch_) batch_->Clear();
   }
   if(worker_.joinable()) worker_.join();
+  // The optional scene owns BLAS/TLAS and their source buffers. Retire all
+  // queued work before releasing them, including shutdown outside a swap.
+  if((rt_capture_scene_ || rt_shadow_scene_ || post_vertex_capture_ || motion_clips_ || temporal_motion_) && queue_ && fence_ && fence_event_ && device_ &&
+     SUCCEEDED(device_->GetDeviceRemovedReason())) {
+    const uint64_t value=next_fence_value_++;
+    if(SUCCEEDED(queue_->Signal(fence_.Get(),value)) && fence_->GetCompletedValue()<value &&
+       SUCCEEDED(fence_->SetEventOnCompletion(value,fence_event_)))
+      WaitForSingleObject(fence_event_,INFINITE);
+  }
+  // No DLSS dispatch is recorded by the capability-only integration below.
+  // A future scene Evaluate path must pass its submitted covering fence here.
+  if(dlss_) { (void)dlss_->Shutdown(); dlss_.reset(); }
   for(auto& [key,entry]:textures_) entry.tracking.reset();
   resource_write_tracker_.Stop();
   packet_sink_={};cancel_packet_sink_={};
@@ -1162,6 +1191,13 @@ bool Renderer::EnsureInitialized() {
   REXLOG_INFO("native PM4 live read profiling: {}",mirror_.alu_read_profile.enabled?"on":"off");
   REXLOG_INFO("native PM4 live read mode: {}",mirror_.bounded_alu_reads?"bounded copy":"query validation");
   render_scale_ = float(std::clamp(REXCVAR_GET(sr_native_render_scale), 1.0, 4.0));
+  temporal_probe_ = !packet_sink_ && REXCVAR_GET(sr_native_temporal_probe);
+  if (temporal_probe_) REXLOG_INFO("native temporal probe: enabled (diagnostics only)");
+  camera_candidate_probe_enabled_ = !packet_sink_ && REXCVAR_GET(sr_native_camera_candidate_probe);
+  if (camera_candidate_probe_enabled_) {
+    REXLOG_INFO("native camera candidate probe: enabled (VS {:016X} c0; diagnostics only)",
+                graphics::CameraCandidateProbe::kViewProjectionShader);
+  }
   stacked_resolves_ = !packet_sink_ && REXCVAR_GET(sr_native_stacked_resolves);
   const auto srv_capacity=cpu_options.srv_capacity;
   if(!packet_sink_ && srv_capacity) buffer_srv_cache_.emplace(size_t(srv_capacity));
@@ -1300,6 +1336,36 @@ bool Renderer::EnsureInitialized() {
     REXLOG_INFO("native: renderer initialized, shaders from {}", where);
   }
   init_failed_ = false;
+  graphics_options_epoch_=graphics::SharedGraphicsOptions()->BeginBackend(graphics::NativeApi::kD3D12);
+  D3D12_FEATURE_DATA_D3D12_OPTIONS5 ray_options{};
+  ray_tracing_capable_=SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5,
+      &ray_options,sizeof(ray_options))) && ray_options.RaytracingTier>=D3D12_RAYTRACING_TIER_1_1;
+  D3D12_FEATURE_DATA_SHADER_MODEL ray_shader_model{D3D_SHADER_MODEL_6_5};
+  ComPtr<ID3D12Device5> ray_device;
+  ray_tracing_capable_=ray_tracing_capable_ && SUCCEEDED(device_->QueryInterface(IID_PPV_ARGS(&ray_device))) &&
+      SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL,&ray_shader_model,sizeof(ray_shader_model))) &&
+      ray_shader_model.HighestShaderModel>=D3D_SHADER_MODEL_6_5;
+  D3D12_FEATURE_DATA_D3D12_OPTIONS1 wave_options{};
+  rt_shadow_wave_capable_=SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1,
+      &wave_options,sizeof(wave_options))) && wave_options.WaveOps;
+#if SR_HAS_DLSS
+  dlss_=std::make_unique<graphics::d3d12::DlssSuperResolution>();
+  wchar_t executable[32768]{};
+  const DWORD path_length=GetModuleFileNameW(nullptr,executable,DWORD(std::size(executable)));
+  if(path_length && path_length<std::size(executable)) {
+    const auto path=std::filesystem::path(executable).parent_path();
+    const auto result=dlss_->Initialize(device_,path.c_str());
+    REXLOG_INFO("native DLSS SDK initialization: result={} ngx={:08X} support={} (not applied)",
+                uint32_t(result.error),result.ngxResult,uint32_t(dlss_->GetStatus().support));
+    if(result) {
+      graphics::d3d12::DlssOptimalSettings settings{};
+      const auto optimal=dlss_->QueryOptimalSettings(output_width_,output_height_,settings);
+      REXLOG_INFO("native DLSS Quality query: result={} ngx={:08X} output={}x{} render={}x{} (scene inputs pending; applied Off)",
+                  uint32_t(optimal.error),optimal.ngxResult,settings.outputWidth,settings.outputHeight,
+                  settings.renderWidth,settings.renderHeight);
+    }
+  }
+#endif
   initialized_ = true;
   return true;
 }
@@ -1316,7 +1382,7 @@ bool Renderer::CreateDrawResources() {
   sampler_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
   sampler_range.NumDescriptors = kSamplerHeapSize;
   sampler_range.RegisterSpace = 3;
-  D3D12_ROOT_PARAMETER params[9] = {};
+  D3D12_ROOT_PARAMETER params[12] = {};
   for (uint32_t i = 0; i < 3; ++i) {
     params[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     params[i].Descriptor.ShaderRegister = i;
@@ -1339,19 +1405,26 @@ bool Renderer::CreateDrawResources() {
   params[7].DescriptorTable.NumDescriptorRanges = 1;
   params[7].DescriptorTable.pDescriptorRanges = &srv_ranges[3];
   params[7].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
-  rs_desc.NumParameters = 8;
+  params[8].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV;
+  params[8].Descriptor={0,6};params[8].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
+  params[9].ParameterType=D3D12_ROOT_PARAMETER_TYPE_CBV;
+  params[9].Descriptor={3,4};params[9].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
+  params[10].ParameterType=D3D12_ROOT_PARAMETER_TYPE_UAV;
+  params[10].Descriptor={0,6};params[10].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
+  rs_desc.NumParameters = 11;
   // Debug (sr_native_debug_rs_salt): an unused root-constant parameter makes every
   // pipeline new to the driver's shader cache - a cold first run on demand.
   if (int32_t salt = REXCVAR_GET(sr_native_debug_rs_salt); salt > 0) {
-    params[8].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    params[8].Constants.ShaderRegister = 15;
-    params[8].Constants.RegisterSpace = 7;
-    params[8].Constants.Num32BitValues = uint32_t(std::min(salt, 32));
-    params[8].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    rs_desc.NumParameters = 9;
+    params[11].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[11].Constants.ShaderRegister = 15;
+    params[11].Constants.RegisterSpace = 7;
+    params[11].Constants.Num32BitValues = uint32_t(std::min(salt, 32));
+    params[11].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    rs_desc.NumParameters = 12;
   }
   rs_desc.pParameters = params;
-  rs_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+  rs_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
+                  D3D12_ROOT_SIGNATURE_FLAG_ALLOW_STREAM_OUTPUT;
   ComPtr<ID3DBlob> blob, error;
   if (FAILED(D3D12SerializeRootSignature(&rs_desc, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &error)) ||
       FAILED(device_->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
@@ -2008,6 +2081,46 @@ bool Renderer::BeginFrame() {
                                 [completed](const auto& r) { return r.first <= completed; }),
                  retired_.end());
   frame_open_ = true;
+  BeginRayShadows();
+  BeginMotionCapture();
+  post_vertex_projection_valid_=post_vertex_camera_conflict_=false;
+  if(post_vertex_capture_) post_vertex_capture_->ReportCompleted(frame_index_);
+  ReportCapturedRayProbe(frame_index_);
+  const int32_t capture_swap=REXCVAR_GET(sr_native_rt_capture_swap);
+  const auto& capture_trigger=REXCVAR_GET(sr_native_rt_capture_trigger_path);
+  std::error_code capture_error;
+  const bool trigger_ready=!post_vertex_done_ && !capture_trigger.empty() &&
+      std::filesystem::exists(std::filesystem::u8path(capture_trigger),capture_error) && !capture_error;
+  post_vertex_diagnostic_=!packet_sink_ && !post_vertex_done_ &&
+      (trigger_ready || (capture_swap>0 && (swap_number_==uint64_t(capture_swap) ||
+                                          swap_number_+1==uint64_t(capture_swap))));
+  post_vertex_active_=post_vertex_diagnostic_ || (!packet_sink_ && rt_shadow_requested_);
+  if(post_vertex_diagnostic_) rt_shadow_requested_=false;
+  if(post_vertex_active_) {
+    post_vertex_depth_snapshot_.Reset();
+    post_vertex_color_snapshot_.Reset();
+    post_vertex_caster_valid_=post_vertex_receiver_valid_=post_vertex_light_conflict_=false;
+    if(!post_vertex_capture_) {
+      post_vertex_capture_=std::make_unique<graphics::d3d12::PostVertexCapture>();
+      if(!post_vertex_capture_->Initialize(device_)) {
+        REXLOG_ERROR("native: post-VS capture resource allocation failed");
+        post_vertex_capture_.reset();
+        post_vertex_active_=false;
+      }
+    }
+    if(post_vertex_active_) post_vertex_active_=post_vertex_capture_->Begin(command_list_.Get(),frame_index_);
+  }
+  if (temporal_probe_) temporal_.Begin(frame_count_ + 1, output_width_, output_height_);
+  if (camera_candidate_probe_enabled_) camera_candidate_probe_.Begin(frame_count_ + 1);
+  const int32_t probe_swap = REXCVAR_GET(sr_native_surface_probe_swap);
+  surface_probe_ = !packet_sink_ && ((motion_capture_active_ && motion_capture_phase_==2) ||
+                   (!surface_probe_done_ && probe_swap > 0 &&
+                    (swap_number_ == uint64_t(probe_swap) ||
+                     swap_number_ + 1 == uint64_t(probe_swap))));
+  if (surface_probe_) {
+    surface_sequence_.Reset();
+    geometry_probe_.Reset(frame_count_ + 1, swap_number_);
+  }
   frame_state_bound_ = false;
   bound_rt_count_ = 0;
   bound_ds_ = nullptr;
@@ -2131,6 +2244,7 @@ Renderer::HostSurface* Renderer::GetSurface(uint8_t* base, uint32_t surface_obje
     dsv.ViewDimension =
         samples > 1 ? D3D12_DSV_DIMENSION_TEXTURE2DMS : D3D12_DSV_DIMENSION_TEXTURE2D;
     device_->CreateDepthStencilView(s.resource.Get(), &dsv, s.view);
+    MaybeFinishMotionBeforeDepthWrite(&s,true,"surface initial clear");
     command_list_->ClearDepthStencilView(s.view, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
                                          1.0f, 0, 0, nullptr);
   } else {
@@ -2229,6 +2343,7 @@ void Renderer::CaptureCamera() {
   }
   std::memcpy(inv_view_proj_, c, sizeof(inv_view_proj_));
   camera_valid_ = true;
+  if (temporal_probe_) temporal_.CaptureCamera(std::span<const float, 16>(inv_view_proj_, 16));
 }
 
 void Renderer::ApplySsao() {
@@ -2639,6 +2754,7 @@ void Renderer::ResolveEdramAliasing(HostSurface* s) {
     REXLOG_INFO("native watch: edram alias clear {} at draw {}", SurfaceName(s), draw_calls_in_frame_);
   }
   if (s->depth) {
+    MaybeFinishMotionBeforeDepthWrite(s,true,"EDRAM alias depth clear");
     Transition(s->resource.Get(), s->state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
     command_list_->ClearDepthStencilView(s->view, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
                                          1.0f, 0, 0, nullptr);
@@ -2657,7 +2773,8 @@ void Renderer::ResolveEdramAliasing(HostSurface* s) {
 }
 
 bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_formats[4],
-                                 uint32_t& rt_count, DXGI_FORMAT& dsv_format) {
+                                 uint32_t& rt_count, DXGI_FORMAT& dsv_format,
+                                 const graphics::SurfaceDrawMetadata& draw_metadata) {
   HostSurface* rts[4] = {};
   rt_count = 0;
   // Only RTs the draw can write: stale MRT slots left bound by the guest (with
@@ -2703,12 +2820,28 @@ bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_fo
     }
     ds = nullptr;
   }
+  if (surface_probe_) {
+    graphics::SurfaceSignature sig{};
+    if (rts[0]) {
+      sig.color_edram = rts[0]->edram_base;
+      sig.color_width = rts[0]->width;
+      sig.color_height = rts[0]->height;
+      sig.color_format = rts[0]->guest_format;
+    }
+    if (ds) {
+      sig.depth_edram = ds->edram_base;
+      sig.depth_width = ds->width;
+      sig.depth_height = ds->height;
+    }
+    surface_sequence_.ObserveDraw(sig, draw_metadata);
+  }
   // Experiment: EDRAM-aliased depth surfaces (e.g. the 256x144 bloom depth at
   // base 448, never cleared by the game) start from depth 0 each frame.
   if (ds && REXCVAR_GET(sr_native_exp_alias_depth_base) >= 0 &&
       ds->edram_base == uint32_t(REXCVAR_GET(sr_native_exp_alias_depth_base)) &&
       alias_clear_frame_ != frame_count_) {
     alias_clear_frame_ = frame_count_;
+    MaybeFinishMotionBeforeDepthWrite(ds,true,"experimental alias depth clear");
     Transition(ds->resource.Get(), ds->state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
     command_list_->ClearDepthStencilView(ds->view, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
                                          float(REXCVAR_GET(sr_native_exp_alias_depth_value)), 0, 0,
@@ -2722,8 +2855,20 @@ bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_fo
   if (g_current_pass == kPassRenderOpaque && rts[0] && ds) {
     scene_rt_ = rts[0];
     scene_ds_ = ds;
+    if (temporal_probe_) {
+      temporal_.ObserveScene(reinterpret_cast<uintptr_t>(rts[0]->resource.Get()),
+                             reinterpret_cast<uintptr_t>(ds->resource.Get()));
+    }
   }
+  if(!same_bind && (rts[0]!=bind_set_[0] || ds!=bind_set_[4]) && motion_capture_active_ && !motion_scene_finished_ && bind_set_[0] && bind_set_[4] &&
+     bind_set_[0]->guest_format==12 && bind_set_[0]->samples==1 &&
+     bind_set_[0]->width==bind_set_[4]->width && bind_set_[0]->height==bind_set_[4]->height)
+    FinishMotionScene(bind_set_[4]);
   if (!same_bind) {
+    if(post_vertex_diagnostic_ && post_vertex_active_ && !post_vertex_depth_snapshot_ && bind_set_[0] && bind_set_[4] &&
+       bind_set_[0]->guest_format==12 && bind_set_[0]->width==bind_set_[4]->width &&
+       bind_set_[0]->height==bind_set_[4]->height && post_vertex_capture_ &&
+       !post_vertex_capture_->ranges().empty()) SnapshotPostVertexDepth();
     // Only a new bind set can observe other surfaces' EDRAM writes.
     bind_set_[0] = rts[0]; bind_set_[1] = rts[1]; bind_set_[2] = rts[2]; bind_set_[3] = rts[3];
     bind_set_[4] = ds;
@@ -2733,6 +2878,9 @@ bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_fo
     for (uint32_t i = 0; i < 4; ++i) if (rts[i]) rts[i]->last_write = seq;
     if (ds) ds->last_write = seq;
   }
+  if(rt_shadow_requested_ && !rt_shadow_attempted_ && rts[0] && ds &&
+     rts[0]->guest_format==12 && post_vertex_capture_ && !post_vertex_capture_->ranges().empty())
+    BuildRayShadowScene();
   rt_count = 0;
   for (uint32_t i = 0; i < 4; ++i) {
     if (rts[i]) rt_count = i + 1;
@@ -2898,6 +3046,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
                                            const DXGI_FORMAT rtv_formats[4], uint32_t rt_count,
                                            DXGI_FORMAT dsv_format,
                                            D3D12_INDEX_BUFFER_STRIP_CUT_VALUE strip_cut) {
+  const bool ray_variant=rt_shadow_draw_active_ && !rt_shadow_shader_.empty();
   reg::RB_BLENDCONTROL blend{LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_BLENDCONTROL0)};
   reg::PA_SU_SC_MODE_CNTL mode{LoadReg(base, dev, rex::graphics::XE_GPU_REG_PA_SU_SC_MODE_CNTL)};
   reg::RB_DEPTHCONTROL depth{LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_DEPTHCONTROL)};
@@ -2942,6 +3091,18 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
                 mode.value, poly_scale, poly_offset, depth_bias, depth.value, stencil_ref_mask,
                 bound_samples_, (LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_COLORCONTROL) >> 4) & 1);
   }
+  current_motion_raster_.depth_bias=depth_bias;current_motion_raster_.slope_bias=slope_bias;
+  current_motion_raster_.cull=mode.cull_front && !mode.cull_back ? D3D12_CULL_MODE_FRONT :
+      mode.cull_back && !mode.cull_front ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
+  current_motion_raster_.front_ccw=(mode.face ? false : true) ^ bool(REXCVAR_GET(sr_native_flip_winding));
+  const uint32_t motion_color=LoadReg(base,dev,rex::graphics::XE_GPU_REG_RB_COLORCONTROL);
+  current_motion_raster_.shader=vs_hash;current_motion_raster_.depth_control=depth.value;
+  current_motion_raster_.blend_control=blend.value;current_motion_raster_.color_control=motion_color;
+  current_motion_raster_.color_mask=color_mask;current_motion_raster_.stencil_enabled=depth.stencil_enable;
+  current_motion_raster_.z_write=depth.z_write_enable;
+  current_motion_raster_.opaque=bound_samples_==1 && depth.z_enable && depth.z_write_enable &&
+      !depth.stencil_enable && !REXCVAR_GET(sr_native_debug_no_ztest) &&
+      (blend.value&0x1fff)==1 && (!(motion_color&8) || (motion_color&7)==7);
   uint32_t slope_bits;
   std::memcpy(&slope_bits, &slope_bias, 4);
 
@@ -2953,7 +3114,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
   uint64_t key_parts[] = {vs_hash ^ (uint64_t(bound_samples_) << 60) ^
                               (uint64_t(alpha_to_coverage) << 59),
                           (uint64_t(uint32_t(depth_bias)) << 32) | slope_bits,
-                          ps_hash,
+                          ps_hash ^ (ray_variant ? 0x5352525453480001ull : 0),
                           decl_hash,
                           blend.value,
                           uint64_t(mode.value & 0x7) | (uint64_t(color_mask & 0xFFFF) << 8) |
@@ -2991,7 +3152,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
   {
     // Precompiled at startup (or compiling right now) by the pipeline cache.
     ComPtr<ID3D12PipelineState> precompiled;
-    if (pipeline_cache_.Take(key, precompiled)) {
+    if (!ray_variant && pipeline_cache_.Take(key, precompiled)) {
       pipelines_[key] = precompiled;
       ++stats_.pso_precompiled_hits;
       return precompiled.Get();
@@ -3001,7 +3162,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
   const auto* vs = LoadShader(vs_hash, true);
   bool pending = shader_pending_;
   // ps_hash == 0: depth-only draw (the game binds no pixel shader).
-  const auto* ps = ps_hash ? LoadShader(ps_hash, false) : nullptr;
+  const auto* ps = ray_variant ? &rt_shadow_shader_ : ps_hash ? LoadShader(ps_hash, false) : nullptr;
   pending = pending || shader_pending_;
   if (!vs || (ps_hash && !ps)) {
     if (pending) pipelines_.erase(key);  // ask again once the translation finished
@@ -3162,7 +3323,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
     record.topology_type = uint32_t(desc.PrimitiveTopologyType);
     record.strip_cut = uint32_t(desc.IBStripCutValue);
   };
-  if (elements.size() <= PsoRecord::kMaxElements) {
+  if (!ray_variant && elements.size() <= PsoRecord::kMaxElements) {
     // Same description precompiled under another key: a settings variant
     // generated from a pipeline captured with other MSAA/foliage settings, or
     // guest state bits that do not change the host pipeline (EXP-052).
@@ -3180,7 +3341,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
   // pipeline is ready. Everything that may carry state across frames (post
   // process, the luminance/exposure chain, copies, HUD, menus) still waits: a
   // skipped one-time draw can break the image permanently (EXP-005).
-  if (REXCVAR_GET(sr_native_async_pipelines) && REXCVAR_GET(sr_native_pipeline_cache) &&
+  if (!ray_variant && REXCVAR_GET(sr_native_async_pipelines) && REXCVAR_GET(sr_native_pipeline_cache) &&
       elements.size() <= PsoRecord::kMaxElements) {
     int p = g_current_pass;
     // Conan: shadow maps, reflections, depth, decals, opaque (+character),
@@ -3245,7 +3406,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
     }
   }
   // Remember it for the next start's precompilation.
-  if (elements.size() <= PsoRecord::kMaxElements) {
+  if (!ray_variant && elements.size() <= PsoRecord::kMaxElements) {
     pipeline_cache_.Record(record);
   }
   ++stats_.pso_created;
@@ -4127,6 +4288,15 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
       REXLOG_INFO("native dbg vs consts v{}:{} | shadow:{}", mirror_.vs_version, m, sh);
     }
   }
+  if (camera_candidate_probe_enabled_ &&
+      current_vs_hash_ == graphics::CameraCandidateProbe::kViewProjectionShader) {
+    // The mirror tracks the actual VS bank in host byte order, including
+    // constants submitted by the worker capture path. Copy only c0..c3.
+    const auto& words = mirror_.FloatConstants(false);
+    std::array<float, 16> matrix{};
+    std::memcpy(matrix.data(), words.data(), sizeof(matrix));
+    camera_candidate_probe_.Observe(current_vs_hash_, matrix);
+  }
   if (!REXCVAR_GET(sr_native_debug_ps).empty() && use_mirror &&
       current_ps_hash_ == std::strtoull(REXCVAR_GET(sr_native_debug_ps).c_str(), nullptr, 16)) {
     static int logged = 0;
@@ -4248,6 +4418,7 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
         srv |= 0x80000000u;
       }
     }
+    if(motion_capture_active_ && slot<3) RecordMotionColorBinding(slot,fetch,srv);
     if (trace_state_ == 1 && (fetch[0] & 3) == uint32_t(xenos::FetchConstantType::kTexture)) {
       uint32_t addr = GuestPhysical(fetch[1] & 0xFFFFF000u);
       auto latest = resolve_latest_.find(addr);
@@ -4320,6 +4491,45 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
   }
   std::memcpy(&s[73], &half_pixel[0], 4);
   std::memcpy(&s[74], &half_pixel[1], 4);
+  if(post_vertex_active_ && use_mirror) {
+    const bool caster=current_vs_hash_==0x57A00D4EB3BF4C31ull || current_vs_hash_==0xC7C0E381A3C9B79Eull;
+    const bool receiver=current_vs_hash_==graphics::CameraCandidateProbe::kViewProjectionShader;
+    if(caster || receiver) {
+      const auto& words=mirror_.FloatConstants(false);
+      const uint32_t row=caster ? 4 : 9;
+      graphics::ShadowProjection projection;
+      std::memcpy(projection.u.data(),words.data()+row*4,16);
+      std::memcpy(projection.v.data(),words.data()+(row+1)*4,16);
+      std::memcpy(projection.z.data(),words.data()+(row+2)*4,16);
+      auto& saved=caster ? post_vertex_caster_projection_ : post_vertex_receiver_projection_;
+      auto& valid=caster ? post_vertex_caster_valid_ : post_vertex_receiver_valid_;
+      if(graphics::ShadowRayDirection(projection).valid) {
+        if(valid && !graphics::ShadowProjectionsMatch(saved,projection)) post_vertex_light_conflict_=true;
+        saved=projection; valid=true;
+      } else post_vertex_light_conflict_=true;
+    }
+  }
+  if(post_vertex_active_ && use_mirror &&
+     current_vs_hash_==graphics::CameraCandidateProbe::kViewProjectionShader &&
+     !ScreenSpaceDraw(base,dev)) {
+    graphics::Matrix4 projection{};
+    const auto& words=mirror_.FloatConstants(false);
+    std::memcpy(projection.data(),words.data(),sizeof(projection));
+    // Invert the actual final raster clip, including the host pixel-center
+    // shift. World varying extraction itself does not need this inverse.
+    for(size_t c=0;c<4;++c) {
+      projection[c]+=half_pixel[0]*projection[12+c];
+      projection[4+c]+=half_pixel[1]*projection[12+c];
+    }
+    graphics::Matrix4 inverse{};
+    const bool valid=graphics::InvertProjection(projection,inverse);
+    if(valid && post_vertex_projection_valid_)
+      for(size_t i=0;i<16;++i)
+        if(std::abs(inverse[i]-post_vertex_inverse_[i])>1e-4f) post_vertex_camera_conflict_=true;
+    if(valid) {post_vertex_inverse_=inverse; post_vertex_projection_valid_=true;}
+    for(size_t axis=0;axis<3;++axis)
+      std::memcpy(&post_vertex_camera_[axis],words.data()+(5+axis)*4+3,sizeof(float));
+  }
   // Runtime spec constants (shared c28.x, see the XenosRecomp patch):
   // bit 1 = alpha test (RB_COLORCONTROL), threshold from RB_ALPHA_REF.
   // The translated test is clip(alpha - ref): exact for GREATER/GEQUAL.
@@ -4427,6 +4637,12 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
     xform[3] = 1.0f + wy * xform[1];
   }
   std::memcpy(&s[108], xform, sizeof(xform));
+  if(motion_capture_active_) {
+    // Preserve the exact CPU operands written above, without reading a mapped
+    // write-combined upload heap when shared staging/cache are disabled.
+    std::memcpy(motion_clip_fixup_.data(),xform,sizeof(xform));
+    std::memcpy(motion_clip_fixup_.data()+4,half_pixel,sizeof(half_pixel));
+  }
   if (trace_state_ == 1) {
     const float* v = reinterpret_cast<const float*>(mirror_.regs() + Pm4Mirror::kAluConstantBase);
     std::string vc;
@@ -4541,6 +4757,9 @@ void Renderer::ApplyFixedFunctionState(uint8_t* base, uint32_t dev) {
     vp.Height *= k;
   }
   command_list_->RSSetViewports(1, &vp);
+  current_motion_raster_.full_viewport=bound_rts_[0] && vp.TopLeftX==0 && vp.TopLeftY==0 &&
+      vp.Width==float(HostPx(bound_rts_[0]->width,bound_rts_[0]->scale)) &&
+      vp.Height==float(HostPx(bound_rts_[0]->height,bound_rts_[0]->scale)) && vp.MinDepth==0 && vp.MaxDepth==1;
   // Scissor (draw_util::GetScissor): window scissor + window offset, clamped by
   // the screen scissor. Not during predicated tiling: host surfaces are untiled
   // while the XDK sets a per-tile scissor.
@@ -4561,6 +4780,7 @@ void Renderer::ApplyFixedFunctionState(uint8_t* base, uint32_t dev) {
     }
   }
   command_list_->RSSetScissorRects(1, &scissor);
+  current_motion_raster_.scissor=scissor;
   uint32_t stencil_ref_mask = LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_STENCILREFMASK);
   command_list_->OMSetStencilRef(stencil_ref_mask & 0xFF);
   float blend_factor[4];
@@ -4786,11 +5006,32 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
   DXGI_FORMAT rtv_formats[4];
   uint32_t rt_count = 0;
   DXGI_FORMAT dsv_format = DXGI_FORMAT_UNKNOWN;
-  if (!BindRenderTargets(base, dev, rtv_formats, rt_count, dsv_format)) {
+  graphics::SurfaceDrawMetadata draw_metadata{};
+  if (surface_probe_) {
+    draw_metadata = {vs_hash, ps_hash, uint32_t(g_current_pass), prim,
+                     LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_DEPTHCONTROL),
+                     LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_COLOR_MASK)};
+  }
+  if (!BindRenderTargets(base, dev, rtv_formats, rt_count, dsv_format, draw_metadata)) {
     ++stats_.skip_rt;
     stats_.pass_last_skip[g_current_pass & 31] = "rt";
     LogUnsupportedOnce("render target bind", 0);
     return false;
+  }
+  if(motion_pre_hud_pending_ && bound_rts_[0] && bound_rts_[0]->guest_format==0 && bound_rts_[0]->samples==1 &&
+     bound_rts_[0]->width==kOutputWidth && bound_rts_[0]->height==kOutputHeight) {
+    // Bounded diagnostic checkpoints, before distinct final-color draw families.
+    // The first font draw was already too late (HUD bar present); inspect the
+    // earlier checkpoints instead of asserting that it is a pre-HUD boundary.
+    const std::array<uint64_t,2> pair{vs_hash,ps_hash};
+    if(motion_color_pairs_.size()<12 &&
+       std::find(motion_color_pairs_.begin(),motion_color_pairs_.end(),pair)==motion_color_pairs_.end()) {
+      motion_color_pairs_.push_back(pair);
+      QueueMotionReadback(bound_rts_[0]->resource.Get(),bound_rts_[0]->state,
+          fmt::format("candidate_color_d{}_vs{:016X}_ps{:016X}",draw_calls_in_frame_,vs_hash,ps_hash));
+    }
+    if(vs_hash==0xFCB6D23E7B941855ull && ps_hash==0x9841B42F263B95DEull)
+      motion_pre_hud_pending_=false;
   }
   // After binding targets: EDRAM reinterpretation inside BindRenderTargets
   // may have changed the root signature and heaps.
@@ -4809,12 +5050,17 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
     frame_state_bound_ = true;
   }
   // Primitive restart only matters for strips.
+  rt_shadow_draw_active_=ConfigureRayShadowDraw(base,dev,vs_hash,ps_hash);
   if (topology != D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP &&
       topology != D3D_PRIMITIVE_TOPOLOGY_LINESTRIP) {
     strip_cut = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
   }
   ID3D12PipelineState* pso = GetPipeline(base, dev, vs_hash, ps_hash, decl, topology_type,
                                          rtv_formats, rt_count, dsv_format, strip_cut);
+  if(!pso && rt_shadow_draw_active_) {
+    rt_shadow_draw_active_=false;
+    pso=GetPipeline(base,dev,vs_hash,ps_hash,decl,topology_type,rtv_formats,rt_count,dsv_format,strip_cut);
+  }
   if (!pso) {
     ++stats_.skip_pso;
     ++stats_.skip_pso_pairs[{vs_hash, ps_hash, g_current_pass}];
@@ -4863,6 +5109,7 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
   }
   current_ps_hash_ = ps_hash;
   current_vs_hash_ = vs_hash;
+  if(motion_capture_active_) for(auto& source:motion_color_sources_) source={};
   if (!UploadConstants(base, dev)) {
     return false;
   }
@@ -4870,7 +5117,16 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
     CaptureCamera();
   }
   ApplyFixedFunctionState(base, dev);
+  if(rt_shadow_draw_active_) {
+    UploadAlloc rt_constants;
+    if(!Upload(sizeof(rt_shadow_constants_),256,rt_constants)) return false;
+    std::memcpy(rt_constants.cpu,&rt_shadow_constants_,sizeof(rt_shadow_constants_));
+    command_list_->SetGraphicsRootShaderResourceView(8,rt_shadow_scene_->AccelerationStructure()->GetGPUVirtualAddress());
+    command_list_->SetGraphicsRootConstantBufferView(9,rt_constants.gpu);
+    command_list_->SetGraphicsRootUnorderedAccessView(10,rt_shadow_counter_[frame_index_]->GetGPUVirtualAddress());
+  }
   command_list_->SetPipelineState(pso);
+  current_raster_pipeline_=pso;
   const D3D12_VERTEX_BUFFER_VIEW default_view{
       default_vertex_buffer_->GetGPUVirtualAddress(), 16, 0};
   command_list_->IASetVertexBuffers(16, 1, &default_view);
@@ -4962,7 +5218,9 @@ void Renderer::VertexRange::Resolve() {
 
 // Worker: executes a guest-side buffer plan. Planned bytes were captured with
 // the command, so SwapBufferRange reads them instead of live guest memory.
-const Renderer::BufferEntry* Renderer::ApplyBuffer(uint8_t* base, const BufferPlan& plan) {
+const Renderer::BufferEntry* Renderer::ApplyBuffer(
+    uint8_t* base, const BufferPlan& plan, uint32_t position_sample_offset,
+    graphics::PositionValueEvidence* position_sample) {
   thread_local std::vector<uint8_t> scratch;
   auto it = buffers_.find(plan.key);
   if (it != buffers_.end() && plan.action != 2) {
@@ -4981,6 +5239,7 @@ const Renderer::BufferEntry* Renderer::ApplyBuffer(uint8_t* base, const BufferPl
                  D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER |
                      D3D12_RESOURCE_STATE_INDEX_BUFFER |
                      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+      entry.content_version = next_buffer_content_version_++;
       ++stats_.buffer_partial_uploads;
       stats_.buffer_upload_bytes += e - b;
     }
@@ -5046,7 +5305,9 @@ const Renderer::BufferEntry* Renderer::ApplyBuffer(uint8_t* base, const BufferPl
     }
     entry.raw_srv = 0;
     entry.raw_srv_fence = 0;
-    if(buffer_srv_cache_) entry.resource_generation=next_buffer_generation_++;
+    // Track generation even without the optional SRV cache so RT diagnostics
+    // can distinguish new host allocations from reused guest addresses.
+    entry.resource_generation = next_buffer_generation_++;
   } else {
     Transition(entry.resource.Get(), entry.state, D3D12_RESOURCE_STATE_COPY_DEST);
   }
@@ -5054,6 +5315,11 @@ const Renderer::BufferEntry* Renderer::ApplyBuffer(uint8_t* base, const BufferPl
   Transition(entry.resource.Get(), entry.state,
              D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_INDEX_BUFFER |
              D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+  entry.content_version = next_buffer_content_version_++;
+  if (position_sample && position_sample_offset != UINT32_MAX) {
+    *position_sample = graphics::DecodeHostFloat3(
+        std::span<const uint8_t>(scratch.data(), scratch.size()), position_sample_offset);
+  }
   return &entry;
 }
 
@@ -5386,6 +5652,17 @@ bool Renderer::BindVertexStreams(uint8_t* base, const WorkBatch& batch, const Wo
   CpuTimer setup_timer(timings.setup_ns,detail);
   if(detail) ++timings.calls;
   bool ok = cmd.streams_ok;
+  position_draw_value_ = {};
+  std::optional<graphics::guest::VertexAttribute> sampled_position;
+  if (surface_probe_ && cmd.op == Op::kDraw && cmd.stream_count) {
+    const auto& first_stream = batch.streams[cmd.stream_first];
+    for (const auto& attribute : ReadVertexDeclaration(base, first_stream.buffer.decl)) {
+      if (attribute.usage == 0 && attribute.index == 0) {
+        if (attribute.type == 0x2A23B9) sampled_position = attribute;
+        break;
+      }
+    }
+  }
   std::memset(vertex_fetch_, 0, sizeof(vertex_fetch_));
   const uint32_t dev = GuestDevice(base);
   const bool dynamic_fetch = dev && DynamicVertexFetch(base, dev);
@@ -5396,7 +5673,16 @@ bool Renderer::BindVertexStreams(uint8_t* base, const WorkBatch& batch, const Wo
     const BufferEntry* vb;
     {
       CpuTimer timer(timings.apply_ns,detail);
-      vb=ApplyBuffer(base,sp.buffer);
+      uint32_t sample_offset = UINT32_MAX;
+      if (sampled_position && sampled_position->stream == sp.stream)
+        sample_offset = graphics::HostPositionSampleOffset(
+            sp.offset, sp.size, sp.buffer.size, sp.stride, cmd.u[1],
+            sampled_position->offset, 12);
+      vb=ApplyBuffer(base, sp.buffer, sample_offset,
+                     sample_offset != UINT32_MAX ? &position_draw_value_ : nullptr);
+      if (sample_offset != UINT32_MAX &&
+          position_draw_value_.status != graphics::PositionValueStatus::kNotSampled)
+        position_draw_value_.vertex_index = cmd.u[1];
     }
     if (!vb) {
       if(detail) ++timings.missing;
@@ -5484,6 +5770,175 @@ bool Renderer::BindVertexStreams(uint8_t* base, const WorkBatch& batch, const Wo
   return ok;
 }
 
+static graphics::GeometryGpuTopology GeometryProbeTopology(D3D12_PRIMITIVE_TOPOLOGY topology) {
+  switch (topology) {
+    case D3D_PRIMITIVE_TOPOLOGY_POINTLIST: return graphics::GeometryGpuTopology::kPointList;
+    case D3D_PRIMITIVE_TOPOLOGY_LINELIST: return graphics::GeometryGpuTopology::kLineList;
+    case D3D_PRIMITIVE_TOPOLOGY_LINESTRIP: return graphics::GeometryGpuTopology::kLineStrip;
+    case D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST: return graphics::GeometryGpuTopology::kTriangleList;
+    case D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP: return graphics::GeometryGpuTopology::kTriangleStrip;
+    default: return graphics::GeometryGpuTopology::kUnknown;
+  }
+}
+
+void Renderer::CapturePostVertexDraw(uint8_t* base,uint32_t dev,
+    D3D12_PRIMITIVE_TOPOLOGY topology,bool indexed,uint32_t count,uint32_t first,
+    int32_t base_vertex,D3D12_INDEX_BUFFER_STRIP_CUT_VALUE cut) {
+  const uint32_t world_texcoord=graphics::WorldPositionTexcoord(current_vs_hash_);
+  const bool caster=graphics::IsOriginalShadowCaster(current_vs_hash_) && bound_rts_[0] &&
+      bound_rts_[0]->guest_format==4 && bound_rts_[0]->width==bound_rts_[0]->height;
+  if((!post_vertex_diagnostic_ && !caster) || !post_vertex_active_ || (!caster && world_texcoord==UINT32_MAX) || SkipGpuDraw() ||
+     !post_vertex_capture_ || !current_raster_pipeline_ || (!caster && !bound_ds_) ||
+     (topology!=D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST &&
+      topology!=D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP)) return;
+  const uint32_t vertices=graphics::PostVertexCapacity(count,
+      topology==D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+  if(!vertices) return;
+  const uint32_t decl=Load32(base,dev+kDevVertexDecl);
+  // The same declaration interpretation and default float inputs as raster.
+  const auto& attributes=ReadVertexDeclaration(base,decl);
+  const uint64_t key_parts[]{current_vs_hash_,uint64_t(cut),
+      XXH3_64bits(attributes.data(),attributes.size()*sizeof(attributes[0]))};
+  const uint64_t key=XXH3_64bits(key_parts,sizeof(key_parts));
+  auto found=post_vertex_pipelines_.find(key);
+  if(found==post_vertex_pipelines_.end()) {
+    const auto* vs=LoadShader(current_vs_hash_,true);
+    if(!vs) return;
+    const auto inputs=VertexShaderInputs(*vs);
+    std::vector<D3D12_INPUT_ELEMENT_DESC> elements;
+    for(const auto& a:attributes) {
+      const auto f=MapDeclType(a.type);
+      if(f.format==DXGI_FORMAT_UNKNOWN) continue;
+      if(!inputs.empty() && std::find(inputs.begin(),inputs.end(),
+          std::make_pair(std::string(UsageSemantic(a.usage)),a.index))==inputs.end()) continue;
+      D3D12_INPUT_ELEMENT_DESC e{};
+      e.SemanticName=UsageSemantic(a.usage); e.SemanticIndex=a.index;
+      e.Format=f.format; e.InputSlot=a.stream; e.AlignedByteOffset=a.offset;
+      e.InputSlotClass=D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+      elements.push_back(e);
+    }
+    for(const auto& input:VertexShaderInputs(*vs,true)) {
+      if(std::any_of(elements.begin(),elements.end(),[&](const auto& e){
+          return input.first==e.SemanticName && input.second==e.SemanticIndex;})) continue;
+      uint32_t usage=0;
+      while(usage<14 && input.first!=UsageSemantic(usage)) ++usage;
+      if(usage==14) continue;
+      D3D12_INPUT_ELEMENT_DESC e{};
+      e.SemanticName=UsageSemantic(usage); e.SemanticIndex=input.second;
+      e.Format=DXGI_FORMAT_R32G32B32A32_FLOAT; e.InputSlot=16;
+      e.InputSlotClass=D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+      elements.push_back(e);
+    }
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
+    desc.pRootSignature=root_signature_.Get();
+    desc.VS={vs->data(),vs->size()};
+    if(!VertexShaderHasFloatOutput(*vs,"TEXCOORD",caster ? 0 : world_texcoord,caster ? 1 : 7)) {
+      REXLOG_ERROR("native: post-VS contract rejected: VS {:016X} has no float XYZ TEXCOORD{} output",
+                   current_vs_hash_,world_texcoord);
+      post_vertex_pipelines_.emplace(key,ComPtr<ID3D12PipelineState>{});
+      return;
+    }
+    desc.GS=graphics::d3d12::PostVertexCapture::GeometryShader(caster ? 0 : world_texcoord);
+    const D3D12_SO_DECLARATION_ENTRY so{0,"TEXCOORD",15,0,3,0};
+    const uint32_t stride=12;
+    desc.StreamOutput={&so,1,&stride,1,D3D12_SO_NO_RASTERIZED_STREAM};
+    desc.InputLayout={elements.data(),UINT(elements.size())};
+    desc.RasterizerState.FillMode=D3D12_FILL_MODE_SOLID;
+    desc.RasterizerState.CullMode=D3D12_CULL_MODE_NONE;
+    desc.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_ALWAYS;
+    desc.DepthStencilState.StencilReadMask=desc.DepthStencilState.StencilWriteMask=0xff;
+    desc.DepthStencilState.FrontFace={D3D12_STENCIL_OP_KEEP,D3D12_STENCIL_OP_KEEP,
+                                     D3D12_STENCIL_OP_KEEP,D3D12_COMPARISON_FUNC_ALWAYS};
+    desc.DepthStencilState.BackFace=desc.DepthStencilState.FrontFace;
+    desc.PrimitiveTopologyType=D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    desc.IBStripCutValue=cut; desc.SampleDesc.Count=1; desc.SampleMask=UINT_MAX;
+    ComPtr<ID3D12PipelineState> pso;
+    const HRESULT hr=device_->CreateGraphicsPipelineState(&desc,IID_PPV_ARGS(&pso));
+    if(FAILED(hr)) REXLOG_ERROR("native: post-VS pipeline vs={:016X} failed {:08X}",current_vs_hash_,uint32_t(hr));
+    found=post_vertex_pipelines_.emplace(key,std::move(pso)).first;
+  }
+  if(!found->second) return;
+  const auto range=post_vertex_capture_->Reserve(vertices,current_vs_hash_);
+  if(!range) return;
+  command_list_->SetPipelineState(found->second.Get());
+  command_list_->SOSetTargets(0,1,&range->view);
+  if(indexed) command_list_->DrawIndexedInstanced(count,1,first,base_vertex,0);
+  else command_list_->DrawInstanced(count,1,first,0);
+  command_list_->SOSetTargets(0,0,nullptr);
+  command_list_->SetPipelineState(current_raster_pipeline_);
+}
+
+#include "native_motion_capture.inc"
+
+void Renderer::RecordGeometrySubmission(uint8_t* base, const WorkBatch* batch, const WorkCmd* cmd,
+                                        graphics::GeometrySubmission submission,
+                                        uint32_t surface_draw_before) {
+  if (!surface_probe_) return;
+  submission.surface_draw = graphics::CorrelateSurfaceDraw(
+      surface_draw_before, surface_sequence_.total_draws());
+  submission.guest_pass = uint32_t(g_current_pass);
+  submission.vs_hash = current_vs_hash_;
+  submission.ps_hash = current_ps_hash_;
+  submission.raster_draw_suppressed = SkipGpuDraw();
+
+  if (batch && cmd) {
+    submission.stream_count = cmd->stream_count;
+    auto host_generation = [this](uint64_t key) -> uint64_t {
+      auto it = buffers_.find(key);
+      return it != buffers_.end() && it->second.resource
+                 ? it->second.resource_generation : 0;
+    };
+    for (size_t i = 0;
+         i < std::min<size_t>(cmd->stream_count, submission.streams.size()); ++i) {
+      const StreamPlan& stream = batch->streams[cmd->stream_first + i];
+      auto& evidence = submission.streams[i];
+      evidence.guest_key = stream.buffer.key;
+      evidence.host_generation = host_generation(stream.buffer.key);
+      evidence.guest_address = stream.buffer.address;
+      evidence.bytes = stream.size;
+      evidence.stride = stream.stride;
+      evidence.offset = stream.offset;
+      evidence.buffer_bytes = stream.buffer.size;
+      evidence.planned_action = stream.buffer.action;
+      evidence.vertex_declaration = stream.buffer.decl;
+      evidence.stream_slot = stream.stream;
+      auto it = buffers_.find(stream.buffer.key);
+      if (it != buffers_.end() && it->second.resource)
+        evidence.content_version = it->second.content_version;
+    }
+    if (cmd->has_index) {
+      auto& evidence = submission.index;
+      evidence.guest_key = cmd->index.key;
+      evidence.host_generation = host_generation(cmd->index.key);
+      evidence.guest_address = cmd->index.address;
+      evidence.bytes = cmd->index_size;
+      evidence.stride = cmd->index32 ? 4 : 2;
+      evidence.buffer_bytes = cmd->index.size;
+      evidence.planned_action = cmd->index.action;
+      auto it = buffers_.find(cmd->index.key);
+      if (it != buffers_.end() && it->second.resource)
+        evidence.content_version = it->second.content_version;
+    }
+    // The XDK declaration is shared by the planned streams. Observe the
+    // POSITION0 semantic only for directly versioned triangle submissions.
+    if (base && cmd->stream_count &&
+        graphics::ClassifyDirectTriangleInput(submission) ==
+            graphics::DirectTriangleInputStatus::kCandidate) {
+      const uint32_t declaration = batch->streams[cmd->stream_first].buffer.decl;
+      submission.position_layout = graphics::InspectPositionLayout(
+          submission, ReadVertexDeclaration(base, declaration));
+    }
+    submission.position_access = graphics::InspectPositionAccess(submission);
+    if (submission.position_access == graphics::PositionAccessStatus::kNonIndexedRangeValid &&
+        submission.position_layout.status == graphics::PositionLayoutStatus::kFloat3) {
+      submission.position_value = position_draw_value_;
+      if (submission.position_value.status == graphics::PositionValueStatus::kNotSampled)
+        submission.position_value.status = graphics::PositionValueStatus::kUnavailableFreshUpload;
+    }
+  }
+  geometry_probe_.Observe(submission);
+}
+
 void Renderer::ExecDrawVertices(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd) {
   uint32_t prim = cmd.u[0], start_vertex = cmd.u[1], vertex_count = cmd.u[2];
   crumb_prim_ = prim;
@@ -5493,6 +5948,7 @@ void Renderer::ExecDrawVertices(uint8_t* base, const WorkBatch& batch, const Wor
   uint32_t dev = GuestDevice(base);
   D3D12_PRIMITIVE_TOPOLOGY topology;
   bool quads;
+  const uint32_t surface_before = surface_probe_ ? surface_sequence_.total_draws() : 0;
   bool streams_ok = BindVertexStreams(base, batch, cmd);
   if (!dev || !vertex_count || !PrepareDraw(base, dev, prim, topology, quads) || !streams_ok) {
     ++stats_.draws_skipped; ++stats_.pass_skips[g_current_pass & 31];
@@ -5522,9 +5978,26 @@ void Renderer::ExecDrawVertices(uint8_t* base, const WorkBatch& batch, const Wor
     }
     D3D12_INDEX_BUFFER_VIEW ibv{ib.gpu, quad_count * 24, DXGI_FORMAT_R32_UINT};
     command_list_->IASetIndexBuffer(&ibv);
-    if (!SkipGpuDraw()) command_list_->DrawIndexedInstanced(quad_count * 6, 1, 0, 0, 0);
+    if (!SkipGpuDraw()) {BeforeMotionColorDraw();command_list_->DrawIndexedInstanced(quad_count * 6, 1, 0, 0, 0);AfterMotionColorDraw();}
   } else {
-    if (!SkipGpuDraw()) command_list_->DrawInstanced(vertex_count, 1, start_vertex, 0);
+    if (!SkipGpuDraw()) {BeforeMotionColorDraw();command_list_->DrawInstanced(vertex_count, 1, start_vertex, 0);AfterMotionColorDraw();}
+    CapturePostVertexDraw(base,dev,topology,false,vertex_count,start_vertex);
+    CaptureMotionClipDraw(base,dev,topology,false,vertex_count,start_vertex,0,
+        D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED,&batch,&cmd);
+  }
+  if (surface_probe_) {
+    graphics::GeometrySubmission submission{};
+    submission.kind = graphics::GeometrySubmissionKind::kVertices;
+    submission.primitive = prim;
+    submission.elements = vertex_count;
+    submission.first_element = start_vertex;
+    submission.gpu_topology = GeometryProbeTopology(topology);
+    submission.gpu_index_source = quads ? graphics::GeometryIndexSource::kGenerated
+                                        : graphics::GeometryIndexSource::kNone;
+    submission.gpu_elements = quads ? (vertex_count / 4) * 6 : vertex_count;
+    submission.gpu_first_element = quads ? 0 : start_vertex;
+    submission.gpu_index32 = quads;
+    RecordGeometrySubmission(base, &batch, &cmd, submission, surface_before);
   }
   ++stats_.draws; ++trace_draws_; Breadcrumb();
   ++stats_.pass_draws[g_current_pass & 31];
@@ -5547,6 +6020,7 @@ void Renderer::ExecDrawIndexedVertices(uint8_t* base, const WorkBatch& batch,
                                                ? D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF
                                                : D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF;
   // Buffers first (planned uploads must happen even for skipped draws).
+  const uint32_t surface_before = surface_probe_ ? surface_sequence_.total_draws() : 0;
   bool streams_ok = BindVertexStreams(base, batch, cmd);
   const BufferEntry* ib = cmd.has_index ? ApplyBuffer(base, cmd.index) : nullptr;
   const bool prepared = dev && index_count && PrepareDraw(base, dev, prim, topology, quads, cut);
@@ -5570,7 +6044,22 @@ void Renderer::ExecDrawIndexedVertices(uint8_t* base, const WorkBatch& batch,
     std::memcpy(tris.cpu, batch.bytes.data() + cmd.u[4], size_t(quad_indices) * 4);
     D3D12_INDEX_BUFFER_VIEW qv{tris.gpu, quad_indices * 4, DXGI_FORMAT_R32_UINT};
     command_list_->IASetIndexBuffer(&qv);
-    if (!SkipGpuDraw()) command_list_->DrawIndexedInstanced(quad_indices, 1, 0, base_vertex, 0);
+    if (!SkipGpuDraw()) {BeforeMotionColorDraw();command_list_->DrawIndexedInstanced(quad_indices, 1, 0, base_vertex, 0);AfterMotionColorDraw();}
+    if (surface_probe_) {
+      graphics::GeometrySubmission submission{};
+      submission.kind = graphics::GeometrySubmissionKind::kIndexed;
+      submission.primitive = prim;
+      submission.elements = index_count;
+      submission.first_element = start_index;
+      submission.base_vertex = base_vertex;
+      submission.index32 = cmd.index32;
+      submission.gpu_topology = GeometryProbeTopology(topology);
+      submission.gpu_index_source = graphics::GeometryIndexSource::kGenerated;
+      submission.gpu_elements = quad_indices;
+      submission.gpu_first_element = 0;
+      submission.gpu_index32 = true;
+      RecordGeometrySubmission(base, &batch, &cmd, submission, surface_before);
+    }
     ++stats_.draws; ++trace_draws_; Breadcrumb();
     ++stats_.pass_draws[g_current_pass & 31];
     return;
@@ -5592,7 +6081,24 @@ void Renderer::ExecDrawIndexedVertices(uint8_t* base, const WorkBatch& batch,
                   base_vertex, current_ps_hash_, cmd.index_size, cmd.index32, st);
     }
   }
-  if (!SkipGpuDraw()) command_list_->DrawIndexedInstanced(index_count, 1, start_index, base_vertex, 0);
+  if (!SkipGpuDraw()) {BeforeMotionColorDraw();command_list_->DrawIndexedInstanced(index_count, 1, start_index, base_vertex, 0);AfterMotionColorDraw();}
+  CapturePostVertexDraw(base,dev,topology,true,index_count,start_index,base_vertex,cut);
+  CaptureMotionClipDraw(base,dev,topology,true,index_count,start_index,base_vertex,cut,&batch,&cmd);
+  if (surface_probe_) {
+    graphics::GeometrySubmission submission{};
+    submission.kind = graphics::GeometrySubmissionKind::kIndexed;
+    submission.primitive = prim;
+    submission.elements = index_count;
+    submission.first_element = start_index;
+    submission.base_vertex = base_vertex;
+    submission.index32 = cmd.index32;
+    submission.gpu_topology = GeometryProbeTopology(topology);
+    submission.gpu_index_source = graphics::GeometryIndexSource::kGuest;
+    submission.gpu_elements = index_count;
+    submission.gpu_first_element = start_index;
+    submission.gpu_index32 = cmd.index32;
+    RecordGeometrySubmission(base, &batch, &cmd, submission, surface_before);
+  }
   ++stats_.draws; ++trace_draws_; Breadcrumb();
   ++stats_.pass_draws[g_current_pass & 31];
 }
@@ -5620,6 +6126,7 @@ void Renderer::ExecDrawInlineVertices(uint8_t* base, uint32_t prim, uint32_t dat
   uint32_t dev = GuestDevice(base);
   D3D12_PRIMITIVE_TOPOLOGY topology;
   bool quads;
+  const uint32_t surface_before = surface_probe_ ? surface_sequence_.total_draws() : 0;
   if (!dev || !vertex_count || !stride || !data ||
       !PrepareDraw(base, dev, prim, topology, quads)) {
     ++stats_.draws_skipped; ++stats_.pass_skips[g_current_pass & 31];
@@ -5657,7 +6164,21 @@ void Renderer::ExecDrawInlineVertices(uint8_t* base, uint32_t prim, uint32_t dat
     std::memcpy(rect_vb.cpu, expanded.data(), expanded.size());
     D3D12_VERTEX_BUFFER_VIEW rect_view{rect_vb.gpu, uint32_t(expanded.size()), stride};
     command_list_->IASetVertexBuffers(0, 1, &rect_view);
-    if (!SkipGpuDraw()) command_list_->DrawInstanced(uint32_t(expanded.size() / stride), 1, 0, 0);
+    if (!SkipGpuDraw()) {CaptureMotionInlineColorGeometry(base,decl,expanded,stride,uint32_t(expanded.size()/stride),topology,false);BeforeMotionColorDraw();command_list_->DrawInstanced(uint32_t(expanded.size() / stride), 1, 0, 0);AfterMotionColorDraw();}
+    if (surface_probe_) {
+      graphics::GeometrySubmission submission{};
+      submission.kind = graphics::GeometrySubmissionKind::kInline;
+      submission.primitive = prim;
+      submission.elements = vertex_count;
+      submission.gpu_topology = GeometryProbeTopology(topology);
+      submission.gpu_elements = uint32_t(expanded.size() / stride);
+      submission.gpu_vertices_expanded = true;
+      submission.stream_count = 1;
+      submission.streams[0].guest_address = data;
+      submission.streams[0].bytes = uint32_t(vb_size);
+      submission.streams[0].stride = stride;
+      RecordGeometrySubmission(base, nullptr, nullptr, submission, surface_before);
+    }
     ++stats_.draws; ++trace_draws_; Breadcrumb();
     ++stats_.pass_draws[g_current_pass & 31];
     return;
@@ -5681,9 +6202,25 @@ void Renderer::ExecDrawInlineVertices(uint8_t* base, uint32_t prim, uint32_t dat
     }
     D3D12_INDEX_BUFFER_VIEW ibv{ib.gpu, quad_count * 12, DXGI_FORMAT_R16_UINT};
     command_list_->IASetIndexBuffer(&ibv);
-    if (!SkipGpuDraw()) command_list_->DrawIndexedInstanced(quad_count * 6, 1, 0, 0, 0);
+    if (!SkipGpuDraw()) {CaptureMotionInlineColorGeometry(base,decl,{vdata,vb_size},stride,vertex_count,topology,quads);BeforeMotionColorDraw();command_list_->DrawIndexedInstanced(quad_count * 6, 1, 0, 0, 0);AfterMotionColorDraw();}
   } else {
-    if (!SkipGpuDraw()) command_list_->DrawInstanced(vertex_count, 1, 0, 0);
+    if (!SkipGpuDraw()) {CaptureMotionInlineColorGeometry(base,decl,{vdata,vb_size},stride,vertex_count,topology,quads);BeforeMotionColorDraw();command_list_->DrawInstanced(vertex_count, 1, 0, 0);AfterMotionColorDraw();}
+  }
+  if (surface_probe_) {
+    graphics::GeometrySubmission submission{};
+    submission.kind = graphics::GeometrySubmissionKind::kInline;
+    submission.primitive = prim;
+    submission.elements = vertex_count;
+    submission.gpu_topology = GeometryProbeTopology(topology);
+    submission.gpu_index_source = quads ? graphics::GeometryIndexSource::kGenerated
+                                        : graphics::GeometryIndexSource::kNone;
+    submission.gpu_elements = quads ? (vertex_count / 4) * 6 : vertex_count;
+    submission.gpu_index32 = false;
+    submission.stream_count = 1;
+    submission.streams[0].guest_address = data;
+    submission.streams[0].bytes = uint32_t(vb_size);
+    submission.streams[0].stride = stride;
+    RecordGeometrySubmission(base, nullptr, nullptr, submission, surface_before);
   }
   ++stats_.draws; ++trace_draws_; Breadcrumb();
   ++stats_.pass_draws[g_current_pass & 31];
@@ -5735,6 +6272,7 @@ void Renderer::ExecBeginTiling(uint8_t* base, uint32_t count, uint32_t rects,
     }
   }
   if (ds) {
+    MaybeFinishMotionBeforeDepthWrite(ds,true,"BeginTiling depth clear");
     Transition(ds->resource.Get(), ds->state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
     command_list_->ClearDepthStencilView(ds->view, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
                                          std::clamp(clear_z, 0.0f, 1.0f), uint8_t(clear_stencil),
@@ -6049,6 +6587,10 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
       d.pResource = dst.resource.Get();
       d.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
       D3D12_BOX box{x1, y1, 0, x2, y2, 1};
+      if(motion_capture_active_ && motion_capture_phase_==2) {
+        dst.motion_source_frame=dst.motion_source_serial=dst.motion_source_resource=0;
+        dst.motion_full_color_copy=false;
+      }
       if (depth) {
         CopyDepthRegion(*src, dst, x1, y1, x2, y2, dx, dy);
         // The scene depth (not a shadow map) for soft particles later in the frame.
@@ -6067,6 +6609,15 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
         command_list_->CopyTextureRegion(&d, dx, dy, volume?stack_plan->destination_z:0, &s, &box);
         if(volume && trace_state_==1)
           REXLOG_INFO("trace stacked resolve base={:08X} mip={} slice={} host_z={} layers={}",dest_base,level,slice,stack_plan->destination_z,layers);
+        if(motion_capture_active_ && motion_capture_phase_==2) {
+          dst.motion_source_frame=src->motion_write_frame;dst.motion_source_serial=src->motion_write_serial;
+          dst.motion_source_resource=reinterpret_cast<uint64_t>(src->resource.Get());
+          dst.motion_full_color_copy=!volume && !x1 && !y1 && !dx && !dy &&
+              x2==HostPx(src->width,src->scale) && y2==HostPx(src->height,src->scale) &&
+              x2==HostPx(dst.width,dst.scale) && y2==HostPx(dst.height,dst.scale);
+          if(motion_scene_finished_ && motion_color_reports_<64)
+            REXLOG_INFO("native motion color copy: host_frame={} serial={} source={:X} destination={:X} source_frame={} source_draw={} full={} rect={}x{}+{},{} destination_xy={},{}",frame_count_+1,++motion_color_serial_,dst.motion_source_resource,reinterpret_cast<uint64_t>(dst.resource.Get()),dst.motion_source_frame,dst.motion_source_serial,dst.motion_full_color_copy,x2-x1,y2-y1,x1,y1,dx,dy);
+        }
         Breadcrumb("color resolve");
       }
       Transition(dst.resource.Get(), dst.state,
@@ -6132,6 +6683,7 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
                       g_current_pass, swap_number_);
         }
       }
+      MaybeFinishMotionBeforeDepthWrite(ds,true,"resolve depth clear");
       Transition(ds->resource.Get(), ds->state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
       command_list_->ClearDepthStencilView(ds->view,
                                            D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
@@ -6145,7 +6697,417 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
   std::memset(bound_rts_, 0, sizeof(bound_rts_));
 }
 
+void Renderer::RecordCapturedRayProbe() {
+  using namespace graphics::d3d12;
+  const auto& ranges=post_vertex_capture_->ranges();
+  if(ranges.empty()) return;
+  if(!rt_capture_scene_) {
+    auto scene=std::make_unique<RayTracingScene>();
+    const HRESULT hr=scene->Initialize(device_);
+    if(FAILED(hr)) {
+      REXLOG_ERROR("native: captured DXR scene unavailable {:08X}: {}",uint32_t(hr),scene->LastError());
+      return;
+    }
+    rt_capture_scene_=std::move(scene);
+  }
+  const auto& last=ranges.back();
+  const uint32_t vertex_count=last.offset/12+last.vertices;
+  // One opaque validation BLAS over the contiguous world-space arena. Materials,
+  // alpha cutouts and logical character identity are not attested by this probe.
+  const RayTracingGeometry geometry{post_vertex_capture_->vertices(),0,vertex_count,false,{}};
+  HRESULT hr=rt_capture_scene_->BeginFrame(frame_index_);
+  if(SUCCEEDED(hr)) hr=rt_capture_scene_->BuildScene(command_list_.Get(),{&geometry,1});
+  if(FAILED(hr)) {
+    REXLOG_ERROR("native: captured DXR BLAS/TLAS failed {:08X}: {}",uint32_t(hr),rt_capture_scene_->LastError());
+    return;
+  }
+  REXLOG_INFO("native: captured DXR BLAS/TLAS recorded: vertices={} triangles={} dropped_draws={} (validation scene; no visual RT option applied)",
+              vertex_count,vertex_count/3,post_vertex_capture_->dropped());
+  if(!post_vertex_projection_valid_ || post_vertex_camera_conflict_) {
+    REXLOG_WARN("native: captured DXR ray validation skipped: camera missing or ambiguous");
+    return;
+  }
+  for(float value:post_vertex_camera_) if(!std::isfinite(value)) return;
+  std::vector<RayTracingRay> rays;
+  for(int y=-1;y<=1;++y) for(int x=-1;x<=1;++x) {
+    const auto p=graphics::RecoverWorldPosition(post_vertex_inverse_,
+        {x*0.5f,y*0.5f,0.5f,1},{1,1,0,0},{0,0});
+    if(!p.valid) continue;
+    RayTracingRay ray{};
+    double length2=0;
+    for(size_t axis=0;axis<3;++axis) {
+      ray.origin[axis]=post_vertex_camera_[axis];
+      ray.direction[axis]=p.xyz[axis]-ray.origin[axis];
+      length2+=double(ray.direction[axis])*ray.direction[axis];
+    }
+    if(!std::isfinite(length2) || length2<1e-12) continue;
+    for(float& value:ray.direction) value/=float(std::sqrt(length2));
+    ray.t_min=0.01f; ray.t_max=100000.0f;
+    rays.push_back(ray);
+  }
+  if(rays.empty()) return;
+  const uint32_t bytes=uint32_t(rays.size()*sizeof(RayTracingHit));
+  auto buffer=[&](D3D12_HEAP_TYPE heap_type,D3D12_RESOURCE_FLAGS flags,
+      D3D12_RESOURCE_STATES state,ComPtr<ID3D12Resource>& result) {
+    D3D12_HEAP_PROPERTIES heap{}; heap.Type=heap_type;
+    D3D12_RESOURCE_DESC d{};
+    d.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER; d.Width=bytes; d.Height=1;
+    d.DepthOrArraySize=d.MipLevels=1; d.SampleDesc.Count=1;
+    d.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR; d.Flags=flags;
+    return device_->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&d,state,
+                                            nullptr,IID_PPV_ARGS(&result));
+  };
+  hr=buffer(D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,rt_probe_results_[frame_index_]);
+  if(SUCCEEDED(hr)) hr=buffer(D3D12_HEAP_TYPE_READBACK,D3D12_RESOURCE_FLAG_NONE,
+      D3D12_RESOURCE_STATE_COPY_DEST,rt_probe_readback_[frame_index_]);
+  if(SUCCEEDED(hr)) hr=rt_capture_scene_->TraceRays(command_list_.Get(),rays,
+                                                   rt_probe_results_[frame_index_].Get());
+  if(FAILED(hr)) {
+    REXLOG_ERROR("native: captured DXR ray query failed {:08X}: {}",uint32_t(hr),rt_capture_scene_->LastError());
+    return;
+  }
+  auto state=D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+  Transition(rt_probe_results_[frame_index_].Get(),state,D3D12_RESOURCE_STATE_COPY_SOURCE);
+  command_list_->CopyBufferRegion(rt_probe_readback_[frame_index_].Get(),0,
+                                  rt_probe_results_[frame_index_].Get(),0,bytes);
+  rt_probe_ray_count_[frame_index_]=uint32_t(rays.size());
+  RecordDepthReceiverProbe();
+  RecordCapturedVisibility();
+}
+
+void Renderer::SnapshotPostVertexDepth() {
+  auto* depth=bind_set_[4];
+  if(!depth || depth->samples!=1 || !post_vertex_projection_valid_ || post_vertex_camera_conflict_) return;
+  const auto desc=depth->resource->GetDesc();
+  D3D12_HEAP_PROPERTIES heap{}; heap.Type=D3D12_HEAP_TYPE_DEFAULT;
+  const HRESULT hr=device_->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,
+      D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&post_vertex_depth_snapshot_));
+  if(FAILED(hr)) {REXLOG_ERROR("native: receiver depth snapshot failed {:08X}",uint32_t(hr));return;}
+  const auto before=depth->state;
+  Transition(depth->resource.Get(),depth->state,D3D12_RESOURCE_STATE_COPY_SOURCE);
+  command_list_->CopyResource(post_vertex_depth_snapshot_.Get(),depth->resource.Get());
+  Transition(depth->resource.Get(),depth->state,before);
+  auto state=D3D12_RESOURCE_STATE_COPY_DEST;
+  Transition(post_vertex_depth_snapshot_.Get(),state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+  auto* color=bind_set_[0];
+  if(color && color->samples==1) {
+    const auto color_desc=color->resource->GetDesc();
+    if(SUCCEEDED(device_->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&color_desc,
+        D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&post_vertex_color_snapshot_)))) {
+      const auto color_before=color->state;
+      Transition(color->resource.Get(),color->state,D3D12_RESOURCE_STATE_COPY_SOURCE);
+      command_list_->CopyResource(post_vertex_color_snapshot_.Get(),color->resource.Get());
+      Transition(color->resource.Get(),color->state,color_before);
+      state=D3D12_RESOURCE_STATE_COPY_DEST;
+      Transition(post_vertex_color_snapshot_.Get(),state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
+  }
+  REXLOG_INFO("native: receiver depth snapshot {}x{} fmt={} after_world_draws={} before_new_surface_bind (candidate scene boundary)",
+              desc.Width,desc.Height,uint32_t(desc.Format),post_vertex_capture_->ranges().size());
+}
+
+void Renderer::RecordDepthReceiverProbe() {
+  using namespace graphics::d3d12;
+  if(!post_vertex_depth_snapshot_ || !rt_capture_scene_ || post_vertex_camera_conflict_) return;
+  RayTracingDepthInputs input{};
+  const auto desc=post_vertex_depth_snapshot_->GetDesc();
+  input.depth=post_vertex_depth_snapshot_.Get(); input.width=uint32_t(desc.Width); input.height=desc.Height;
+  input.grid_width=32; input.grid_height=18;
+  std::memcpy(input.inv_view_projection,post_vertex_inverse_.data(),sizeof(input.inv_view_projection));
+  std::memcpy(input.camera,post_vertex_camera_.data(),sizeof(input.camera));
+  const uint32_t count=input.grid_width*input.grid_height,bytes=count*sizeof(RayTracingDepthHit);
+  D3D12_RESOURCE_DESC buffer{}; buffer.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;
+  buffer.Width=bytes; buffer.Height=1; buffer.DepthOrArraySize=buffer.MipLevels=1;
+  buffer.SampleDesc.Count=1; buffer.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  buffer.Flags=D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+  D3D12_HEAP_PROPERTIES heap{}; heap.Type=D3D12_HEAP_TYPE_DEFAULT;
+  HRESULT hr=device_->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&buffer,
+      D3D12_RESOURCE_STATE_UNORDERED_ACCESS,nullptr,IID_PPV_ARGS(&rt_depth_results_[frame_index_]));
+  heap.Type=D3D12_HEAP_TYPE_READBACK; buffer.Flags=D3D12_RESOURCE_FLAG_NONE;
+  if(SUCCEEDED(hr)) hr=device_->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&buffer,
+      D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&rt_depth_readback_[frame_index_]));
+  if(SUCCEEDED(hr)) hr=rt_capture_scene_->ProbeDepth(command_list_.Get(),input,rt_depth_results_[frame_index_].Get());
+  if(FAILED(hr)) {REXLOG_ERROR("native: receiver depth probe failed {:08X}: {}",uint32_t(hr),rt_capture_scene_->LastError());return;}
+  auto state=D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+  Transition(rt_depth_results_[frame_index_].Get(),state,D3D12_RESOURCE_STATE_COPY_SOURCE);
+  command_list_->CopyResource(rt_depth_readback_[frame_index_].Get(),rt_depth_results_[frame_index_].Get());
+  rt_depth_count_[frame_index_]=count;
+}
+
+void Renderer::RecordCapturedVisibility() {
+  using namespace graphics::d3d12;
+  const bool match=post_vertex_caster_valid_ && post_vertex_receiver_valid_ &&
+      graphics::ShadowProjectionsMatch(post_vertex_caster_projection_,post_vertex_receiver_projection_);
+  if(!match || post_vertex_light_conflict_ || !post_vertex_depth_snapshot_ || !post_vertex_color_snapshot_) {
+    REXLOG_INFO("native captured visibility skipped: caster={} receiver={} projection_match={} conflict={} depth={} color={}",
+        post_vertex_caster_valid_,post_vertex_receiver_valid_,match,post_vertex_light_conflict_,
+        bool(post_vertex_depth_snapshot_),bool(post_vertex_color_snapshot_));
+    return;
+  }
+  const auto direction=graphics::ShadowRayDirection(post_vertex_receiver_projection_);
+  RayTracingTraceInputs input{};
+  const auto desc=post_vertex_depth_snapshot_->GetDesc();
+  input.depth=post_vertex_depth_snapshot_.Get(); input.color=post_vertex_color_snapshot_.Get();
+  input.width=uint32_t(desc.Width); input.height=desc.Height;
+  std::memcpy(input.inv_view_projection,post_vertex_inverse_.data(),sizeof(input.inv_view_projection));
+  std::memcpy(input.camera,post_vertex_camera_.data(),sizeof(input.camera));
+  std::memcpy(input.direction_to_light,direction.xyz.data(),sizeof(input.direction_to_light));
+  input.inv_view_projection_valid=input.camera_valid=input.light_valid=input.depth_valid=input.color_valid=true;
+  // Explicit diagnostic settings, not claims about the game's light size/bias.
+  input.ray_bias=0.05f; input.max_distance=10000; input.max_depth_delta=0.005f;
+  const HRESULT trace=rt_capture_scene_->Trace(command_list_.Get(),input);
+  if(FAILED(trace)) {REXLOG_ERROR("native captured visibility failed {:08X}: {}",uint32_t(trace),rt_capture_scene_->LastError());return;}
+  auto* shadow=rt_capture_scene_->Outputs().shadow;
+  const auto output_desc=shadow->GetDesc();
+  uint64_t size=0;
+  device_->GetCopyableFootprints(&output_desc,0,1,0,&rt_visibility_layout_[frame_index_],nullptr,nullptr,&size);
+  D3D12_RESOURCE_DESC buffer{}; buffer.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER; buffer.Width=size;
+  buffer.Height=1; buffer.DepthOrArraySize=buffer.MipLevels=1; buffer.SampleDesc.Count=1;
+  buffer.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  D3D12_HEAP_PROPERTIES heap{}; heap.Type=D3D12_HEAP_TYPE_READBACK;
+  if(FAILED(device_->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&buffer,
+      D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&rt_visibility_readback_[frame_index_])))) return;
+  auto state=D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+  Transition(shadow,state,D3D12_RESOURCE_STATE_COPY_SOURCE);
+  D3D12_TEXTURE_COPY_LOCATION src{},dst{};
+  src.pResource=shadow; src.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  dst.pResource=rt_visibility_readback_[frame_index_].Get(); dst.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  dst.PlacedFootprint=rt_visibility_layout_[frame_index_];
+  command_list_->CopyTextureRegion(&dst,0,0,0,&src,nullptr);
+  rt_visibility_size_[frame_index_]=size; rt_visibility_swap_[frame_index_]=swap_number_;
+  REXLOG_INFO("native captured visibility recorded: {}x{} light=({:.6g},{:.6g},{:.6g}) matched_caster_receiver=true (diagnostic texture; no lighting composition or RT option applied)",
+              input.width,input.height,direction.xyz[0],direction.xyz[1],direction.xyz[2]);
+}
+
+void Renderer::ReportCapturedRayProbe(uint32_t slot) {
+  if(rt_visibility_size_[slot] && rt_visibility_readback_[slot]) {
+    const size_t size=size_t(rt_visibility_size_[slot]); rt_visibility_size_[slot]=0;
+    const D3D12_RANGE range{0,size}; void* data=nullptr;
+    if(SUCCEEDED(rt_visibility_readback_[slot]->Map(0,&range,&data))) {
+      const auto& layout=rt_visibility_layout_[slot];
+      uint32_t valid=0,occluded=0; double sum=0;
+      for(uint32_t y=0;y<layout.Footprint.Height;++y) {
+        const auto* row=reinterpret_cast<const float*>(static_cast<const uint8_t*>(data)+layout.Offset+y*layout.Footprint.RowPitch);
+        for(uint32_t x=0;x<layout.Footprint.Width;++x) if(std::isfinite(row[x]) && row[x]>=0 && row[x]<=1) {
+          ++valid; occluded+=row[x]<1; sum+=row[x];
+        }
+      }
+      const auto folder=std::filesystem::u8path(REXCVAR_GET(sr_native_dump_dir));
+      const auto file=folder/fmt::format("rt_visibility_s{}.raw",rt_visibility_swap_[slot]);
+      std::ofstream out;
+      const uint32_t header[]{layout.Footprint.Width,layout.Footprint.Height,uint32_t(DXGI_FORMAT_R32_FLOAT),layout.Footprint.RowPitch};
+      bool saved=false;
+      if(!folder.empty()) {
+        std::error_code error; std::filesystem::create_directories(folder,error);
+        if(!error) {
+          out.open(file,std::ios::binary);
+          out.write(reinterpret_cast<const char*>(header),sizeof(header));
+          const bool rows_saved=graphics::WritePaddedReadbackRows(out,
+              {static_cast<const uint8_t*>(data),size},size_t(layout.Offset),
+              layout.Footprint.Width*sizeof(float),layout.Footprint.RowPitch,layout.Footprint.Height);
+          out.close(); saved=rows_saved && bool(out);
+        }
+      }
+      const D3D12_RANGE empty{0,0}; rt_visibility_readback_[slot]->Unmap(0,&empty);
+      REXLOG_INFO("native captured visibility completed: valid_receivers={} occluded={} mean_visibility={:.6g} dump={} saved={} (partial opaque scene; shadows not composed)",
+          valid,occluded,valid ? sum/valid : 0,file.string(),saved);
+    }
+  }
+  if(rt_depth_count_[slot] && rt_depth_readback_[slot]) {
+    const uint32_t count=rt_depth_count_[slot]; rt_depth_count_[slot]=0;
+    D3D12_RANGE range{0,count*sizeof(graphics::d3d12::RayTracingDepthHit)};
+    void* data=nullptr;
+    if(SUCCEEDED(rt_depth_readback_[slot]->Map(0,&range,&data))) {
+      const auto* samples=static_cast<const graphics::d3d12::RayTracingDepthHit*>(data);
+      uint32_t valid=0,hits=0,agree=0;
+      std::vector<float> errors;
+      for(uint32_t i=0;i<count;++i) if(samples[i].valid) {
+        ++valid; hits+=samples[i].hit!=0;
+        if(samples[i].hit && std::isfinite(samples[i].relative_error)) {
+          errors.push_back(samples[i].relative_error);
+          agree+=samples[i].relative_error<=0.01f;
+        }
+      }
+      std::sort(errors.begin(),errors.end());
+      const D3D12_RANGE empty{0,0}; rt_depth_readback_[slot]->Unmap(0,&empty);
+      REXLOG_INFO("native receiver depth agreement: samples={} valid={} hits={} within_one_percent={} relative_error_p50={:.6g} p95={:.6g} fence_completed=true (coverage/camera experiment; no temporal readiness attested)",
+          count,valid,hits,agree,errors.empty() ? -1.f : errors[errors.size()/2],
+          errors.empty() ? -1.f : errors[(errors.size()-1)*95/100]);
+    }
+  }
+  const uint32_t count=rt_probe_ray_count_[slot];
+  if(!count || !rt_probe_readback_[slot]) return;
+  rt_probe_ray_count_[slot]=0;
+  const D3D12_RANGE range{0,count*sizeof(graphics::d3d12::RayTracingHit)};
+  void* data=nullptr;
+  if(FAILED(rt_probe_readback_[slot]->Map(0,&range,&data))) return;
+  const auto* results=static_cast<const graphics::d3d12::RayTracingHit*>(data);
+  uint32_t hits=0;
+  for(uint32_t i=0;i<count;++i) {
+    if(results[i].hit) {
+      ++hits;
+      REXLOG_INFO("native captured DXR hit: ray={} distance={:.6g} primitive={} instance={}",
+                  i,results[i].distance,results[i].primitive_id,results[i].instance_id);
+    }
+  }
+  const D3D12_RANGE empty{0,0}; rt_probe_readback_[slot]->Unmap(0,&empty);
+  REXLOG_INFO("native captured DXR execution: rays={} hits={} misses={} completed_after_frame_slot_fence=true (probe only; RT shadows/reflections Off)",
+              count,hits,count-hits);
+}
+
+void Renderer::BeginRayShadows() {
+  HarvestRayShadowExecution();
+  graphics_frame_request_=graphics::SharedGraphicsOptions()->Snapshot();
+  rt_shadow_built_=rt_shadow_attempted_=rt_shadow_draw_active_=rt_shadow_counter_recorded_=false;
+  if(ray_tracing_capable_ && rt_shadow_wave_capable_ && rt_shadow_shader_.empty()) {
+    if(ShaderTranslator::Get().FetchRtShadowVariant(0x8A6DD1D52752FAD6ull,rt_shadow_shader_)==TranslateState::kReady)
+      REXLOG_INFO("native RT shadow shader ready: {} bytes; original lighting family specialization",rt_shadow_shader_.size());
+  }
+  rt_shadow_requested_=graphics_frame_request_.requested[0]==1 && ray_tracing_capable_ &&
+      rt_shadow_wave_capable_ && !rt_shadow_shader_.empty() && REXCVAR_GET(sr_native_pm4_mirror);
+  if(!rt_shadow_requested_) return;
+  auto buffer=[&](uint64_t bytes,D3D12_HEAP_TYPE type,D3D12_RESOURCE_STATES state,
+                  D3D12_RESOURCE_FLAGS flags,ComPtr<ID3D12Resource>& resource) {
+    D3D12_HEAP_PROPERTIES heap{};heap.Type=type;
+    D3D12_RESOURCE_DESC d{};d.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;d.Width=bytes;
+    d.Height=1;d.DepthOrArraySize=d.MipLevels=1;d.SampleDesc.Count=1;
+    d.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;d.Flags=flags;
+    return device_->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&d,state,nullptr,IID_PPV_ARGS(&resource));
+  };
+  HRESULT hr=S_OK;
+  if(!rt_shadow_zero_) {
+    hr=buffer(4,D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ,D3D12_RESOURCE_FLAG_NONE,rt_shadow_zero_);
+    void* mapped=nullptr; const D3D12_RANGE empty{0,0};
+    if(SUCCEEDED(hr)) hr=rt_shadow_zero_->Map(0,&empty,&mapped);
+    if(SUCCEEDED(hr)) {std::memset(mapped,0,4);rt_shadow_zero_->Unmap(0,nullptr);}
+    else rt_shadow_zero_.Reset();
+  }
+  if(SUCCEEDED(hr) && !rt_shadow_counter_[frame_index_])
+    hr=buffer(4,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,rt_shadow_counter_[frame_index_]);
+  if(SUCCEEDED(hr) && !rt_shadow_counter_readback_[frame_index_])
+    hr=buffer(4,D3D12_HEAP_TYPE_READBACK,D3D12_RESOURCE_STATE_COPY_DEST,
+        D3D12_RESOURCE_FLAG_NONE,rt_shadow_counter_readback_[frame_index_]);
+  if(FAILED(hr)) {REXLOG_ERROR("native RT shader counter unavailable {:08X}",uint32_t(hr));rt_shadow_requested_=false;return;}
+  Transition(rt_shadow_counter_[frame_index_].Get(),rt_shadow_counter_state_[frame_index_],D3D12_RESOURCE_STATE_COPY_DEST);
+  command_list_->CopyBufferRegion(rt_shadow_counter_[frame_index_].Get(),0,rt_shadow_zero_.Get(),0,4);
+  Transition(rt_shadow_counter_[frame_index_].Get(),rt_shadow_counter_state_[frame_index_],D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+}
+
+void Renderer::BuildRayShadowScene() {
+  using namespace graphics::d3d12;
+  rt_shadow_attempted_=true;
+  if(!post_vertex_capture_ || !post_vertex_caster_valid_ || post_vertex_light_conflict_) return;
+  const auto& ranges=post_vertex_capture_->ranges();
+  if(ranges.empty() || post_vertex_capture_->dropped()) return;
+  for(const auto& range:ranges) if(!graphics::IsOriginalShadowCaster(range.vs)) return;
+  post_vertex_capture_->Finish(command_list_.Get(),false);
+  post_vertex_active_=false;
+  if(!rt_shadow_scene_) {
+    auto scene=std::make_unique<RayTracingScene>();
+    const HRESULT hr=scene->Initialize(device_);
+    if(FAILED(hr)) {REXLOG_WARN("native RT shadows initialization failed: {}",scene->LastError());return;}
+    rt_shadow_scene_=std::move(scene);
+  }
+  const auto& last=ranges.back();
+  const RayTracingGeometry geometry{post_vertex_capture_->vertices(),0,last.offset/12+last.vertices,false,{}};
+  HRESULT hr=rt_shadow_scene_->BeginFrame(frame_index_);
+  if(SUCCEEDED(hr)) hr=rt_shadow_scene_->BuildScene(command_list_.Get(),{&geometry,1});
+  if(FAILED(hr)) {REXLOG_WARN("native RT shadows scene failed: {}",rt_shadow_scene_->LastError());return;}
+  rt_shadow_built_=true;
+}
+
+bool Renderer::ConfigureRayShadowDraw(uint8_t* base,uint32_t dev,uint64_t vs,uint64_t ps) {
+  // Only color-producing scene draws can contribute to the applied effect.
+  // A depth-only invocation must not count as an active visual RT shadow.
+  if(!bound_rts_[0] || bound_rts_[0]->guest_format!=12 ||
+     !(LoadReg(base,dev,rex::graphics::XE_GPU_REG_RB_COLOR_MASK)&7u)) return false;
+  if(!rt_shadow_requested_ || !rt_shadow_built_ || !rt_shadow_scene_->AccelerationStructure() ||
+     vs!=0x2C45BFFE76D77398ull || !graphics::IsRtShadowShader(ps) ||
+     rt_shadow_shader_.empty() || post_vertex_light_conflict_) return false;
+  const auto& words=mirror_.FloatConstants(false);
+  graphics::ShadowProjection projection;
+  std::memcpy(projection.u.data(),words.data()+9*4,16);
+  std::memcpy(projection.v.data(),words.data()+10*4,16);
+  std::memcpy(projection.z.data(),words.data()+11*4,16);
+  if(!graphics::ShadowProjectionsMatch(projection,post_vertex_caster_projection_)) return false;
+  const auto direction=graphics::ShadowRayDirection(projection);
+  rt_shadow_constants_={};
+  std::memcpy(rt_shadow_constants_.light,direction.xyz.data(),sizeof(rt_shadow_constants_.light));
+  rt_shadow_constants_.enabled=1;rt_shadow_constants_.bias=.05f;rt_shadow_constants_.max_distance=10000;
+  const bool high=graphics_frame_request_.requested[1]==2;
+  rt_shadow_constants_.cone=high ? .01f : .003f;rt_shadow_constants_.samples=high ? 16 : 4;
+  rt_shadow_constants_.mask=3; // Logical character identity is still unknown.
+  return true;
+}
+
+void Renderer::RecordRayShadowCounter() {
+  if(!rt_shadow_requested_ || !rt_shadow_counter_[frame_index_] || !rt_shadow_counter_readback_[frame_index_]) return;
+  Transition(rt_shadow_counter_[frame_index_].Get(),rt_shadow_counter_state_[frame_index_],D3D12_RESOURCE_STATE_COPY_SOURCE);
+  command_list_->CopyBufferRegion(rt_shadow_counter_readback_[frame_index_].Get(),0,rt_shadow_counter_[frame_index_].Get(),0,4);
+  rt_shadow_counter_recorded_=true;
+}
+
+void Renderer::HarvestRayShadowExecution() {
+  if(!fence_) return;
+  const uint64_t completed=fence_->GetCompletedValue();
+  if(completed==UINT64_MAX) return;
+  const auto previous=rt_shadow_execution_.Latest();
+  for(uint32_t slot=0;slot<3;++slot) {
+    const auto ticket=rt_shadow_execution_.Pending(slot);
+    if(!ticket.fence || ticket.fence>completed) continue;
+    uint32_t pixels=0;
+    if(ticket.counter_recorded && rt_shadow_counter_readback_[slot]) {
+      const D3D12_RANGE range{0,4};void* mapped=nullptr;
+      if(SUCCEEDED(rt_shadow_counter_readback_[slot]->Map(0,&range,&mapped))) {
+        std::memcpy(&pixels,mapped,4);
+        const D3D12_RANGE empty{0,0};rt_shadow_counter_readback_[slot]->Unmap(0,&empty);
+      }
+    }
+    rt_shadow_execution_.Complete(slot,completed,pixels);
+  }
+  const auto result=rt_shadow_execution_.Latest();
+  if(result.applied!=previous.applied || (result.applied[0] && result.frame%120==0))
+    REXLOG_INFO("native RT shadows executed: frame={} revision={} shader_pixels={} applied={} softness={} fence_completed=true (mapped lighting family; original fallback elsewhere)",
+        result.frame,result.revision,result.pixels,result.applied[0],result.applied[1]);
+}
+
+void Renderer::PublishGraphicsOptions() {
+  auto options=graphics::SharedGraphicsOptions();
+  const auto request=options->Snapshot();
+  graphics::GraphicsBackendReport report;
+  const auto executed=rt_shadow_execution_.Latest();
+  report.request_revision=executed.revision;
+  report.frame=frame_count_+1;
+  for(size_t i=0;i<4;++i)
+    report.features[i]={false,ray_tracing_capable_,
+        ray_tracing_capable_ ? "Scene geometry and lighting integration pending" : "DXR 1.1 is unavailable on this device"};
+  const bool shadow_ready=ray_tracing_capable_ && rt_shadow_wave_capable_ && !rt_shadow_shader_.empty() &&
+      REXCVAR_GET(sr_native_pm4_mirror);
+  report.features[0]={shadow_ready,ray_tracing_capable_ && rt_shadow_wave_capable_,
+      shadow_ready ? "Some materials retain original shadows" : "RT lighting shader is not ready"};
+  report.features[1]=report.features[0];
+  report.features[2]={false,ray_tracing_capable_,"Character caster ownership has not been identified"};
+  report.applied=executed.applied;
+  const bool dlss_supported=dlss_ && dlss_->GetStatus().support==graphics::d3d12::DlssSupport::Supported;
+  report.features[4]={false,dlss_supported,dlss_supported ?
+      "Scene depth, object motion and HUD separation pending" : "DLSS SDK support is unavailable"};
+  if(request.requested[0] && !report.applied[0]) report.failure="RT shadows are waiting for a verified shader execution";
+  options->PublishBackend(graphics_options_epoch_,report);
+}
+
 void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
+  if(post_vertex_active_ && post_vertex_capture_ && post_vertex_diagnostic_) {
+    post_vertex_capture_->Finish(command_list_.Get(),true);
+    RecordCapturedRayProbe();
+    REXLOG_INFO("native: post-VS extraction recorded guest_swap={} draws={} dropped={}; results after slot fence",
+                swap_number_,post_vertex_capture_->ranges().size(),post_vertex_capture_->dropped());
+    post_vertex_done_=!post_vertex_capture_->ranges().empty();
+    post_vertex_active_=false;
+  }
+  EndMotionCapture();
+  RecordRayShadowCounter();
   // Blit the resolved front buffer into the output target.
   auto latest = resolve_latest_.find(front_buffer_address);
   auto it = latest != resolve_latest_.end() ? resolve_textures_.find(latest->second)
@@ -6266,8 +7228,13 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
     queue_->ExecuteCommandLists(1, lists);
     frame_open_ = false;
   }
-  queue_->Signal(fence_.Get(), next_fence_value_);
-  frame_fence_values_[frame_index_] = next_fence_value_++;
+  const HRESULT submitted=queue_->Signal(fence_.Get(), next_fence_value_);
+  frame_fence_values_[frame_index_] = next_fence_value_;
+  if(SUCCEEDED(submitted)) rt_shadow_execution_.Submit(frame_index_,next_fence_value_,frame_count_+1,
+      graphics_frame_request_.request_revision,graphics_frame_request_.requested,rt_shadow_counter_recorded_);
+  ++next_fence_value_;
+  HarvestRayShadowExecution();
+  PublishGraphicsOptions();
   ProfileReport();
   if (dump_all_active_) {
     dump_all_active_ = false;
@@ -6321,6 +7288,155 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
     trace_state_ = 1;
     trace_draws_ = 0;
     REXLOG_INFO("trace begin frame {} after_guest_swap={}", frame_count_ + 1, swap_number_);
+  }
+  if (surface_probe_) {
+    REXLOG_INFO("native surface sequence: guest_swap={} frame={} observed_draws={} segments={} "
+                "dropped_segments={} (observations; game pass roles not identified)",
+                swap_number_, frame_count_, surface_sequence_.total_draws(),
+                surface_sequence_.size(), surface_sequence_.dropped_segments());
+    for (size_t i = 0; i < surface_sequence_.size(); ++i) {
+      const auto& segment = surface_sequence_[i];
+      const auto& s = segment.surface;
+      REXLOG_INFO("native surface sequence: segment={} first_draw={} draws={} color_edram={} "
+                  "color={}x{} fmt={} depth_edram={} depth={}x{}",
+                  i, segment.first_draw, segment.draws, s.color_edram, s.color_width,
+                  s.color_height, s.color_format, s.depth_edram, s.depth_width, s.depth_height);
+      for (uint32_t j = 0; j < segment.sample_count; ++j) {
+        const auto& sample = segment.samples[j];
+        const auto& draw = sample.draw;
+        REXLOG_INFO("native surface sample: segment={} draw_offset={} guest_pass={} prim={} "
+                    "vs={:016X} ps={:016X} depth={:08X} mask={:08X}",
+                    i, sample.draw_offset, draw.guest_pass, draw.primitive,
+                    draw.vs_hash, draw.ps_hash, draw.depth_control, draw.color_mask);
+      }
+    }
+    REXLOG_INFO("native geometry sequence: guest_swap={} frame={} submissions={} vertices={} "
+                "indexed={} inline={} samples={} (host versions tracked; no guest mesh identity/BLAS reuse proven)",
+                geometry_probe_.guest_swap(), geometry_probe_.frame(), geometry_probe_.total(),
+                geometry_probe_.count(graphics::GeometrySubmissionKind::kVertices),
+                geometry_probe_.count(graphics::GeometrySubmissionKind::kIndexed),
+                geometry_probe_.count(graphics::GeometrySubmissionKind::kInline),
+                geometry_probe_.sample_count());
+    REXLOG_INFO("native geometry readiness: candidate={} non_triangle={} too_few={} "
+                "generated={} missing_streams={} unobserved_streams={} "
+                "unversioned_stream={} unversioned_index={} (position layout and transforms still unverified)",
+                geometry_probe_.status_count(graphics::DirectTriangleInputStatus::kCandidate),
+                geometry_probe_.status_count(graphics::DirectTriangleInputStatus::kNonTriangle),
+                geometry_probe_.status_count(graphics::DirectTriangleInputStatus::kTooFewElements),
+                geometry_probe_.status_count(graphics::DirectTriangleInputStatus::kGeneratedGeometry),
+                geometry_probe_.status_count(graphics::DirectTriangleInputStatus::kMissingStreams),
+                geometry_probe_.status_count(graphics::DirectTriangleInputStatus::kUnobservedStreams),
+                geometry_probe_.status_count(graphics::DirectTriangleInputStatus::kUnversionedStream),
+                geometry_probe_.status_count(graphics::DirectTriangleInputStatus::kUnversionedIndex));
+    REXLOG_INFO("native geometry POSITION0 layout: float3={} float4={} other_encoded={} "
+                "missing={} missing_stream={} unsupported_type={} out_of_bounds={} "
+                "not_checked={} (declaration only; vertex values/transforms not validated)",
+                geometry_probe_.position_count(graphics::PositionLayoutStatus::kFloat3),
+                geometry_probe_.position_count(graphics::PositionLayoutStatus::kFloat4),
+                geometry_probe_.position_count(graphics::PositionLayoutStatus::kOtherEncoded),
+                geometry_probe_.position_count(graphics::PositionLayoutStatus::kMissingPosition),
+                geometry_probe_.position_count(graphics::PositionLayoutStatus::kMissingStream),
+                geometry_probe_.position_count(graphics::PositionLayoutStatus::kUnsupportedType),
+                geometry_probe_.position_count(graphics::PositionLayoutStatus::kOutOfBounds),
+                geometry_probe_.position_count(graphics::PositionLayoutStatus::kNotChecked));
+    REXLOG_INFO("native geometry POSITION0 access: nonindexed_window_valid={} "
+                "indexed_values_needed={} backing_too_small={} index_window_too_small={} "
+                "position_window_too_small={} not_checked={} "
+                "(window bounds only; index values, vertex contents and world transforms unverified)",
+                geometry_probe_.access_count(graphics::PositionAccessStatus::kNonIndexedRangeValid),
+                geometry_probe_.access_count(graphics::PositionAccessStatus::kIndexValuesNeeded),
+                geometry_probe_.access_count(graphics::PositionAccessStatus::kBackingTooSmall),
+                geometry_probe_.access_count(graphics::PositionAccessStatus::kIndexWindowTooSmall),
+                geometry_probe_.access_count(graphics::PositionAccessStatus::kWindowTooSmall),
+                geometry_probe_.access_count(graphics::PositionAccessStatus::kNotChecked));
+    REXLOG_INFO("native geometry POSITION0 values: decoded={} nonfinite={} "
+                "fresh_upload_unavailable={} strip_restart={} out_of_bounds={} not_sampled={} "
+                "(sampled local coordinates only from fresh complete CPU uploads; no world-space proof)",
+                geometry_probe_.value_count(graphics::PositionValueStatus::kDecoded),
+                geometry_probe_.value_count(graphics::PositionValueStatus::kNonFinite),
+                geometry_probe_.value_count(graphics::PositionValueStatus::kUnavailableFreshUpload),
+                geometry_probe_.value_count(graphics::PositionValueStatus::kStripRestart),
+                geometry_probe_.value_count(graphics::PositionValueStatus::kOutOfBounds),
+                geometry_probe_.value_count(graphics::PositionValueStatus::kNotSampled));
+    for (size_t i = 0; i < geometry_probe_.sample_count(); ++i) {
+      const auto& draw = geometry_probe_.sample(i);
+      REXLOG_INFO("native geometry sample: sample={} kind={} surface_draw={} pass={} prim={} "
+                  "elements={} first={} base={} vs={:016X} ps={:016X} "
+                  "stream_count={} index32={} suppressed={} gpu_topology={} gpu_index_source={} "
+                  "gpu_elements={} gpu_first={} gpu_index32={} gpu_expanded_vertices={} direct_input={}",
+                  i, graphics::GeometrySubmissionKindName(draw.kind), draw.surface_draw,
+                  draw.guest_pass, draw.primitive, draw.elements, draw.first_element,
+                  draw.base_vertex, draw.vs_hash, draw.ps_hash, draw.stream_count,
+                  draw.index32, draw.raster_draw_suppressed,
+                  graphics::GeometryGpuTopologyName(draw.gpu_topology),
+                  graphics::GeometryIndexSourceName(draw.gpu_index_source), draw.gpu_elements,
+                  draw.gpu_first_element, draw.gpu_index32, draw.gpu_vertices_expanded,
+                  graphics::DirectTriangleInputStatusName(graphics::ClassifyDirectTriangleInput(draw)));
+      if (graphics::ClassifyDirectTriangleInput(draw) ==
+          graphics::DirectTriangleInputStatus::kCandidate) {
+        const auto& p = draw.position_layout;
+        REXLOG_INFO("native geometry POSITION0: sample={} layout={} access={} value={} slot={} "
+                    "type={:08X} offset={} stride={}",
+                    i, graphics::PositionLayoutStatusName(p.status),
+                    graphics::PositionAccessStatusName(draw.position_access),
+                    graphics::PositionValueStatusName(draw.position_value.status), p.stream_slot,
+                    p.type, p.offset, p.stride);
+        if (draw.position_value.status == graphics::PositionValueStatus::kDecoded)
+          REXLOG_INFO("native geometry POSITION0 host sample: sample={} vertex={} local=({:.6g},{:.6g},{:.6g})",
+                      i, draw.position_value.vertex_index, draw.position_value.x,
+                      draw.position_value.y, draw.position_value.z);
+      }
+      for (size_t stream = 0;
+           stream < std::min<size_t>(draw.stream_count, draw.streams.size()); ++stream) {
+        const auto& b = draw.streams[stream];
+        REXLOG_INFO("native geometry buffer: sample={} stream={} slot={} decl={:08X} "
+                    "key={:016X} host_gen={} addr={:08X} bytes={} backing_bytes={} stride={} offset={} "
+                    "action={} version={} host_versioned={}",
+                    i, stream, b.stream_slot, b.vertex_declaration, b.guest_key,
+                    b.host_generation, b.guest_address, b.bytes, b.buffer_bytes,
+                    b.stride, b.offset, unsigned(b.planned_action), b.content_version,
+                    b.HasVersionedHostContent());
+      }
+      if (draw.kind == graphics::GeometrySubmissionKind::kIndexed) {
+        const auto& b = draw.index;
+        REXLOG_INFO("native geometry index: sample={} key={:016X} host_gen={} addr={:08X} "
+                    "bytes={} backing_bytes={} stride={} action={} version={} host_versioned={}",
+                    i, b.guest_key, b.host_generation, b.guest_address, b.bytes,
+                    b.buffer_bytes, b.stride,
+                    unsigned(b.planned_action), b.content_version,
+                    b.HasVersionedHostContent());
+      }
+    }
+    surface_probe_done_ = true;
+    surface_probe_ = false;
+  }
+  if (temporal_probe_) {
+    const auto& tf = temporal_.current();
+    if (frame_count_ % 120 == 0) {
+      REXLOG_INFO("native temporal probe: frame={} blocker={} camera={} prev={} scene_color={} "
+                  "scene_depth={} depth_convention={} motion={} object_motion={} jitter={} hud={}",
+                  tf.frame, graphics::TemporalBlockerName(temporal_.DlssBlocker()),
+                  tf.camera_valid, tf.previous_camera_valid, tf.scene_color != 0,
+                  tf.scene_depth != 0, tf.depth_convention_valid, tf.has_motion_vectors,
+                  tf.has_object_motion, tf.jitter_valid, tf.hud_boundary_valid);
+    }
+    temporal_.End();
+  }
+  if (camera_candidate_probe_enabled_) {
+    const auto& c = camera_candidate_probe_.frame();
+    if (frame_count_ % 120 == 0 && c.valid > 0) {
+      REXLOG_INFO("native camera candidate: frame={} guest_swap={} draws={} valid={} rejected={} "
+                  "varying_draws={} in_frame_max_delta={:.6g} previous={} inter_frame_max_delta={:.6g} "
+                  "c0=({:.6g},{:.6g},{:.6g},{:.6g}) c1=({:.6g},{:.6g},{:.6g},{:.6g}) "
+                  "c2=({:.6g},{:.6g},{:.6g},{:.6g}) c3=({:.6g},{:.6g},{:.6g},{:.6g})",
+                  c.frame, swap_number_, c.draws, c.valid, c.rejected, c.varying_draws,
+                  c.max_within_frame_delta, c.has_previous, c.max_previous_frame_delta,
+                  c.first[0], c.first[1], c.first[2], c.first[3],
+                  c.first[4], c.first[5], c.first[6], c.first[7],
+                  c.first[8], c.first[9], c.first[10], c.first[11],
+                  c.first[12], c.first[13], c.first[14], c.first[15]);
+    }
+    camera_candidate_probe_.End();
   }
   frame_index_ = (frame_index_ + 1) % kFramesInFlight;
   ++frame_count_;
@@ -6705,14 +7821,17 @@ void Renderer::DumpFrameResources(const std::string& prefix, bool surfaces_only,
     void* data = nullptr;
     D3D12_RANGE range{0, size_t(total)};
     if (SUCCEEDED(readback->Map(0, &range, &data))) {
-      if (std::FILE* f = std::fopen((dir + "/" + prefix + item.name + ".raw").c_str(), "wb")) {
+      std::ofstream out(std::filesystem::u8path(dir)/(prefix+item.name+".raw"),std::ios::binary);
+      if (out) {
         uint32_t header[4] = {uint32_t(desc.Width), desc.Height, uint32_t(desc.Format),
                               fp.Footprint.RowPitch};
-        std::fwrite(header, 4, 4, f);
-        std::fwrite(static_cast<uint8_t*>(data) + fp.Offset, 1,
-                    size_t(fp.Footprint.RowPitch) * rows, f);
-        std::fclose(f);
-        ++written;
+        out.write(reinterpret_cast<const char*>(header),sizeof(header));
+        const bool valid_rows=row_size<=UINT32_MAX && graphics::WritePaddedReadbackRows(out,
+            {static_cast<const uint8_t*>(data),size_t(total)},size_t(fp.Offset),
+            uint32_t(row_size),fp.Footprint.RowPitch,rows);
+        out.close();
+        if(valid_rows && out) ++written;
+        else REXLOG_ERROR("native: incomplete dump {}/{}{}.raw",dir,prefix,item.name);
       } else {
         REXLOG_ERROR("native: cannot write dump {}/{}{}.raw", dir, prefix, item.name);
       }
@@ -7283,6 +8402,11 @@ void Renderer::Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd
   g_current_pass = cmd.pass;
   if (frame_open_ && REXCVAR_GET(sr_native_gpu_pass_timing)) PassTimestamp(cmd.pass);
   if (cmd.pass != last_exec_pass_) {
+    if (temporal_probe_ && kPassRenderHud >= 0 && cmd.pass == kPassRenderHud &&
+        frame_open_) {
+      std::lock_guard<std::recursive_mutex> lock(mutex_);
+      temporal_.ObserveHudBoundary();
+    }
     if (fxaa_ && cmd.pass == kPassRenderHud && upscale_rt_ && frame_open_) {
       std::lock_guard<std::recursive_mutex> lock(mutex_);
       ApplyFxaa(*upscale_rt_);
@@ -7518,6 +8642,16 @@ void Renderer::DrawIndexedVertices(uint8_t* base, uint32_t prim, int32_t base_ve
   }
   index_scope.Stop();
   cur_.streams_ok = PlanStreams(base, dev, Load32(base, dev + kDevVertexDecl), &draw_range);
+  // Opt-in diagnostic: capture the exact normalized index envelope while this
+  // guest draw owns its input, never scan live guest indices on the worker.
+  // DrawIndexed u6/u7 are otherwise unused; zero/zero means unverified.
+  if(!REXCVAR_GET(sr_native_motion_capture_trigger_path).empty() && cur_.has_index &&
+     uint64_t(start_index)+index_count<=uint64_t(draw_range.ib_size)/(draw_range.index32?4u:2u)) {
+    draw_range.Resolve();
+    if(draw_range.first<draw_range.end && draw_range.end<=0x1000000u) {
+      cur_.u[6]=draw_range.first;cur_.u[7]=draw_range.end;
+    }
+  }
   EndCmd(base);
 }
 
@@ -7658,6 +8792,7 @@ void Renderer::ExecClear(uint8_t* base, uint32_t count, uint32_t rects, uint32_t
     HostSurface* rt0 = GetSurface(base, Load32(base, dev + kDevRenderTargets), false);
     if (HostSurface* ds = GetSurface(base, Load32(base, dev + kDevDepthStencil), true,
                                      rt0 ? rt0->width : 0, rt0 ? rt0->height : 0)) {
+      MaybeFinishMotionBeforeDepthWrite(ds,(ds_flags&D3D12_CLEAR_FLAG_DEPTH)!=0,"explicit depth clear");
       Transition(ds->resource.Get(), ds->state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
       std::vector<D3D12_RECT> scaled = ScaleRects(rs, ds->scale);
       command_list_->ClearDepthStencilView(ds->view, ds_flags, std::clamp(z, 0.0f, 1.0f),

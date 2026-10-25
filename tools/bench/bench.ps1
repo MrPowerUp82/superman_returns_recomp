@@ -32,9 +32,13 @@ param(
   [int]$Settle = 25,
   [int]$Window = 20,
   [int]$WorldTimeout = 90,
-  [string]$WindowMetadata = ''
+  [string]$WindowMetadata = '',
+  [switch]$GraphicsMenuChecks,
+  [switch]$RayShadowChecks,
+  [switch]$RequireNoRunningGame
 )
 $ErrorActionPreference = 'Stop'
+if($RayShadowChecks -and -not $GraphicsMenuChecks){throw 'RayShadowChecks requires GraphicsMenuChecks'}
 . "$PSScriptRoot/bench_window_metadata.ps1"
 $script:benchWindows=New-Object System.Collections.ArrayList
 if($WindowMetadata -and (Test-Path -LiteralPath $WindowMetadata)){throw 'Window metadata already exists; use a new label'}
@@ -66,11 +70,23 @@ function Step($message) {
 }
 
 function Focus($proc) {
+  if($env:SR_BENCH_GAMEPAD_ONLY -eq '1') { return }
   [SrBenchInput]::SetForegroundWindow($proc.MainWindowHandle) | Out-Null
   Start-Sleep -Milliseconds 300
 }
 
 function Key($vk, [switch]$Down, [switch]$Up) {
+  if($env:SR_BENCH_GAMEPAD_ONLY -eq '1') {
+    if(-not $env:SR_BENCH_INPUT) {throw 'Isolated pad test requires SR_BENCH_INPUT'}
+    $buttons=switch($vk){0x0D{16};0x20{4096};0x1B{8192};0x47{32768};default{0}}
+    $forward=if($vk -eq 0x57 -and -not $Up){32767}else{0}
+    if($Up){$buttons=0}
+    $hold=if($Down){30000}else{250}
+    $id=[DateTime]::UtcNow.Ticks
+    "$id $hold $buttons $forward" | Set-Content -LiteralPath $env:SR_BENCH_INPUT -Encoding ASCII
+    if(-not $Down){Start-Sleep -Milliseconds 450}
+    return
+  }
   if (-not $Up) { [SrBenchInput]::keybd_event($vk, 0, 0, [UIntPtr]::Zero) }
   if (-not $Down) { Start-Sleep -Milliseconds 120; [SrBenchInput]::keybd_event($vk, 0, 2, [UIntPtr]::Zero) }
 }
@@ -197,7 +213,9 @@ function Measure-Window($proc, $scenario) {
   $row
 }
 
-Get-Process superman_returns -ErrorAction SilentlyContinue | Stop-Process -Force
+$existingGame=Get-Process superman_returns -ErrorAction SilentlyContinue
+if($RequireNoRunningGame -and $existingGame) {throw 'A game instance is already running; leaving it untouched'}
+if(-not $RequireNoRunningGame) {$existingGame | Stop-Process -Force}
 Start-Sleep 2
 if (Test-Path $log) { Clear-Content $log }
 $env:SR_LOG_FPS = '1'
@@ -266,16 +284,110 @@ try {
   # checked after idle either; it is asserted right after the forward window while W
   # is still held (input keeps it visible). A menu or title cannot produce a clean
   # run: the HUD must still be visible after the forward window.
-  Measure-Window $proc 'idle'
-  Focus $proc; Key 0x57 -Down
-  try {
-    Measure-Window $proc 'forward'
-    Assert-Gameplay $proc
-  } finally { Key 0x57 -Up }
+  if(-not $GraphicsMenuChecks) {
+    Measure-Window $proc 'idle'
+    Focus $proc; Key 0x57 -Down
+    try {
+      Measure-Window $proc 'forward'
+      Assert-Gameplay $proc
+    } finally { Key 0x57 -Up }
+  }
+  if($GraphicsMenuChecks) {
+    if(-not $env:SR_BENCH_INPUT) {throw 'GraphicsMenuChecks requires a dedicated SR_BENCH_INPUT command file'}
+    function Count-GraphicsEvent([string]$pattern) {
+      return @(Select-String -LiteralPath $log -Pattern $pattern).Count
+    }
+    if($env:SR_BENCH_RT_CAPTURE_TRIGGER) {
+      'capture' | Set-Content -LiteralPath $env:SR_BENCH_RT_CAPTURE_TRIGGER -Encoding ASCII
+      Start-Sleep -Seconds 2
+    }
+    if($env:SR_BENCH_MOTION_CAPTURE_TRIGGER) {
+      # Exercise actual guest movement across the two captured frames.
+      "$([DateTime]::UtcNow.Ticks) 1800 0 32767" | Set-Content -LiteralPath $env:SR_BENCH_INPUT -Encoding ASCII
+      Start-Sleep -Milliseconds 500
+      'capture' | Set-Content -LiteralPath $env:SR_BENCH_MOTION_CAPTURE_TRIGGER -Encoding ASCII
+      Start-Sleep -Seconds 3
+      "$([DateTime]::UtcNow.Ticks) 100 0 0" | Set-Content -LiteralPath $env:SR_BENCH_INPUT -Encoding ASCII
+      Step 'two-frame motion capture requested during guest movement'
+    }
+    Step 'graphics checks only; no performance measurement recorded'
+    $resumes=Count-GraphicsEvent 'native graphics guest pause: paused=false.*state=3'
+    $lastPause=@(Select-String -LiteralPath $log -Pattern 'native graphics guest pause:') | Select-Object -Last 1
+    Focus $proc
+    if(-not $lastPause -or $lastPause.Line -notmatch 'paused=true') { Key 0x0D }
+    Start-Sleep -Seconds 2
+    if(-not(Count-GraphicsEvent 'native graphics guest pause: paused=true.*state=4')) {throw 'Verified guest pause was not entered'}
+    Save-GameRegion $proc "$root/logs/bench_${Name}_pause.png"
+    Key 0x47; Start-Sleep -Seconds 2
+    if((Count-GraphicsEvent 'native graphics panel: open=true') -ne 1) {throw 'G did not open GRAPHICS OPTIONS'}
+    Save-GameRegion $proc "$root/logs/bench_${Name}_graphics_keyboard.png"
+    if($RayShadowChecks) {
+      function Send-GraphicsPad([int]$buttons) {
+        "$([DateTime]::UtcNow.Ticks) 300 $buttons 0" | Set-Content -LiteralPath $env:SR_BENCH_INPUT -Encoding ASCII
+        Start-Sleep -Milliseconds 800
+      }
+      function Wait-RayShadow([int]$applied,[int]$softness,[int]$before) {
+        $pattern="native RT shadows executed:.*applied=$applied softness=$softness fence_completed=true"
+        $deadline=[DateTime]::UtcNow.AddSeconds(40)
+        while([DateTime]::UtcNow -lt $deadline) {
+          if((Count-GraphicsEvent $pattern) -gt $before){return}
+          Start-Sleep -Milliseconds 500
+        }
+        throw "RT shader execution was not confirmed: applied=$applied softness=$softness"
+      }
+      $before=Count-GraphicsEvent 'native RT shadows executed:.*applied=1 softness=2 fence_completed=true'
+      Send-GraphicsPad 8 # Right on RT SHADOWS.
+      Wait-RayShadow 1 2 $before
+      Save-GameRegion $proc "$root/logs/bench_${Name}_rt_high.png"
+      Send-GraphicsPad 2 # Down to SHADOW SOFTNESS.
+      $before=Count-GraphicsEvent 'native RT shadows executed:.*applied=1 softness=1 fence_completed=true'
+      Send-GraphicsPad 4
+      Wait-RayShadow 1 1 $before
+      Save-GameRegion $proc "$root/logs/bench_${Name}_rt_low.png"
+      $before=Count-GraphicsEvent 'native RT shadows executed:.*applied=1 softness=2 fence_completed=true'
+      Send-GraphicsPad 8
+      Wait-RayShadow 1 2 $before
+      Send-GraphicsPad 1 # Back to RT SHADOWS.
+      $before=Count-GraphicsEvent 'native RT shadows executed:.*applied=0 softness=0 fence_completed=true'
+      Send-GraphicsPad 4
+      Wait-RayShadow 0 0 $before
+      Step 'RT shadow menu On/Low/High/Off PASS: actual shader counter and queue fence confirmed'
+    }
+    Key 0x0D; Start-Sleep -Seconds 1
+    if((Count-GraphicsEvent 'native graphics guest pause: paused=false.*state=3') -ne $resumes) {throw 'Start leaked through the open graphics panel'}
+    Key 0x1B; Start-Sleep -Seconds 2
+    if((Count-GraphicsEvent 'native graphics panel: open=false') -ne 1) {throw 'Esc did not return from graphics panel'}
+    if((Count-GraphicsEvent 'native graphics guest pause: paused=false.*state=3') -ne $resumes) {throw 'Esc unpaused the guest instead of returning to pause'}
+    Save-GameRegion $proc "$root/logs/bench_${Name}_back_to_pause.png"
+    # Synthetic pad drives the actual merged XInput path, before guest filtering.
+    "$([DateTime]::UtcNow.Ticks) 700 32768 0" | Set-Content -LiteralPath $env:SR_BENCH_INPUT -Encoding ASCII
+    Start-Sleep -Seconds 2
+    if((Count-GraphicsEvent 'native graphics panel: open=true') -ne 2) {throw 'Gamepad Y did not reopen GRAPHICS OPTIONS'}
+    Save-GameRegion $proc "$root/logs/bench_${Name}_graphics_gamepad.png"
+    "$([DateTime]::UtcNow.Ticks) 500 8192 0" | Set-Content -LiteralPath $env:SR_BENCH_INPUT -Encoding ASCII
+    Start-Sleep -Seconds 2
+    if((Count-GraphicsEvent 'native graphics panel: open=false') -ne 2) {throw 'Gamepad B did not return from GRAPHICS OPTIONS'}
+    if((Count-GraphicsEvent 'native graphics guest pause: paused=false.*state=3') -ne $resumes) {throw 'Gamepad B unpaused the guest'}
+    Key 0x0D; Start-Sleep -Seconds 2
+    if((Count-GraphicsEvent 'native graphics guest pause: paused=false.*state=3') -ne $resumes+1) {throw 'Guest did not resume normally after graphics input was released'}
+    if($env:SR_BENCH_GAMEPAD_ONLY -eq '1') {
+      Step 'graphics pause integration PASS: isolated synthetic Y/B/Start, suppression, same pause, normal resume; physical keyboard not tested'
+    }else{
+      Step 'graphics pause integration PASS: G/Esc, Y/B, Start suppression, same pause, normal resume'
+    }
+  }
 } catch {
   Step "FAILED: $_"
   throw
 } finally {
+  if($GraphicsMenuChecks -and -not $proc.HasExited) {
+    # Exercise the application's normal close/persistence hook in graphics
+    # integration checks. Other benchmark modes retain their original teardown.
+    if($proc.CloseMainWindow()) {
+      if($proc.WaitForExit(15000)) { Step 'graphics normal window close completed' }
+      else { Step 'graphics window close timed out; force termination required' }
+    }
+  }
   if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
   if($WindowMetadata) {
     [pscustomobject]@{schema=1;name=$Name;windows=@($script:benchWindows.ToArray())} |

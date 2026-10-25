@@ -10,6 +10,34 @@
 #include "shader_pack.h"
 #include "test_main.h"
 
+SR_TEST(post_vertex_world_contract_requires_actual_float_xyz_output_signature) {
+  using superman_returns::native::VertexShaderHasFloat3Output;
+  std::vector<uint8_t> blob(144);
+  auto put=[&](size_t at,uint32_t value){std::memcpy(blob.data()+at,&value,4);};
+  std::memcpy(blob.data(),"DXBC",4);
+  put(28,1); put(32,40);
+  std::memcpy(blob.data()+40,"OSG1",4); put(44,80);
+  put(48,1); put(52,8);
+  // Stream, semantic string offset, semantic index, system kind, float type,
+  // register, component mask. Offsets in the signature are chunk-relative.
+  put(56,0); put(60,48); put(64,2); put(68,0); put(72,3); put(76,4); put(80,7);
+  std::memcpy(blob.data()+96,"TEXCOORD",9);
+  SR_CHECK(VertexShaderHasFloat3Output(blob,"TEXCOORD",2));
+  SR_CHECK(!VertexShaderHasFloat3Output(blob,"TEXCOORD",1));
+  put(80,3);
+  SR_CHECK(!VertexShaderHasFloat3Output(blob,"TEXCOORD",2));
+  put(80,1);
+  SR_CHECK(superman_returns::native::VertexShaderHasFloatOutput(blob,"TEXCOORD",2,1));
+  SR_CHECK(!superman_returns::native::VertexShaderHasFloatOutput(blob,"TEXCOORD",2,7));
+  SR_CHECK(!superman_returns::native::VertexShaderHasFloatOutput(blob,"TEXCOORD",2,0));
+  put(80,7); put(72,1);
+  SR_CHECK(!VertexShaderHasFloat3Output(blob,"TEXCOORD",2));
+  put(72,3); put(60,0xfffffff0);
+  SR_CHECK(!VertexShaderHasFloat3Output(blob,"TEXCOORD",2));
+  put(60,48); put(44,12);
+  SR_CHECK(!VertexShaderHasFloat3Output(blob,"TEXCOORD",2));
+}
+
 namespace {
 
 using superman_returns::native::kMaxShaderContainerBytes;
