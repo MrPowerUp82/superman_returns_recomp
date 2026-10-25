@@ -484,7 +484,7 @@ struct DetailScope {
 // SR_FRAME_TIMELINE_DETAIL=1: why PlanStreams takes its slow path (first failing reason per stream),
 // accumulated on the guest thread and logged every 120 frames. Counts only; no timing.
 struct StreamPlanCounters {
-  uint64_t evaluated=0,fast=0,slow=0;
+  uint64_t evaluated=0,fast=0,slow=0,secondary_hits=0;
   uint64_t untracked=0,address=0,size=0,decl=0,stride=0,phase=0,dirty=0;
   uint64_t refresh_calls=0,refresh_hashes=0,refresh_hash_bytes=0;
   uint64_t pm4_reads=0,pm4_bytes=0;
@@ -3968,13 +3968,17 @@ uint32_t Renderer::CreateTexture(const uint32_t fetch[6], TextureEntry& entry) {
   return entry.srv_index;
 }
 
+static uint64_t SamplerKey(const uint32_t fetch[6], bool force_linear, uint32_t bias_q) {
+  return (uint64_t(fetch[0]) & 0x7FFC00) | (uint64_t(fetch[3] & 0x3FF80000) << 32) |
+         (uint64_t(force_linear) << 63) | (uint64_t(bias_q) << 1);
+}
+
 uint32_t Renderer::GetSamplerIndex(const uint32_t fetch[6], bool force_linear, float lod_bias) {
   CpuTimer cpu_timer(cpu_timings.sampler_ns);
   xenos::xe_gpu_texture_fetch_t f;
   std::memcpy(&f, fetch, sizeof(f));
   uint32_t bias_q = uint32_t(std::clamp(lod_bias, 0.0f, 7.9f) * 16.0f);  // 1/16 steps
-  uint64_t key = (uint64_t(fetch[0]) & 0x7FFC00) | (uint64_t(fetch[3] & 0x3FF80000) << 32) |
-                 (uint64_t(force_linear) << 63) | (uint64_t(bias_q) << 1);
+  uint64_t key = SamplerKey(fetch, force_linear, bias_q);
   auto it = samplers_.find(key);
   if (it != samplers_.end()) {
     return it->second;
@@ -4370,8 +4374,18 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
   setup_timer.Stop();
   CpuTimer slots_timer(cpu_timings.constant_slots_ns);
   for (uint32_t slot = 0; slot < 16; ++slot) {
-    uint32_t fetch[6];
-    for (uint32_t d = 0; d < 6; ++d) {
+    uint32_t fetch[6]{};
+    fetch[0] = GpuConstant(base, dev, Pm4Mirror::kFetchConstantBase + 6 * slot,
+                           kDevFetchConstants + 24 * slot);
+    // Empty slots have no texture or sampler. Their three SRV dimensions use
+    // the same null descriptors regardless of the remaining fetch words.
+    // Motion capture still needs fetch[1] for the first three slots.
+    if (!IsTextureBound(fetch[0]) && !(motion_capture_active_ && slot < 3)) {
+      s[16 + slot] = 1;
+      s[32 + slot] = 2;
+      continue;
+    }
+    for (uint32_t d = 1; d < 6; ++d) {
       fetch[d] = GpuConstant(base, dev, Pm4Mirror::kFetchConstantBase + 6 * slot + d,
                              kDevFetchConstants + 24 * slot + 4 * d);
     }
@@ -4418,7 +4432,7 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
         sc.srv = srv;
         sc.frame = frame_count_;
       }
-      sampler = GetSamplerIndex(fetch, sc.smooth);
+      float sampler_bias = 0.0f;
       // Smooth effects: small textures of blended draws (particles, glows,
       // light halos) magnify with a cubic B-spline above the original
       // resolution (bit 28, tfetch2D in the XenosRecomp patch).
@@ -4430,8 +4444,18 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
         uint32_t blend = LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_BLENDCONTROL0);
         if ((blend & 0x1FFF) != 0x0001) {
           srv |= 0x10000000u;
-          sampler = GetSamplerIndex(fetch, sc.smooth, std::log2(bound_scale_));
+          sampler_bias = std::log2(bound_scale_);
         }
+      }
+      const uint32_t bias_q = uint32_t(std::clamp(sampler_bias, 0.0f, 7.9f) * 16.0f);
+      const uint64_t sampler_key = SamplerKey(fetch, sc.smooth, bias_q);
+      if (sc.sampler_valid && sc.sampler_key == sampler_key) {
+        sampler = sc.sampler_index;
+      } else {
+        sampler = GetSamplerIndex(fetch, sc.smooth, sampler_bias);
+        sc.sampler_key = sampler_key;
+        sc.sampler_index = sampler;
+        sc.sampler_valid = true;
       }
       // PWL gamma in the shader (XenosRecomp CONAN_RECOMP tfetch*).
       if (srv > 2 && REXCVAR_GET(sr_native_texture_gamma) == 2 && IsGammaFetch(fetch)) {
@@ -5352,8 +5376,17 @@ const Renderer::BufferEntry* Renderer::ApplyBuffer(
 bool Renderer::RefreshTrackedBuffer(TrackedBuffer& t) {
   DetailScope refresh_scope(capture_timings.fb_refresh_ns);
   if (graphics::FrameTimeline::Detail()) ++stream_plan_counters.refresh_calls;
-  bool page_written = false;
   const bool every_use=t.size<=kHashedBufferMax && SmallBufferHashEveryUse();
+  // The same small allocation can be bound thousands of times in one frame.
+  // Once its contents were checked, neither hashing nor write-watch scanning
+  // can find new data until a physical write advances the global sequence.
+  // Explicit Unlock invalidations already set t.dirty separately.
+  if (!every_use && t.content.valid && t.content.frame == front_frame_ &&
+      (!texture_watch_ || !t.watched ||
+       t.checked_seq == write_seq_.load(std::memory_order_acquire))) {
+    return t.dirty;
+  }
+  bool page_written = false;
   if (texture_watch_ && t.watched && !every_use) {
     const uint32_t global = write_seq_.load(std::memory_order_acquire);
     if (global != t.checked_seq) {
@@ -5389,12 +5422,19 @@ Renderer::BufferPlan Renderer::PlanBuffer(uint8_t* base, uint32_t address, uint3
                                           uint32_t decl, uint32_t stride, uint32_t index_format,
                                           uint32_t phase, uint32_t need_begin, uint32_t need_end,
                                           bool& ok, uint32_t reset_index,
-                                          VertexRange* lazy_range, uint32_t lazy_offset) {
+                                          VertexRange* lazy_range, uint32_t lazy_offset,
+                                          TrackedBuffer* already_refreshed, uint64_t already_key) {
   BufferPlan plan;
   ok = size && size <= (64u << 20);
   if (!ok) return plan;
-  const uint64_t key_parts[]{address,size,decl,stride,index_format,phase,reset_index};
-  plan.key = XXH3_64bits(key_parts, sizeof(key_parts));
+  if (already_refreshed) {
+    // The stream cache verified all key fields and refreshed the content for
+    // this draw. Reuse both checks rather than hashing and probing again.
+    plan.key = already_key;
+  } else {
+    const uint64_t key_parts[]{address,size,decl,stride,index_format,phase,reset_index};
+    plan.key = XXH3_64bits(key_parts, sizeof(key_parts));
+  }
   plan.address = address;
   plan.size = size;
   plan.decl = decl;
@@ -5418,14 +5458,18 @@ Renderer::BufferPlan Renderer::PlanBuffer(uint8_t* base, uint32_t address, uint3
     }
     e = std::min(e, size);
   };
-  auto it = tracked_.find(plan.key);
-  if (it != tracked_.end()) {
-    TrackedBuffer& t = it->second;
+  TrackedBuffer* tracked = already_refreshed;
+  if (!tracked) {
+    auto it = tracked_.find(plan.key);
+    if (it != tracked_.end()) tracked = &it->second;
+  }
+  if (tracked) {
+    TrackedBuffer& t = *tracked;
     if (REXCVAR_GET(sr_native_debug_buffers_always_dirty)) {
       t.dirty = true;
       t.clean.clear();
     }
-    RefreshTrackedBuffer(t);
+    if (!already_refreshed) RefreshTrackedBuffer(t);
     if (!t.dirty) return plan;
     uint32_t b = need_begin, e = need_end;
     if (lazy_range) {
@@ -5560,10 +5604,29 @@ bool Renderer::PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRan
     sp.offset = offset;
     sp.size = size;
     sp.stride = stride;
-    FrontStreamCache& sc = front_stream_cache_[s];
+    // The base address identifies the guest allocation; its range and layout
+    // are checked below. Mix aligned address bits before selecting a set.
+    uint32_t address_hash = buffer_base ^ (buffer_base >> 12) ^ (buffer_base >> 23);
+    const size_t set = (address_hash * 0x9E3779B1u) >> 26;
+    const size_t first = set * 2;
+    auto& cache = front_stream_cache_[s];
+    const auto matches = [&](size_t slot) {
+      const FrontStreamCache& candidate = cache[slot];
+      return candidate.tracked && candidate.address == buffer_base && candidate.size == buffer_size &&
+             candidate.decl == decl && candidate.stride == stride && candidate.phase == phase;
+    };
+    const bool allow_cache = !REXCVAR_GET(sr_native_debug_buffers_always_dirty);
+    const bool first_hit = allow_cache && matches(first);
+    const bool second_hit = !first_hit && allow_cache && matches(first + 1);
+    const bool cached_fields_match = first_hit || second_hit;
+    if (second_hit) {
+      if (graphics::FrameTimeline::Detail()) ++stream_plan_counters.secondary_hits;
+    }
+    const size_t selected_slot = first + (first_hit ? 0 : second_hit ? 1 : front_stream_cache_next_[s][set]);
+    FrontStreamCache& sc = cache[selected_slot];
     if (graphics::FrameTimeline::Detail()) ++stream_plan_counters.evaluated;
-    if (!REXCVAR_GET(sr_native_debug_buffers_always_dirty) && sc.tracked && sc.address == buffer_base && sc.size == buffer_size && sc.decl == decl &&
-        sc.stride == stride && sc.phase == phase && !RefreshTrackedBuffer(*sc.tracked)) {
+    const bool cached_dirty = cached_fields_match && RefreshTrackedBuffer(*sc.tracked);
+    if (cached_fields_match && !cached_dirty) {
       if (graphics::FrameTimeline::Detail()) ++stream_plan_counters.fast;
       // Clean and cached: no lookup, no range needed.
       sp.buffer.key = sc.key;
@@ -5606,9 +5669,11 @@ bool Renderer::PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRan
         DetailScope buffer_scope(capture_timings.fs_buffer_ns);
         sp.buffer = PlanBuffer(base, buffer_base, buffer_size, decl, stride, s << 8, phase,
                                need_begin, need_end, ok, UINT32_MAX,
-                               lazy_resolve ? range : nullptr, offset);
+                               lazy_resolve ? range : nullptr, offset,
+                               cached_fields_match ? sc.tracked : nullptr, sc.key);
       }
       if (!ok) return false;
+      if (!cached_fields_match) front_stream_cache_next_[s][set] ^= 1;
       auto it = tracked_.find(sp.buffer.key);
       sc.address = buffer_base;
       sc.size = buffer_size;
@@ -5686,6 +5751,21 @@ bool Renderer::BindVertexStreams(uint8_t* base, const WorkBatch& batch, const Wo
   std::memset(vertex_fetch_, 0, sizeof(vertex_fetch_));
   const uint32_t dev = GuestDevice(base);
   const bool dynamic_fetch = dev && DynamicVertexFetch(base, dev);
+  // All streams in a draw come from PlanStreams with the same declaration.
+  // Decode it once rather than repeating the lookup per bound stream.
+  // ApplyBuffer may decode a different declaration while converting guest
+  // endian layouts, so retain a local snapshot for all streams of this draw.
+  // Entries are populated by copy_n before use. Avoid zero-initializing up
+  // to 64 attributes for every draw, including draws without dynamic fetch.
+  std::array<graphics::guest::VertexAttribute, 64> declaration;
+  size_t declaration_count = 0;
+  if (dynamic_fetch && cmd.stream_count) {
+    CpuTimer declaration_timer(timings.declaration_ns, detail);
+    const auto& decoded = ReadVertexDeclaration(base, batch.streams[cmd.stream_first].buffer.decl);
+    declaration_count = std::min(decoded.size(), declaration.size());
+    std::copy_n(decoded.begin(), declaration_count, declaration.begin());
+    if (detail) { ++timings.declaration_reads; timings.attributes += declaration_count; }
+  }
   setup_timer.Stop();
   for (uint32_t i = 0; i < cmd.stream_count; ++i) {
     const StreamPlan& sp = batch.streams[cmd.stream_first + i];
@@ -5764,13 +5844,9 @@ bool Renderer::BindVertexStreams(uint8_t* base, const WorkBatch& batch, const Wo
     }
     entry.raw_srv_fence=next_fence_value_;
     srv_timer.Stop();
-    const uint32_t decl = sp.buffer.decl;
-    CpuTimer declaration_timer(timings.declaration_ns,detail);
-    const auto& declaration=ReadVertexDeclaration(base,decl);
-    declaration_timer.Stop();
-    if(detail) {++timings.declaration_reads;timings.attributes+=declaration.size();}
     CpuTimer metadata_timer(timings.metadata_ns,detail);
-    for (const auto& attribute : declaration) {
+    for (size_t attribute_index = 0; attribute_index < declaration_count; ++attribute_index) {
+      const auto& attribute = declaration[attribute_index];
       if (attribute.stream != sp.stream) continue;
       const uint32_t usage = attribute.usage, index = attribute.index;
       if (usage >= 14 || index >= 16) continue;
@@ -7977,8 +8053,9 @@ void Renderer::EndCmd(uint8_t* base) {
 void Renderer::CaptureBytes(uint8_t* base, uint32_t address, uint32_t length) {
   if (!length) return;
   size_t offset = batch_->bytes.size();
-  batch_->bytes.resize(offset + length);
-  std::memcpy(batch_->bytes.data() + offset, base + address, length);
+  // Appending the source range constructs the new bytes directly. resize()
+  // value-initializes (zeros) them before the memcpy, doubling the writes.
+  batch_->bytes.insert(batch_->bytes.end(), base + address, base + address + length);
   batch_->ranges.push_back({address, length, uint32_t(offset)});
 }
 
@@ -7986,12 +8063,15 @@ void Renderer::CaptureTextures(uint8_t* base) {
   const bool replay_textures = TextureHashReplayEnabled();
   for (uint32_t slot=0;slot<32;++slot) {
     std::array<uint32_t,6> fetch{};
-    for(uint32_t i=0;i<6;++i) {
+    const uint32_t first_reg=Pm4Mirror::kFetchConstantBase+slot*6;
+    fetch[0]=capture_mirror_.written(first_reg) ? capture_mirror_.reg(first_reg)
+        : Load32(base,cur_.device+kDev.fetch_constants+slot*24);
+    if(!IsTextureBound(fetch[0])) continue;
+    for(uint32_t i=1;i<6;++i) {
       uint32_t reg=Pm4Mirror::kFetchConstantBase+slot*6+i;
       fetch[i]=capture_mirror_.written(reg) ? capture_mirror_.reg(reg)
           : Load32(base,cur_.device+kDev.fetch_constants+slot*24+i*4);
     }
-    if(!IsTextureBound(fetch[0])) continue;
     auto& entry=TextureSlotLookupCaching()?CapturedTexture(slot,fetch):captured_textures_[fetch];
     if(!entry.snapshot && entry.failed_frame!=~0ull && front_frame_<entry.failed_frame+16) {cur_.texture_errors.emplace_back(slot,entry.failure);continue;}
     bool dirty=!entry.snapshot;
@@ -8158,8 +8238,8 @@ void Renderer::CaptureRing(uint8_t* base, uint32_t dev) {
     uint32_t n = current - ring_last_;
     if (!cur_.ring_bytes) cur_.ring_offset = uint32_t(batch_->bytes.size());
     if (cur_.ring_offset + cur_.ring_bytes == batch_->bytes.size()) {
-      batch_->bytes.resize(batch_->bytes.size() + n);
-      std::memcpy(batch_->bytes.data() + cur_.ring_offset + cur_.ring_bytes, base + ring_last_, n);
+      // Append directly, avoiding a zero-fill pass over every captured PM4 command.
+      batch_->bytes.insert(batch_->bytes.end(), base + ring_last_, base + ring_last_ + n);
       cur_.ring_bytes += n;
     }
   } else if (ring_last_) {
@@ -8914,9 +8994,9 @@ void Renderer::OnSwap(uint8_t* base, uint32_t front_buffer_texture, uint64_t swa
         REXLOG_INFO("native physical write notifications: per_frame={:.1f} completed={}",double(write_delta)/120.0,writes);
         profiled_texture_writes_=writes;
         auto& c = stream_plan_counters;
-        REXLOG_INFO("native front-end stream plan (per frame over 120): evaluated={} fast={} slow={} | slow reasons: "
+        REXLOG_INFO("native front-end stream plan (per frame over 120): evaluated={} fast={} slow={} secondary_hits={} | slow reasons: "
                     "untracked={} address={} size={} decl={} stride={} phase={} dirty={} | buffer refresh: calls={} hashes={} hash_kb={} | pm4 deps: reads={} kb={}",
-                    c.evaluated/120,c.fast/120,c.slow/120,c.untracked/120,c.address/120,c.size/120,c.decl/120,
+                     c.evaluated/120,c.fast/120,c.slow/120,c.secondary_hits/120,c.untracked/120,c.address/120,c.size/120,c.decl/120,
                     c.stride/120,c.phase/120,c.dirty/120,c.refresh_calls/120,c.refresh_hashes/120,c.refresh_hash_bytes/120/1024,
                     c.pm4_reads/120,c.pm4_bytes/120/1024);
         c={};

@@ -233,10 +233,12 @@ class Renderer : public NativeFrontend {
   void CaptureDevice(uint8_t* base, uint32_t dev);
   void CaptureRing(uint8_t* base, uint32_t dev);
   struct VertexRange;
+  struct TrackedBuffer;
   BufferPlan PlanBuffer(uint8_t* base, uint32_t address, uint32_t size, uint32_t decl,
                         uint32_t stride, uint32_t format, uint32_t phase, uint32_t need_begin,
                         uint32_t need_end, bool& ok, uint32_t reset_index = UINT32_MAX,
-                        VertexRange* lazy_range = nullptr, uint32_t lazy_offset = 0);
+                        VertexRange* lazy_range = nullptr, uint32_t lazy_offset = 0,
+                        TrackedBuffer* already_refreshed = nullptr, uint64_t already_key = 0);
   bool PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRange* range);
   void FlushBatch();
   void WaitWorkerIdle(uint64_t batches);
@@ -274,7 +276,11 @@ class Renderer : public NativeFrontend {
     uint32_t address = 0, size = 0, decl = 0, stride = 0, format = 0, phase = 0;
     uint64_t key = 0;
     TrackedBuffer* tracked = nullptr;
-  } front_stream_cache_[17];
+  };
+  // Two-way, 64-set vertex stream cache. Probe at most two entries per draw,
+  // including on a miss (the former fully associative scan was expensive).
+  std::array<FrontStreamCache, 128> front_stream_cache_[17];
+  std::array<std::array<uint8_t, 64>, 17> front_stream_cache_next_{};
   // Worker.
   void WorkerMain();
   void Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd,graphics::guest::DrawPacketOwner storage={},std::shared_ptr<const WorkBatch> capture_owner={},graphics::guest::ReplayResult* prepared=nullptr);
@@ -825,6 +831,11 @@ class Renderer : public NativeFrontend {
     uint32_t srv = 0;
     uint64_t frame = ~0ull;
     bool smooth = false;  // point fetch of an upscaled color target -> linear
+    // Sampler descriptors survive frame boundaries and resolve invalidations.
+    // Unlike the SRV, only their sampling key determines whether to reuse one.
+    uint64_t sampler_key = 0;
+    uint32_t sampler_index = 0;
+    bool sampler_valid = false;
   } slot_cache_[16];
   uint64_t edram_write_seq_ = 0;
   HostSurface* bind_set_[5] = {};
