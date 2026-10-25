@@ -29,6 +29,8 @@
 #include "../graphics/frame_timeline.h"
 #include "../graphics/d3d12/device_capabilities.h"
 #include "../graphics/graphics_options_runtime.h"
+#include "../render_scale_policy.h"
+#include "../sr_settings.h"
 
 #include <dxgi1_4.h>
 
@@ -248,9 +250,10 @@ REXCVAR_DEFINE_BOOL(sr_native_debug_buffers_always_dirty, false, "Superman Retur
 REXCVAR_DEFINE_BOOL(sr_native_debug_clears, false, "Superman Returns Native", "Debug: log resolve depth clears");
 REXCVAR_DEFINE_BOOL(sr_native_debug_no_ztest, false, "Superman Returns Native", "Debug: disable all depth tests");
 REXCVAR_DEFINE_DOUBLE(sr_native_render_scale, 1.0, "Superman Returns Native",
-                      "Internal render resolution multiplier of 720p, may be fractional (1 = 720p, "
-                      "1.5 = 1080p, 2 = 1440p, 3 = 2160p, 4 = 2880p)")
-    .range(1.0, 4.0);
+                      "D3D12 internal resolution multiplier of 720p (0.5 = 360p, "
+                      "0.75 = 540p, 1 = 720p, 1.5 = 1080p, 2 = 1440p)")
+    .range(0.5, 4.0)
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(sr_native_temporal_probe, false, "Superman Returns Native",
                     "Diagnose missing D3D12 temporal inputs for future DLSS/RT (no visual effect)");
 REXCVAR_DEFINE_INT32(sr_native_rt_capture_swap, 0, "Superman Returns Native",
@@ -1190,7 +1193,8 @@ bool Renderer::EnsureInitialized() {
       pm4_reads_profile && *pm4_reads_profile && *pm4_reads_profile!='0';
   REXLOG_INFO("native PM4 live read profiling: {}",mirror_.alu_read_profile.enabled?"on":"off");
   REXLOG_INFO("native PM4 live read mode: {}",mirror_.bounded_alu_reads?"bounded copy":"query validation");
-  render_scale_ = float(std::clamp(REXCVAR_GET(sr_native_render_scale), 1.0, 4.0));
+  render_scale_ = render_scale::NativeScale(REXCVAR_GET(sr_native_render_scale),
+                                           REXCVAR_GET(sr_render_scale));
   temporal_probe_ = !packet_sink_ && REXCVAR_GET(sr_native_temporal_probe);
   if (temporal_probe_) REXLOG_INFO("native temporal probe: enabled (diagnostics only)");
   camera_candidate_probe_enabled_ = !packet_sink_ && REXCVAR_GET(sr_native_camera_candidate_probe);
@@ -1239,8 +1243,8 @@ bool Renderer::EnsureInitialized() {
     shadow_scale_ = 1.0f;
     REXLOG_WARN("native: sr_native_shadow_quality needs the shadow pass role; disabled");
   }
-  output_width_ = HostPx(kOutputWidth, render_scale_);
-  output_height_ = HostPx(kOutputHeight, render_scale_);
+  output_width_ = render_scale::HostDimension(kOutputWidth, render_scale_);
+  output_height_ = render_scale::HostDimension(kOutputHeight, render_scale_);
   REXLOG_INFO("native: render scale {} ({}x{}), shadow scale {}, msaa {}, anisotropy {}",
               render_scale_, output_width_, output_height_, shadow_scale_, msaa_samples_,
               anisotropy_);
@@ -2204,8 +2208,8 @@ Renderer::HostSurface* Renderer::GetSurface(uint8_t* base, uint32_t surface_obje
   }
   D3D12_RESOURCE_DESC desc{};
   desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-  desc.Width = HostPx(width, s.scale);
-  desc.Height = HostPx(height, s.scale);
+  desc.Width = render_scale::HostDimension(width, s.scale);
+  desc.Height = render_scale::HostDimension(height, s.scale);
   desc.DepthOrArraySize = 1;
   desc.MipLevels = 1;
   desc.SampleDesc.Count = samples;
@@ -6477,8 +6481,8 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
       dst.srv_format = depth ? DXGI_FORMAT_R32_FLOAT : src->srv_format;
       D3D12_RESOURCE_DESC desc{};
       desc.Dimension = volume?D3D12_RESOURCE_DIMENSION_TEXTURE3D:D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-      desc.Width = HostPx(dest_w, dst.scale);
-      desc.Height = HostPx(dest_h, dst.scale);
+      desc.Width = render_scale::HostDimension(dest_w, dst.scale);
+      desc.Height = render_scale::HostDimension(dest_h, dst.scale);
       desc.DepthOrArraySize = uint16_t(layers);
       desc.MipLevels = 1;
       desc.Format = dst.format;

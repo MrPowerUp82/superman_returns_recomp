@@ -50,7 +50,7 @@ public partial class MainWindow : Window
         SetChoices(ResolutionBox, new("960x540", "960 × 540 (PC fraco)"), new("1280x720", "1280 × 720"), new("1600x900", "1600 × 900"), new("1920x1080", "1920 × 1080"), new("2560x1440", "2560 × 1440"), new("3840x2160", "3840 × 2160"));
         SetChoices(DisplayModeBox, new("Fullscreen", "Tela cheia sem bordas"), new("Windowed", "Janela"));
         SetChoices(InputBox, new("KeyboardMouse", "Teclado e mouse"), new("Controller", "Controle Xbox / XInput"));
-        SetChoices(RenderScaleBox, new("50", "50% — 360p (PC fraco, experimental)"), new("75", "75% — 540p (PC fraco, experimental)"), new("100", "100% — 720p original"), new("125", "125% — 900p"), new("150", "150% — 1080p"), new("200", "200% — 1440p"), new("300", "300% — 2160p"), new("400", "400% — 2880p"));
+        SetChoices(RenderScaleBox, new("50", "50% — 360p (nativo D3D12)"), new("75", "75% — 540p (nativo D3D12)"), new("100", "100% — 720p original"), new("125", "125% — 900p"), new("150", "150% — 1080p"), new("200", "200% — 1440p"), new("300", "300% — 2160p"), new("400", "400% — 2880p"));
         SetChoices(AaBox, new("Off", "Desativado"), new("FXAA", "FXAA"));
         SetChoices(FilterBox, new("Original", "Original do jogo"), new("Anisotropic2x", "Anisotrópico 2×"), new("Anisotropic4x", "Anisotrópico 4×"), new("Anisotropic8x", "Anisotrópico 8×"), new("Anisotropic16x", "Anisotrópico 16×"));
         SetChoices(FpsBox, new("30", "30 FPS — original"), new("60", "60 FPS — experimental"), new("120", "120 FPS — experimental"), new("0", "Sem limite — experimental"));
@@ -97,7 +97,7 @@ public partial class MainWindow : Window
             ? $"Vulkan · Nativo · {_settings.Resolution.Replace("x", " × ")} · 100% interno"
             : $"Direct3D 12 · {(_settings.Renderer == "xenos" ? "Xenos" : "Nativo")} · {_settings.Resolution.Replace("x", " × ")} · {_settings.RenderScale}% interno";
         FpsNote.Text = _settings.FpsLimit == "30" ? "30 FPS preserva o ritmo original do jogo." : "FPS acima de 30 é experimental e pode alterar o ritmo do jogo.";
-        EngineNote.Text = _settings.UsesVulkan ? "Vulkan: escala interna, FXAA, MSAA, sombras e filtro anisotrópico ficam no padrão do jogo. A primeira execução traduz os shaders e demora alguns minutos." : _settings.Renderer == "xenos" ? "Xenos é o motor alternativo, mais lento e menos corrigido; use apenas se o nativo falhar." : _settings.RenderScale is "50" or "75" ? "Escalas abaixo de 100% são experimentais e podem causar áreas pretas." : "Nativo: renderizador atual, com as correções de cutscenes, HUD e War World.";
+        EngineNote.Text = _settings.UsesVulkan ? "Vulkan: escala interna, FXAA, MSAA, sombras e filtro anisotrópico ficam no padrão do jogo. A primeira execução traduz os shaders e demora alguns minutos." : _settings.Renderer == "xenos" ? (_settings.RenderScale is "50" or "75" ? "Xenos não suporta 50%/75%: escolha Nativo com Direct3D 12 para reduzir a resolução interna." : "Xenos é o motor alternativo, mais lento e menos corrigido; use apenas se o nativo falhar.") : _settings.RenderScale is "50" or "75" ? "D3D12: reduz os alvos internos e os resolves juntos; exibição e HUD permanecem na área total da janela." : "Nativo: renderizador atual, com as correções de cutscenes, HUD e War World.";
         ArgumentsPreview.Text = _settings.BuildArguments();
     }
     private void Save_Click(object sender, RoutedEventArgs e)

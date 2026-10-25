@@ -55,10 +55,19 @@ var ini = Path.Combine(fixture, "launcher.ini");
 settings.Save(ini);
 var loaded = LauncherSettings.Load(ini);
 Check(loaded.GameData == settings.GameData && loaded.Gpu == settings.Gpu && loaded.GpuLuid == settings.GpuLuid && loaded.InputMode == "Controller", "preferences round trip preserves paths and GPU identity");
-var weak = new LauncherSettings { GraphicsApi = "d3d12", Renderer = "xenos", SkipIntro = true, RenderScale = "75" };
+var weak = new LauncherSettings { GraphicsApi = "d3d12", Renderer = "native", SkipIntro = true, RenderScale = "75" };
 var weakArgs = weak.BuildArgumentList();
-Check(weakArgs.Contains("--sr_renderer=xenos") && weakArgs.Contains("--sr_skip_intro=true"), "engine and intro skip are forwarded");
-Check(weakArgs.Contains("--sr_render_scale=75") && weakArgs.Contains("--sr_native_render_scale=1"), "reduced scale uses guest render scale");
+Check(weakArgs.Contains("--sr_renderer=native") && weakArgs.Contains("--sr_skip_intro=true"), "engine and intro skip are forwarded");
+Check(weakArgs.Contains("--sr_render_scale=100") && weakArgs.Contains("--sr_native_render_scale=0.75"), "540p scales native targets, keeping guest resolves at 720p");
+weak.RenderScale = "50";
+weak.Resolution = "960x540";
+Check(weak.BuildArgumentList().Contains("--sr_native_render_scale=0.5") && weak.BuildArgumentList().Contains("--window_width=960") && weak.BuildArgumentList().Contains("--window_height=540"), "360p renders at half resolution with independent window size");
+weak.Renderer = "xenos";
+weak.GameExe = settings.GameExe;
+weak.GameData = settings.GameData;
+bool rejectedXenosScale = false;
+try { weak.CreateLaunch(fixture); } catch (InvalidOperationException) { rejectedXenosScale = true; }
+Check(rejectedXenosScale, "Xenos does not start with a known-broken low guest resolution");
 Check(settings.BuildArgumentList().Contains("--sr_render_scale=100") && settings.BuildArgumentList().Contains("--sr_skip_intro=false"), "defaults keep full quality");
 Check(new LauncherSettings().UsesVulkan, "Vulkan is the default graphics API");
 var vk = new LauncherSettings { GameExe = settings.GameExe, GameData = settings.GameData, Renderer = "xenos", RenderScale = "200",

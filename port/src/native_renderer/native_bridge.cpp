@@ -26,6 +26,7 @@
 #include "hang_watchdog.h"
 #include "native_graphics_system.h"
 #include "native_renderer.h"
+#include "../render_scale_policy.h"
 #include "sdk_compat.h"
 
 REXCVAR_DECLARE(bool, sr_native_ab_mode);
@@ -269,7 +270,9 @@ std::unique_ptr<rex::system::IGraphicsSystem> CreateNativeGraphicsSystem(
   options.ssao=rex::cvar::Query<bool>("sr_native_ambient_occlusion");
   options.lsfg=rex::cvar::Query<bool>("sr_lsfg");
   options.ab_mode=REXCVAR_GET(sr_native_ab_mode);
-  options.render_scale=rex::cvar::Query<double>("sr_native_render_scale");
+  options.render_scale=render_scale::NativeScale(
+      rex::cvar::Query<double>("sr_native_render_scale"),
+      rex::cvar::Query<int32_t>("sr_render_scale"));
   options.msaa_samples=rex::cvar::Query<int32_t>("sr_native_msaa_samples");
   options.shadow_quality=rex::cvar::Query<int32_t>("sr_native_shadow_quality");
   options.bloom_quality=rex::cvar::Query<int32_t>("sr_native_bloom_quality");

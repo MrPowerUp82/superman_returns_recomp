@@ -10,7 +10,7 @@ Implementado às cegas, sem compilar nem rodar o jogo; nenhum número abaixo foi
 | --- | --- |
 | `sr_preset` | `port/src/sr_preset.cpp`. `quality` (padrão) mantém tudo como está; `performance` hoje não altera nada (o `sr_post_effects=false` foi retirado: corrompeu a imagem sem ganho de FPS na validação de 2026-09-29); `custom` não mexe em nada. Aplicado no `OnPreSetup`, só em opções com `GetFlagSource == kDefault`. |
 | `sr_post_effects` | `port/src/native_renderer/post_effects.h` (lista derivada do trace) e o filtro no processador de comandos do projeto. Validação: `tools/bench/post_effects_check.ps1`. |
-| `sr_render_scale` | Experimental (`port/src/render_scale.cpp`). Os dois presets mantêm `100`; o gancho está comentado na tabela de `sr_preset.cpp`. |
+| `sr_render_scale` | No D3D12 nativo valores 50/75 redirecionam para a escala de render targets no host, preservando os resolves e a resolução lógica de 1280x720. No Xenos o gancho de escala do jogo permanece experimental (pode gerar regiões pretas); use `sr_render_scale=100` com o Xenos. Os presets mantêm `100`. |
 | `sr_shadows`, `sr_draw_distance` | Não implementados. |
 | Opções de registrador do codegen | Desligadas: ligadas juntas, o jogo não gera nenhum quadro. `tools/bench/bisect_codegen_flags.ps1` testa uma de cada vez. |
 | Espera ativa | `tools/analysis/find_spin_loops.py` lista candidatos no código gerado para virarem hooks. |

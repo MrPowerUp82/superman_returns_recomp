@@ -177,7 +177,7 @@ uint g_SpecConstants();
 // Xenos returns linear values, converted with its piecewise-linear curve
 // (xenos::PWLGammaToLinear, applied after filtering like the Xenia/ReXGlue
 // Xenos backend).
-// Bits 16-27 = host scale of a texture rendered larger than its guest size
+// Bits 16-27 = host scale of a texture rendered at a different size than its guest size
 // (render_scale resolve targets, 8.8 fixed point, 0 = 1:1): texel offsets and
 // filter weights stay in guest texels, like on Xenos. SRV indices use bits 0-14.
 #define TEX_INDEX(i) ((i) & 0x7FFFu)

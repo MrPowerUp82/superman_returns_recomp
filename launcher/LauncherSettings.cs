@@ -97,13 +97,16 @@ public sealed class LauncherSettings
         var vulkan = UsesVulkan;
         var percent = vulkan ? 100 : ValidChoice(RenderScale, 100, 50, 75, 100, 125, 150, 200, 300, 400);
         if (vulkan) filter = -1;
-        var lowScale = percent < 100;
-        var scale = (lowScale ? 100 : percent) / 100.0;
+        // D3D12 scales every host surface and resolve in one coordinate system.
+        // Shrinking the guest's 1280x720 present parameters instead truncates
+        // post-process resolves and leaves black/stale regions on screen.
+        var nativeD3d12 = !vulkan && Renderer != "xenos";
+        var scale = (nativeD3d12 ? percent : (vulkan ? 100 : Math.Max(100, percent))) / 100.0;
         var result = new List<string> {
             $"--sr_renderer={(Renderer == "xenos" && !vulkan ? "xenos" : "native")}", "--sr_preset=custom",
             $"--sr_native_api={(vulkan ? "vulkan" : "d3d12")}",
             $"--sr_skip_intro={SkipIntro.ToString().ToLowerInvariant()}",
-            $"--sr_render_scale={(lowScale ? percent : 100)}",
+            "--sr_render_scale=100",
             $"--window_width={width}", $"--window_height={height}",
             $"--fullscreen={(DisplayMode != "Windowed").ToString().ToLowerInvariant()}",
             $"--vsync={VSync.ToString().ToLowerInvariant()}",
@@ -132,6 +135,8 @@ public sealed class LauncherSettings
 
     public ProcessStartInfo CreateLaunch(string baseDirectory)
     {
+        if (!UsesVulkan && Renderer == "xenos" && ValidChoice(RenderScale, 100, 50, 75, 100, 125, 150, 200, 300, 400) < 100)
+            throw new InvalidOperationException("Xenos ainda não suporta resolução interna abaixo de 100%. Selecione o renderizador Nativo com Direct3D 12 para usar 540p ou 360p.");
         var exe = Path.GetFullPath(GameExe, baseDirectory);
         if (!File.Exists(exe) || !Path.GetFileName(exe).Equals("superman_returns.exe", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Selecione o executável superman_returns.exe da build do jogo.");

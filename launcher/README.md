@@ -9,7 +9,12 @@ O launcher só envia `--sr_native_gpu_luid` quando uma GPU específica foi escol
 Oferece resolução, tela cheia sem bordas/janela, GPU DXGI, teclado/mouse ou controle,
 escala interna, FXAA, filtro de texturas, sombras, MSAA, VSync e limite de FPS.
 30 FPS é o padrão; 60/120 FPS são experimentais e não garantem ganho de desempenho.
-A escala interna nativa começa em 100%; aumentá-la aumenta o trabalho da GPU.
+A escala interna no D3D12 nativo aceita 50% (640x360) e 75% (960x540),
+além de 100% e valores superiores. O renderizador dimensiona os alvos e resolves
+no host e preserva o tamanho lógico 1280x720, inclusive na composição e no HUD.
+A opção de redução no Xenos continua incompatível e o launcher impede iniciá-la;
+o Vulkan mantém 100% por enquanto. A resolução da janela é independente da
+resolução interna e pode ser ampliada pelo apresentador.
 
 Detecta o executável e a pasta `game` ou permite selecioná-los. Valida `default.xex`
 e `DATA` antes de iniciar. As preferências ficam em

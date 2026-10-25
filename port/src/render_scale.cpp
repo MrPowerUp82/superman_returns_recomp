@@ -1,9 +1,11 @@
-// Internal render resolution (sr_render_scale, percent of 1280x720).
+// Guest resolution scaling (sr_render_scale, percent of 1280x720).
+// The native renderer instead scales all host targets/resolves consistently;
+// it leaves these guest dimensions alone (render_scale_policy.h).
 //
 // Device setup (sub_822EB148) fills its D3D present parameters with
 // sub_82611A20(params, 4); mode 4 is the 1280x720 preset, written to the
 // back buffer (+0 width, +4 height) and front buffer (+12, +16) fields. The
-// Shrinking these fields alone is NOT sufficient: the 2026-09-30 title
+// Shrinking these fields alone is NOT sufficient for Xenos: the 2026-09-30 title
 // smoke test at 75% still resolves 1280 pixels from a pitch of 960 and shows
 // black regions and stale pixels. Keep this experimental and out of presets
 // until intermediate textures, composition and HUD have been validated.
@@ -11,12 +13,14 @@
 #include <algorithm>
 #include <array>
 #include <mutex>
+#include <string>
 
 #include <rex/hook.h>
 #include <rex/logging.h>
 
 #include "generated/default/superman_returns_init.h"
 #include "sr_settings.h"
+#include "render_scale_policy.h"
 
 namespace {
 
@@ -40,7 +44,9 @@ uint32_t Scale(uint32_t size, int32_t percent) {
 // hold the real video mode). The engine sizes its EDRAM render targets from
 // these fields, not from the back buffer.
 void SrScaleEngineRenderSize(PPCRegister& r31) {
-  const int32_t percent = std::clamp(REXCVAR_GET(sr_render_scale), 25, 100);
+  const bool native = rex::cvar::Query<std::string>("sr_renderer") == "native";
+  const int32_t percent = superman_returns::render_scale::GuestPercent(
+      REXCVAR_GET(sr_render_scale), native);
   if (percent == 100) return;
   uint8_t* base = rex::system::kernel_state()->memory()->virtual_membase();
   const uint32_t device = r31.u32;
@@ -60,7 +66,9 @@ REX_HOOK_RAW(sub_82611A20) {
   const uint32_t mode = ctx.r4.u32;
   __imp__sub_82611A20(ctx, base);
 
-  const int32_t percent = std::clamp(REXCVAR_GET(sr_render_scale), 25, 100);
+  const bool native = rex::cvar::Query<std::string>("sr_renderer") == "native";
+  const int32_t percent = superman_returns::render_scale::GuestPercent(
+      REXCVAR_GET(sr_render_scale), native);
   if (percent == 100 || mode != 4) return;
   const uint32_t width = Scale(Load32(base, params + 0), percent);
   const uint32_t height = Scale(Load32(base, params + 4), percent);
