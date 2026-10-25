@@ -16,4 +16,23 @@ private:
   uint32_t calls_=0;
   bool have_time_=false;
 };
+
+// Retain the intended vblank phase under ordinary scheduling jitter. If the
+// guest interrupt takes longer than a vblank, skip missed deadlines rather
+// than dispatching a burst of catch-up interrupts.
+class VblankPacer {
+public:
+  VblankPacer(uint64_t start, uint64_t interval)
+      : interval_(interval ? interval : 1), deadline_(start + interval_) {}
+  uint64_t Remaining(uint64_t now) const {
+    return now < deadline_ ? deadline_ - now : 0;
+  }
+  void Complete(uint64_t now) {
+    deadline_ += interval_;
+    if (now >= deadline_) deadline_ = now + interval_;
+  }
+private:
+  uint64_t interval_;
+  uint64_t deadline_;
+};
 }

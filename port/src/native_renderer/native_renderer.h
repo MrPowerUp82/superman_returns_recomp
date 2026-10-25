@@ -732,6 +732,7 @@ class Renderer : public NativeFrontend {
     uint64_t content_hash = 0;
     uint64_t checked_frame = 0;
     uint64_t hashed_frame = 0;
+    TextureHashBackoff hash_backoff;
     // Write watch: page write sequence when the watch was armed.
     uint32_t watch_seq = 0;
     uint32_t guest_format = 0;

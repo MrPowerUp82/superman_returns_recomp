@@ -83,6 +83,50 @@ SR_TEST(active_fallback_keeps_legacy_cadence) {
   SR_CHECK(LegacyTextureValidationRequired(8<<20,false,false,31,1));
 }
 
+SR_TEST(unchanged_small_textures_back_off_hashes_but_still_sample) {
+  TextureHashBackoff backoff;
+  backoff.OnHashed(10, false);
+  uint64_t last_hash = 10;
+  for (uint64_t delay : {2ull, 4ull, 8ull, 8ull, 8ull}) {
+    // Hashing unchanged content doubles the interval up to eight frames.
+    backoff.OnHashed(last_hash, true);
+    for (uint64_t frame = last_hash + 1; frame < last_hash + delay; ++frame)
+      SR_CHECK(!backoff.ShouldValidate(4096, true, false, frame, last_hash, true));
+    SR_CHECK(backoff.ShouldValidate(4096, true, false, last_hash + delay, last_hash, true));
+    last_hash += delay;
+  }
+  backoff.OnHashed(last_hash, false);
+  SR_CHECK(backoff.ShouldValidate(4096, true, false, last_hash + 1, last_hash, true));
+}
+
+SR_TEST(untracked_video_or_ui_writes_trigger_continuous_validation) {
+  TextureHashBackoff backoff;
+  backoff.OnHashed(10, false);
+  backoff.OnHashed(11, true);
+  backoff.OnHashed(13, true);
+  backoff.OnHashed(17, false, true);
+  backoff.OnHashed(18, true);
+  SR_CHECK(backoff.ShouldValidate(4096, true, false, 19, 18, true));
+  backoff.OnHashed(19, false, true); // Another frame updated without a write notification.
+  SR_CHECK(backoff.ShouldValidate(4096, true, false, 139, 138, true));
+  backoff.OnHashed(139, true);
+  SR_CHECK(!backoff.ShouldValidate(4096, true, false, 140, 139, true));
+}
+
+SR_TEST(texture_hash_backoff_keeps_write_and_fallback_rules) {
+  TextureHashBackoff backoff;
+  backoff.OnHashed(100, false);
+  backoff.OnHashed(101, true);
+  backoff.OnHashed(103, true);
+  SR_CHECK(!backoff.ShouldValidate(4096, true, false, 104, 103, true));
+  SR_CHECK(backoff.ShouldValidate(4096, true, true, 104, 103, true));
+  SR_CHECK(backoff.ShouldValidate(4096, false, false, 104, 103, true));
+  SR_CHECK(backoff.ShouldValidate(4096, true, false, 104, 103, false));
+  SR_CHECK(!backoff.ShouldValidate(8u << 20, true, false, 104, 103, true));
+  SR_CHECK(backoff.ShouldValidate(8u << 20, true, true, 104, 103, true));
+  SR_CHECK(backoff.ShouldValidate(8u << 20, false, false, 133, 103, true));
+}
+
 SR_TEST(active_descriptor_identity_checks_every_fetch_word_even_with_same_hash_bucket) {
   const std::array<uint32_t,6> a{1,2,3,4,5,6};
   SR_CHECK(TextureDescriptorMatches(a,a));

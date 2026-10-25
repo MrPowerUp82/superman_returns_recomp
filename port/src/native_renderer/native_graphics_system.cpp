@@ -22,6 +22,7 @@
 #include <chrono>
 #include <cstring>
 #include <cstdlib>
+#include <thread>
 
 #include <rex/chrono/clock.h>
 #include <rex/cvar.h>
@@ -48,6 +49,7 @@
 
 #include "game_profile.h"
 #include "hang_watchdog.h"
+#include "idle_yield.h"
 #include "sdk_compat.h"
 #if SR_NATIVE_RENDERER_BUILD
 #include "native_renderer.h"
@@ -422,22 +424,28 @@ void D3D12NativeGraphicsSystem::VsyncThreadMain() {
                               : std::max(int32_t(1), REXCVAR_GET(sr_native_unlocked_vblank_hz));
   REXLOG_INFO("native graphics: frame rate limit {} (guest vblank {} Hz)", fps, vblank_hz);
   uint64_t interval = std::max(uint64_t(1), freq / uint64_t(vblank_hz));
-  uint64_t last = rex::chrono::Clock::QueryGuestTickCount();
+  VblankPacer pacer(rex::chrono::Clock::QueryGuestTickCount(), interval);
   while (running_) {
     uint64_t now = rex::chrono::Clock::QueryGuestTickCount();
-    if (now - last < interval) {
-      uint64_t remaining_us = (interval - (now - last)) * 1000000ull / freq;
-      rex::thread::Sleep(std::chrono::microseconds(std::min<uint64_t>(remaining_us, 8000ull)));
+    uint64_t remaining = pacer.Remaining(now);
+    if (remaining) {
+      uint64_t remaining_us = remaining * 1000000ull / freq;
+      if (remaining_us > 2000) {
+        // Leave a short margin for Windows scheduler oversleep.
+        rex::thread::Sleep(std::chrono::microseconds(
+            std::min<uint64_t>(remaining_us - 1500, 8000ull)));
+      } else if (remaining_us > 250) {
+        std::this_thread::yield();
+      } else {
+        _mm_pause();
+      }
       continue;
     }
     // Vblank: the guest sees progress and its vblank handler runs.
     counter_.fetch_add(1);
     cp_wake_->Set();
     DispatchInterrupt(0, 2);
-    last += interval;
-    if (rex::chrono::Clock::QueryGuestTickCount() - last >= interval) {
-      last = rex::chrono::Clock::QueryGuestTickCount();
-    }
+    pacer.Complete(rex::chrono::Clock::QueryGuestTickCount());
   }
 }
 

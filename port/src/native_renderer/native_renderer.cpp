@@ -165,9 +165,9 @@ REXCVAR_DEFINE_INT32(sr_native_dump_swap, 0, "Superman Returns Native",
 REXCVAR_DEFINE_BOOL(sr_native_pm4_mirror, true, "Superman Returns Native",
                     "Take shader/fetch constants from the parsed command stream (GPU truth) "
                     "instead of the XDK device shadow");
-REXCVAR_DEFINE_BOOL(sr_native_pm4_bounded_reads, false, "Superman Returns Native",
-                    "Experiment: copy live PM4 constant sources with bounded checked reads "
-                    "instead of VirtualQuery validation (D3D12, restart required)");
+REXCVAR_DEFINE_BOOL(sr_native_pm4_bounded_reads, true, "Superman Returns Native",
+                    "Copy live PM4 constant sources with bounded checked reads instead of "
+                    "VirtualQuery validation (D3D12, restart required; false = legacy path)");
 REXCVAR_DEFINE_BOOL(sr_native_cpu_bundle, false, "Superman Returns Native",
                     "Experiment: combine verified texture tracking, bounded PM4 reads, CPU "
                     "upload staging and complete resolve reuse (D3D12, restart required)");
@@ -217,6 +217,9 @@ REXCVAR_DEFINE_BOOL(sr_native_edram_reinterpret, true, "Superman Returns Native"
 REXCVAR_DEFINE_BOOL(sr_native_texture_watch, true, "Superman Returns Native",
                     "Revalidate textures only after guest writes (page write watches) instead "
                     "of hashing them every frame");
+REXCVAR_DEFINE_BOOL(sr_native_texture_hash_backoff, true, "Superman Returns Native",
+                    "Back off hashing of unchanged small textures to 8 frames; "
+                    "physical writes and untracked dynamic textures get prompt checks");
 REXCVAR_DEFINE_INT32(sr_native_texture_gamma, 2, "Superman Returns Native",
                      "Xenos gamma textures (fetch sign = GAMMA): 0 = raw, 1 = sRGB views, "
                      "2 = Xenos piecewise-linear curve in the shader (descriptor index bit 31)");
@@ -323,6 +326,8 @@ REXCVAR_DEFINE_BOOL(sr_native_gpu_breadcrumbs, false, "Superman Returns Native",
                     "draw; enable only to diagnose GPU hangs)");
 REXCVAR_DEFINE_BOOL(sr_native_gpu_pass_timing, false, "Superman Returns Native",
                     "Debug: log GPU time per render pass (timestamp queries at pass changes)");
+REXCVAR_DEFINE_BOOL(sr_native_gpu_timestamps, false, "Superman Returns Native",
+                    "Collect frame GPU timestamps/readbacks for diagnostics (disabled by default)");
 REXCVAR_DEFINE_BOOL(sr_native_msaa, true, "Superman Returns Native",
                     "Create host render targets with the guest's MSAA sample count");
 REXCVAR_DEFINE_BOOL(sr_native_ab_mode, false, "Superman Returns Native",
@@ -1925,6 +1930,13 @@ void Renderer::ProfileReport() {
 }
 
 void Renderer::BeginFrameTimestamp() {
+  // Query resolves copy GPU timestamps into CPU-visible memory. Avoid that
+  // work during ordinary gameplay; diagnostics can opt back in at runtime.
+  if (!REXCVAR_GET(sr_native_gpu_timestamps) &&
+      !REXCVAR_GET(sr_native_gpu_pass_timing) && !CpuProfiling()) {
+    ts_open_ = false;
+    return;
+  }
   if (!ts_heap_) {
     D3D12_QUERY_HEAP_DESC qd{};
     qd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
@@ -3514,7 +3526,7 @@ uint32_t Renderer::GetTextureSrvIndex(uint8_t* base, const uint32_t fetch[6]) {
     if (entry.checked_frame != frame_count_ && !entry.guest_ranges.empty()) {
       entry.checked_frame = frame_count_;
       // With write watches: guest physical writes trigger a check immediately.
-      // Dynamic movie and UI textures (up to 4MB) are revalidated each frame
+      // Dynamic movie and UI textures (up to 4MB) are periodically revalidated
       // because guest virtual CPU writes (video codecs) bypass physical write watches.
       // Larger unwatched textures are checked every 30 frames.
       const auto written_since = [this](uint32_t address, uint32_t size, uint32_t seq) {
@@ -3531,7 +3543,8 @@ uint32_t Renderer::GetTextureSrvIndex(uint8_t* base, const uint32_t fetch[6]) {
       watch_timer.Stop();
       // Preserve the existing base-level threshold; adding mip coverage must
       // not move an existing per-frame texture into the slower policy.
-      bool check = LegacyTextureValidationRequired(entry.guest_size,texture_watch_,written,frame_count_,entry.hashed_frame);
+      bool check = entry.hash_backoff.ShouldValidate(entry.guest_size,texture_watch_,written,
+          frame_count_,entry.hashed_frame,REXCVAR_GET(sr_native_texture_hash_backoff));
       if(check && texture_tracking_mode_==TextureTrackingMode::On && entry.tracking) {
         auto& tracking=*entry.tracking;
         const auto query_start=CpuProfiling()?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
@@ -3622,6 +3635,8 @@ uint32_t Renderer::GetTextureSrvIndex(uint8_t* base, const uint32_t fetch[6]) {
         }
         if (TextureHashReplayEnabled())
           MaybeReplayTextureHash(std::span<const uint32_t, 6>(fetch, 6), frame_count_, "d3d12");
+        entry.hash_backoff.OnHashed(frame_count_,hash==entry.content_hash,
+            texture_watch_ && !written && hash!=entry.content_hash);
         if (hash != entry.content_hash) {
           if (CpuProfiling()) ++cpu_timings.texture_hash_changes;
           ++stats_.textures_reloaded;
@@ -3938,6 +3953,7 @@ uint32_t Renderer::CreateTexture(const uint32_t fetch[6], TextureEntry& entry) {
   entry.watch_seq = pre_seq;
   entry.content_hash = pre_hash;
   entry.checked_frame = entry.hashed_frame = frame_count_;
+  entry.hash_backoff.OnHashed(frame_count_,false);
   if(texture_tracking_mode_==TextureTrackingMode::On && entry.tracking) {
     auto& tracking=*entry.tracking;
     // GPU upload and pre_hash used this exact owned decode. Publish only after

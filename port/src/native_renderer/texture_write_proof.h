@@ -62,4 +62,24 @@ inline bool LegacyTextureValidationRequired(uint32_t base_size,bool watches,bool
                                             uint64_t frame,uint64_t hashed_frame) {
   return base_size<=(4096u<<10) || (watches?written:frame-hashed_frame>=30);
 }
+// Physical watches catch writes immediately. Small textures must also be
+// sampled periodically: guest virtual aliases (e.g. video) can bypass watches.
+// Unchanged samples back off from 1 to 8 frames. When an unobserved change is
+// found, sample every frame for 120 frames to keep video/UI updates fluid.
+struct TextureHashBackoff {
+  uint32_t stable_checks=0;
+  uint64_t next_check_frame=0;
+  uint64_t dynamic_until_frame=0;
+  bool ShouldValidate(uint32_t base_size,bool watches,bool written,
+                      uint64_t frame,uint64_t hashed_frame,bool enabled) const {
+    if(!LegacyTextureValidationRequired(base_size,watches,written,frame,hashed_frame)) return false;
+    return !enabled || !watches || written || base_size>(4096u<<10) ||
+        frame<=dynamic_until_frame || frame>=next_check_frame;
+  }
+  void OnHashed(uint64_t frame,bool unchanged,bool unobserved_change=false) {
+    if(unobserved_change) dynamic_until_frame=frame+120;
+    stable_checks=unchanged?std::min(stable_checks+1,3u):0;
+    next_check_frame=frame+(uint64_t(1)<<stable_checks);
+  }
+};
 }  // namespace superman_returns::native
