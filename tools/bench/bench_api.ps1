@@ -17,6 +17,7 @@ param(
   [Parameter(Mandatory)] [string]$Name,
   [string]$Exe = '',
   [ValidateRange(0, 1000)] [int]$FpsLimit = 30,
+  [string]$ExtraGameArgs = '',
   [switch]$Profile,
   [switch]$Timeline,
   [switch]$TimelineDetail,
@@ -35,6 +36,7 @@ $gameArgs = @(
   '--sr_native_fxaa=false', '--sr_native_shadow_quality=1', '--sr_native_msaa_samples=1',
   '--mnk_mode=true', '--mnk_mouse=true'
 ) -join ' '
+if ($ExtraGameArgs.Trim()) { $gameArgs += ' ' + $ExtraGameArgs.Trim() }
 if($FrameGeneration) {
   if(-not (Test-Path -LiteralPath $FrameGenerationDll -PathType Leaf)) {throw "Lossless.dll ausente: $FrameGenerationDll"}
   $gameArgs += ' --sr_lsfg=true --sr_lsfg_mode=performance --sr_lsfg_dll="' + $FrameGenerationDll + '"'
@@ -76,7 +78,8 @@ try {
       try {
         [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
         $env:PYTHONIOENCODING = 'utf-8'
-        $report = @(python "$root\tools\analysis\frame_timeline_report.py" $timelineCsv)
+        $budgetMs = if ($FpsLimit -gt 0) { 1000.0 / $FpsLimit } else { 1000.0 / 60.0 }
+        $report = @(python "$root\tools\analysis\frame_timeline_report.py" $timelineCsv --budget-ms ($budgetMs.ToString('0.000000', [System.Globalization.CultureInfo]::InvariantCulture)))
         if ($LASTEXITCODE -ne 0) { throw "frame_timeline_report.py terminou com codigo $LASTEXITCODE" }
       } finally {
         try { [Console]::OutputEncoding = $prevConsoleEnc } catch { }

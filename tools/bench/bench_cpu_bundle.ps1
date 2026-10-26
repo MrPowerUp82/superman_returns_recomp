@@ -12,6 +12,7 @@ param(
   [ValidateRange(0,1000)][int]$FpsLimit=60,
   [switch]$Profile,
   [switch]$Timeline,
+  [switch]$TimelineDetail,
   [switch]$ColdPipelineCache
 )
 $ErrorActionPreference='Stop'
@@ -31,6 +32,10 @@ $settings=@{
 }
 if($Profile){foreach($key in @('SR_NATIVE_CPU_PROFILE','SR_NATIVE_CONSTANTS_PROFILE','SR_NATIVE_STREAMS_PROFILE','SR_NATIVE_PM4_READ_PROFILE')){$settings[$key]='1'}}
 if($Timeline){$settings.SR_FRAME_TIMELINE=$timelinePath}
+if($TimelineDetail){
+ if(!$Timeline){throw 'TimelineDetail requires Timeline'}
+ $settings.SR_FRAME_TIMELINE_DETAIL='1'
+}
 $gameArgs="--sr_renderer=native --sr_preset=custom --sr_native_api=d3d12 --sr_native_cpu_bundle=$bundle --sr_native_pm4_bounded_reads=false --sr_native_shared_staging=false --sr_native_resolve_identity_cache=false --sr_native_buffer_srv_cache=0 --sr_native_stacked_resolves=false --sr_native_fps_limit=$FpsLimit --sr_native_render_scale=1 --sr_render_scale=100 --window_width=1280 --window_height=720 --vsync=true --sr_native_msaa_samples=1 --sr_native_shadow_quality=1 --sr_native_fxaa=false --sr_native_anisotropic_filtering=-1 --sr_lsfg=false --mnk_mode=true --mnk_mouse=false --sr_native_pipeline_cache=true"
 $cache=Join-Path (Split-Path $Exe) 'superman_returns_pipelines.bin'
 $cacheBackup=''

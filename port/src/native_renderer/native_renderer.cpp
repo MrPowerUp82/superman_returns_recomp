@@ -415,6 +415,7 @@ bool NativeTraceTriggered() {
 }
 struct CpuTimings {
   uint64_t capture_ns=0,wait_ns=0,execute_ns=0,prepare_ns=0,constants_ns=0,streams_ns=0,swaps=0;
+  uint64_t surfaces_ns=0,render_targets_ns=0,pipeline_ns=0,fixed_state_ns=0;
   uint64_t constant_float_ns=0,constant_slots_ns=0,texture_lookup_ns=0,texture_hash_ns=0,sampler_ns=0;
   uint64_t texture_hash_bytes=0,texture_hash_checks=0,slot_hits=0,slot_misses=0,constant_draws=0;
   uint64_t texture_watch_ns=0,texture_watch_rearms=0,texture_hash_changes=0;
@@ -2151,6 +2152,7 @@ bool Renderer::BeginFrame() {
     geometry_probe_.Reset(frame_count_ + 1, swap_number_);
   }
   frame_state_bound_ = false;
+  fixed_state_cached_ = false;
   bound_rt_count_ = 0;
   bound_ds_ = nullptr;
   std::memset(bound_rts_, 0, sizeof(bound_rts_));
@@ -2160,6 +2162,7 @@ bool Renderer::BeginFrame() {
 
 Renderer::HostSurface* Renderer::GetSurface(uint8_t* base, uint32_t surface_object, bool depth,
                                             uint32_t min_width, uint32_t min_height) {
+  CpuTimer cpu_timer(cpu_timings.surfaces_ns);
   if (!surface_object) {
     return nullptr;
   }
@@ -2552,6 +2555,7 @@ void Renderer::ApplySsao() {
   command_list_->DrawInstanced(3, 1, 0, 0);
   Breadcrumb("ssao");
   frame_state_bound_ = false;
+  fixed_state_cached_ = false;
   bound_rt_count_ = 0;
   bound_ds_ = nullptr;
   std::memset(bound_rts_, 0, sizeof(bound_rts_));
@@ -2655,6 +2659,7 @@ void Renderer::ApplyFxaa(HostSurface& target) {
   command_list_->DrawInstanced(3, 1, 0, 0);
   // The guest state (root signature, heaps, targets) must be rebound.
   frame_state_bound_ = false;
+  fixed_state_cached_ = false;
   bound_rt_count_ = 0;
   bound_ds_ = nullptr;
   std::memset(bound_rts_, 0, sizeof(bound_rts_));
@@ -2728,6 +2733,7 @@ bool Renderer::ReinterpretSurface(HostSurface& dst, HostSurface& src) {
   Breadcrumb("edram reinterpret");
   // Guest state must be rebound (root signature, heaps, targets).
   frame_state_bound_ = false;
+  fixed_state_cached_ = false;
   bound_rt_count_ = 0;
   bound_ds_ = nullptr;
   std::memset(bound_rts_, 0, sizeof(bound_rts_));
@@ -2804,6 +2810,7 @@ void Renderer::ResolveEdramAliasing(HostSurface* s) {
 bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_formats[4],
                                  uint32_t& rt_count, DXGI_FORMAT& dsv_format,
                                  const graphics::SurfaceDrawMetadata& draw_metadata) {
+  CpuTimer cpu_timer(cpu_timings.render_targets_ns);
   HostSurface* rts[4] = {};
   rt_count = 0;
   // Only RTs the draw can write: stale MRT slots left bound by the guest (with
@@ -3084,6 +3091,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
                                            const DXGI_FORMAT rtv_formats[4], uint32_t rt_count,
                                            DXGI_FORMAT dsv_format,
                                            D3D12_INDEX_BUFFER_STRIP_CUT_VALUE strip_cut) {
+  CpuTimer cpu_timer(cpu_timings.pipeline_ns);
   const bool ray_variant=rt_shadow_draw_active_ && !rt_shadow_shader_.empty();
   const bool coverage_variant=motion_coverage_draw_active_ && motion_coverage_shader_;
   const bool special_variant=ray_variant || coverage_variant;
@@ -4185,8 +4193,8 @@ void Renderer::ReportHang() {
 }
 
 uint32_t Renderer::GpuConstant(uint8_t* base, uint32_t dev, uint32_t reg,
-                               uint32_t shadow_offset) const {
-  if (REXCVAR_GET(sr_native_pm4_mirror) && mirror_.written(reg)) return mirror_.reg(reg);
+                               uint32_t shadow_offset, bool use_mirror) const {
+  if (use_mirror && mirror_.written(reg)) return mirror_.reg(reg);
   return Load32(base, dev + shadow_offset);
 }
 
@@ -4408,7 +4416,7 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
   for (uint32_t slot = 0; slot < 16; ++slot) {
     uint32_t fetch[6]{};
     fetch[0] = GpuConstant(base, dev, Pm4Mirror::kFetchConstantBase + 6 * slot,
-                           kDevFetchConstants + 24 * slot);
+                           kDevFetchConstants + 24 * slot, use_mirror);
     // Empty slots have no texture or sampler. Their three SRV dimensions use
     // the same null descriptors regardless of the remaining fetch words.
     // Motion capture still needs fetch[1] for the first three slots.
@@ -4419,7 +4427,7 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
     }
     for (uint32_t d = 1; d < 6; ++d) {
       fetch[d] = GpuConstant(base, dev, Pm4Mirror::kFetchConstantBase + 6 * slot + d,
-                             kDevFetchConstants + 24 * slot + 4 * d);
+                             kDevFetchConstants + 24 * slot + 4 * d, use_mirror);
     }
     uint32_t srv = 0, sampler = 0;
     if (IsTextureBound(fetch[0])) {
@@ -4541,10 +4549,10 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
   slots_timer.Stop();
   CpuTimer derived_timer(d.derived_ns,detail);
   for (uint32_t i = 0; i < 4; ++i) {
-    const uint32_t vs_bool=GpuConstant(base, dev, Pm4Mirror::kBoolConstantBase + i, kDevVsBools + 4 * i);
+    const uint32_t vs_bool=GpuConstant(base, dev, Pm4Mirror::kBoolConstantBase + i, kDevVsBools + 4 * i, use_mirror);
     s[64 + i] = vs_bool;
     if(motion_capture_active_) motion_uploaded_vs_bools_[i]=vs_bool;
-    s[68 + i] = GpuConstant(base, dev, Pm4Mirror::kBoolConstantBase + 4 + i, kDevPsBools + 4 * i);
+    s[68 + i] = GpuConstant(base, dev, Pm4Mirror::kBoolConstantBase + 4 + i, kDevPsBools + 4 * i, use_mirror);
   }
   s[72] = 0;
   // g_HalfPixelOffset (c18.yz): Xenos D3D pixel centers (PA_SU_VTX_CNTL
@@ -4710,9 +4718,9 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
     std::memcpy(&s[115], &softness, 4);
   }
   for (uint32_t i = 0; i < 16; ++i) {
-    s[76 + i] = GpuConstant(base, dev, Pm4Mirror::kLoopConstantBase + i, kDevVsLoops + 4 * i);
+    s[76 + i] = GpuConstant(base, dev, Pm4Mirror::kLoopConstantBase + i, kDevVsLoops + 4 * i, use_mirror);
     s[92 + i] =
-        GpuConstant(base, dev, Pm4Mirror::kLoopConstantBase + 16 + i, kDevPsLoops + 4 * i);
+        GpuConstant(base, dev, Pm4Mirror::kLoopConstantBase + 16 + i, kDevPsLoops + 4 * i, use_mirror);
   }
   // g_ScreenXform (c27): screen-space draws (viewport transform disabled in
   // PA_CL_VTE_CNTL, e.g. the upscale pass) emit pixel positions; map them to NDC.
@@ -4800,6 +4808,7 @@ void Renderer::ScreenSpaceTargetSize(float& w, float& h) {
 }
 
 void Renderer::ApplyFixedFunctionState(uint8_t* base, uint32_t dev) {
+  CpuTimer cpu_timer(cpu_timings.fixed_state_ns);
   // sub_820F2810 caches D3DVIEWPORT9: four uint32 coordinates, then two floats.
   D3D12_VIEWPORT vp{};
   vp.TopLeftX = float(Load32(base, dev + kDevViewport + 0));
@@ -4848,7 +4857,10 @@ void Renderer::ApplyFixedFunctionState(uint8_t* base, uint32_t dev) {
     vp.Width *= k;
     vp.Height *= k;
   }
-  command_list_->RSSetViewports(1, &vp);
+  if (!fixed_state_cached_ || std::memcmp(&fixed_viewport_, &vp, sizeof(vp)) != 0) {
+    command_list_->RSSetViewports(1, &vp);
+    fixed_viewport_ = vp;
+  }
   current_motion_raster_.full_viewport=bound_rts_[0] && vp.TopLeftX==0 && vp.TopLeftY==0 &&
       vp.Width==float(HostPx(bound_rts_[0]->width,bound_rts_[0]->scale)) &&
       vp.Height==float(HostPx(bound_rts_[0]->height,bound_rts_[0]->scale)) && vp.MinDepth==0 && vp.MaxDepth==1;
@@ -4871,16 +4883,29 @@ void Renderer::ApplyFixedFunctionState(uint8_t* base, uint32_t dev) {
                   scissor.top, scissor.right, scissor.bottom);
     }
   }
-  command_list_->RSSetScissorRects(1, &scissor);
+  if (!fixed_state_cached_ || std::memcmp(&fixed_scissor_, &scissor, sizeof(scissor)) != 0) {
+    command_list_->RSSetScissorRects(1, &scissor);
+    fixed_scissor_ = scissor;
+  }
   current_motion_raster_.scissor=scissor;
   uint32_t stencil_ref_mask = LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_STENCILREFMASK);
-  command_list_->OMSetStencilRef(stencil_ref_mask & 0xFF);
+  const uint32_t stencil_ref = stencil_ref_mask & 0xFF;
+  if (!fixed_state_cached_ || fixed_stencil_ref_ != stencil_ref) {
+    command_list_->OMSetStencilRef(stencil_ref);
+    fixed_stencil_ref_ = stencil_ref;
+  }
   float blend_factor[4];
+  uint32_t blend_bits[4];
   for (uint32_t i = 0; i < 4; ++i) {
     uint32_t v = LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_BLEND_RED + i);
     std::memcpy(&blend_factor[i], &v, 4);
+    blend_bits[i] = v;
   }
-  command_list_->OMSetBlendFactor(blend_factor);
+  if (!fixed_state_cached_ || std::memcmp(fixed_blend_bits_, blend_bits, sizeof(blend_bits)) != 0) {
+    command_list_->OMSetBlendFactor(blend_factor);
+    std::memcpy(fixed_blend_bits_, blend_bits, sizeof(blend_bits));
+  }
+  fixed_state_cached_ = true;
 }
 
 bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
@@ -4959,6 +4984,7 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
       command_list_->Reset(allocators_[frame_index_].Get(), nullptr);
       command_list_->IASetVertexBuffers(0, 16, guest_vertex_views_);
       frame_state_bound_ = false;
+      fixed_state_cached_ = false;
       bound_rt_count_ = 0;
       bound_ds_ = nullptr;
       std::memset(bound_rts_, 0, sizeof(bound_rts_));
@@ -5670,7 +5696,7 @@ bool Renderer::PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRan
     // The base address identifies the guest allocation; its range and layout
     // are checked below. Mix aligned address bits before selecting a set.
     uint32_t address_hash = buffer_base ^ (buffer_base >> 12) ^ (buffer_base >> 23);
-    const size_t set = (address_hash * 0x9E3779B1u) >> 26;
+    const size_t set = (address_hash * 0x9E3779B1u) >> 22;
     const size_t first = set * 2;
     auto& cache = front_stream_cache_[s];
     const auto matches = [&](size_t slot) {
@@ -6531,6 +6557,7 @@ void Renderer::CopyDepthRegion(HostSurface& src, ResolveTexture& dst, uint32_t x
   }
   // The guest state (root signature, heaps, targets) must be rebound.
   frame_state_bound_ = false;
+  fixed_state_cached_ = false;
   bound_rt_count_ = 0;
   bound_ds_ = nullptr;
   std::memset(bound_rts_, 0, sizeof(bound_rts_));
@@ -6562,6 +6589,7 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
       DumpFrameResources(fmt::format("r{}_", index), true);
       command_list_->Reset(allocators_[frame_index_].Get(), nullptr);
       frame_state_bound_ = false;
+      fixed_state_cached_ = false;
       bound_rt_count_ = 0;
       bound_ds_ = nullptr;
       std::memset(bound_rts_, 0, sizeof(bound_rts_));
@@ -7331,6 +7359,7 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
     command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     command_list_->DrawInstanced(3, 1, 0, 0);
     frame_state_bound_ = false;
+    fixed_state_cached_ = false;
   } else {
     float color[4] = {0.3f, 0.0f, 0.3f, 1.0f};  // magenta-ish: no front buffer resolved
     command_list_->ClearRenderTargetView(output_rtvs_[frame_index_], color, 0, nullptr);
@@ -7714,6 +7743,7 @@ void Renderer::ExecOnPassEnd(int pass) {
     DumpFrameResources(fmt::format("p{:02}_", pass), true);
     command_list_->Reset(allocators_[frame_index_].Get(), nullptr);
     frame_state_bound_ = false;
+    fixed_state_cached_ = false;
     bound_rt_count_ = 0;
     bound_ds_ = nullptr;
     std::memset(bound_rts_, 0, sizeof(bound_rts_));
@@ -7741,6 +7771,7 @@ void Renderer::ExecOnPassEnd(int pass) {
   DumpFrameResources();
   command_list_->Reset(allocators_[frame_index_].Get(), nullptr);
   frame_state_bound_ = false;
+  fixed_state_cached_ = false;
   bound_rt_count_ = 0;
   bound_ds_ = nullptr;
   std::memset(bound_rts_, 0, sizeof(bound_rts_));
@@ -7889,6 +7920,7 @@ void Renderer::WatchHdr(uint32_t index) {
   command_list_->Reset(allocators_[frame_index_].Get(), nullptr);
   command_list_->IASetVertexBuffers(0, 16, guest_vertex_views_);
   frame_state_bound_ = false;
+  fixed_state_cached_ = false;
   bound_rt_count_ = 0;
   bound_ds_ = nullptr;
   std::memset(bound_rts_, 0, sizeof(bound_rts_));
@@ -8478,6 +8510,7 @@ void Renderer::WorkerMain() {
           p.execute_ns+=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-started).count());
           if(cmd.op==Op::kSwap && ++p.swaps==120) {
             REXLOG_INFO("native CPU worker (ms/frame over 120, nested): api={} execute={:.2f} prepare={:.2f} constants={:.2f} streams={:.2f}",packet_sink_?"vulkan":"d3d12",p.execute_ns/120000000.0,p.prepare_ns/120000000.0,p.constants_ns/120000000.0,p.streams_ns/120000000.0);
+            REXLOG_INFO("native CPU prepare detail (ms/frame over 120, nested surface in targets): surface={:.3f} targets={:.3f} pipeline={:.3f} fixed_state={:.3f} other={:.3f}",p.surfaces_ns/120000000.0,p.render_targets_ns/120000000.0,p.pipeline_ns/120000000.0,p.fixed_state_ns/120000000.0,(double(p.prepare_ns)-double(p.constants_ns)-double(p.render_targets_ns)-double(p.pipeline_ns)-double(p.fixed_state_ns))/120000000.0);
             if (mirror_.alu_read_profile.enabled) {
               const auto& r=mirror_.alu_read_profile;
               REXLOG_INFO("native CPU PM4 live reads (120 swaps, validation nested in execute): calls={} bytes={} queries={} bounded_calls={} failures={} validation_ns={} validation_ms={:.4f}",r.calls,r.bytes,r.queries,r.bounded_calls,r.failures,r.validation_ns,r.validation_ns/120000000.0);
@@ -8493,6 +8526,7 @@ void Renderer::WorkerMain() {
               stream_detail_timings={};
             }
             p.execute_ns=p.prepare_ns=p.constants_ns=p.streams_ns=p.swaps=0;
+            p.surfaces_ns=p.render_targets_ns=p.pipeline_ns=p.fixed_state_ns=0;
             REXLOG_INFO("native CPU texture watches (ms/frame over 120, nested in texture_lookup): watch={:.2f} rearms={} reloads={}",p.texture_watch_ns/120000000.0,p.texture_watch_rearms/120,p.texture_hash_changes/120);
             p.texture_watch_ns=p.texture_watch_rearms=p.texture_hash_changes=0;
             REXLOG_INFO("native CPU shared constants (ms/frame over 120, nested): compare_upload={:.2f} hits={} uploads={} saved_kb={}",p.shared_upload_ns/120000000.0,p.shared_hits/120,p.shared_uploads/120,p.shared_hits*4/120);

@@ -278,10 +278,12 @@ class Renderer : public NativeFrontend {
     uint64_t key = 0;
     TrackedBuffer* tracked = nullptr;
   };
-  // Two-way, 64-set vertex stream cache. Probe at most two entries per draw,
-  // including on a miss (the former fully associative scan was expensive).
-  std::array<FrontStreamCache, 128> front_stream_cache_[17];
-  std::array<std::array<uint8_t, 64>, 17> front_stream_cache_next_{};
+  // Keep two probes per draw while reducing address churn among the thousands
+  // of distinct world vertex buffers in a city frame. The original 64 sets
+  // evicted clean buffer plans even when their tracked content was unchanged.
+  static constexpr size_t kFrontStreamSetCount = 1024;
+  std::array<FrontStreamCache, kFrontStreamSetCount * 2> front_stream_cache_[17];
+  std::array<std::array<uint8_t, kFrontStreamSetCount>, 17> front_stream_cache_next_{};
   // Worker.
   void WorkerMain();
   void Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd,graphics::guest::DrawPacketOwner storage={},std::shared_ptr<const WorkBatch> capture_owner={},graphics::guest::ReplayResult* prepared=nullptr);
@@ -718,6 +720,13 @@ class Renderer : public NativeFrontend {
   uint8_t* upload_cpu_[kFramesInFlight] = {};
   size_t upload_offset_ = 0;
   bool frame_state_bound_ = false;
+  // D3D12 command-list state shadow. Invalidated on every command-list reset
+  // or auxiliary pass which writes viewport, scissor, stencil or blend state.
+  bool fixed_state_cached_ = false;
+  D3D12_VIEWPORT fixed_viewport_{};
+  D3D12_RECT fixed_scissor_{};
+  uint32_t fixed_stencil_ref_ = 0;
+  uint32_t fixed_blend_bits_[4]{};
 
   // Currently bound render targets (to skip redundant OMSetRenderTargets).
   HostSurface* bound_rts_[4] = {};
@@ -870,7 +879,8 @@ class Renderer : public NativeFrontend {
   // frontend packets directly and will not rescan commands on its worker.
   // Register value as the GPU sees it (mirror), falling back to the XDK shadow
   // at dev+shadow_offset for registers no packet has written yet.
-  uint32_t GpuConstant(uint8_t* base, uint32_t dev, uint32_t reg, uint32_t shadow_offset) const;
+  uint32_t GpuConstant(uint8_t* base, uint32_t dev, uint32_t reg, uint32_t shadow_offset,
+                       bool use_mirror) const;
   std::string SurfaceName(const HostSurface* s) const;
 
   // Byte-swapped host copies of guest vertex/index buffers.

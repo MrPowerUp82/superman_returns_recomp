@@ -249,6 +249,11 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
             ${SR_REXGPU_SOURCE_DIR}
             ${SR_REXGPU_SOURCE_DIR}/thirdparty/renderdoc
         )
+        if(SR_MEMORY_TRACKING_SDK)
+            # Source-built ReXGlue exposes ImGui headers to its own targets,
+            # but the standalone native renderer also includes rex/ui headers.
+            target_include_directories(sr_native PRIVATE "${REXSDK_DIR}/thirdparty/imgui")
+        endif()
         if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
             target_compile_options(sr_native PRIVATE -Wno-unused-variable -mssse3 -msse4.1)
         endif()
