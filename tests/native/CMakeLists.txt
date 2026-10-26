@@ -45,6 +45,8 @@ add_executable(sr_native_tests
     test_scene_color_vertex_input.cpp
     test_motion_depth_boundary.cpp
     test_scene_raster_jitter.cpp
+    test_scene_resolution_shader.cpp
+    test_scene_resolution_mapping.cpp
     test_observed_instance_lifetimes.cpp
     test_observed_skinned_motion.cpp
     test_observed_cloth_motion.cpp
@@ -53,6 +55,7 @@ add_executable(sr_native_tests
     test_pixel_coverage_shader.cpp
     test_motion_raster_coverage.cpp
     "${SR_NATIVE_DIR}/../graphics/pixel_coverage_shader.cpp"
+    "${SR_NATIVE_DIR}/../graphics/scene_resolution_shader.cpp"
     "${SR_NATIVE_DIR}/../graphics/rt_shadow_shader.cpp"
     "${SR_NATIVE_DIR}/../graphics/graphics_preferences.cpp"
     "${SR_NATIVE_DIR}/../graphics/graphics_options.cpp"

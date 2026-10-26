@@ -1,0 +1,8 @@
+# Mandatory orchestrator review
+
+01 lifecycle: REJECTED, empty response. Runner reported denied read_file. No source claim accepted. Orchestrator reads bounded exact routines directly instead of repeating broad context.
+03 motion gaps: REJECTED, empty response. No coverage or source identity claim accepted. Orchestrator will inspect captured rows/VS dependencies locally.
+02 reflection: ACCEPTED ONLY for existing exact original cube sample replacement boundary, closest-hit traversal, secondary view vector and preserved original material weighting. Source sampled against existing authoritative reflection audit and actual UploadConstants.
+REJECTED: proposed vertex payload drops required TC0.w/TC1.w/TC4 fields; snapshot spec_constants=s72 is wrong (actual s112; s72 is swap metadata); b4/space4 collides with existing pixel ownership;4288-byte material layout is not a multiple of256 as claimed; FOV-only cone formula is not a source-qualified actual projection footprint; displaced shadow proxies must be excluded by provenance, not accepted as opaque reflection blockers. No PBR roughness invented; original rational specular shape is preserved. Implementation must freeze the complete shared bank and actual PS constants/resources per material.
+
+Mapping write: allowed changes only new scene_resolution_mapping.h and test_scene_resolution_mapping.cpp plus permitted scratch exe. Reviewed exact int64 signed rounding, per-axis rational comparison, finite viewport/output bounds, copy extent/clipping rules. Parent reruns -Wall -Wextra -Werror -Wpedantic and integrates only these2files; CMake integration by parent. No worker success accepted without checks.

@@ -214,6 +214,7 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
             src/graphics/graphics_settings.cpp
             src/graphics/rt_shadow_shader.cpp
             src/graphics/pixel_coverage_shader.cpp
+              src/graphics/scene_resolution_shader.cpp
             ${SR_NATIVE_ROOT}/resource_write_tracking.cpp
             ${SR_NATIVE_ROOT}/pm4_mirror.cpp
             ${SR_NATIVE_ROOT}/../graphics/guest/draw_state.cpp
