@@ -101,17 +101,29 @@ void Pm4Mirror::WriteRange(uint32_t first,const uint8_t* words,uint32_t count) {
 void Pm4Mirror::ScanFrom(const uint8_t *base, const uint8_t *stream,
                          uint32_t begin, uint32_t end, int depth,
                          const MemoryReader *reader) {
+#ifdef _WIN32
+  // Each nested indirect buffer gets a separate, owned scratch slot until the
+  // outer scan completes. Recycle the slots between top-level command scans.
+  thread_local CheckedGuestReads indirect_reads;
+  if (!depth && !reader)
+    indirect_reads.Reset();
+#endif
   uint32_t p = begin;
-  while (p + 4 <= end) {
+  while (p <= end && end - p >= 4) {
     uint32_t header = LoadBE(stream, p);
     p += 4;
     ++packets;
+    // Xenia's command processor treats these as invalid/padding markers and
+    // advances one dword. Decoding them as type-0 writes would desynchronize
+    // the mirror from the GPU after a padded command segment.
+    if (!header || header == 0x0BADF00Du)
+      continue;
     switch (header >> 30) {
     case 0: {
       uint32_t count = ((header >> 16) & 0x3FFF) + 1;
       uint32_t index = header & 0x7FFF;
       bool one_register = (header >> 15) & 1;
-      if (p + count * 4 > end)
+      if (end - p < count * 4)
         return;
       if(one_register) for(uint32_t i=0;i<count;++i) Write(index,LoadBE(stream,p+4*i));
       else WriteRange(index,stream+p,count);
@@ -120,7 +132,7 @@ void Pm4Mirror::ScanFrom(const uint8_t *base, const uint8_t *stream,
       break;
     }
     case 1: {
-      if (p + 8 > end)
+      if (end - p < 8)
         return;
       Write(header & 0x7FF, LoadBE(stream, p));
       Write((header >> 11) & 0x7FF, LoadBE(stream, p + 4));
@@ -132,10 +144,50 @@ void Pm4Mirror::ScanFrom(const uint8_t *base, const uint8_t *stream,
     case 3: {
       uint32_t opcode = (header >> 8) & 0x7F;
       uint32_t count = ((header >> 16) & 0x3FFF) + 1;
-      if (p + count * 4 > end)
+      if (end - p < count * 4)
         return;
+      // As in the Xenos command processor, type-3 predication applies to
+      // register writes and indirect buffers as well as to draws.
+      if ((header & 1) && !(bin_mask_ & bin_select_)) {
+        p += count * 4;
+        dwords += count;
+        break;
+      }
       uint32_t d0 = count > 0 ? LoadBE(stream, p) : 0;
       switch (opcode) {
+      case 0x21: { // REG_RMW: destination = (destination & and) | or
+        if (count < 3)
+          break;
+        const uint32_t index = d0 & 0x1FFF;
+        const uint32_t and_operand = LoadBE(stream, p + 4);
+        const uint32_t or_operand = LoadBE(stream, p + 8);
+        const uint32_t and_value = (d0 & 0x80000000u)
+            ? reg(and_operand & 0x1FFF) : and_operand;
+        const uint32_t or_value = (d0 & 0x40000000u)
+            ? reg(or_operand & 0x1FFF) : or_operand;
+        Write(index, (reg(index) & and_value) | or_value);
+        break;
+      }
+      case 0x50: // SET_BIN_MASK (high, low)
+        if (count >= 2)
+          bin_mask_ = (uint64_t(d0) << 32) | LoadBE(stream, p + 4);
+        break;
+      case 0x51: // SET_BIN_SELECT (high, low)
+        if (count >= 2)
+          bin_select_ = (uint64_t(d0) << 32) | LoadBE(stream, p + 4);
+        break;
+      case 0x60: // SET_BIN_MASK_LO
+        bin_mask_ = (bin_mask_ & 0xFFFFFFFF00000000ull) | d0;
+        break;
+      case 0x61: // SET_BIN_MASK_HI
+        bin_mask_ = (bin_mask_ & 0xFFFFFFFFull) | (uint64_t(d0) << 32);
+        break;
+      case 0x62: // SET_BIN_SELECT_LO
+        bin_select_ = (bin_select_ & 0xFFFFFFFF00000000ull) | d0;
+        break;
+      case 0x63: // SET_BIN_SELECT_HI
+        bin_select_ = (bin_select_ & 0xFFFFFFFFull) | (uint64_t(d0) << 32);
+        break;
       case 0x2D: { // SET_CONSTANT
         uint32_t index = d0 & 0x7FF;
         uint32_t first;
@@ -197,6 +249,8 @@ void Pm4Mirror::ScanFrom(const uint8_t *base, const uint8_t *stream,
           break;
         }
         uint32_t src = kPhysicalView + (address & 0x1FFFFFFF);
+        const auto* live_source = reinterpret_cast<const uint8_t*>(
+            reinterpret_cast<uintptr_t>(base) + uintptr_t(src));
         std::span<const uint8_t> captured;
         const uint8_t* source = nullptr;
         if (reader)
@@ -215,15 +269,15 @@ void Pm4Mirror::ScanFrom(const uint8_t *base, const uint8_t *stream,
             // survives into the next ALU load or a nested command scan.
             thread_local CheckedGuestReads reads;
             reads.Reset();
-            captured = reads.Read(base + src, size * 4);
+            captured = reads.Read(live_source, size * 4);
             readable = captured.size() >= size * 4;
             source = captured.data();
             if (profile) ++profile->bounded_calls;
           } else
 #endif
           {
-            readable = HostReadable(base + src, size * 4, profile);
-            source = base + src;
+            readable = HostReadable(live_source, size * 4, profile);
+            source = live_source;
           }
           if (profile) {
             const auto end = std::chrono::steady_clock::now();
@@ -257,7 +311,7 @@ void Pm4Mirror::ScanFrom(const uint8_t *base, const uint8_t *stream,
           break;
         uint32_t address = kPhysicalView + (d0 & 0x1FFFFFFF);
         uint32_t size = LoadBE(stream, p + 4) & 0xFFFFF;
-        if (size > (1u << 18))
+        if (!size || size > (1u << 18))
           break; // not a plausible command buffer
         indirect_dwords += size;
         if (reader) {
@@ -267,7 +321,21 @@ void Pm4Mirror::ScanFrom(const uint8_t *base, const uint8_t *stream,
           else
             ++unreadable_indirect_buffers;
         } else {
+#ifdef _WIN32
+          // Guest command pages may be recycled while the renderer consumes
+          // them. Copy the full indirect stream before parsing so an invalid
+          // or partially unreadable page cannot crash the process or mutate
+          // register state from a truncated buffer.
+          const auto* live_source = reinterpret_cast<const uint8_t*>(
+              reinterpret_cast<uintptr_t>(base) + uintptr_t(address));
+          const auto captured = indirect_reads.Read(live_source, size * 4);
+          if (captured.size() >= size * 4)
+            ScanFrom(base, captured.data(), 0, size * 4, depth + 1);
+          else
+            ++unreadable_indirect_buffers;
+#else
           ScanFrom(base, base, address, address + size * 4, depth + 1);
+#endif
         }
         break;
       }

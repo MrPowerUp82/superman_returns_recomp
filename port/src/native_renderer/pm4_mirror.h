@@ -93,6 +93,10 @@ public:
   uint64_t indirect_dwords = 0;
 
 private:
+  // The command processor starts with all bins selected and enabled. Type-3
+  // packets with the predicate bit set execute only when these overlap.
+  uint64_t bin_mask_ = ~uint64_t{0};
+  uint64_t bin_select_ = ~uint64_t{0};
   // Main stream read from `stream` + address; memory references via `base`.
   void ScanFrom(const uint8_t *base, const uint8_t *stream, uint32_t begin,
                 uint32_t end, int depth, const MemoryReader *reader = nullptr);

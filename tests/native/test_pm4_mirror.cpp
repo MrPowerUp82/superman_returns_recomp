@@ -35,8 +35,10 @@ struct Stream {
       Dword(v);
     return *this;
   }
-  Stream &Type3(uint32_t opcode, std::initializer_list<uint32_t> payload) {
-    Dword(0xC0000000u | ((uint32_t(payload.size()) - 1) << 16) | (opcode << 8));
+  Stream &Type3(uint32_t opcode, std::initializer_list<uint32_t> payload,
+                bool predicated = false) {
+    Dword(0xC0000000u | ((uint32_t(payload.size()) - 1) << 16) |
+          (opcode << 8) | uint32_t(predicated));
     for (uint32_t v : payload)
       Dword(v);
     return *this;
@@ -120,6 +122,74 @@ SR_TEST(type1_writes_two_registers) {
   m.ScanCopy(nullptr, s.bytes.data(), s.size());
   SR_CHECK_EQ(m.reg(0x104), 0xAAAAu);
   SR_CHECK_EQ(m.reg(0x105), 0xBBBBu);
+}
+
+SR_TEST(padding_and_invalid_pm4_markers_do_not_consume_payloads) {
+  Pm4Mirror m;
+  Stream s;
+  s.Dword(0).Dword(0x0BADF00Du);
+  s.Type0(0x2100, {0x66});
+  m.ScanCopy(nullptr, s.bytes.data(), s.size());
+  SR_CHECK_EQ(m.reg(0), 0u);
+  SR_CHECK_EQ(m.reg(0x2100), 0x66u);
+  SR_CHECK_EQ(m.packets, 3u);
+}
+
+SR_TEST(scan_does_not_wrap_when_less_than_one_dword_remains) {
+  Pm4Mirror m;
+  m.Scan(nullptr, 0xFFFFFFFCu, 0xFFFFFFFFu);
+  SR_CHECK_EQ(m.packets, 0u);
+}
+
+SR_TEST(reg_rmw_combines_immediate_and_register_operands) {
+  Pm4Mirror m;
+  Stream s;
+  s.Type0(0x104, {0xAA});
+  s.Type0(0x105, {0x0F, 0xF0});
+  s.Type3(0x21, {0x104, 0x3F, 0x40}); // (0xAA & 0x3F) | 0x40
+  s.Type3(0x21, {0xC0000104u, 0x105, 0x106}); // both operands from registers
+  m.ScanCopy(nullptr, s.bytes.data(), s.size());
+  SR_CHECK_EQ(m.reg(0x104), 0xFAu);
+  SR_CHECK_EQ(m.reg(0x105), 0x0Fu);
+}
+
+SR_TEST(predicated_type3_writes_respect_bin_mask_and_select) {
+  Pm4Mirror m;
+  Stream s;
+  s.Type3(0x55, {0x2208, 1}, true);  // default masks allow execution
+  s.Type3(0x50, {0, 1});             // mask low bit only
+  s.Type3(0x51, {0, 2});             // select a different bit
+  s.Type3(0x55, {0x2208, 6}, true);  // blocked
+  s.Type3(0x55, {0x2209, 7});        // unpredicated always executes
+  s.Type3(0x62, {1});                // select low bit
+  s.Type3(0x55, {0x2208, 6}, true);  // allowed again
+  s.Type3(0x60, {0});                // mask no bits
+  s.Type3(0x21, {0x104, 0, 99}, true); // blocked RMW
+  s.Type3(0x61, {0xFFFFFFFF});      // high half only doesn't match
+  s.Type3(0x63, {0xFFFFFFFF});      // now high halves match
+  s.Type3(0x55, {0x220A, 10}, true);
+  m.ScanCopy(nullptr, s.bytes.data(), s.size());
+  SR_CHECK_EQ(m.reg(0x2208), 6u);
+  SR_CHECK_EQ(m.reg(0x2209), 7u);
+  SR_CHECK_EQ(m.reg(0x220A), 10u);
+  SR_CHECK_EQ(m.reg(0x104), 0u);
+}
+
+SR_TEST(predicated_indirect_buffer_skips_reader_and_preserves_counts) {
+  Stream primary;
+  primary.Type3(0x50, {0, 0});
+  primary.Type3(0x3F, {0x200, 2}, true);
+  Pm4Mirror m;
+  unsigned callbacks = 0;
+  m.ScanCopyUsing(primary.bytes.data(), primary.size(),
+      [&](uint32_t, uint32_t) -> std::span<const uint8_t> {
+        ++callbacks;
+        return {};
+      });
+  SR_CHECK_EQ(callbacks, 0u);
+  SR_CHECK_EQ(m.indirect_buffers, 0u);
+  SR_CHECK_EQ(m.unreadable_indirect_buffers, 0u);
+  SR_CHECK_EQ(m.packets, 2u);
 }
 
 SR_TEST(set_constant_targets_each_register_file) {
@@ -350,6 +420,67 @@ SR_TEST(indirect_buffer_is_followed) {
   m.ScanCopy(mem.base(), s.bytes.data(), s.size());
   SR_CHECK_EQ(m.reg(0x2100), 0x77u);
 }
+
+SR_TEST(nested_live_indirect_buffers_preserve_outer_stream) {
+  GuestMemory mem;
+  // First buffer contains a register write, a nested dispatch and a final
+  // write. The nested load must not overwrite the captured outer buffer.
+  mem.Store(0x200, 0x2100);
+  mem.Store(0x204, 0x11);
+  mem.Store(0x208, 0xC0013F00u);
+  mem.Store(0x20C, 0x300);
+  mem.Store(0x210, 2);
+  mem.Store(0x214, 0x2102);
+  mem.Store(0x218, 0x33);
+  mem.Store(0x300, 0x2101);
+  mem.Store(0x304, 0x22);
+  Stream root;
+  root.Type3(0x3F, {0x200, 7});
+  Pm4Mirror m;
+  m.ScanCopy(mem.base(), root.bytes.data(), root.size());
+  SR_CHECK_EQ(m.reg(0x2100), 0x11u);
+  SR_CHECK_EQ(m.reg(0x2101), 0x22u);
+  SR_CHECK_EQ(m.reg(0x2102), 0x33u);
+  SR_CHECK_EQ(m.unreadable_indirect_buffers, 0u);
+  SR_CHECK_EQ(m.indirect_buffers, 2u);
+}
+
+#ifdef _WIN32
+SR_TEST(live_indirect_rejects_unreadable_tail_without_partial_writes) {
+  SYSTEM_INFO system;
+  GetSystemInfo(&system);
+  const size_t page_size = system.dwPageSize;
+  auto* pages = static_cast<uint8_t*>(VirtualAlloc(
+      nullptr, 2 * page_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+  SR_CHECK(pages != nullptr);
+  if (!pages) return;
+  DWORD old = 0;
+  const bool protected_ok = VirtualProtect(
+      pages + page_size, page_size, PAGE_NOACCESS, &old) != 0;
+  SR_CHECK(protected_ok);
+  if (protected_ok) {
+    // A complete register write is present in the readable page, but the
+    // indirect command requests one more dword from the inaccessible page.
+    pages[page_size - 8] = 0;
+    pages[page_size - 7] = 0;
+    pages[page_size - 6] = 0x21;
+    pages[page_size - 5] = 0;
+    pages[page_size - 4] = 0;
+    pages[page_size - 3] = 0;
+    pages[page_size - 2] = 0;
+    pages[page_size - 1] = 0x66;
+    const auto* base = reinterpret_cast<const uint8_t*>(
+        reinterpret_cast<uintptr_t>(pages) - 0xA0000000u);
+    Stream s;
+    s.Type3(0x3F, {uint32_t(page_size - 8), 3});
+    Pm4Mirror m;
+    m.ScanCopy(base, s.bytes.data(), s.size());
+    SR_CHECK_EQ(m.unreadable_indirect_buffers, 1u);
+    SR_CHECK_EQ(m.reg(0x2100), 0u);
+  }
+  SR_CHECK(VirtualFree(pages, 0, MEM_RELEASE));
+}
+#endif
 
 SR_TEST(copy_mode_draw_records_resolve_destination) {
   Pm4Mirror m;
