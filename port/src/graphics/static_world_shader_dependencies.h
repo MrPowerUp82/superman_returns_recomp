@@ -27,7 +27,7 @@ struct StaticWorldShaderDependencies {
   // All unused words are zero; source domains remain distinct.
   std::array<uint32_t, 1200> position_words{};
   // Exact projection inputs, separate from world correspondence. Inspect kind:
-  // rigid c5..8 (C5E8) / c8..11 are OBJECT-to-clip;
+  // rigid c5..8 (C5E8) / c4..7 (7D1AA) / c8..11 are OBJECT-to-clip;
   // instanced c0..3 are WORLD-to-clip. These are pre-shared-fixup rows only.
   std::array<uint32_t, 16> clip_rows{};
   uint32_t clip_first_row = 0;
@@ -35,7 +35,7 @@ struct StaticWorldShaderDependencies {
   bool operator==(const StaticWorldShaderDependencies&) const = default;
 };
 
-// This no-range entry accepts source-audited rigid 4F172/18B4F/C5E8/C63F. It
+// This no-range entry accepts source-audited rigid 4F172/18B4F/C5E8/C63F/7D1AA. It
 // deliberately rejects instanced 29C1/C79C without the range overload below.
 // This describes unchanged world inputs;
 // it never supplies moving-instance identity or verifies GPU buffer contents.
@@ -66,6 +66,13 @@ inline bool CaptureStaticWorldShaderDependencies(
       world_first_row = 1;
       clip_first_row = 5;
       world_texcoord = 2;
+      break;
+    // 7D1AA: source aliases596..597, position885..902, world927..942,
+    // TEX4 export959, final shared XY1204..1206. Z clamps to LOCAL literal
+    // c254.z=asfloat(0x3727C5AC), not a mutable guest bank/deformation input.
+    case 0x7D1AA67BBDC418D1ull:
+      clip_first_row = 4;
+      world_texcoord = 4;
       break;
     default:
       return false;

@@ -68,6 +68,7 @@
 #include "../graphics/readback_rows.h"
 #include "../graphics/motion_depth_boundary.h"
 #include "../graphics/scene_color_vertex_input.h"
+#include "../graphics/pixel_coverage_shader.h"
 #include "native_bridge.h"
 #include "native_graphics_system.h"
 #include "sdk_compat.h"
@@ -1391,7 +1392,7 @@ bool Renderer::CreateDrawResources() {
   sampler_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
   sampler_range.NumDescriptors = kSamplerHeapSize;
   sampler_range.RegisterSpace = 3;
-  D3D12_ROOT_PARAMETER params[12] = {};
+  D3D12_ROOT_PARAMETER params[13] = {};
   for (uint32_t i = 0; i < 3; ++i) {
     params[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     params[i].Descriptor.ShaderRegister = i;
@@ -1420,16 +1421,19 @@ bool Renderer::CreateDrawResources() {
   params[9].Descriptor={3,4};params[9].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
   params[10].ParameterType=D3D12_ROOT_PARAMETER_TYPE_UAV;
   params[10].Descriptor={0,6};params[10].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
-  rs_desc.NumParameters = 11;
+  params[11].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+  params[11].Constants={4,4,1}; // b4,space4: original-PS pixel owner.
+  params[11].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
+  rs_desc.NumParameters = 12;
   // Debug (sr_native_debug_rs_salt): an unused root-constant parameter makes every
   // pipeline new to the driver's shader cache - a cold first run on demand.
   if (int32_t salt = REXCVAR_GET(sr_native_debug_rs_salt); salt > 0) {
-    params[11].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    params[11].Constants.ShaderRegister = 15;
-    params[11].Constants.RegisterSpace = 7;
-    params[11].Constants.Num32BitValues = uint32_t(std::min(salt, 32));
-    params[11].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    rs_desc.NumParameters = 12;
+    params[12].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[12].Constants.ShaderRegister = 15;
+    params[12].Constants.RegisterSpace = 7;
+    params[12].Constants.Num32BitValues = uint32_t(std::min(salt, 32));
+    params[12].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    rs_desc.NumParameters = 13;
   }
   rs_desc.pParameters = params;
   rs_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
@@ -2876,9 +2880,13 @@ bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_fo
                              reinterpret_cast<uintptr_t>(ds->resource.Get()));
     }
   }
-  if(!same_bind && (rts[0]!=bind_set_[0] || ds!=bind_set_[4]) && motion_capture_active_ && !motion_scene_finished_ && bind_set_[0] && bind_set_[4] &&
-     bind_set_[0]->guest_format==12 && bind_set_[0]->samples==1 &&
-     bind_set_[0]->width==bind_set_[4]->width && bind_set_[0]->height==bind_set_[4]->height)
+  // A larger depth attachment is legal. End the captured resource epoch on
+  // its actual pair transition, independent of dimensions and OM cache resets.
+  if(!same_bind && motion_capture_active_ && !motion_scene_finished_ && motion_captured_depth_ &&
+     bind_set_[4] && bind_set_[4]->resource.Get()==motion_captured_depth_.Get() &&
+     !graphics::MatchesRetainedMotionCapturePair(
+        {reinterpret_cast<uintptr_t>(motion_captured_color_.Get()),reinterpret_cast<uintptr_t>(motion_captured_depth_.Get())},
+        {rts[0]?reinterpret_cast<uintptr_t>(rts[0]->resource.Get()):0,ds?reinterpret_cast<uintptr_t>(ds->resource.Get()):0}))
     FinishMotionScene(bind_set_[4]);
   if (!same_bind) {
     if(post_vertex_diagnostic_ && post_vertex_active_ && !post_vertex_depth_snapshot_ && bind_set_[0] && bind_set_[4] &&
@@ -2905,16 +2913,20 @@ bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_fo
     rtv_formats[i] = rts[i] ? rts[i]->view_format : DXGI_FORMAT_UNKNOWN;
     if (rts[i]) Transition(rts[i]->resource.Get(), rts[i]->state, D3D12_RESOURCE_STATE_RENDER_TARGET);
   }
+  ConfigureMotionCoverage(rts[0],ds,draw_metadata.vs_hash,draw_metadata.ps_hash,rt_count==1);
+  if(motion_coverage_draw_active_) {rtv_formats[1]=DXGI_FORMAT_R32_UINT;rt_count=2;}
   dsv_format = ds ? ds->view_format : DXGI_FORMAT_UNKNOWN;
   if (ds) Transition(ds->resource.Get(), ds->state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-  bool changed = rt_count != bound_rt_count_ || ds != bound_ds_;
+  bool changed = rt_count != bound_rt_count_ || ds != bound_ds_ ||
+      motion_coverage_bound_!=motion_coverage_draw_active_;
   for (uint32_t i = 0; i < 4 && !changed; ++i) changed = rts[i] != bound_rts_[i];
   if (changed) {
     D3D12_CPU_DESCRIPTOR_HANDLE rtvs[4] = {};
     for (uint32_t i = 0; i < rt_count; ++i) {
       // Gaps are not allowed with a contiguous RTV array; use the first bound
       // RT's view for gaps (write mask 0 in that case is the guest's intent).
-      rtvs[i] = rts[i] ? rts[i]->view : rts[0] ? rts[0]->view : D3D12_CPU_DESCRIPTOR_HANDLE{};
+      rtvs[i] = motion_coverage_draw_active_ && i==1 ? MotionCoverageView() :
+          rts[i] ? rts[i]->view : rts[0] ? rts[0]->view : D3D12_CPU_DESCRIPTOR_HANDLE{};
     }
     command_list_->OMSetRenderTargets(rt_count, rt_count ? rtvs : nullptr, FALSE,
                                       ds ? &ds->view : nullptr);
@@ -2927,6 +2939,7 @@ bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_fo
     std::memcpy(bound_rts_, rts, sizeof(rts));
     bound_rt_count_ = rt_count;
     bound_ds_ = ds;
+    motion_coverage_bound_=motion_coverage_draw_active_;
   }
   return true;
 }
@@ -3063,6 +3076,8 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
                                            DXGI_FORMAT dsv_format,
                                            D3D12_INDEX_BUFFER_STRIP_CUT_VALUE strip_cut) {
   const bool ray_variant=rt_shadow_draw_active_ && !rt_shadow_shader_.empty();
+  const bool coverage_variant=motion_coverage_draw_active_ && motion_coverage_shader_;
+  const bool special_variant=ray_variant || coverage_variant;
   reg::RB_BLENDCONTROL blend{LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_BLENDCONTROL0)};
   reg::PA_SU_SC_MODE_CNTL mode{LoadReg(base, dev, rex::graphics::XE_GPU_REG_PA_SU_SC_MODE_CNTL)};
   reg::RB_DEPTHCONTROL depth{LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_DEPTHCONTROL)};
@@ -3116,9 +3131,10 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
   current_motion_raster_.blend_control=blend.value;current_motion_raster_.color_control=motion_color;
   current_motion_raster_.color_mask=color_mask;current_motion_raster_.stencil_enabled=depth.stencil_enable;
   current_motion_raster_.z_write=depth.z_write_enable;
+  current_motion_raster_.coverage_id=coverage_variant ? motion_coverage_draw_id_ : 0;
   current_motion_raster_.opaque=bound_samples_==1 && depth.z_enable && depth.z_write_enable &&
       !depth.stencil_enable && !REXCVAR_GET(sr_native_debug_no_ztest) &&
-      (blend.value&0x1fff)==1 && (!(motion_color&8) || (motion_color&7)==7);
+      (((blend.value&0x1fff)==1 && (!(motion_color&8) || (motion_color&7)==7)) || coverage_variant);
   uint32_t slope_bits;
   std::memcpy(&slope_bits, &slope_bias, 4);
 
@@ -3130,7 +3146,8 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
   uint64_t key_parts[] = {vs_hash ^ (uint64_t(bound_samples_) << 60) ^
                               (uint64_t(alpha_to_coverage) << 59),
                           (uint64_t(uint32_t(depth_bias)) << 32) | slope_bits,
-                          ps_hash ^ (ray_variant ? 0x5352525453480001ull : 0),
+                          ps_hash ^ (ray_variant ? 0x5352525453480001ull : 0) ^
+                              (coverage_variant ? 0x5352434F56450001ull : 0),
                           decl_hash,
                           blend.value,
                           uint64_t(mode.value & 0x7) | (uint64_t(color_mask & 0xFFFF) << 8) |
@@ -3168,7 +3185,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
   {
     // Precompiled at startup (or compiling right now) by the pipeline cache.
     ComPtr<ID3D12PipelineState> precompiled;
-    if (!ray_variant && pipeline_cache_.Take(key, precompiled)) {
+    if (!special_variant && pipeline_cache_.Take(key, precompiled)) {
       pipelines_[key] = precompiled;
       ++stats_.pso_precompiled_hits;
       return precompiled.Get();
@@ -3178,7 +3195,8 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
   const auto* vs = LoadShader(vs_hash, true);
   bool pending = shader_pending_;
   // ps_hash == 0: depth-only draw (the game binds no pixel shader).
-  const auto* ps = ray_variant ? &rt_shadow_shader_ : ps_hash ? LoadShader(ps_hash, false) : nullptr;
+  const auto* ps = coverage_variant ? motion_coverage_shader_ :
+      ray_variant ? &rt_shadow_shader_ : ps_hash ? LoadShader(ps_hash, false) : nullptr;
   pending = pending || shader_pending_;
   if (!vs || (ps_hash && !ps)) {
     if (pending) pipelines_.erase(key);  // ask again once the translation finished
@@ -3281,6 +3299,10 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
       desc.BlendState.RenderTarget[i].BlendEnable = FALSE;
     }
   }
+  if(coverage_variant) {
+    auto& owner=desc.BlendState.RenderTarget[1];
+    owner.BlendEnable=FALSE;owner.LogicOpEnable=FALSE;owner.RenderTargetWriteMask=D3D12_COLOR_WRITE_ENABLE_RED;
+  }
   desc.SampleMask = UINT_MAX;
   desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
   if (mode.cull_front && !mode.cull_back) {
@@ -3339,7 +3361,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
     record.topology_type = uint32_t(desc.PrimitiveTopologyType);
     record.strip_cut = uint32_t(desc.IBStripCutValue);
   };
-  if (!ray_variant && elements.size() <= PsoRecord::kMaxElements) {
+  if (!special_variant && elements.size() <= PsoRecord::kMaxElements) {
     // Same description precompiled under another key: a settings variant
     // generated from a pipeline captured with other MSAA/foliage settings, or
     // guest state bits that do not change the host pipeline (EXP-052).
@@ -3357,7 +3379,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
   // pipeline is ready. Everything that may carry state across frames (post
   // process, the luminance/exposure chain, copies, HUD, menus) still waits: a
   // skipped one-time draw can break the image permanently (EXP-005).
-  if (!ray_variant && REXCVAR_GET(sr_native_async_pipelines) && REXCVAR_GET(sr_native_pipeline_cache) &&
+  if (!special_variant && REXCVAR_GET(sr_native_async_pipelines) && REXCVAR_GET(sr_native_pipeline_cache) &&
       elements.size() <= PsoRecord::kMaxElements) {
     int p = g_current_pass;
     // Conan: shadow maps, reflections, depth, decals, opaque (+character),
@@ -3422,7 +3444,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
     }
   }
   // Remember it for the next start's precompilation.
-  if (!ray_variant && elements.size() <= PsoRecord::kMaxElements) {
+  if (!special_variant && elements.size() <= PsoRecord::kMaxElements) {
     pipeline_cache_.Record(record);
   }
   ++stats_.pso_created;
@@ -5051,6 +5073,7 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
   uint32_t rt_count = 0;
   DXGI_FORMAT dsv_format = DXGI_FORMAT_UNKNOWN;
   graphics::SurfaceDrawMetadata draw_metadata{};
+  draw_metadata.vs_hash=vs_hash;draw_metadata.ps_hash=ps_hash;
   if (surface_probe_) {
     draw_metadata = {vs_hash, ps_hash, uint32_t(g_current_pass), prim,
                      LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_DEPTHCONTROL),
@@ -5171,6 +5194,7 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
   }
   command_list_->SetPipelineState(pso);
   current_raster_pipeline_=pso;
+  if(motion_coverage_draw_active_) command_list_->SetGraphicsRoot32BitConstant(11,motion_coverage_draw_id_,0);
   const D3D12_VERTEX_BUFFER_VIEW default_view{
       default_vertex_buffer_->GetGPUVirtualAddress(), 16, 0};
   command_list_->IASetVertexBuffers(16, 1, &default_view);

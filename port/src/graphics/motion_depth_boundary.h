@@ -5,6 +5,12 @@ struct MotionDepthBoundaryState {
   bool active=false,finished=false,has_geometry=false;
   uintptr_t captured_depth=0;
 };
+struct MotionCapturePair {uintptr_t color=0,depth=0;};
+inline bool MatchesRetainedMotionCapturePair(MotionCapturePair retained,MotionCapturePair current) {
+  if(!current.color || !current.depth) return false;
+  if(!retained.color && !retained.depth) return true;
+  return retained.color && retained.depth && retained.color==current.color && retained.depth==current.depth;
+}
 // Freeze before the first depth mutation, even if a resolve already cleared
 // OM binding caches. Binding bookkeeping is not the depth resource's lifetime.
 inline bool ShouldFreezeMotionDepthBeforeWrite(MotionDepthBoundaryState state,

@@ -47,6 +47,7 @@
 #include "shader_library.h"
 #include "shader_translator.h"
 #include "../graphics/rt_shadow_shader.h"
+#include "../graphics/pixel_coverage_shader.h"
 
 REXCVAR_DEFINE_STRING(sr_native_dump_shader_dir, "", "Superman Returns Native",
                       "Write every shader container seen by the XDK CreateShader hooks to "
@@ -282,9 +283,15 @@ void OfferTranslation(uint8_t* base, uint32_t container, const GuestShaderInfo& 
         ShaderTranslator::Get().OfferRtShadowVariant(info.container_hash,
             shader->container.data(), shader->container.size());
       }
+      if (!info.is_vertex && graphics::IsPixelCoverageShader(info.container_hash))
+        ShaderTranslator::Get().OfferPixelCoverageVariant(info.container_hash,
+            shader->container.data(),shader->container.size());
       return;
     }
   }
+  if (!info.is_vertex && graphics::IsPixelCoverageShader(info.container_hash) && info.capture)
+    ShaderTranslator::Get().OfferPixelCoverageVariant(info.container_hash,
+        info.capture->container.data(),info.capture->container.size());
   if (!info.is_vertex && graphics::IsRtShadowShader(info.container_hash) && info.capture) {
     ShaderTranslator::Get().OfferRtShadowVariant(info.container_hash,
         info.capture->container.data(), info.capture->container.size());

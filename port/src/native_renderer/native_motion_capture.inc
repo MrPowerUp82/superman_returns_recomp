@@ -8,6 +8,9 @@ void Renderer::CaptureMotionClipDraw(uint8_t* base,uint32_t dev,D3D12_PRIMITIVE_
      bound_rts_[0]->width!=kOutputWidth || bound_rts_[0]->height!=kOutputHeight ||
      bound_samples_!=1 || !current_motion_raster_.full_viewport ||
      (topology!=D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST && topology!=D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP)) return;
+  if(!graphics::MatchesRetainedMotionCapturePair(
+      {reinterpret_cast<uintptr_t>(motion_captured_color_.Get()),reinterpret_cast<uintptr_t>(motion_captured_depth_.Get())},
+      {reinterpret_cast<uintptr_t>(bound_rts_[0]->resource.Get()),reinterpret_cast<uintptr_t>(bound_ds_->resource.Get())})) return;
   const uint32_t vertices=graphics::PostVertexCapacity(count,topology==D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
   if(!vertices) return;
   const uint32_t declaration=Load32(base,dev+kDevVertexDecl);
@@ -157,10 +160,60 @@ void Renderer::CaptureMotionClipDraw(uint8_t* base,uint32_t dev,D3D12_PRIMITIVE_
   command_list_->SOSetTargets(0,0,nullptr);command_list_->SetPipelineState(current_raster_pipeline_);
 }
 
+D3D12_CPU_DESCRIPTOR_HANDLE Renderer::MotionCoverageView() const {
+  auto view=motion_coverage_rtv_heap_->GetCPUDescriptorHandleForHeapStart();
+  view.ptr+=SIZE_T(frame_index_)*device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+  return view;
+}
+
+void Renderer::ConfigureMotionCoverage(HostSurface* color,HostSurface* depth,
+    uint64_t vs,uint64_t ps,bool single_color) {
+  motion_coverage_draw_active_=false;motion_coverage_draw_id_=0;motion_coverage_shader_=nullptr;
+  const bool paired=(vs==0x4F17209D364D5B51ull && ps==0x559F422BEF5E5714ull) ||
+      (vs==0x18B4F69400B7F0AFull && ps==0x220353EB37491B13ull);
+  if(!paired || !motion_capture_active_ || motion_scene_finished_ || !single_color || !color || !depth ||
+     color->guest_format!=12 || color->width!=kOutputWidth || color->height!=kOutputHeight ||
+     color->samples!=1 || depth->samples!=1 || !REXCVAR_GET(sr_native_shader_dir).empty() ||
+     motion_coverage_next_id_>=4096) return;
+  const auto dimensions=color->resource->GetDesc(),depth_dimensions=depth->resource->GetDesc();
+  if(dimensions.Width!=depth_dimensions.Width || dimensions.Height!=depth_dimensions.Height) return;
+  auto shader=motion_coverage_shaders_.find(ps);
+  if(shader==motion_coverage_shaders_.end()) {
+    std::vector<uint8_t> bytecode;
+    if(ShaderTranslator::Get().FetchPixelCoverageVariant(ps,bytecode)!=TranslateState::kReady || bytecode.empty()) return;
+    shader=motion_coverage_shaders_.emplace(ps,std::move(bytecode)).first;
+  }
+  if(!motion_coverage_rtv_heap_) {
+    D3D12_DESCRIPTOR_HEAP_DESC descriptors{};descriptors.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    descriptors.NumDescriptors=3;
+    if(FAILED(device_->CreateDescriptorHeap(&descriptors,IID_PPV_ARGS(&motion_coverage_rtv_heap_)))) return;
+  }
+  auto& owner=motion_coverage_[frame_index_];
+  if(!owner || owner->GetDesc().Width!=dimensions.Width || owner->GetDesc().Height!=dimensions.Height) {
+    D3D12_RESOURCE_DESC texture=dimensions;texture.Format=DXGI_FORMAT_R32_UINT;
+    texture.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_CLEAR_VALUE clear{};clear.Format=texture.Format;
+    if(FAILED(device_->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&texture,
+        D3D12_RESOURCE_STATE_RENDER_TARGET,&clear,IID_PPV_ARGS(&owner)))) return;
+    motion_coverage_state_[frame_index_]=D3D12_RESOURCE_STATE_RENDER_TARGET;
+    device_->CreateRenderTargetView(owner.Get(),nullptr,MotionCoverageView());
+  }
+  Transition(owner.Get(),motion_coverage_state_[frame_index_],D3D12_RESOURCE_STATE_RENDER_TARGET);
+  if(!motion_coverage_cleared_) {
+    const float zero[4]{};command_list_->ClearRenderTargetView(MotionCoverageView(),zero,0,nullptr);
+    motion_coverage_cleared_=true;
+  }
+  motion_coverage_shader_=&shader->second;
+  motion_coverage_draw_id_=++motion_coverage_next_id_;motion_coverage_draw_active_=true;
+}
+
 void Renderer::BeginMotionCapture() {
   ReportMotionReadbacks(frame_index_);
   motion_capture_active_=false;motion_scene_finished_=false;
   motion_captured_depth_.Reset();motion_captured_color_.Reset();
+  motion_coverage_draw_active_=false;motion_coverage_bound_=false;motion_coverage_cleared_=false;
+  motion_coverage_next_id_=motion_coverage_draw_id_=0;motion_coverage_shader_=nullptr;
   if(motion_capture_done_ || packet_sink_) return;
   const auto& trigger=REXCVAR_GET(sr_native_motion_capture_trigger_path);
   std::error_code error;
@@ -221,6 +274,7 @@ void Renderer::FinishMotionScene(HostSurface* depth) {
       draw.previousClip=motion_clips_->Buffer(match.previous.slot);draw.previous_offset=match.previous.offset;
     }
     const auto& raster=motion_rasters_[i];
+    draw.coverage_id=raster.coverage_id;
     auto& family=families[raster.shader];++family.draws;family.opaque+=raster.opaque;
     family.matches+=match.status==graphics::GeometryHistoryStatus::kMatch;
     family.stencil+=raster.stencil_enabled;
@@ -264,12 +318,38 @@ void Renderer::FinishMotionScene(HostSurface* depth) {
   Transition(motion_depth_snapshot_.Get(),snapshot_state,D3D12_RESOURCE_STATE_DEPTH_READ);
   TemporalMotionInputs input;
   input.depth=motion_depth_snapshot_.Get();input.width=uint32_t(dimensions.Width);input.height=dimensions.Height;
+  if(motion_coverage_cleared_) {
+    Transition(motion_coverage_[frame_index_].Get(),motion_coverage_state_[frame_index_],D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    input.coverage=motion_coverage_[frame_index_].Get();
+    QueueMotionReadback(input.coverage,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,"audited_pixel_owners");
+  }
   hr=temporal_motion_->BeginFrame(frame_index_);
   if(SUCCEEDED(hr)) hr=temporal_motion_->Render(command_list_.Get(),input,geometry);
   frame_state_bound_=false;bound_rt_count_=0;bound_ds_=nullptr;
   std::memset(bound_rts_,0,sizeof(bound_rts_));
   if(FAILED(hr)) {REXLOG_ERROR("native motion render failed {:08X}: {}",uint32_t(hr),temporal_motion_->LastError());return;}
   const auto outputs=temporal_motion_->Outputs();
+  // Preserve the actual scene inputs for a deterministic depth/EQUAL replay.
+  // Sky-only coverage must be diagnosed using real clips and depth, rather than
+  // loosening equality or interpreting a synthetic fixture as gameplay proof.
+  if(!REXCVAR_GET(sr_native_dump_dir).empty()) {
+    const auto directory=std::filesystem::u8path(REXCVAR_GET(sr_native_dump_dir));
+    std::error_code error;std::filesystem::create_directories(directory,error);
+    std::ofstream manifest(directory/fmt::format("motion_geometry_s{}.csv",swap_number_));
+    manifest<<"draw,offset,vertices,vs,valid,cull,front_ccw,depth_bias,slope_bias,left,top,right,bottom\n";
+    uint32_t used=0;
+    for(size_t i=0;i<geometry.size();++i) {
+      const auto& g=geometry[i];
+      used=uint32_t(std::max<uint64_t>(used,g.current_offset+uint64_t(g.vertex_count)*16));
+      manifest<<i<<','<<g.current_offset<<','<<g.vertex_count<<','<<std::hex<<motion_rasters_[i].shader<<std::dec
+          <<','<<g.correspondence_valid<<','<<uint32_t(g.cull_mode)<<','<<g.front_counter_clockwise
+          <<','<<g.depth_bias<<','<<g.slope_scaled_depth_bias<<','<<g.scissor.left<<','<<g.scissor.top
+          <<','<<g.scissor.right<<','<<g.scissor.bottom<<'\n';
+    }
+    manifest.close();
+    QueueMotionClipReadback(motion_clips_->Buffer(frame_index_),used);
+    QueueMotionReadback(motion_depth_snapshot_.Get(),D3D12_RESOURCE_STATE_DEPTH_READ,"scene_depth_snapshot");
+  }
   QueueMotionReadback(outputs.velocity,D3D12_RESOURCE_STATE_RENDER_TARGET,"motion_velocity");
   QueueMotionReadback(outputs.validity,D3D12_RESOURCE_STATE_RENDER_TARGET,"motion_validity");
   // Diagnostic upper bound only: isolate how much candidate coverage is later
@@ -315,17 +395,49 @@ void Renderer::QueueMotionReadback(ID3D12Resource* texture,D3D12_RESOURCE_STATES
   motion_readbacks_.push_back(std::move(readback));
 }
 
+void Renderer::QueueMotionClipReadback(ID3D12Resource* clips,uint32_t bytes) {
+  if(!clips || !bytes || bytes%16 || bytes>graphics::d3d12::PostVertexClipCapture::kBytes ||
+     REXCVAR_GET(sr_native_dump_dir).empty()) return;
+  MotionReadback readback;readback.slot=frame_index_;readback.swap=swap_number_;
+  readback.size=bytes;readback.clip_buffer=true;
+  readback.name=fmt::format("{}/scene_clips_s{}.bin",REXCVAR_GET(sr_native_dump_dir),swap_number_);
+  D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_READBACK;
+  D3D12_RESOURCE_DESC buffer{};buffer.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;buffer.Width=bytes;
+  buffer.Height=1;buffer.DepthOrArraySize=buffer.MipLevels=1;buffer.SampleDesc.Count=1;
+  buffer.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  if(FAILED(device_->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&buffer,D3D12_RESOURCE_STATE_COPY_DEST,
+      nullptr,IID_PPV_ARGS(&readback.resource)))) return;
+  auto state=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+  Transition(clips,state,D3D12_RESOURCE_STATE_COPY_SOURCE);
+  command_list_->CopyBufferRegion(readback.resource.Get(),0,clips,0,bytes);
+  Transition(clips,state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+  motion_readbacks_.push_back(std::move(readback));
+}
+
 void Renderer::ReportMotionReadbacks(uint32_t slot) {
   for(auto it=motion_readbacks_.begin();it!=motion_readbacks_.end();) {
     if(it->slot!=slot) {++it;continue;}
     // BeginFrame has waited for this exact slot's submission, including copies.
     void* mapped=nullptr;const D3D12_RANGE range{0,size_t(it->size)};
     if(SUCCEEDED(it->resource->Map(0,&range,&mapped))) {
+      if(it->clip_buffer) {
+        const auto path=std::filesystem::u8path(it->name);
+        std::ofstream out(path,std::ios::binary);
+        const uint32_t header[]{0x53434C50,1,uint32_t(it->size/16),16};
+        out.write(reinterpret_cast<const char*>(header),sizeof(header));
+        out.write(static_cast<const char*>(mapped),std::streamsize(it->size));out.close();
+        const D3D12_RANGE empty{0,0};it->resource->Unmap(0,&empty);
+        REXLOG_INFO("native motion clips readback: {} vertices={} saved={} fence_completed=true (diagnostic input)",
+            path.string(),it->size/16,bool(out));
+        it=motion_readbacks_.erase(it);continue;
+      }
       const auto& footprint=it->layout.Footprint;
       uint32_t bytes_per_pixel=0;
       switch(footprint.Format) {
         case DXGI_FORMAT_R8_UINT:bytes_per_pixel=1;break;
         case DXGI_FORMAT_R16G16_FLOAT:case DXGI_FORMAT_R8G8B8A8_UNORM:case DXGI_FORMAT_B8G8R8A8_UNORM:bytes_per_pixel=4;break;
+        case DXGI_FORMAT_R24_UNORM_X8_TYPELESS:case DXGI_FORMAT_R32_TYPELESS:
+        case DXGI_FORMAT_R32_FLOAT:case DXGI_FORMAT_R32_UINT:bytes_per_pixel=4;break;
         case DXGI_FORMAT_R16G16B16A16_FLOAT:bytes_per_pixel=8;break;
         default:break;
       }
@@ -482,6 +594,9 @@ void Renderer::CaptureMotionInlineColorGeometry(uint8_t* base,uint32_t declarati
 void Renderer::AfterMotionColorDraw() {
   if(!motion_capture_active_ || motion_capture_phase_!=2) return;
   const uint64_t serial=++motion_color_serial_;
+  if(motion_coverage_draw_active_ && motion_color_reports_<64)
+    REXLOG_INFO("native motion original pixel owner issued: serial={} vs={:016X} ps={:016X} owner_id={} original_color_alpha_preserved=true",
+        serial,current_vs_hash_,current_ps_hash_,motion_coverage_draw_id_);
   for(uint32_t slot=0;slot<4;++slot) {
     if(!bound_rts_[slot] || !((current_motion_raster_.color_mask>>(slot*4))&15)) continue;
     bound_rts_[slot]->motion_write_frame=frame_count_+1;bound_rts_[slot]->motion_write_serial=serial;

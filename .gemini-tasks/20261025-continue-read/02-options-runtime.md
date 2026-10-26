@@ -1,0 +1,8 @@
+**Contexto mínimo:** Recompilação nativa Superman Returns, D3D12/RTX2060. Meta autorizada: RT, DLSS e menu. Checkout contém alterações locais intencionais; não usar diff como fonte única. Você é um worker novo de revisão SOMENTE LEITURA. Caminho raiz: C:\Users\Gusta\Documents\outros-projetos\superman_returns_recomp. Não rode comandos, não edite/crie/apague arquivos, não faça rede. Use ferramentas de leitura. Resposta curta, com referências verificáveis arquivo:linha. Se não conseguir ler, declare limitação em vez de concluir sucesso.
+
+**Objetivo:** revisar se o menu/runtime anuncia RT/DLSS aplicado indevidamente antes da comprovação por execução/fence.
+**Onde olhar:** port/src/graphics/graphics_options.h, graphics_options.cpp, graphics_options_runtime.h, graphics_options_runtime.cpp, graphics_settings.h, ray_shadow_execution.h e tests/native/test_ray_shadow_execution.cpp. Todos sob raiz acima; arquivos graphics em port/src/graphics/.
+**Requisitos:** solicitado/capaz/implementado/aplicado distintos. DLSS e reflexos reais ainda incompletos, portanto Off/indisponíveis. RT sombras parcial integrado a família real só pode ser anunciado após contador de fragmentos positivo e fence da revisão atual; Off/revisionchange não pode ressuscitar status antigo. Não recomende fingir On. Não avaliar aparência visual sem imagem.
+**Faça:** rastrear revisões, epochs, invalidadores e contadores; apontar race ou estado obsoleto comprovável por fonte. Não precisa ler renderer enorme.
+**Formato:** resumo até5linhas + achados arquivo:linha, cenário e correção mínima; limitações explícitas. Sem mudanças cosméticas.
+**Pronto quando:** estado stale/revisões e gateways foram examinados, sem fingir teste executado.

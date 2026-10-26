@@ -10,8 +10,8 @@ namespace superman_returns::graphics::d3d12 {
 using Microsoft::WRL::ComPtr;
 struct TemporalMotion::Impl {
   struct Slot {
-    ComPtr<ID3D12Resource> velocity, validity, depth;
-    ComPtr<ID3D12DescriptorHeap> rtv, dsv;
+    ComPtr<ID3D12Resource> velocity, validity, depth, coverage;
+    ComPtr<ID3D12DescriptorHeap> rtv, dsv, coverage_srv;
     std::array<ComPtr<ID3D12Resource>, kMaxDraws * 2> buffers;
     uint32_t retained = 0, width = 0, height = 0;
     bool rendered = false;
@@ -125,17 +125,21 @@ HRESULT TemporalMotion::Initialize(ID3D12Device* device) {
     if (!(support.Support1 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET))
       return m.Fail("Required output RTV format unavailable", DXGI_ERROR_UNSUPPORTED);
   }
-  D3D12_ROOT_PARAMETER params[3]{};
+  D3D12_ROOT_PARAMETER params[4]{};
   for (UINT i = 0; i < 2; ++i) {
     params[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
     params[i].Descriptor.ShaderRegister = i;
     params[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
   }
   params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-  params[2].Constants.Num32BitValues = 7;
+  params[2].Constants.Num32BitValues = 9;
   params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+  const D3D12_DESCRIPTOR_RANGE coverage_range{D3D12_DESCRIPTOR_RANGE_TYPE_SRV,1,2,0,0};
+  params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+  params[3].DescriptorTable = {1,&coverage_range};
+  params[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
   D3D12_ROOT_SIGNATURE_DESC root{};
-  root.NumParameters = 3; root.pParameters = params;
+  root.NumParameters = 4; root.pParameters = params;
   ComPtr<ID3DBlob> blob, errors;
   HRESULT hr = D3D12SerializeRootSignature(&root,D3D_ROOT_SIGNATURE_VERSION_1,&blob,&errors);
   if (FAILED(hr)) return m.Fail("Temporal root signature serialization failed",hr);
@@ -154,6 +158,10 @@ HRESULT TemporalMotion::Initialize(ID3D12Device* device) {
     h.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV; h.NumDescriptors = 1;
     hr = device->CreateDescriptorHeap(&h,IID_PPV_ARGS(&slot.dsv));
     if (FAILED(hr)) return m.Fail("Temporal slot DSV heap creation failed",hr);
+    h.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    h.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    hr = device->CreateDescriptorHeap(&h,IID_PPV_ARGS(&slot.coverage_srv));
+    if (FAILED(hr)) return m.Fail("Temporal slot coverage SRV heap creation failed",hr);
   }
   m.initialized = true; m.error = "";
   return S_OK;
@@ -167,6 +175,7 @@ HRESULT TemporalMotion::BeginFrame(uint32_t slot) {
   auto& s = m.slots[slot];
   // The caller's fence is the ONLY authority allowing these releases/descriptor rewrites.
   s.depth.Reset();
+  s.coverage.Reset();
   for (uint32_t i = 0; i < s.retained; ++i) s.buffers[i].Reset();
   s.retained = 0; s.rendered = false;
   m.active = slot; m.error = "";
@@ -197,9 +206,20 @@ HRESULT TemporalMotion::Render(ID3D12GraphicsCommandList* list,
       !(d.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) ||
       (d.Format != DXGI_FORMAT_R24G8_TYPELESS && d.Format != DXGI_FORMAT_R32_TYPELESS))
     return m.Fail("Depth must be matching single-sample R24G8_TYPELESS or R32_TYPELESS depth texture");
+  if (in.coverage) {
+    if (!m.SameDevice(in.coverage)) return m.Fail("Coverage must belong to the initialized device");
+    const auto mask=in.coverage->GetDesc();
+    if (mask.Dimension!=D3D12_RESOURCE_DIMENSION_TEXTURE2D || mask.Format!=DXGI_FORMAT_R32_UINT ||
+        mask.Width!=in.width || mask.Height!=in.height || mask.DepthOrArraySize!=1 || mask.MipLevels!=1 ||
+        mask.SampleDesc.Count!=1 || mask.SampleDesc.Quality!=0 ||
+        (mask.Flags&D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE))
+      return m.Fail("Coverage must be a matching single-sample/mip/layer R32_UINT SRV Texture2D");
+  }
   if (geometry.size() > kMaxDraws) return m.Fail("Temporal draw budget exceeded");
   uint64_t vertices = 0;
   for (const auto& g : geometry) {
+    if (g.coverage_id && !in.coverage)
+      return m.Fail("Positive coverage IDs require the current frame's audited coverage texture");
     vertices += g.vertex_count;
     if (!g.vertex_count || g.vertex_count % 3 || vertices > kMaxVertices)
       return m.Fail("Triangle list count must be positive, divisible by 3 and within the vertex budget");
@@ -261,6 +281,15 @@ HRESULT TemporalMotion::Render(ID3D12GraphicsCommandList* list,
   const auto ds = s.dsv->GetCPUDescriptorHandleForHeapStart();
   m.device->CreateDepthStencilView(in.depth,&view,ds);
   s.depth = in.depth;
+  D3D12_SHADER_RESOURCE_VIEW_DESC coverage_view{};
+  coverage_view.Format=DXGI_FORMAT_R32_UINT;
+  coverage_view.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
+  coverage_view.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+  coverage_view.Texture2D.MipLevels=1;
+  // Typed null SRV when absent. Rewrite only after full validation, within a
+  // slot whose previous GPU readers were fenced by BeginFrame.
+  m.device->CreateShaderResourceView(in.coverage,&coverage_view,s.coverage_srv->GetCPUDescriptorHandleForHeapStart());
+  s.coverage=in.coverage;
   for (const auto& g : geometry) {
     s.buffers[s.retained++] = g.currentClip;
     if (g.previousClip) s.buffers[s.retained++] = g.previousClip;
@@ -275,8 +304,10 @@ HRESULT TemporalMotion::Render(ID3D12GraphicsCommandList* list,
     if (m.vrs >= D3D12_VARIABLE_SHADING_RATE_TIER_2) list5->RSSetShadingRateImage(nullptr);
   }
   list->SetPredication(nullptr,0,D3D12_PREDICATION_OP_EQUAL_ZERO);
-  list->SetDescriptorHeaps(0,nullptr);
+  ID3D12DescriptorHeap* heaps[]{s.coverage_srv.Get()};
+  list->SetDescriptorHeaps(1,heaps);
   list->SetGraphicsRootSignature(m.root.Get());
+  list->SetGraphicsRootDescriptorTable(3,s.coverage_srv->GetGPUDescriptorHandleForHeapStart());
   const float zero[4]{};
   list->ClearRenderTargetView(rt[0],zero,0,nullptr);
   list->ClearRenderTargetView(rt[1],zero,0,nullptr);
@@ -285,18 +316,20 @@ HRESULT TemporalMotion::Render(ID3D12GraphicsCommandList* list,
   const D3D12_RECT rect{0,0,LONG(in.width),LONG(in.height)};
   list->RSSetViewports(1,&vp); list->RSSetScissorRects(1,&rect);
   list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-  struct Constants { float dimensions[2], current[2], previous[2]; uint32_t valid; };
-  static_assert(sizeof(Constants) == 7 * sizeof(uint32_t));
+  struct Constants { float dimensions[2], current[2], previous[2]; uint32_t valid,coverage_enabled,coverage_id; };
+  static_assert(sizeof(Constants) == 9 * sizeof(uint32_t));
   Constants constants{{float(in.width),float(in.height)},
                        {in.current_jitter[0],in.current_jitter[1]},
-                       {in.previous_jitter[0],in.previous_jitter[1]},0};
+                       {in.previous_jitter[0],in.previous_jitter[1]},0,0,0};
   size_t draw=0;
   for (const auto& g : geometry) {
     list->SetPipelineState(draw_pipelines[draw++]);
     const D3D12_RECT scissor=g.scissor_enabled ? g.scissor : rect;
     list->RSSetScissorRects(1,&scissor);
     constants.valid = g.correspondence_valid ? 1 : 0;
-    list->SetGraphicsRoot32BitConstants(2,7,&constants,0);
+    constants.coverage_enabled = in.coverage && g.coverage_id ? 1 : 0;
+    constants.coverage_id = g.coverage_id;
+    list->SetGraphicsRoot32BitConstants(2,9,&constants,0);
     list->SetGraphicsRootShaderResourceView(0,g.currentClip->GetGPUVirtualAddress()+g.current_offset);
     auto* previous = g.correspondence_valid ? g.previousClip : g.currentClip;
     const uint64_t offset = g.correspondence_valid ? g.previous_offset : g.current_offset;

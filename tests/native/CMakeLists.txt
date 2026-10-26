@@ -45,6 +45,8 @@ add_executable(sr_native_tests
     test_scene_color_vertex_input.cpp
     test_motion_depth_boundary.cpp
     test_rt_shadow_shader.cpp
+    test_pixel_coverage_shader.cpp
+    "${SR_NATIVE_DIR}/../graphics/pixel_coverage_shader.cpp"
     "${SR_NATIVE_DIR}/../graphics/rt_shadow_shader.cpp"
     "${SR_NATIVE_DIR}/../graphics/graphics_preferences.cpp"
     "${SR_NATIVE_DIR}/../graphics/graphics_options.cpp"

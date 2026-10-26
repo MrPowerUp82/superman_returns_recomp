@@ -29,6 +29,10 @@ struct MotionGeometry {
   float slope_scaled_depth_bias = 0, depth_bias_clamp = 0;
   bool scissor_enabled = false;
   D3D12_RECT scissor{}; // Ignored when disabled (full target); otherwise bounded, empty allowed.
+  // Audited original draw's coverage ID. Positive IDs require inputs.coverage
+  // and filter replay to that owner. Zero ALWAYS uses legacy unmasked replay,
+  // even with a map: opaque draws/unknown invalidators retain original order.
+  uint32_t coverage_id = 0;
 };
 struct TemporalMotionInputs {
   // Single-sample, one mip/layer, matching size, ALLOW_DEPTH_STENCIL texture:
@@ -36,6 +40,15 @@ struct TemporalMotionInputs {
   ID3D12Resource* depth = nullptr;
   uint32_t width = 0, height = 0;
   float current_jitter[2]{}, previous_jitter[2]{}; // Actual render pixels: +right/+down.
+  // Optional same-device, matching single-sample/mip/layer R32_UINT Texture2D
+  // in PIXEL_SHADER_RESOURCE state. Caller attests the exact current frame's
+  // LAST AUDITED writer, written by the ACTUAL audited original PS after its
+  // alpha/discard/depth tests. Unsupported PS paths must unbind this MRT;
+  // retained IDs need not identify the globally nearest/latest scene writer.
+  // Preserve original draw order, EQUAL and unmasked unknown invalidators.
+  // Zero denotes no audited writer. Keep contents immutable through the slot
+  // fence; pointer/size alone cannot prove lineage.
+  ID3D12Resource* coverage = nullptr;
 };
 struct TemporalMotionOutputs {
   ID3D12Resource* velocity = nullptr; // R16G16_FLOAT current->previous in render pixels.
@@ -69,18 +82,24 @@ class TemporalMotion {
   // DIRECT list on this device, on one caller-synchronized queue. Buffers must
   // be in NON_PIXEL_SHADER_RESOURCE (GENERIC_READ upload buffers also allowed).
   // Caller supplies producer/UAV/streamout barriers and cross-queue fences.
-  // All resources and private RTV/DSV descriptors are retained per slot until
-  // its next fenced BeginFrame. Keep input CONTENTS immutable through that fence.
+  // All resources and private RTV/DSV/coverage SRV descriptors are retained per
+  // slot until its next fenced BeginFrame. Keep input CONTENTS immutable through that fence.
   // Exact raster coverage/depth must match opaque triangles: full viewport,
   // minZ=0/maxZ=1, solid fill, depth clip enabled, and supplied per-draw raster
-  // state. No alpha-test/translucency/custom coverage emulation. Caller must
-  // exclude unsupported sources; correspondence_valid=false only invalidates
-  // motion history and does NOT implement original alpha/coverage semantics.
+  // state. Positive coverage IDs additionally filter to surviving pixels from
+  // the actual audited original PS; a guessed/CPU mask does not prove alpha or
+  // discard behavior. This does not emulate translucency/custom coverage.
+  // ID-zero geometry keeps legacy unmasked semantics, including unknown draws
+  // writing validity zero under EQUAL. Retain original replay order: audited
+  // last-writer IDs are not a global nearest-surface oracle. Caller must still
+  // exclude unsupported positive-validity sources. correspondence_valid=false
+  // invalidates history and does NOT itself implement alpha/coverage semantics.
   // Cull must be NONE/FRONT/BACK, float biases finite, and enabled scissor must
   // satisfy 0<=left<=right<=width and 0<=top<=bottom<=height (empty is legal).
   // Render sets its own full viewport/per-draw scissor, EQUAL/no writes, and clears
   // both outputs. It clobbers graphics root signature/arguments, PSO, descriptor
-  // heaps (unbinds them), OM RTV/DSV, IA topology, viewport/scissor, predication,
+  // heaps (binds its private coverage heap), OM RTV/DSV, IA topology,
+  // viewport/scissor, predication,
   // and supported VRS state (1x1, PASSTHROUGH combiners, no Tier2 rate image).
   // Rebind caller state afterward; the module never transitions input resources.
   HRESULT Render(ID3D12GraphicsCommandList* list, const TemporalMotionInputs& inputs,

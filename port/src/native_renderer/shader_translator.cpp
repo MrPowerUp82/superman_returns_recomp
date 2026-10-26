@@ -1,5 +1,6 @@
 #include "shader_translator.h"
 #include "../graphics/rt_shadow_shader.h"
+#include "../graphics/pixel_coverage_shader.h"
 
 #include <algorithm>
 #include <atomic>
@@ -93,7 +94,7 @@ fs::path FirstWith(const std::vector<fs::path>& dirs, const char* file) {
   return {};
 }
 
-Tools FindTools(bool rt_shadow = false) {
+Tools FindTools(bool rt_shadow = false,bool pixel_coverage = false) {
   Tools t;
   const fs::path exe = rex::filesystem::GetExecutableFolder();
   std::vector<fs::path> dirs;
@@ -148,6 +149,10 @@ Tools FindTools(bool rt_shadow = false) {
   if (rt_shadow) {
     const auto patch = graphics::RtShadowShaderCacheIdentity();
     t.cache /= fmt::format("rt-shadow-v1-{:016X}", XXH3_64bits(patch.data(), patch.size()));
+  }
+  if (pixel_coverage) {
+    const auto patch = graphics::PixelCoverageShaderCacheIdentity();
+    t.cache /= fmt::format("pixel-coverage-v1-{:016X}", XXH3_64bits(patch.data(), patch.size()));
   }
   if (!WritableDir(t.cache) || !WritableDir(t.cache / "tmp")) {
     t.why = "cache folder not writable: " + t.cache.string();
@@ -219,12 +224,13 @@ struct Entry {
 
 class Impl {
  public:
-  explicit Impl(bool rt_shadow = false) : rt_shadow_(rt_shadow) {
+  explicit Impl(bool rt_shadow = false,bool pixel_coverage = false)
+      : rt_shadow_(rt_shadow),pixel_coverage_(pixel_coverage) {
     if (!REXCVAR_GET(sr_native_runtime_shaders)) {
       REXLOG_INFO("runtime shaders: disabled (sr_native_runtime_shaders=false)");
       return;
     }
-    tools_ = FindTools(rt_shadow_);
+    tools_ = FindTools(rt_shadow_,pixel_coverage_);
     if (!tools_.ok) {
       REXLOG_WARN("runtime shaders: unavailable ({}); only the pre-shader library and the "
                   "embedded pack can supply shaders", tools_.why);
@@ -232,7 +238,7 @@ class Impl {
     }
     REXLOG_INFO("runtime shaders: {} + {}, cache {}", tools_.translator.filename().string(),
                 tools_.dxc.filename().string(), tools_.cache.string());
-    const int n = rt_shadow_ ? 1 : std::clamp(REXCVAR_GET(sr_native_runtime_shader_threads), 1, 8);
+    const int n = (rt_shadow_ || pixel_coverage_) ? 1 : std::clamp(REXCVAR_GET(sr_native_runtime_shader_threads), 1, 8);
     for (int i = 0; i < n; ++i) threads_.emplace_back([this] { Worker(); });
     enabled_ = true;
   }
@@ -255,11 +261,11 @@ class Impl {
     if (entries_.count(key)) return;
     Entry& e = entries_[key];
     e.vertex = vertex;
-    if (!rt_shadow_ && fs::exists(DxilPath(hash, vertex))) {
+    if (!rt_shadow_ && !pixel_coverage_ && fs::exists(DxilPath(hash, vertex))) {
       e.state = TranslateState::kReady;  // loaded on first Get
       return;
     }
-    if (!rt_shadow_ && fs::exists(FailedPath(hash, vertex))) {
+    if (!rt_shadow_ && !pixel_coverage_ && fs::exists(FailedPath(hash, vertex))) {
       e.state = TranslateState::kFailed;
       return;
     }
@@ -368,10 +374,10 @@ class Impl {
       bool ok;
       // Variant disk I/O always belongs to this worker. Fetch only observes
       // in-memory state, even on a warm cache or while the worker owns mutex_.
-      if (rt_shadow_ && ReadFile(DxilPath(hash, vertex), dxil) && !dxil.empty()) {
+      if ((rt_shadow_ || pixel_coverage_) && ReadFile(DxilPath(hash, vertex), dxil) && !dxil.empty()) {
         ok = true;
-      } else if (rt_shadow_ && fs::exists(FailedPath(hash, vertex))) {
-        reason = "cached RT specialization failure";
+      } else if ((rt_shadow_ || pixel_coverage_) && fs::exists(FailedPath(hash, vertex))) {
+        reason = "cached shader specialization failure";
         ok = false;
       } else {
         ok = Translate(hash, vertex, container, dxil, reason);
@@ -451,6 +457,14 @@ class Impl {
       }
       src.assign(specialized.begin(), specialized.end());
     }
+    if (pixel_coverage_) {
+      std::string specialized;
+      if (!graphics::SpecializePixelCoverageShader(hash,
+              std::string_view(reinterpret_cast<const char*>(src.data()), src.size()), specialized, reason)) {
+        WriteFailed(hash, vertex, reason); cleanup(); return false;
+      }
+      src.assign(specialized.begin(), specialized.end());
+    }
     {
       std::ofstream f(std_hlsl, std::ios::binary);
       f.write(reinterpret_cast<const char*>(src.data()), std::streamsize(src.size()));
@@ -495,7 +509,7 @@ class Impl {
   }
 
   Tools tools_;
-  const bool rt_shadow_;
+  const bool rt_shadow_,pixel_coverage_;
   bool enabled_ = false;
   bool stop_ = false;
   std::mutex mutex_;
@@ -525,6 +539,16 @@ Impl& RtShadowInstance() {
   return *impl;
 }
 
+std::atomic<Impl*> g_pixel_coverage_instance{nullptr};
+Impl& PixelCoverageInstance() {
+  static Impl* impl = [] {
+    auto* value = new Impl(false,true);
+    g_pixel_coverage_instance.store(value,std::memory_order_release);
+    return value;
+  }();
+  return *impl;
+}
+
 }  // namespace
 
 ShaderTranslator& ShaderTranslator::Get() {
@@ -536,7 +560,10 @@ bool ShaderTranslator::Enabled() { return Instance().enabled(); }
 
 void ShaderTranslator::Offer(uint64_t hash, bool vertex, const uint8_t* container, size_t size) {
   Instance().Offer(hash, vertex, container, size);
-  if (!vertex) OfferRtShadowVariant(hash, container, size);
+  if (!vertex) {
+    OfferRtShadowVariant(hash, container, size);
+    OfferPixelCoverageVariant(hash, container, size);
+  }
 }
 
 TranslateState ShaderTranslator::Fetch(uint64_t hash, bool vertex, std::vector<uint8_t>& dxil) {
@@ -553,6 +580,17 @@ TranslateState ShaderTranslator::FetchRtShadowVariant(uint64_t hash, std::vector
   if (!graphics::IsRtShadowShader(hash)) return TranslateState::kUnknown;
   Impl* impl = g_rt_shadow_instance.load(std::memory_order_acquire);
   return impl ? impl->FetchNonBlocking(hash, dxil) : TranslateState::kUnknown;
+}
+
+void ShaderTranslator::OfferPixelCoverageVariant(uint64_t hash,const uint8_t* container,size_t size) {
+  if(graphics::IsPixelCoverageShader(hash) && container && size)
+    PixelCoverageInstance().Offer(hash,false,container,size);
+}
+TranslateState ShaderTranslator::FetchPixelCoverageVariant(uint64_t hash,std::vector<uint8_t>& dxil) {
+  dxil.clear();
+  if(!graphics::IsPixelCoverageShader(hash)) return TranslateState::kUnknown;
+  Impl* impl=g_pixel_coverage_instance.load(std::memory_order_acquire);
+  return impl ? impl->FetchNonBlocking(hash,dxil) : TranslateState::kUnknown;
 }
 
 bool ShaderTranslator::LoadCached(uint64_t hash, bool vertex, std::vector<uint8_t>& dxil) {

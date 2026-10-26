@@ -554,6 +554,7 @@ class Renderer : public NativeFrontend {
   void HarvestRayShadowExecution();
   struct MotionRaster {
     uint64_t shader=0;
+    uint32_t coverage_id=0;
     uint32_t depth_control=0,blend_control=0,color_control=0,color_mask=0;
     D3D12_CULL_MODE cull=D3D12_CULL_MODE_NONE;
     bool front_ccw=false,opaque=false,full_viewport=false,stencil_enabled=false,z_write=false;
@@ -564,6 +565,7 @@ class Renderer : public NativeFrontend {
     Microsoft::WRL::ComPtr<ID3D12Resource> resource;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout{};
     uint64_t size=0,swap=0;uint32_t slot=0;std::string name;
+    bool clip_buffer=false;
   };
   std::unique_ptr<graphics::d3d12::PostVertexClipCapture> motion_clips_;
   std::unique_ptr<graphics::d3d12::TemporalMotion> temporal_motion_;
@@ -587,6 +589,16 @@ class Renderer : public NativeFrontend {
   std::array<uint32_t,16> motion_camera_words_{};
   std::array<uint32_t,6> motion_clip_fixup_{}; // Exact uploaded ScreenXform + HalfPixelOffset bits.
   Microsoft::WRL::ComPtr<ID3D12Resource> motion_depth_snapshot_;
+  Microsoft::WRL::ComPtr<ID3D12Resource> motion_coverage_[3];
+  Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> motion_coverage_rtv_heap_;
+  D3D12_RESOURCE_STATES motion_coverage_state_[3]{D3D12_RESOURCE_STATE_RENDER_TARGET,
+      D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_RENDER_TARGET};
+  std::unordered_map<uint64_t,std::vector<uint8_t>> motion_coverage_shaders_;
+  const std::vector<uint8_t>* motion_coverage_shader_=nullptr;
+  bool motion_coverage_draw_active_=false,motion_coverage_bound_=false,motion_coverage_cleared_=false;
+  uint32_t motion_coverage_next_id_=0,motion_coverage_draw_id_=0;
+  D3D12_CPU_DESCRIPTOR_HANDLE MotionCoverageView() const;
+  void ConfigureMotionCoverage(HostSurface* color,HostSurface* depth,uint64_t vs,uint64_t ps,bool single_color);
   Microsoft::WRL::ComPtr<ID3D12Resource> motion_captured_depth_,motion_captured_color_;
   uint32_t motion_captured_color_edram_=0,motion_captured_color_width_=0,motion_captured_color_height_=0;
   float motion_captured_color_scale_=0;
@@ -598,6 +610,7 @@ class Renderer : public NativeFrontend {
   void MaybeFinishMotionBeforeDepthWrite(HostSurface* depth,bool writes_depth,const char* reason);
   void EndMotionCapture();
   void QueueMotionReadback(ID3D12Resource* texture,D3D12_RESOURCE_STATES state,const std::string& name);
+  void QueueMotionClipReadback(ID3D12Resource* clips,uint32_t bytes);
   void ReportMotionReadbacks(uint32_t slot);
   void BeforeMotionColorDraw();
   void CaptureMotionInlineColorGeometry(uint8_t* base,uint32_t declaration,

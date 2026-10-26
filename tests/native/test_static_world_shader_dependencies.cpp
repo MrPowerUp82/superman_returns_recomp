@@ -16,11 +16,12 @@ struct RigidFamily {
   uint32_t world_texcoord;
 };
 // Independent expectations from each artifact's aliases and output chain.
-constexpr std::array<RigidFamily, 4> kRigidFamilies{{
+constexpr std::array<RigidFamily, 5> kRigidFamilies{{
     {0x4F17209D364D5B51ull, 0, 8, 1},
     {0x18B4F69400B7F0AFull, 0, 8, 1},
     {0xC5E8551EFDE01162ull, 1, 5, 2},
     {0xC63F6F22679609F0ull, 0, 8, 1},
+    {0x7D1AA67BBDC418D1ull, 0, 4, 4},
 }};
 constexpr std::array<uint64_t, 2> kInstancedShaders{
     0x29C1ACD9F4373197ull, 0xC79CC997C897773Eull};

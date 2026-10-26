@@ -107,3 +107,10 @@ Evidências detalhadas em `../../post-vertex-world-contracts-2026-10-24.md`,
   Nova validação de gameplay em andamento; não presumir vetores válidos.
 - DLSS no gameplay permanece Off: ainda faltam motion de objetos/deformação,
   jitter aplicado, fronteira pré-HUD comprovada e execução NGX nessa cena.
+
+
+## 2026-10-25: preserve actual alpha-tested pixel ownership for motion
+
+Frozen actual clips/depth replay identifies VS4F172/PS559F as the sampled ground contributor (56000/56000 ROI pixels). Existing static world dependencies support this VS, but generic motion excludes its blend/alpha test. Do not remove that guard. Extend the opt-in capture with an R32_UINT owner target produced by an audited original-PS variant: preserve original color, alpha/discard, depth and raster state; append a current-frame draw ID in a separate unblended MRT. Zero/invalidate unknown writes so stale IDs never supply coverage. TemporalMotion optionally tests this owner ID before writing any velocity/validity; mismatch discards, preserving other draws. IDs provide current-frame fragment coverage only, never cross-frame object/pose identity. Keep matched immutable world-input proof and all frame/fence/resource checks.
+
+Implementation split: pure audited PS instrumentation (559F+2203 only) with distinct cache identity; D3D12 TemporalMotion optional owner-map sampling and meaningful hole/unknown-occluder GPU tests; renderer opt-in allocation/binding/variant-cache integration and captured runtime validation. Original Off path and all unqualified families keep existing behavior. No DLSS activation is implied by this work. This evolves existing shader variants and motion backend; it does not replace the guest frontend.

@@ -1,11 +1,14 @@
 // Exact post-VS clips supplied by caller; no transform or identity inference.
 ByteAddressBuffer currentClips : register(t0);
 ByteAddressBuffer previousClips : register(t1);
+Texture2D<uint> coverage : register(t2);
 cbuffer MotionConstants : register(b0) {
     float2 dimensions;
     float2 currentJitter;
     float2 previousJitter;
     uint correspondenceValid;
+    uint coverageEnabled;
+    uint coverageId;
 };
 struct RasterVertex {
     float4 position : SV_Position;
@@ -23,6 +26,10 @@ struct MotionPixel {
     uint validity : SV_Target1;
 };
 MotionPixel MotionPS(RasterVertex v) {
+    // A mismatching audited owner must leave previous replay outputs intact.
+    // Zero-ID draws disable filtering and retain legacy ordered invalidation.
+    if (coverageEnabled && coverage.Load(int3(uint2(v.position.xy), 0)) != coverageId)
+        discard;
     MotionPixel result;
     result.velocity = 0;
     result.validity = 0;
