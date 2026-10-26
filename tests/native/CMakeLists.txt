@@ -47,6 +47,7 @@ add_executable(sr_native_tests
     test_scene_raster_jitter.cpp
     test_observed_instance_lifetimes.cpp
     test_observed_skinned_motion.cpp
+    test_observed_cloth_motion.cpp
     test_observed_skinned_part_key.cpp
     test_rt_shadow_shader.cpp
     test_pixel_coverage_shader.cpp

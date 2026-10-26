@@ -73,6 +73,7 @@
 #include "instance_probe.h"
 #include "../graphics/observed_skinned_motion.h"
 #include "../graphics/observed_skinned_part_key.h"
+#include "../graphics/observed_cloth_motion.h"
 #include "native_bridge.h"
 #include "native_graphics_system.h"
 #include "sdk_compat.h"
@@ -6235,9 +6236,12 @@ void Renderer::ExecDrawIndexedVertices(uint8_t* base, const WorkBatch& batch,
     command_list_->IASetIndexBuffer(&qv);
     if (!SkipGpuDraw()) {BeforeMotionColorDraw();command_list_->DrawIndexedInstanced(quad_indices, 1, 0, base_vertex, 0);AfterMotionColorDraw();}
     ReportObservedClothDraw(batch,cmd);
-    // Generated/inline geometry has no attested temporal identity here.
+    // Only the audited cloth producer supplies persistent slots for these
+    // generated quad indices; every other generated path remains unverified.
+    const bool observed_cloth=REXCVAR_GET(sr_native_debug_observed_skin_motion) &&
+        current_vs_hash_==0xA5232A3184AA617Cull && cmd.observed_render.cloth.source_route_observed;
     CaptureMotionClipDraw(base,dev,topology,true,quad_indices,0,base_vertex,
-        D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED,nullptr,nullptr);
+        D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED,observed_cloth?&batch:nullptr,observed_cloth?&cmd:nullptr);
     if (surface_probe_) {
       graphics::GeometrySubmission submission{};
       submission.kind = graphics::GeometrySubmissionKind::kIndexed;

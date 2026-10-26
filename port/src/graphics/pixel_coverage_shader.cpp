@@ -10,11 +10,19 @@ constexpr size_t kMaxSourceBytes = 1024 * 1024;
 constexpr std::string_view kOutput = "out float4 oC0 : SV_Target0)";
 constexpr std::string_view kExtra = ",\n\tout uint srCoverageId : SV_Target1";
 constexpr std::string_view kAssignment = "\n\tsrCoverageId = g_SrPixelCoverageId;\n\t";
+// The cape PS initializes its pixel-position register with this exact emitter
+// branch. Neither arm exits main or changes the fragment coverage tail.
+constexpr std::string_view kCapePixelPosition = "float4 r5 = \n" R"hlsl(#ifdef CONAN_RECOMP
+		float4((iPos.xy * g_PixelPosScale - 0.5) * float2(iFace ? 1.0 : -1.0, 1.0), 0.0, 0.0);
+#else
+		float4((iPos.xy - 0.5) * float2(iFace ? 1.0 : -1.0, 1.0), 0.0, 0.0);
+#endif
+)hlsl";
 constexpr std::string_view kLoadBuffers =
     "#define SR_LOAD_FLOAT4(STAGE,OFFSET) asfloat(g_ ## STAGE ## ShaderConstants.Load4(OFFSET))";
 constexpr std::string_view kLoadAddress =
     "#define SR_LOAD_FLOAT4(STAGE,OFFSET) vk::RawBufferLoad<float4>(g_PushConstants.STAGE ## ShaderConstants + (OFFSET), 0x10)";
-constexpr std::string_view kPrefix = R"hlsl(// SrPixelCoverage patch v1: original PS 559F/2203/E6C7/3EF6/E83A; capture only.
+constexpr std::string_view kPrefix = R"hlsl(// SrPixelCoverage patch v1: original PS 559F/2203/E6C7/3EF6/E83A/71CB; capture only.
 cbuffer SrPixelCoverage : register(b4, space4)
 {
     uint g_SrPixelCoverageId;
@@ -98,13 +106,15 @@ const std::string& AuditedParameters() {
 
 bool IsPixelCoverageShader(uint64_t hash) {
   return hash == 0x559F422BEF5E5714ull || hash == 0x220353EB37491B13ull ||
-         hash == 0xE6C740EAC16B70D4ull || hash == 0x3EF6A4A3C740ADB1ull || hash == 0xE83A13DF3297C6CBull;
+         hash == 0xE6C740EAC16B70D4ull || hash == 0x3EF6A4A3C740ADB1ull || hash == 0xE83A13DF3297C6CBull ||
+         hash == 0x71CB82D791DE8E77ull;
 }
 bool IsPixelCoverageShaderPair(uint64_t vs, uint64_t ps) {
   return (vs == 0x4F17209D364D5B51ull && ps == 0x559F422BEF5E5714ull) ||
          (vs == 0x18B4F69400B7F0AFull && ps == 0x220353EB37491B13ull) ||
          (vs == 0xC20921D0DBBD2F1Full && ps == 0xE6C740EAC16B70D4ull) ||
-         (vs == 0xC687EB65D635C5D7ull && (ps == 0x3EF6A4A3C740ADB1ull || ps == 0xE83A13DF3297C6CBull));
+         (vs == 0xC687EB65D635C5D7ull && (ps == 0x3EF6A4A3C740ADB1ull || ps == 0xE83A13DF3297C6CBull)) ||
+         (vs == 0xA5232A3184AA617Cull && ps == 0x71CB82D791DE8E77ull);
 }
 bool SpecializePixelCoverageShader(uint64_t hash, std::string_view source,
                                    std::string& output, std::string& error) {
@@ -223,9 +233,13 @@ bool SpecializePixelCoverageShader(uint64_t hash, std::string_view source,
   const size_t declaration = code.find(kOutput), close = declaration + kOutput.size() - 1;
   if (declaration < tokens[main].at || close != tokens[parameters_end].at)
     return reject("Pixel coverage output declaration must finish main's parameter list");
+  const size_t cape_branch=hash==0x71CB82D791DE8E77ull && Unique(normalized,kCapePixelPosition)
+      ? normalized.find(kCapePixelPosition) : kNone;
   size_t returns = 0, final_return = kNone;
   for (size_t i = body + 1; i < end; ++i) {
-    if (token(i) == "#") return reject("Preprocessor control in main body is not audited");
+    if (token(i) == "#" && (cape_branch==kNone || tokens[i].at<cape_branch ||
+        tokens[i].at>=cape_branch+kCapePixelPosition.size()))
+      return reject("Preprocessor control in main body is not audited");
     if (token(i) == "return") {
       ++returns; final_return = tokens[i].at;
       if (parent[i] != body || token(i + 1) != ";" || i + 2 != end)
@@ -251,7 +265,7 @@ bool SpecializePixelCoverageShader(uint64_t hash, std::string_view source,
 std::string_view PixelCoverageShaderCacheIdentity() {
   static const std::string identity = std::string("pixel-coverage-structural-audit-v1\n") +
       std::string(kPrefix) + std::string(kOutput) + std::string(kExtra) +
-      std::string(kAssignment) + std::string(kTail) + AuditedParameters() +
+      std::string(kAssignment) + std::string(kTail) + std::string(kCapePixelPosition) + AuditedParameters() +
       std::string(kLoadBuffers) + std::string(kLoadAddress);
   return identity;
 }

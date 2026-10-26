@@ -250,7 +250,33 @@ try {
   $skips = 0; $blackSamples = 0; $samples = 0
   while ($true) {
     Focus $proc
-    if (Has-Gameplay-Frame $proc) { break }
+    $frameReady=Has-Gameplay-Frame $proc
+    if($GraphicsMenuChecks -and $env:SR_BENCH_MOTION_CAPTURE_TRIGGER) {
+      # Cinematic colors can satisfy the visual HUD heuristic. A motion run
+      # must first prove the source-audited gameplay -> pause -> gameplay path.
+      $pauseBefore=@(Select-String -LiteralPath $log -Pattern 'native graphics guest pause: paused=true.*state=4').Count
+      $lastGuestPause=@(Select-String -LiteralPath $log -Pattern 'native graphics guest pause:') | Select-Object -Last 1
+      $alreadyPaused=$lastGuestPause -and $lastGuestPause.Line -match 'paused=true.*state=4'
+      if(-not $alreadyPaused) {Key 0x0D}
+      $pauseDeadline=(Get-Date).AddSeconds(5)
+      do {
+        Start-Sleep -Milliseconds 250
+        $pauseNow=@(Select-String -LiteralPath $log -Pattern 'native graphics guest pause: paused=true.*state=4').Count
+      } while(-not $alreadyPaused -and $pauseNow -le $pauseBefore -and (Get-Date) -lt $pauseDeadline -and -not $proc.HasExited)
+      $frameReady=$alreadyPaused -or $pauseNow -gt $pauseBefore
+      if($frameReady) {
+        $resumeBefore=@(Select-String -LiteralPath $log -Pattern 'native graphics guest pause: paused=false.*state=3').Count
+        Key 0x0D
+        $resumeDeadline=(Get-Date).AddSeconds(5)
+        do {
+          Start-Sleep -Milliseconds 250
+          $resumeNow=@(Select-String -LiteralPath $log -Pattern 'native graphics guest pause: paused=false.*state=3').Count
+        } while($resumeNow -le $resumeBefore -and (Get-Date) -lt $resumeDeadline -and -not $proc.HasExited)
+        $frameReady=$resumeNow -gt $resumeBefore
+        if($frameReady) {Step 'motion gameplay qualified by actual guest pause/resume; visual HUD alone is insufficient'}
+      } else {Step 'visual HUD candidate rejected: no verified gameplay pause (cinematic/loading)'}
+    }
+    if ($frameReady) { break }
     if ($proc.HasExited) { throw "game exited before rendering the save" }
     $samples++; if (Capture-IsBlack) { $blackSamples++ }
     if ((Get-Date) -gt $worldDeadline) {

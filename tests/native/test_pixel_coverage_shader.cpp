@@ -8,15 +8,15 @@
 
 using namespace superman_returns::graphics;
 namespace {
-constexpr std::array<uint64_t, 5> kPs{0x559F422BEF5E5714ull, 0x220353EB37491B13ull, 0xE6C740EAC16B70D4ull, 0x3EF6A4A3C740ADB1ull, 0xE83A13DF3297C6CBull};
-constexpr std::array<uint64_t, 5> kVs{0x4F17209D364D5B51ull, 0x18B4F69400B7F0AFull, 0xC20921D0DBBD2F1Full, 0xC687EB65D635C5D7ull, 0xC687EB65D635C5D7ull};
+constexpr std::array<uint64_t, 6> kPs{0x559F422BEF5E5714ull, 0x220353EB37491B13ull, 0xE6C740EAC16B70D4ull, 0x3EF6A4A3C740ADB1ull, 0xE83A13DF3297C6CBull, 0x71CB82D791DE8E77ull};
+constexpr std::array<uint64_t, 6> kVs{0x4F17209D364D5B51ull, 0x18B4F69400B7F0AFull, 0xC20921D0DBBD2F1Full, 0xC687EB65D635C5D7ull, 0xC687EB65D635C5D7ull, 0xA5232A3184AA617Cull};
 constexpr std::string_view kOutput = "out float4 oC0 : SV_Target0)";
 constexpr std::string_view kExtra = ",\n\tout uint srCoverageId : SV_Target1";
 constexpr std::string_view kAssignment = "\n\tsrCoverageId = g_SrPixelCoverageId;\n\t";
 
 std::string Source(uint64_t hash) {
   constexpr const char* names[]{"559F422BEF5E5714.ps.hlsl","220353EB37491B13.ps.hlsl",
-      "E6C740EAC16B70D4.ps.hlsl","3EF6A4A3C740ADB1.ps.hlsl","E83A13DF3297C6CB.ps.hlsl"};
+      "E6C740EAC16B70D4.ps.hlsl","3EF6A4A3C740ADB1.ps.hlsl","E83A13DF3297C6CB.ps.hlsl","71CB82D791DE8E77.ps.hlsl"};
   const char* name=nullptr;
   for(size_t i=0;i<kPs.size();++i) if(hash==kPs[i]) name=names[i];
   SR_CHECK(name!=nullptr);if(!name)return {};
@@ -62,6 +62,7 @@ SR_TEST(pixel_coverage_actual_sources_keep_all_original_code_and_fragment_tail) 
     std::string output, error = "stale error";
     const bool specialized = SpecializePixelCoverageShader(hash, source, output, error);
     SR_CHECK(specialized);
+    if (!specialized) std::printf("  specialization error: %s\n", error.c_str());
     if (!specialized) continue;
     SR_CHECK(error.empty());
     SR_CHECK(output.find("cbuffer SrPixelCoverage : register(b4, space4)") != std::string::npos);
@@ -196,4 +197,13 @@ SR_TEST(pixel_coverage_cache_identity_contains_version_and_actual_emitted_patch)
   SR_CHECK(identity.find(std::string_view(output).substr(0, prefix_end)) != std::string_view::npos);
   SR_CHECK(identity.find(kExtra) != std::string_view::npos);
   SR_CHECK(identity.find(kAssignment) != std::string_view::npos);
+}
+
+SR_TEST(pixel_coverage_cape_accepts_only_the_original_pixel_position_branch) {
+  const auto source=Source(0x71CB82D791DE8E77ull);
+  for(std::string_view replacement : {"#ifdef OTHER_ENGINE", "#if 1", "#ifdef CONAN_RECOMP\nreturn;"}) {
+    auto changed=source;
+    Replace(changed,"float4 r5 = \n#ifdef CONAN_RECOMP",std::string("float4 r5 = \n")+std::string(replacement));
+    Reject(0x71CB82D791DE8E77ull,changed);
+  }
 }

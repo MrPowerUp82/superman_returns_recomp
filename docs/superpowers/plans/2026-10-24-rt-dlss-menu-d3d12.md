@@ -114,3 +114,19 @@ Evidências detalhadas em `../../post-vertex-world-contracts-2026-10-24.md`,
 Frozen actual clips/depth replay identifies VS4F172/PS559F as the sampled ground contributor (56000/56000 ROI pixels). Existing static world dependencies support this VS, but generic motion excludes its blend/alpha test. Do not remove that guard. Extend the opt-in capture with an R32_UINT owner target produced by an audited original-PS variant: preserve original color, alpha/discard, depth and raster state; append a current-frame draw ID in a separate unblended MRT. Zero/invalidate unknown writes so stale IDs never supply coverage. TemporalMotion optionally tests this owner ID before writing any velocity/validity; mismatch discards, preserving other draws. IDs provide current-frame fragment coverage only, never cross-frame object/pose identity. Keep matched immutable world-input proof and all frame/fence/resource checks.
 
 Implementation split: pure audited PS instrumentation (559F+2203 only) with distinct cache identity; D3D12 TemporalMotion optional owner-map sampling and meaningful hole/unknown-occluder GPU tests; renderer opt-in allocation/binding/variant-cache integration and captured runtime validation. Original Off path and all unqualified families keep existing behavior. No DLSS activation is implied by this work. This evolves existing shader variants and motion backend; it does not replace the guest frontend.
+
+## Continuação em 26/10 — movimento da capa validado, integração final pendente
+
+O caminho opt-in agora qualifica a capa A523/71CB por ciclo de vida/topologia,
+bindings e índices reais, preservando slots através dos buffers rotativos.
+Captura do VS original e cobertura do PS original produziram 19.007 pixels
+de velocidade finita e não nula atribuídos exclusivamente à capa na RTX 2060.
+Build com SDK DLSS passou; 460 testes nativos e CTest3/3 passaram; rodada
+`motion_cloth_correspondence_2610d` aprovou pausa/menu/retorno e fechamento normal.
+
+Isso não conclui as etapas3–7. DLSS ainda não executa na cena real; faltam os
+domínios de resolução/resolve e a qualificação de entradas para NGX. Há nova
+evidência de inicialização/lifecycle da dupla default para qualificar a alocação
+antes do primeiro clear. Reflexos e controle completo de casters de personagem
+continuam pendentes. Evidências, correções RED→GREEN e próximos contratos em
+`../../rt-dlss-continuation-2026-10-26.md`.

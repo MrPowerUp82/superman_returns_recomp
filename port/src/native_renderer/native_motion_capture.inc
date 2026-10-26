@@ -111,13 +111,22 @@ void Renderer::CaptureMotionClipDraw(uint8_t* base,uint32_t dev,D3D12_PRIMITIVE_
   uint64_t position_signature=0;
   graphics::ObservedSkinnedMotionInputs observed_skin;
   graphics::ObservedSkinnedPartKey observed_part;
+  graphics::ObservedClothShaderInputs observed_cloth;
+  const bool observed_cloth_inputs=REXCVAR_GET(sr_native_debug_observed_skin_motion) && cmd &&
+      motion_coverage_draw_active_ && current_motion_raster_.coverage_id &&
+      graphics::IsPixelCoverageShaderPair(current_vs_hash_,current_ps_hash_) &&
+      graphics::CaptureObservedClothShaderInputs(current_vs_hash_,words,motion_uploaded_vs_bools_,observed_cloth);
   const bool observed_skin_inputs=REXCVAR_GET(sr_native_debug_observed_skin_motion) && cmd &&
       motion_coverage_draw_active_ && current_motion_raster_.coverage_id &&
       graphics::IsPixelCoverageShaderPair(current_vs_hash_,current_ps_hash_) &&
       graphics::CaptureObservedSkinnedPartKey(cmd->observed_render,observed_part) &&
       graphics::CaptureObservedSkinnedMotionInputs(current_vs_hash_,cmd->observed_render,
           words,motion_uploaded_vs_bools_,observed_skin);
-  if(observed_skin_inputs && vertex_range_valid) {
+  if(observed_cloth_inputs && vertex_range_valid) {
+    projection_words=observed_cloth.clip_rows;
+    dependencies_valid=true;
+    position_signature=XXH3_64bits(observed_cloth.position_words.data(),sizeof(observed_cloth.position_words));
+  } else if(observed_skin_inputs && vertex_range_valid) {
     projection_words=observed_skin.clip_rows;
     dependencies_valid=true; // Object-to-clip, not a shared camera.
     position_signature=XXH3_64bits(observed_skin.position_words.data(),sizeof(observed_skin.position_words));
@@ -161,7 +170,35 @@ void Renderer::CaptureMotionClipDraw(uint8_t* base,uint32_t dev,D3D12_PRIMITIVE_
       else identity.insert(identity.end(),{cmd->index.key,entry->second.resource_generation,entry->second.content_version,cmd->index_size,uint64_t(cmd->index32)});
     }
     graphics::TemporalFetchSignature fetch_signature{};
-    if(versioned && graphics::CaptureTemporalVertexFetch(vertex_fetch_,fetch_resources,fetch_signature)) {
+    bool fetch_valid=versioned && graphics::CaptureTemporalVertexFetch(vertex_fetch_,fetch_resources,fetch_signature);
+    graphics::ObservedClothMotionIdentity cloth_identity;
+    if(observed_cloth_inputs) {
+      const auto ib=buffers_.find(cmd->index.key);
+      const graphics::TemporalFetchResource index_resource=ib==buffers_.end()?graphics::TemporalFetchResource{}:
+          graphics::TemporalFetchResource{0,cmd->index.key,ib->second.resource_generation,ib->second.content_version};
+      fetch_valid=fetch_valid && count==cmd->u[5] && !first && !base_vertex &&
+          topology==D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST &&
+          graphics::CaptureObservedClothMotionIdentity(current_vs_hash_,*batch,*cmd,
+              fetch_resources,index_resource,vertex_fetch_,cloth_identity);
+      if(motion_cloth_reports_<=2)
+        REXLOG_INFO("native observed cloth correspondence: phase={} serial={} qualified={} vertices={} topology_generation={}",
+            motion_capture_phase_,cmd->command_serial,fetch_valid,count,cmd->observed_render.cloth.topology_generation);
+      if(fetch_valid) {
+        const uint64_t actual_inputs[]{position_signature,
+            XXH3_64bits(cloth_identity.actual_streams.data(),sizeof(cloth_identity.actual_streams))};
+        position_signature=XXH3_64bits(actual_inputs,sizeof(actual_inputs));
+        // Dynamic addresses and versions are deliberately absent ONLY after
+        // the actual bindings have passed the source-route validator above.
+        identity.resize(8);
+        identity.insert(identity.end(),{cmd->observed_render.cloth.topology_generation,
+            cmd->observed_render.cloth.vertices,cmd->observed_render.cloth.quads,
+            XXH3_64bits(cloth_identity.mesh_streams.data(),sizeof(cloth_identity.mesh_streams)),
+            XXH3_64bits(cloth_identity.index.data(),sizeof(cloth_identity.index)),
+            XXH3_64bits(batch->bytes.data()+cmd->u[4],size_t(cmd->u[5])*4)});
+        fetch_signature=cloth_identity.fetch;
+      }
+    }
+    if(fetch_valid) {
       const uint64_t buffers_signature=XXH3_64bits(identity.data(),identity.size()*sizeof(identity[0]));
       const uint64_t fetch_hash=XXH3_64bits(fetch_signature.data(),sizeof(fetch_signature));
       identity.push_back(fetch_hash);
@@ -177,6 +214,10 @@ void Renderer::CaptureMotionClipDraw(uint8_t* base,uint32_t dev,D3D12_PRIMITIVE_
         sample.proof=graphics::GeometryHistoryProof::kVerifiedInstance;
         sample.instance=XXH3_64bits(observed_part.instance_words.data(),sizeof(observed_part.instance_words));
         sample.instance_generation=observed_part.generation;
+      } else if(observed_cloth_inputs) {
+        sample.proof=graphics::GeometryHistoryProof::kVerifiedInstance;
+        sample.instance=XXH3_64bits(cloth_identity.instance_words.data(),sizeof(cloth_identity.instance_words));
+        sample.instance_generation=cloth_identity.generation;
       }
       if(motion_signature_reports_++<12) {
         REXLOG_INFO("native motion input proof: phase={} mesh={:016X} buffers={:016X} fetch={:016X} world={:016X} domain={:016X} count={} first={} base={}",
@@ -303,7 +344,7 @@ void Renderer::FinishMotionScene(HostSurface* depth) {
   if(!depth || depth->resource.Get()!=motion_captured_depth_.Get() || !motion_clips_ ||
      motion_scene_finished_ || motion_history_.samples().empty()) return;
   motion_scene_finished_=true;motion_clips_->Finish(command_list_.Get());motion_history_.Seal();
-  uint32_t matched=0,observed_skin_matches=0,unverified=0,missing=0,ambiguous=0;uint64_t vertex_total=0;
+  uint32_t matched=0,observed_skin_matches=0,observed_cloth_matches=0,unverified=0,missing=0,ambiguous=0;uint64_t vertex_total=0;
   struct Family {uint32_t draws=0,opaque=0,matches=0,stencil=0,no_depth_write=0,blend=0,alpha_test=0;};
   std::unordered_map<uint64_t,Family> families;
   std::vector<MotionGeometry> geometry;
@@ -328,7 +369,10 @@ void Renderer::FinishMotionScene(HostSurface* depth) {
     draw.correspondence_valid=match.status==graphics::GeometryHistoryStatus::kMatch &&
         !motion_camera_conflict_ && !motion_previous_camera_bad_ && !motion_clips_->dropped() && !motion_history_.dropped();
     if(draw.correspondence_valid) {
-      observed_skin_matches+=sample.proof==graphics::GeometryHistoryProof::kVerifiedInstance;
+      observed_skin_matches+=sample.proof==graphics::GeometryHistoryProof::kVerifiedInstance &&
+          graphics::IsObservedSkinnedMotionShader(motion_rasters_[i].shader);
+      observed_cloth_matches+=sample.proof==graphics::GeometryHistoryProof::kVerifiedInstance &&
+          motion_rasters_[i].shader==0xA5232A3184AA617Cull;
       draw.previousClip=motion_clips_->Buffer(match.previous.slot);draw.previous_offset=match.previous.offset;
     }
     const auto& raster=motion_rasters_[i];
@@ -456,9 +500,30 @@ void Renderer::FinishMotionScene(HostSurface* depth) {
       } else REXLOG_WARN("native observed skin attribution failed {:08X}: {}",uint32_t(skin_hr),motion_observed_skin_attribution_->LastError());
     }
   }
+  if(observed_cloth_matches && REXCVAR_GET(sr_native_debug_observed_skin_motion)) {
+    if(!motion_observed_cloth_attribution_) {
+      auto candidate=std::make_unique<TemporalMotion>();
+      if(SUCCEEDED(candidate->Initialize(device_))) motion_observed_cloth_attribution_=std::move(candidate);
+    }
+    if(motion_observed_cloth_attribution_) {
+      auto attribution=geometry;
+      for(size_t i=0;i<attribution.size();++i)
+        if(motion_rasters_[i].shader!=0xA5232A3184AA617Cull ||
+           motion_history_.samples()[i].proof!=graphics::GeometryHistoryProof::kVerifiedInstance)
+          attribution[i].correspondence_valid=false;
+      HRESULT cloth_hr=motion_observed_cloth_attribution_->BeginFrame(frame_index_);
+      if(SUCCEEDED(cloth_hr)) cloth_hr=motion_observed_cloth_attribution_->Render(command_list_.Get(),input,attribution);
+      if(SUCCEEDED(cloth_hr)) {
+        const auto cloth=motion_observed_cloth_attribution_->Outputs();
+        QueueMotionReadback(cloth.velocity,D3D12_RESOURCE_STATE_RENDER_TARGET,"observed_cloth_motion_velocity");
+        QueueMotionReadback(cloth.validity,D3D12_RESOURCE_STATE_RENDER_TARGET,"observed_cloth_motion_validity");
+        REXLOG_INFO("native observed cloth attribution GPU recorded: matches={} other_writers_invalidated=true DLSS_input=false",observed_cloth_matches);
+      } else REXLOG_WARN("native observed cloth attribution failed {:08X}: {}",uint32_t(cloth_hr),motion_observed_cloth_attribution_->LastError());
+    }
+  }
   motion_color_pairs_.clear();motion_pre_hud_pending_=true;
-  REXLOG_INFO("native motion GPU recorded: {}x{} position_matches={} observed_skin_matches={} complete_object_motion_verified=false raster_jitter_applied={} current_jitter_px={},{} previous_jitter_px={},{} candidate_scene_scope_only=true DLSS_applied=Off",
-      input.width,input.height,matched,observed_skin_matches,motion_jitter_applied_,input.current_jitter[0],input.current_jitter[1],
+  REXLOG_INFO("native motion GPU recorded: {}x{} position_matches={} observed_skin_matches={} observed_cloth_matches={} complete_object_motion_verified=false raster_jitter_applied={} current_jitter_px={},{} previous_jitter_px={},{} candidate_scene_scope_only=true DLSS_applied=Off",
+      input.width,input.height,matched,observed_skin_matches,observed_cloth_matches,motion_jitter_applied_,input.current_jitter[0],input.current_jitter[1],
       input.previous_jitter[0],input.previous_jitter[1]);
 }
 

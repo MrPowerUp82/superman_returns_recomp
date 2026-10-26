@@ -53,7 +53,7 @@ def main():
         report['captures'].append({'file': path.name, 'width': valid.shape[1], 'height': valid.shape[0],
             'diagnostic_upper_bound_only': path.name.startswith(('candidate_static_only_', 'candidate_matched_only_')),
             'unknown_geometry_omitted': path.name.startswith(('candidate_static_only_', 'candidate_matched_only_')),
-            'family_only_attribution': path.name.startswith('observed_skin_'),
+            'family_only_attribution': path.name.startswith(('observed_skin_', 'observed_cloth_')),
             'valid_pixels': int(valid.sum()), 'coverage_fraction': float(valid.mean()),
             'moving_pixels_above_0_01': int((valid & (magnitude > .01)).sum()),
             'magnitude_percentiles': np.percentile(magnitude[valid], [0, 50, 95, 100]).tolist() if valid.any() else [],

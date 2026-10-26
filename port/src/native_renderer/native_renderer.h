@@ -574,6 +574,7 @@ class Renderer : public NativeFrontend {
   std::unique_ptr<graphics::d3d12::TemporalMotion> temporal_motion_;
   std::unique_ptr<graphics::d3d12::TemporalMotion> motion_static_candidate_;
   std::unique_ptr<graphics::d3d12::TemporalMotion> motion_observed_skin_attribution_;
+  std::unique_ptr<graphics::d3d12::TemporalMotion> motion_observed_cloth_attribution_;
   graphics::TemporalGeometryHistory motion_history_;
   std::vector<MotionRaster> motion_rasters_;
   std::vector<MotionReadback> motion_readbacks_;
