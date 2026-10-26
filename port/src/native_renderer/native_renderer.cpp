@@ -35,6 +35,7 @@
 #include <dxgi1_4.h>
 
 #include <algorithm>
+#include <bit>
 #include <array>
 #include <immintrin.h>
 #include <chrono>
@@ -904,8 +905,8 @@ DeclFormat MapDeclType(uint32_t type) {
   auto encoding=graphics::guest::GetVertexEncoding(type);
   return {MapDeclHostFormat(type),encoding.size,encoding.swap};
 }
-const std::vector<graphics::guest::VertexAttribute>& ReadVertexDeclaration(uint8_t* base,uint32_t decl) {
-  static const std::vector<graphics::guest::VertexAttribute> empty;
+const graphics::guest::VertexDeclaration& ReadVertexDeclarationInfo(uint8_t* base,uint32_t decl) {
+  static const graphics::guest::VertexDeclaration empty;
   if(!decl) return empty;
   uint32_t count=std::min(Load32(base,decl+0x18),64u);
   if(!count) return empty;
@@ -913,16 +914,28 @@ const std::vector<graphics::guest::VertexAttribute>& ReadVertexDeclaration(uint8
   auto bytes=t_capture_count?graphics::guest::FindUnambiguousCapture(
       {t_capture_ranges,t_capture_count},{t_capture_bytes,t_capture_bytes_size},decl+0x34,count*12)
       :std::span<const uint8_t>(base+decl+0x34,count*12);
-  if(!bytes.empty()) return cache.Decode(bytes).attributes;
+  if(!bytes.empty()) return cache.Decode(bytes);
   // Partial overlays must keep the scalar read precedence of the capture shim.
-  thread_local std::vector<graphics::guest::VertexAttribute> out;
-  out.clear();
+  thread_local graphics::guest::VertexDeclaration fallback;
+  fallback.attributes.clear();
+  fallback.streams_used = 0;
+  fallback.normal_spec_bits = 0;
   for(uint32_t i=0;i<count;++i) {
     uint32_t a=decl+0x34+i*12,stream=Load16(base,a);
     if(stream==0xff) break;
-    out.push_back({stream,Load16(base,a+2),Load32(base,a+4),Load8(base,a+9),Load8(base,a+10)});
+    uint32_t offset=Load16(base,a+2),type=Load32(base,a+4);
+    uint32_t usage=Load8(base,a+9),index=Load8(base,a+10);
+    fallback.attributes.push_back({stream,offset,type,usage,index});
+    if(stream<32) fallback.streams_used|=1u<<stream;
+    if(usage==3 || usage==6 || usage==7) {
+      if(type==0x2a2187) fallback.normal_spec_bits|=1u<<6;
+      if(type==0x2a2190 || type==0x2a2390) fallback.normal_spec_bits|=1u;
+    }
   }
-  return out;
+  return fallback;
+}
+const std::vector<graphics::guest::VertexAttribute>& ReadVertexDeclaration(uint8_t* base,uint32_t decl) {
+  return ReadVertexDeclarationInfo(base,decl).attributes;
 }
 
 const char* UsageSemantic(uint32_t usage) {
@@ -2155,6 +2168,7 @@ bool Renderer::BeginFrame() {
   }
   frame_state_bound_ = false;
   fixed_state_cached_ = false;
+  bound_vertex_views_mask_ = 0;
   bound_rt_count_ = 0;
   bound_ds_ = nullptr;
   std::memset(bound_rts_, 0, sizeof(bound_rts_));
@@ -2558,6 +2572,7 @@ void Renderer::ApplySsao() {
   Breadcrumb("ssao");
   frame_state_bound_ = false;
   fixed_state_cached_ = false;
+  bound_vertex_views_mask_ = 0;
   bound_rt_count_ = 0;
   bound_ds_ = nullptr;
   std::memset(bound_rts_, 0, sizeof(bound_rts_));
@@ -2662,6 +2677,7 @@ void Renderer::ApplyFxaa(HostSurface& target) {
   // The guest state (root signature, heaps, targets) must be rebound.
   frame_state_bound_ = false;
   fixed_state_cached_ = false;
+  bound_vertex_views_mask_ = 0;
   bound_rt_count_ = 0;
   bound_ds_ = nullptr;
   std::memset(bound_rts_, 0, sizeof(bound_rts_));
@@ -2736,6 +2752,7 @@ bool Renderer::ReinterpretSurface(HostSurface& dst, HostSurface& src) {
   // Guest state must be rebound (root signature, heaps, targets).
   frame_state_bound_ = false;
   fixed_state_cached_ = false;
+  bound_vertex_views_mask_ = 0;
   bound_rt_count_ = 0;
   bound_ds_ = nullptr;
   std::memset(bound_rts_, 0, sizeof(bound_rts_));
@@ -4408,10 +4425,12 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
   // BindVertexStreams. The shader needs the type to undo USHORT2 UNORM.
   for (auto& meta : vertex_fetch_) meta[3] = 0;
   uint32_t input_decl = Load32(base, dev + kDevVertexDecl);
-  for (const auto& attribute : ReadVertexDeclaration(base,input_decl)) {
+  const auto& decl_info = ReadVertexDeclarationInfo(base, input_decl);
+  for (const auto& attribute : decl_info.attributes) {
     if (attribute.usage < 14 && attribute.index < 16)
       vertex_fetch_[attribute.usage * 16 + attribute.index][3] = attribute.type;
   }
+  const uint32_t decl_normal_spec = decl_info.normal_spec_bits;
   std::memcpy(s + 128, vertex_fetch_, sizeof(vertex_fetch_));
   setup_timer.Stop();
   CpuTimer slots_timer(cpu_timings.constant_slots_ns);
@@ -4637,16 +4656,7 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
   // The translated test is clip(alpha - ref): exact for GREATER/GEQUAL.
   uint32_t color_control = LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_COLORCONTROL);
   uint32_t alpha_func = color_control & 7;
-  uint32_t spec = 0;
-  // Packed normal inputs are bound as raw R32_UINT, not IA-decoded floats.
-  uint32_t decl = Load32(base, dev + kDev.vertex_decl);
-  for (const auto& attribute : ReadVertexDeclaration(base,decl)) {
-      uint32_t usage = attribute.usage;
-      if (usage != 3 && usage != 6 && usage != 7) continue;
-      uint32_t type = attribute.type;
-      if (type == 0x2A2187) spec |= 1u << 6;
-      if (type == 0x2A2190 || type == 0x2A2390) spec |= 1u;
-  }
+  uint32_t spec = decl_normal_spec;
   float alpha_ref = 0.0f;
   if ((color_control & 0x8) && alpha_func != 7) {
     spec |= 1u << 1;
@@ -4985,6 +4995,7 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
       order_srv_leases();
       command_list_->Reset(allocators_[frame_index_].Get(), nullptr);
       command_list_->IASetVertexBuffers(0, 16, guest_vertex_views_);
+      bound_vertex_views_mask_ = 0xFFFFu;
       frame_state_bound_ = false;
       fixed_state_cached_ = false;
       bound_rt_count_ = 0;
@@ -5353,7 +5364,7 @@ void Renderer::VertexRange::Resolve() {
 
 // Worker: executes a guest-side buffer plan. Planned bytes were captured with
 // the command, so SwapBufferRange reads them instead of live guest memory.
-const Renderer::BufferEntry* Renderer::ApplyBuffer(
+Renderer::BufferEntry* Renderer::ApplyBuffer(
     uint8_t* base, const BufferPlan& plan, uint32_t position_sample_offset,
     graphics::PositionValueEvidence* position_sample) {
   thread_local std::vector<uint8_t> scratch;
@@ -5661,12 +5672,13 @@ bool Renderer::PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRan
   if (!decl) return false;
   DetailScope prep_scope(capture_timings.fs_prep_ns);
   if (DynamicVertexFetch(base, dev)) range = nullptr;
-  uint32_t streams_used = 0;
-  for (const auto& attribute : ReadVertexDeclaration(base,decl))
-    if(attribute.stream<16) streams_used|=1u<<attribute.stream;
+  const uint32_t streams_used = ReadVertexDeclarationInfo(base, decl).streams_used & 0xFFFFu;
   prep_scope.Stop();
-  for (uint32_t s = 0; s < 16; ++s) {
-    if (!(streams_used & (1u << s))) continue;
+  const bool allow_cache = !REXCVAR_GET(sr_native_debug_buffers_always_dirty);
+  const uint32_t dbg_vb_addr = uint32_t(REXCVAR_GET(sr_native_debug_vb_addr));
+  const bool has_dbg_vs = !REXCVAR_GET(sr_native_debug_vs).empty();
+  for (uint32_t mask = streams_used; mask; mask &= mask - 1) {
+    const uint32_t s = uint32_t(std::countr_zero(mask));
     // Vertex fetch constant for stream s (XDK: slot 95 - s).
     uint32_t fetch0 = Load32(base, dev + kDevVertexFetch0 - 8 * s);
     uint32_t fetch1 = Load32(base, dev + kDevVertexFetch0 - 8 * s + 4);
@@ -5698,7 +5710,7 @@ bool Renderer::PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRan
     // The base address identifies the guest allocation; its range and layout
     // are checked below. Mix aligned address bits before selecting a set.
     uint32_t address_hash = buffer_base ^ (buffer_base >> 12) ^ (buffer_base >> 23);
-    const size_t set = (address_hash * 0x9E3779B1u) >> 22;
+    const size_t set = ((address_hash * 0x9E3779B1u) >> 22) & (kFrontStreamSetCount - 1);
     const size_t first = set * 2;
     auto& cache = front_stream_cache_[s];
     const auto matches = [&](size_t slot) {
@@ -5706,7 +5718,6 @@ bool Renderer::PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRan
       return candidate.tracked && candidate.address == buffer_base && candidate.size == buffer_size &&
              candidate.decl == decl && candidate.stride == stride && candidate.phase == phase;
     };
-    const bool allow_cache = !REXCVAR_GET(sr_native_debug_buffers_always_dirty);
     const bool first_hit = allow_cache && matches(first);
     const bool second_hit = !first_hit && allow_cache && matches(first + 1);
     const bool cached_fields_match = first_hit || second_hit;
@@ -5775,7 +5786,7 @@ bool Renderer::PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRan
       sc.key = sp.buffer.key;
       sc.tracked = it != tracked_.end() ? &it->second : nullptr;
     }
-    if (REXCVAR_GET(sr_native_debug_vb_addr) && address == uint32_t(REXCVAR_GET(sr_native_debug_vb_addr))) {
+    if (dbg_vb_addr && address == dbg_vb_addr) {
       static int logged = 0;
       if (logged++ < 40) {
         std::string v;
@@ -5787,7 +5798,7 @@ bool Renderer::PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRan
       }
     }
     batch_->streams.push_back(sp);
-    if (!REXCVAR_GET(sr_native_debug_vs).empty()) {
+    if (has_dbg_vs) {
       uint64_t want = std::strtoull(REXCVAR_GET(sr_native_debug_vs).c_str(), nullptr, 16);
       const GuestShaderInfo* a = LookupGuestShader(Load32(base, dev + kDevShaderA));
       const GuestShaderInfo* b = LookupGuestShader(Load32(base, dev + kDevShaderB));
@@ -5839,9 +5850,15 @@ bool Renderer::BindVertexStreams(uint8_t* base, const WorkBatch& batch, const Wo
       }
     }
   }
-  std::memset(vertex_fetch_, 0, sizeof(vertex_fetch_));
   const uint32_t dev = GuestDevice(base);
   const bool dynamic_fetch = dev && DynamicVertexFetch(base, dev);
+  if (dynamic_fetch) {
+    for (auto& meta : vertex_fetch_) {
+      meta[0] = 0;
+      meta[1] = 0;
+      meta[2] = 0;
+    }
+  }
   // All streams in a draw come from PlanStreams with the same declaration.
   // Decode it once rather than repeating the lookup per bound stream.
   // ApplyBuffer may decode a different declaration while converting guest
@@ -5861,7 +5878,7 @@ bool Renderer::BindVertexStreams(uint8_t* base, const WorkBatch& batch, const Wo
   for (uint32_t i = 0; i < cmd.stream_count; ++i) {
     const StreamPlan& sp = batch.streams[cmd.stream_first + i];
     if(detail) {++timings.streams;++timings.actions[sp.buffer.action<3?sp.buffer.action:3];}
-    const BufferEntry* vb;
+    BufferEntry* vb;
     {
       CpuTimer timer(timings.apply_ns,detail);
       uint32_t sample_offset = UINT32_MAX;
@@ -5890,16 +5907,25 @@ bool Renderer::BindVertexStreams(uint8_t* base, const WorkBatch& batch, const Wo
     CpuTimer timer(timings.ia_ns,detail);
     D3D12_VERTEX_BUFFER_VIEW view{vb->resource->GetGPUVirtualAddress() + sp.offset, sp.size,
                                   sp.stride};
-    command_list_->IASetVertexBuffers(sp.stream, 1, &view);
-    if (sp.stream < 16) guest_vertex_views_[sp.stream] = view;
-    if(detail) ++timings.ia_binds;
+    const uint16_t stream_bit = sp.stream < 16 ? uint16_t(1u << sp.stream) : 0u;
+    if (sp.stream >= 16 || !(bound_vertex_views_mask_ & stream_bit) ||
+        guest_vertex_views_[sp.stream].BufferLocation != view.BufferLocation ||
+        guest_vertex_views_[sp.stream].SizeInBytes != view.SizeInBytes ||
+        guest_vertex_views_[sp.stream].StrideInBytes != view.StrideInBytes) {
+      command_list_->IASetVertexBuffers(sp.stream, 1, &view);
+      if (sp.stream < 16) {
+        guest_vertex_views_[sp.stream] = view;
+        bound_vertex_views_mask_ |= stream_bit;
+      }
+      if(detail) ++timings.ia_binds;
+    }
     }
     if (!dynamic_fetch) continue;
     // Static IA draws need no descriptor: allocate only for shader-driven
     // instancing, otherwise transient vertex buffers would fill the SRV heap.
     CpuTimer srv_timer(timings.srv_ns,detail);
     if(detail) ++timings.dynamic_streams;
-    BufferEntry& entry = buffers_.at(sp.buffer.key);
+    BufferEntry& entry = *vb;
     bool retained_hit=false;
     if(buffer_srv_cache_) {
       // The entry field may still name an evicted index. Only the lease cache
@@ -6361,6 +6387,7 @@ void Renderer::ExecDrawInlineVertices(uint8_t* base, uint32_t prim, uint32_t dat
     std::memcpy(rect_vb.cpu, expanded.data(), expanded.size());
     D3D12_VERTEX_BUFFER_VIEW rect_view{rect_vb.gpu, uint32_t(expanded.size()), stride};
     command_list_->IASetVertexBuffers(0, 1, &rect_view);
+    bound_vertex_views_mask_ &= ~1u;
     if (!SkipGpuDraw()) {CaptureMotionInlineColorGeometry(base,decl,expanded,stride,uint32_t(expanded.size()/stride),topology,false);BeforeMotionColorDraw();command_list_->DrawInstanced(uint32_t(expanded.size() / stride), 1, 0, 0);AfterMotionColorDraw();}
     // Generated/inline geometry has no attested temporal identity here.
     CaptureMotionClipDraw(base,dev,topology,false,uint32_t(expanded.size()/stride),0,0,
@@ -6386,6 +6413,7 @@ void Renderer::ExecDrawInlineVertices(uint8_t* base, uint32_t prim, uint32_t dat
   std::memcpy(vb.cpu, vdata, vb_size);
   D3D12_VERTEX_BUFFER_VIEW vbv{vb.gpu, uint32_t(vb_size), stride};
   command_list_->IASetVertexBuffers(0, 1, &vbv);
+  bound_vertex_views_mask_ &= ~1u;
   if (quads) {
     uint32_t quad_count = vertex_count / 4;
     UploadAlloc ib;
@@ -6564,6 +6592,7 @@ void Renderer::CopyDepthRegion(HostSurface& src, ResolveTexture& dst, uint32_t x
   // The guest state (root signature, heaps, targets) must be rebound.
   frame_state_bound_ = false;
   fixed_state_cached_ = false;
+  bound_vertex_views_mask_ = 0;
   bound_rt_count_ = 0;
   bound_ds_ = nullptr;
   std::memset(bound_rts_, 0, sizeof(bound_rts_));
@@ -6596,6 +6625,7 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
       command_list_->Reset(allocators_[frame_index_].Get(), nullptr);
       frame_state_bound_ = false;
       fixed_state_cached_ = false;
+      bound_vertex_views_mask_ = 0;
       bound_rt_count_ = 0;
       bound_ds_ = nullptr;
       std::memset(bound_rts_, 0, sizeof(bound_rts_));
@@ -7366,6 +7396,7 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
     command_list_->DrawInstanced(3, 1, 0, 0);
     frame_state_bound_ = false;
     fixed_state_cached_ = false;
+    bound_vertex_views_mask_ = 0;
   } else {
     float color[4] = {0.3f, 0.0f, 0.3f, 1.0f};  // magenta-ish: no front buffer resolved
     command_list_->ClearRenderTargetView(output_rtvs_[frame_index_], color, 0, nullptr);
@@ -7750,6 +7781,7 @@ void Renderer::ExecOnPassEnd(int pass) {
     command_list_->Reset(allocators_[frame_index_].Get(), nullptr);
     frame_state_bound_ = false;
     fixed_state_cached_ = false;
+    bound_vertex_views_mask_ = 0;
     bound_rt_count_ = 0;
     bound_ds_ = nullptr;
     std::memset(bound_rts_, 0, sizeof(bound_rts_));
@@ -7778,6 +7810,7 @@ void Renderer::ExecOnPassEnd(int pass) {
   command_list_->Reset(allocators_[frame_index_].Get(), nullptr);
   frame_state_bound_ = false;
   fixed_state_cached_ = false;
+  bound_vertex_views_mask_ = 0;
   bound_rt_count_ = 0;
   bound_ds_ = nullptr;
   std::memset(bound_rts_, 0, sizeof(bound_rts_));
@@ -7925,6 +7958,7 @@ void Renderer::WatchHdr(uint32_t index) {
   order_srv_leases();
   command_list_->Reset(allocators_[frame_index_].Get(), nullptr);
   command_list_->IASetVertexBuffers(0, 16, guest_vertex_views_);
+  bound_vertex_views_mask_ = 0xFFFFu;
   frame_state_bound_ = false;
   fixed_state_cached_ = false;
   bound_rt_count_ = 0;
@@ -8174,6 +8208,14 @@ void Renderer::CaptureBytes(uint8_t* base, uint32_t address, uint32_t length) {
   // Appending the source range constructs the new bytes directly. resize()
   // value-initializes (zeros) them before the memcpy, doubling the writes.
   batch_->bytes.insert(batch_->bytes.end(), base + address, base + address + length);
+  if (batch_->ranges.size() > cur_.range_first) {
+    CaptureRange& last = batch_->ranges.back();
+    if (uint64_t(last.address) + last.length == address &&
+        size_t(last.offset) + last.length == offset) {
+      last.length += length;
+      return;
+    }
+  }
   batch_->ranges.push_back({address, length, uint32_t(offset)});
 }
 
@@ -8833,10 +8875,52 @@ void Renderer::DrawIndexedVertices(uint8_t* base, uint32_t prim, int32_t base_ve
       if (index32 || reset <= UINT16_MAX) reset_index = reset;
     }
     draw_range.reset_index = reset_index;
-    uint32_t isize = index32 ? 4 : 2;
+    const uint32_t isize = index32 ? 4 : 2;
+    const uint32_t ib_format = (index32 ? 2u : 1u) | (endian << 2);
+    const uint32_t address_hash = address ^ (address >> 12) ^ (address >> 23);
+    const size_t set = ((address_hash * 0x9E3779B1u) >> 22) & (kFrontStreamSetCount - 1);
+    const size_t first = set * 2;
+    auto& cache = front_stream_cache_[16];
+    const auto matches = [&](size_t slot) {
+      const FrontStreamCache& candidate = cache[slot];
+      return candidate.tracked && candidate.address == address && candidate.size == size &&
+             candidate.decl == reset_index && candidate.format == ib_format;
+    };
+    const bool allow_cache = !REXCVAR_GET(sr_native_debug_buffers_always_dirty);
+    const bool first_hit = allow_cache && matches(first);
+    const bool second_hit = !first_hit && allow_cache && matches(first + 1);
+    const bool cached_fields_match = first_hit || second_hit;
+    const size_t selected_slot = first + (first_hit ? 0 : second_hit ? 1 : front_stream_cache_next_[16][set]);
+    FrontStreamCache& sc = cache[selected_slot];
+    const bool cached_dirty = cached_fields_match && RefreshTrackedBuffer(*sc.tracked);
     bool ok = false;
-    cur_.index = PlanBuffer(base, address, size, 0, 0, (index32 ? 2u : 1u) | (endian << 2), 0, start_index * isize,
-                            (start_index + index_count) * isize, ok, reset_index);
+    if (cached_fields_match && !cached_dirty) {
+      cur_.index = {};
+      cur_.index.key = sc.key;
+      cur_.index.address = address;
+      cur_.index.size = size;
+      cur_.index.format = ib_format;
+      cur_.index.reset_index = reset_index;
+      cur_.index.action = 0;
+      ok = true;
+    } else {
+      cur_.index = PlanBuffer(base, address, size, 0, 0, ib_format, 0, start_index * isize,
+                              (start_index + index_count) * isize, ok, reset_index,
+                              nullptr, 0,
+                              cached_fields_match ? sc.tracked : nullptr, sc.key);
+      if (ok) {
+        if (!cached_fields_match) front_stream_cache_next_[16][set] ^= 1;
+        auto it = tracked_.find(cur_.index.key);
+        sc.address = address;
+        sc.size = size;
+        sc.decl = reset_index;
+        sc.stride = 0;
+        sc.format = ib_format;
+        sc.phase = 0;
+        sc.key = cur_.index.key;
+        sc.tracked = it != tracked_.end() ? &it->second : nullptr;
+      }
+    }
     cur_.has_index = ok;
     cur_.index32 = index32;
     cur_.index_size = size;

@@ -726,6 +726,7 @@ class Renderer : public NativeFrontend {
   // D3D12 command-list state shadow. Invalidated on every command-list reset
   // or auxiliary pass which writes viewport, scissor, stencil or blend state.
   bool fixed_state_cached_ = false;
+  uint16_t bound_vertex_views_mask_ = 0;
   D3D12_VIEWPORT fixed_viewport_{};
   D3D12_RECT fixed_scissor_{};
   uint32_t fixed_stencil_ref_ = 0;
@@ -914,7 +915,7 @@ class Renderer : public NativeFrontend {
   // need_begin/need_end: byte range (relative to address) the draw reads;
   // [0, size) when unknown.
   // Worker: host buffer for a guest-side plan (creates / uploads as planned).
-  const BufferEntry* ApplyBuffer(uint8_t* base, const BufferPlan& plan,
+  BufferEntry* ApplyBuffer(uint8_t* base, const BufferPlan& plan,
                                  uint32_t position_sample_offset = UINT32_MAX,
                                  graphics::PositionValueEvidence* position_sample = nullptr);
   // Byte-swaps [begin, end) of the guest buffer into `dst` (host order).

@@ -878,3 +878,36 @@ SR_TEST(decode_captured_packet_reads_contiguous_device_block_and_merges_mirror_b
   SR_CHECK_EQ(bool1, 0xDEADBEEFu);
   SR_CHECK_EQ(loop0, 0x55667788u);
 }
+SR_TEST(coalesced_capture_ranges_preserve_unambiguous_and_overlay_reads) {
+  WorkBatch batch;
+  WorkCmd cmd;
+  cmd.range_first = 0;
+  auto append_coalesced = [&](uint32_t range_first, uint32_t address, std::span<const uint8_t> data) {
+    if (data.empty()) return;
+    size_t offset = batch.bytes.size();
+    batch.bytes.insert(batch.bytes.end(), data.begin(), data.end());
+    if (batch.ranges.size() > range_first) {
+      auto& last = batch.ranges.back();
+      if (uint64_t(last.address) + last.length == address &&
+          size_t(last.offset) + last.length == offset) {
+        last.length += uint32_t(data.size());
+        return;
+      }
+    }
+    batch.ranges.push_back({address, uint32_t(data.size()), uint32_t(offset)});
+  };
+  const uint8_t part1[] = {1, 2, 3, 4};
+  const uint8_t part2[] = {5, 6, 7, 8};
+  append_coalesced(cmd.range_first, 0x2000, part1);
+  append_coalesced(cmd.range_first, 0x2004, part2);
+  cmd.range_count = uint32_t(batch.ranges.size()) - cmd.range_first;
+  SR_CHECK_EQ(cmd.range_count, 1u);
+
+  CapturedMemory mem;
+  std::string error;
+  SR_CHECK(CapturedMemory::Capture(batch, cmd, mem, error));
+  auto span = mem.ReadUnambiguous(0x2000, 8);
+  SR_CHECK_EQ(span.size(), 8u);
+  SR_CHECK_EQ(span[0], 1u);
+  SR_CHECK_EQ(span[7], 8u);
+}
