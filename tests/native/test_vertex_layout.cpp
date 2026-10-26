@@ -47,3 +47,15 @@ SR_TEST(declaration_cache_honors_terminator_and_owns_source_bytes) {
   try {cache.Decode(bytes);} catch(const std::invalid_argument&) {rejected=true;}
   SR_CHECK(rejected);
 }
+SR_TEST(declaration_cache_precomputes_streams_used_and_normal_spec_bits) {
+  VertexDeclarationCache cache;
+  // Attribute 0: stream 0, offset 0, type 0x2a2187, usage 3 (NORMAL), index 0 -> bit 6 (64)
+  // Attribute 1: stream 2, offset 4, type 0x2a2390, usage 6 (TANGENT), index 0 -> bit 0 (1)
+  std::vector<uint8_t> bytes = {
+      0, 0, 0, 0, 0, 0x2a, 0x21, 0x87, 0, 3, 0, 0,
+      0, 2, 0, 4, 0, 0x2a, 0x23, 0x90, 0, 6, 0, 0,
+  };
+  const auto& decl = cache.Decode(bytes);
+  SR_CHECK_EQ(decl.streams_used, (1u << 0) | (1u << 2));
+  SR_CHECK_EQ(decl.normal_spec_bits, (1u << 6) | 1u);
+}

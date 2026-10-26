@@ -7,7 +7,7 @@
 namespace superman_returns::graphics::guest {
 struct VertexAttribute {uint32_t stream,offset,type,usage,index;};
 struct VertexEncoding {uint32_t size,swap;bool floating;};
-struct VertexDeclaration {std::vector<VertexAttribute> attributes;uint32_t streams_used=0;};
+struct VertexDeclaration {std::vector<VertexAttribute> attributes;uint32_t streams_used=0;uint32_t normal_spec_bits=0;};
 // Per-thread, bounded cache keyed by owned bytes, never by a guest pointer.
 // A returned reference is consumed before another Decode call can evict it.
 class VertexDeclarationCache {

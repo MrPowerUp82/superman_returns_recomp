@@ -134,16 +134,23 @@ void DeviceState(DrawPacket &d, uint32_t device,const State &mirror) {
     }
   }
   uint32_t a = Address(device, layout.viewport);
+  const auto vp_bytes = d.memory.ReadUnambiguous(a, 24);
+  auto read_vp = [&](uint32_t off) {
+    return vp_bytes.empty() ? U32(d.memory, Address(a, off)) : CapturedWord(vp_bytes, off);
+  };
   d.viewport = NormalizeViewport(
-      {float(U32(d.memory, a)), float(U32(d.memory, Address(a, 4))),
-       float(U32(d.memory, Address(a, 8))),
-       float(U32(d.memory, Address(a, 12))),
-       std::bit_cast<float>(U32(d.memory, Address(a, 16))),
-       std::bit_cast<float>(U32(d.memory, Address(a, 20)))},
+      {float(read_vp(0)), float(read_vp(4)),
+       float(read_vp(8)), float(read_vp(12)),
+       std::bit_cast<float>(read_vp(16)),
+       std::bit_cast<float>(read_vp(20))},
       {1280, 720}, std::nullopt, 1);
+  const auto rt_address = Address(device, layout.render_targets);
+  const auto rt_bytes = d.memory.ReadUnambiguous(rt_address, 16);
   for (uint32_t i = 0; i < 4; ++i)
     d.colors[i] = Surface(
-        d.memory, U32(d.memory, Address(device, layout.render_targets + i * 4)),
+        d.memory,
+        rt_bytes.empty() ? U32(d.memory, Address(rt_address, i * 4))
+                         : CapturedWord(rt_bytes, i * 4),
         false);
   d.depth = Surface(d.memory,
                     U32(d.memory, Address(device, layout.depth_stencil)), true);
@@ -294,46 +301,61 @@ bool DecodeCapturedPacket(const WorkBatch &batch, const WorkCmd &cmd,
       d.base_vertex = d.indexed ? int32_t(cmd.u[1]) : 0;
       d.constants.vs.Share(mirror.ShareFloatConstants(false));
       d.constants.ps.Share(mirror.ShareFloatConstants(true));
-      for (uint32_t i = 0; i < 8; ++i) {
-        auto v = mirror.reg(native::Pm4Mirror::kBoolConstantBase + i);
-        std::memcpy(d.constants.shared.data() + 256 + i * 4, &v, 4);
-      }
-      for (uint32_t i = 0; i < 32; ++i) {
-        auto v = mirror.reg(native::Pm4Mirror::kLoopConstantBase + i);
-        std::memcpy(d.constants.shared.data() + 304 + i * 4, &v, 4);
-      }
       for (uint32_t i = 0; i < d.polygon_offset_registers.size(); ++i)
         d.polygon_offset_registers[i] = mirror.reg(0x2380 + i);
       d.scissor = DecodeScissor({mirror.reg(0x2081), mirror.reg(0x2082),
                                  mirror.reg(0x2080), mirror.reg(0x200e),
                                  mirror.reg(0x200f)},
                                 true, d.tiling_active, 1);
-      if (cmd.device)
-        DeviceState(d, cmd.device, mirror);
       if (cmd.device) {
+        DeviceState(d, cmd.device, mirror);
         const auto &layout = native::profile::kDevice;
+        const auto vs_bools_addr = Address(cmd.device, layout.vs_bools);
+        const auto vs_bools_bytes = memory.ReadUnambiguous(vs_bools_addr, 32);
         for (uint32_t i = 0; i < 8; ++i) {
           auto reg = native::Pm4Mirror::kBoolConstantBase + i;
           auto value =
               mirror.written(reg)
                   ? mirror.reg(reg)
-                  : U32(memory, Address(cmd.device, layout.vs_bools + i * 4));
+                  : (vs_bools_bytes.empty()
+                         ? U32(memory, Address(vs_bools_addr, i * 4))
+                         : CapturedWord(vs_bools_bytes, i * 4));
           std::memcpy(d.constants.shared.data() + 256 + i * 4, &value, 4);
         }
+        const auto vs_loops_addr = Address(cmd.device, layout.vs_loops);
+        const auto vs_loops_bytes = memory.ReadUnambiguous(vs_loops_addr, 64);
+        const auto ps_loops_addr = Address(cmd.device, layout.ps_loops);
+        const auto ps_loops_bytes = memory.ReadUnambiguous(ps_loops_addr, 64);
         for (uint32_t i = 0; i < 32; ++i) {
           auto reg = native::Pm4Mirror::kLoopConstantBase + i;
-          uint32_t offset =
-              i < 16 ? layout.vs_loops + i * 4 : layout.ps_loops + (i - 16) * 4;
-          auto value = mirror.written(reg)
-                           ? mirror.reg(reg)
-                           : U32(memory, Address(cmd.device, offset));
+          auto value =
+              mirror.written(reg)
+                  ? mirror.reg(reg)
+                  : (i < 16
+                         ? (vs_loops_bytes.empty()
+                                ? U32(memory, Address(vs_loops_addr, i * 4))
+                                : CapturedWord(vs_loops_bytes, i * 4))
+                         : (ps_loops_bytes.empty()
+                                ? U32(memory, Address(ps_loops_addr, (i - 16) * 4))
+                                : CapturedWord(ps_loops_bytes, (i - 16) * 4)));
           std::memcpy(d.constants.shared.data() + 304 + i * 4, &value, 4);
+        }
+      } else {
+        for (uint32_t i = 0; i < 8; ++i) {
+          auto v = mirror.reg(native::Pm4Mirror::kBoolConstantBase + i);
+          std::memcpy(d.constants.shared.data() + 256 + i * 4, &v, 4);
+        }
+        for (uint32_t i = 0; i < 32; ++i) {
+          auto v = mirror.reg(native::Pm4Mirror::kLoopConstantBase + i);
+          std::memcpy(d.constants.shared.data() + 304 + i * 4, &v, 4);
         }
       }
       if (uint64_t(cmd.stream_first) + cmd.stream_count > batch.streams.size())
         throw std::out_of_range("Command stream range exceeds batch");
       if (!cmd.streams_ok)
         throw std::out_of_range("Guest stream capture failed");
+      uint32_t cached_decl = 0;
+      const std::vector<VertexAttribute>* cached_attrs = nullptr;
       for (uint64_t i = cmd.stream_first;
            i < uint64_t(cmd.stream_first) + cmd.stream_count; ++i) {
         const auto &s = batch.streams[size_t(i)];
@@ -342,7 +364,11 @@ bool DecodeCapturedPacket(const WorkBatch &batch, const WorkCmd &cmd,
         auto decl = s.buffer.decl;
         if (!decl)
           continue;
-        for (const auto& attribute : Declaration(memory,decl)) {
+        if (decl != cached_decl || !cached_attrs) {
+          cached_decl = decl;
+          cached_attrs = &Declaration(memory, decl);
+        }
+        for (const auto& attribute : *cached_attrs) {
           if(attribute.stream!=s.stream) continue;
           auto usage=attribute.usage,index=attribute.index;
           auto offset=attribute.offset,type=attribute.type;

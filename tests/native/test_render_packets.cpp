@@ -832,3 +832,49 @@ SR_TEST(replayed_draw_keeps_latest_capture_and_pm4_constants_after_batch_reuse) 
   SR_CHECK_EQ(draw.memory.Read(0x1001, 2)[0], 9);
   SR_CHECK_EQ(draw.memory.Read(0x1000, 4)[1], 2);
 }
+
+SR_TEST(decode_captured_packet_reads_contiguous_device_block_and_merges_mirror_bools_loops) {
+  WorkBatch batch;
+  WorkCmd cmd;
+  cmd.op = Op::kDraw;
+  cmd.u[0] = 4;
+  cmd.u[2] = 3;
+  cmd.device = 0x10000;
+  // Populate a single contiguous capture covering the entire device struct [0x10000, 0x14000).
+  batch.bytes.resize(0x4000, 0);
+  auto put_be32 = [&](uint32_t addr, uint32_t val) {
+    size_t off = addr - cmd.device;
+    batch.bytes[off + 0] = uint8_t(val >> 24);
+    batch.bytes[off + 1] = uint8_t(val >> 16);
+    batch.bytes[off + 2] = uint8_t(val >> 8);
+    batch.bytes[off + 3] = uint8_t(val);
+  };
+  const auto& layout = superman_returns::native::profile::kDevice;
+  put_be32(cmd.device + layout.vs_bools, 0x11223344u);
+  put_be32(cmd.device + layout.vs_loops, 0x55667788u);
+  put_be32(cmd.device + layout.shader_a, 0xAABBCCDDu);
+  put_be32(cmd.device + layout.shader_b, 0xEEFF0011u);
+  batch.ranges.push_back({cmd.device, 0x4000, 0});
+  cmd.range_first = 0;
+  cmd.range_count = 1;
+
+  superman_returns::native::Pm4Mirror mirror;
+  // Override bool constant +1 via PM4 mirror while leaving +0 from device shadow.
+  const uint8_t pm4[] = {0, 0, 0x49, 0x01, 0xDE, 0xAD, 0xBE, 0xEF};
+  mirror.ScanCopy(nullptr, pm4, sizeof(pm4));
+
+  RenderPacket packet;
+  std::string error;
+  SR_CHECK(ReplayCapturedRenderPacket(batch, cmd, mirror, packet, error));
+  const auto* draw = GetDraw(packet);
+  SR_CHECK(draw != nullptr);
+  SR_CHECK_EQ(draw->shader_a, 0xAABBCCDDu);
+  SR_CHECK_EQ(draw->shader_b, 0xEEFF0011u);
+  uint32_t bool0 = 0, bool1 = 0, loop0 = 0;
+  std::memcpy(&bool0, draw->constants.shared.data() + 256, 4);
+  std::memcpy(&bool1, draw->constants.shared.data() + 260, 4);
+  std::memcpy(&loop0, draw->constants.shared.data() + 304, 4);
+  SR_CHECK_EQ(bool0, 0x11223344u);
+  SR_CHECK_EQ(bool1, 0xDEADBEEFu);
+  SR_CHECK_EQ(loop0, 0x55667788u);
+}

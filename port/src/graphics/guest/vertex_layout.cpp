@@ -19,8 +19,14 @@ const VertexDeclaration& VertexDeclarationCache::Decode(std::span<const uint8_t>
   auto u32=[&](size_t at) {return u16(at)<<16|u16(at+2);};
   for(size_t at=0;at<bytes.size();at+=12) {
     uint32_t stream=u16(at);if(stream==0xff) break;
-    entry.declaration.attributes.push_back({stream,u16(at+2),u32(at+4),bytes[at+9],bytes[at+10]});
+    uint32_t offset=u16(at+2),type=u32(at+4);
+    uint32_t usage=bytes[at+9],index=bytes[at+10];
+    entry.declaration.attributes.push_back({stream,offset,type,usage,index});
     if(stream<32) entry.declaration.streams_used|=1u<<stream;
+    if(usage==3 || usage==6 || usage==7) {
+      if(type==0x2a2187) entry.declaration.normal_spec_bits|=1u<<6;
+      if(type==0x2a2190 || type==0x2a2390) entry.declaration.normal_spec_bits|=1u;
+    }
   }
   auto& added=entries_[hash].emplace_back(std::move(entry));
   ++count_;last_=&added;return added.declaration;
