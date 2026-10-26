@@ -1,7 +1,12 @@
 # Isolated opt-in motion diagnostic; does not enable DLSS or record performance.
 param([string]$Name = ('motion_' + (Get-Date -Format 'yyyyMMdd_HHmmss')),
-      [switch]$RayShadowChecks)
+      [switch]$RayShadowChecks,
+      [switch]$ForceCoverageFailure,
+      [switch]$SceneJitter,
+      [switch]$InstanceProbe,
+      [switch]$ObservedSkinMotion)
 $ErrorActionPreference='Stop'
+if($ObservedSkinMotion -and -not $InstanceProbe) {throw 'ObservedSkinMotion requires InstanceProbe lifecycle tracking'}
 $root=Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 if(Get-Process superman_returns -ErrorAction SilentlyContinue) {throw 'Game already running; leaving it untouched'}
 $inputFile=Join-Path $root "logs/${Name}_input.txt"
@@ -18,6 +23,10 @@ $argsTask=@(
  '--sr_native_fps_limit=30','--sr_native_render_scale=1','--sr_native_anisotropic_filtering=-1',
  '--sr_native_fxaa=false','--sr_native_shadow_quality=1','--sr_native_msaa_samples=1',
  '--mnk_mode=false','--mnk_mouse=false','--sr_lsfg=false','--sr_rt_shadows=false','--sr_dlss=off',
+ "--sr_native_debug_observed_skin_motion=$($ObservedSkinMotion.IsPresent.ToString().ToLowerInvariant())",
+ "--sr_native_instance_probe=$($InstanceProbe.IsPresent.ToString().ToLowerInvariant())",
+ "--sr_native_debug_motion_jitter=$($SceneJitter.IsPresent.ToString().ToLowerInvariant())",
+ "--sr_native_debug_motion_coverage_pso_failure=$($ForceCoverageFailure.IsPresent.ToString().ToLowerInvariant())",
  "--sr_native_motion_capture_trigger_path=$triggerFile","--sr_native_dump_dir=$dump"
 ) -join ' '
 try {

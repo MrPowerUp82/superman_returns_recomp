@@ -14,14 +14,14 @@ constexpr std::string_view kLoadBuffers =
     "#define SR_LOAD_FLOAT4(STAGE,OFFSET) asfloat(g_ ## STAGE ## ShaderConstants.Load4(OFFSET))";
 constexpr std::string_view kLoadAddress =
     "#define SR_LOAD_FLOAT4(STAGE,OFFSET) vk::RawBufferLoad<float4>(g_PushConstants.STAGE ## ShaderConstants + (OFFSET), 0x10)";
-constexpr std::string_view kPrefix = R"hlsl(// SrPixelCoverage patch v1: original PS 559F/2203; capture only.
+constexpr std::string_view kPrefix = R"hlsl(// SrPixelCoverage patch v1: original PS 559F/2203/E6C7/3EF6/E83A; capture only.
 cbuffer SrPixelCoverage : register(b4, space4)
 {
     uint g_SrPixelCoverageId;
 };
 
 )hlsl";
-// Exact normalized emitter tail, shared by both audited sources. This anchors
+// Exact normalized emitter tail, shared by the audited sources. This anchors
 // the insertion AFTER soft particles, clip/discard and alpha-to-coverage logic.
 constexpr std::string_view kTail = R"hlsl([branch] if (g_SpecConstants() & (SPEC_CONSTANT_SOFT_PARTICLE_RGBA | SPEC_CONSTANT_SOFT_PARTICLE_ALPHA))	{		float conanSceneZ = g_Texture2DDescriptorHeap[g_SoftParticleDepth].Load(int3(iPos.xy * g_SoftParticleTexelScale, 0)).x;
 		float conanFade = saturate((rcp(conanSceneZ * g_SoftParticleW.x + g_SoftParticleW.y) - rcp(iPos.z * g_SoftParticleW.x + g_SoftParticleW.y)) / g_SoftParticleDistance);
@@ -75,7 +75,7 @@ bool Mask(std::string& text) {
 struct Token { size_t at, size; };
 constexpr size_t kNone = std::string_view::npos;
 const std::string& AuditedParameters() {
-  // Both original PS files have this identical complete emitter signature,
+  // The original PS files have this identical complete emitter signature,
   // including inactive SPIR-V alternatives. This validates inputs as well as RT0.
   static const std::string parameters = [] {
     std::string text = "\n\tin float4 iPos : SV_Position,\n";
@@ -97,11 +97,14 @@ const std::string& AuditedParameters() {
 }  // namespace
 
 bool IsPixelCoverageShader(uint64_t hash) {
-  return hash == 0x559F422BEF5E5714ull || hash == 0x220353EB37491B13ull;
+  return hash == 0x559F422BEF5E5714ull || hash == 0x220353EB37491B13ull ||
+         hash == 0xE6C740EAC16B70D4ull || hash == 0x3EF6A4A3C740ADB1ull || hash == 0xE83A13DF3297C6CBull;
 }
 bool IsPixelCoverageShaderPair(uint64_t vs, uint64_t ps) {
   return (vs == 0x4F17209D364D5B51ull && ps == 0x559F422BEF5E5714ull) ||
-         (vs == 0x18B4F69400B7F0AFull && ps == 0x220353EB37491B13ull);
+         (vs == 0x18B4F69400B7F0AFull && ps == 0x220353EB37491B13ull) ||
+         (vs == 0xC20921D0DBBD2F1Full && ps == 0xE6C740EAC16B70D4ull) ||
+         (vs == 0xC687EB65D635C5D7ull && (ps == 0x3EF6A4A3C740ADB1ull || ps == 0xE83A13DF3297C6CBull));
 }
 bool SpecializePixelCoverageShader(uint64_t hash, std::string_view source,
                                    std::string& output, std::string& error) {

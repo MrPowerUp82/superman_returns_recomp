@@ -196,6 +196,7 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
         add_library(sr_native OBJECT
             ${SR_NATIVE_ROOT}/native_bridge.cpp
             ${SR_NATIVE_ROOT}/native_hooks.cpp
+            ${SR_NATIVE_ROOT}/instance_probe.cpp
             ${SR_NATIVE_ROOT}/guest_cpu_profile.cpp
             ${SR_NATIVE_ROOT}/native_graphics_system.cpp
             ${SR_NATIVE_ROOT}/native_renderer.cpp

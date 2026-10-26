@@ -69,6 +69,9 @@
 #include "../graphics/motion_depth_boundary.h"
 #include "../graphics/scene_color_vertex_input.h"
 #include "../graphics/pixel_coverage_shader.h"
+#include "instance_probe.h"
+#include "../graphics/observed_skinned_motion.h"
+#include "../graphics/observed_skinned_part_key.h"
 #include "native_bridge.h"
 #include "native_graphics_system.h"
 #include "sdk_compat.h"
@@ -93,6 +96,12 @@ REXCVAR_DEFINE_INT32(sr_native_dump_after_pass, -1, "Superman Returns Native",
 REXCVAR_DEFINE_STRING(sr_native_dump_dir, "", "Superman Returns Native", "Directory for sr_native_dump_frame_at_s");
 REXCVAR_DEFINE_STRING(sr_native_motion_capture_trigger_path, "", "Superman Returns Native",
     "Opt-in: capture two consecutive main-scene post-VS clip frames after this file appears; no DLSS application");
+REXCVAR_DEFINE_BOOL(sr_native_debug_observed_skin_motion, false, "Superman Returns Native",
+    "Diagnostic: observed skinned part/lifetime and exact clip correspondence; no complete DLSS motion claim");
+REXCVAR_DEFINE_BOOL(sr_native_debug_motion_jitter, false, "Superman Returns Native",
+    "Diagnostic: apply known Halton jitter to the two-frame HDR motion capture; never enables DLSS");
+REXCVAR_DEFINE_BOOL(sr_native_debug_motion_coverage_pso_failure, false, "Superman Returns Native",
+    "Diagnostic: force the optional motion coverage PSO to fail, exercising original-draw fallback");
 REXCVAR_DEFINE_INT32(sr_native_dump_before_draw, -1, "Superman Returns Native",
                      "Debug: with sr_native_dump_frame_at_s, dump every native surface into "
                      "sr_native_dump_dir right before the Nth draw call (0-based, drawn or "
@@ -513,7 +522,7 @@ bool TextureSlotLookupCaching() {
   }();
   return enabled;
 }
-// Ponteiro do host para uma faixa do jogo, ou nullptr se ela cai fora do espaço de endereços.
+// Ponteiro do host para uma faixa do jogo, ou nullptr se ela cai fora do espaÃƒÂ§o de endereÃƒÂ§os.
 const uint8_t* GuestSource(uint8_t* base, uint32_t address, uint32_t length) {
   if(uint64_t(address)+length>(uint64_t{1}<<32)) return nullptr;
   if(address>=0xa0000000u && address<0xc0000000u) {
@@ -3078,6 +3087,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
   const bool ray_variant=rt_shadow_draw_active_ && !rt_shadow_shader_.empty();
   const bool coverage_variant=motion_coverage_draw_active_ && motion_coverage_shader_;
   const bool special_variant=ray_variant || coverage_variant;
+  if(coverage_variant && REXCVAR_GET(sr_native_debug_motion_coverage_pso_failure)) return nullptr;
   reg::RB_BLENDCONTROL blend{LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_BLENDCONTROL0)};
   reg::PA_SU_SC_MODE_CNTL mode{LoadReg(base, dev, rex::graphics::XE_GPU_REG_PA_SU_SC_MODE_CNTL)};
   reg::RB_DEPTHCONTROL depth{LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_DEPTHCONTROL)};
@@ -4531,7 +4541,9 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
   slots_timer.Stop();
   CpuTimer derived_timer(d.derived_ns,detail);
   for (uint32_t i = 0; i < 4; ++i) {
-    s[64 + i] = GpuConstant(base, dev, Pm4Mirror::kBoolConstantBase + i, kDevVsBools + 4 * i);
+    const uint32_t vs_bool=GpuConstant(base, dev, Pm4Mirror::kBoolConstantBase + i, kDevVsBools + 4 * i);
+    s[64 + i] = vs_bool;
+    if(motion_capture_active_) motion_uploaded_vs_bools_[i]=vs_bool;
     s[68 + i] = GpuConstant(base, dev, Pm4Mirror::kBoolConstantBase + 4 + i, kDevPsBools + 4 * i);
   }
   s[72] = 0;
@@ -4554,6 +4566,20 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
     }
     half_pixel[0] = 1.0f / w;
     half_pixel[1] = -1.0f / h;
+  }
+  // Preserve the legacy correction and append only the requested scene delta.
+  // Screen-space/postprocess, shadows and ordinary frames retain their inputs.
+  motion_jitter_draw_active_=false;
+  if(motion_capture_active_ && !motion_scene_finished_ && motion_jitter_ready_ && REXCVAR_GET(sr_native_debug_motion_jitter) &&
+     bound_rts_[0] && bound_ds_ && bound_rts_[0]->guest_format==12 &&
+     bound_rts_[0]->width==kOutputWidth && bound_rts_[0]->height==kOutputHeight &&
+     bound_samples_==1 && !ScreenSpaceDraw(base,dev) && REXCVAR_GET(sr_native_shader_dir).empty()) {
+    const auto color=bound_rts_[0]->resource->GetDesc(),depth=bound_ds_->resource->GetDesc();
+    if(color.Width==depth.Width && color.Height==depth.Height &&
+       color.Width==uint32_t(HostPx(kOutputWidth,render_scale_)) && color.Height==uint32_t(HostPx(kOutputHeight,render_scale_))) {
+      half_pixel[0]+=motion_frame_jitter_.ndc_x;half_pixel[1]+=motion_frame_jitter_.ndc_y;
+      motion_jitter_draw_active_=true;
+    }
   }
   std::memcpy(&s[73], &half_pixel[0], 4);
   std::memcpy(&s[74], &half_pixel[1], 4);
@@ -5124,6 +5150,19 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
   }
   ID3D12PipelineState* pso = GetPipeline(base, dev, vs_hash, ps_hash, decl, topology_type,
                                          rtv_formats, rt_count, dsv_format, strip_cut);
+  if(!pso && motion_coverage_draw_active_) {
+    // Optional diagnostics must never remove an otherwise valid guest draw.
+    // The failed variant key stays separate; retry the original PS/RT layout
+    // and recompute its ordinary motion eligibility in GetPipeline below.
+    motion_coverage_failed_shaders_.insert(ps_hash);
+    motion_coverage_draw_active_=false;motion_coverage_draw_id_=0;motion_coverage_shader_=nullptr;
+    motion_coverage_bound_=false;
+    rtv_formats[1]=DXGI_FORMAT_UNKNOWN;rt_count=1;bound_rt_count_=1;
+    const auto original_rtv=bound_rts_[0]->view;
+    command_list_->OMSetRenderTargets(1,&original_rtv,FALSE,bound_ds_?&bound_ds_->view:nullptr);
+    REXLOG_WARN("native motion coverage PSO unavailable: ps={:016X}; retrying original draw without owner MRT",ps_hash);
+    pso=GetPipeline(base,dev,vs_hash,ps_hash,decl,topology_type,rtv_formats,rt_count,dsv_format,strip_cut);
+  }
   if(!pso && rt_shadow_draw_active_) {
     rt_shadow_draw_active_=false;
     pso=GetPipeline(base,dev,vs_hash,ps_hash,decl,topology_type,rtv_formats,rt_count,dsv_format,strip_cut);
@@ -6099,6 +6138,9 @@ void Renderer::ExecDrawVertices(uint8_t* base, const WorkBatch& batch, const Wor
     D3D12_INDEX_BUFFER_VIEW ibv{ib.gpu, quad_count * 24, DXGI_FORMAT_R32_UINT};
     command_list_->IASetIndexBuffer(&ibv);
     if (!SkipGpuDraw()) {BeforeMotionColorDraw();command_list_->DrawIndexedInstanced(quad_count * 6, 1, 0, 0, 0);AfterMotionColorDraw();}
+    // Generated/inline geometry has no attested temporal identity here.
+    CaptureMotionClipDraw(base,dev,topology,true,quad_count*6,0,0,
+        D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED,nullptr,nullptr);
   } else {
     if (!SkipGpuDraw()) {BeforeMotionColorDraw();command_list_->DrawInstanced(vertex_count, 1, start_vertex, 0);AfterMotionColorDraw();}
     CapturePostVertexDraw(base,dev,topology,false,vertex_count,start_vertex);
@@ -6165,6 +6207,9 @@ void Renderer::ExecDrawIndexedVertices(uint8_t* base, const WorkBatch& batch,
     D3D12_INDEX_BUFFER_VIEW qv{tris.gpu, quad_indices * 4, DXGI_FORMAT_R32_UINT};
     command_list_->IASetIndexBuffer(&qv);
     if (!SkipGpuDraw()) {BeforeMotionColorDraw();command_list_->DrawIndexedInstanced(quad_indices, 1, 0, base_vertex, 0);AfterMotionColorDraw();}
+    // Generated/inline geometry has no attested temporal identity here.
+    CaptureMotionClipDraw(base,dev,topology,true,quad_indices,0,base_vertex,
+        D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED,nullptr,nullptr);
     if (surface_probe_) {
       graphics::GeometrySubmission submission{};
       submission.kind = graphics::GeometrySubmissionKind::kIndexed;
@@ -6285,6 +6330,9 @@ void Renderer::ExecDrawInlineVertices(uint8_t* base, uint32_t prim, uint32_t dat
     D3D12_VERTEX_BUFFER_VIEW rect_view{rect_vb.gpu, uint32_t(expanded.size()), stride};
     command_list_->IASetVertexBuffers(0, 1, &rect_view);
     if (!SkipGpuDraw()) {CaptureMotionInlineColorGeometry(base,decl,expanded,stride,uint32_t(expanded.size()/stride),topology,false);BeforeMotionColorDraw();command_list_->DrawInstanced(uint32_t(expanded.size() / stride), 1, 0, 0);AfterMotionColorDraw();}
+    // Generated/inline geometry has no attested temporal identity here.
+    CaptureMotionClipDraw(base,dev,topology,false,uint32_t(expanded.size()/stride),0,0,
+        D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED,nullptr,nullptr);
     if (surface_probe_) {
       graphics::GeometrySubmission submission{};
       submission.kind = graphics::GeometrySubmissionKind::kInline;
@@ -6323,8 +6371,14 @@ void Renderer::ExecDrawInlineVertices(uint8_t* base, uint32_t prim, uint32_t dat
     D3D12_INDEX_BUFFER_VIEW ibv{ib.gpu, quad_count * 12, DXGI_FORMAT_R16_UINT};
     command_list_->IASetIndexBuffer(&ibv);
     if (!SkipGpuDraw()) {CaptureMotionInlineColorGeometry(base,decl,{vdata,vb_size},stride,vertex_count,topology,quads);BeforeMotionColorDraw();command_list_->DrawIndexedInstanced(quad_count * 6, 1, 0, 0, 0);AfterMotionColorDraw();}
+    // Generated/inline geometry has no attested temporal identity here.
+    CaptureMotionClipDraw(base,dev,topology,true,quad_count*6,0,0,
+        D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED,nullptr,nullptr);
   } else {
     if (!SkipGpuDraw()) {CaptureMotionInlineColorGeometry(base,decl,{vdata,vb_size},stride,vertex_count,topology,quads);BeforeMotionColorDraw();command_list_->DrawInstanced(vertex_count, 1, 0, 0);AfterMotionColorDraw();}
+    // Generated/inline geometry has no attested temporal identity here.
+    CaptureMotionClipDraw(base,dev,topology,false,vertex_count,0,0,
+        D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED,nullptr,nullptr);
   }
   if (surface_probe_) {
     graphics::GeometrySubmission submission{};
@@ -7991,6 +8045,8 @@ void Renderer::BeginCmd(Op op) {
   if (!batch_) batch_ = std::make_unique<WorkBatch>();
   cur_ = WorkCmd{};
   cur_.op = op;
+  if(op==Op::kDraw || op==Op::kDrawIndexed || op==Op::kDrawInline)
+    cur_.observed_render=CaptureInstanceProbeInvocation(guest_base_);
   cur_.command_serial = ++capture_serial_;
   cur_.tiling_active = capture_tiling_active_;
   cur_.packet_check = (!worker_stop_ && bool(packet_sink_)) || (REXCVAR_GET(sr_native_packet_check) && graphics::guest::IsCaptureFrame(

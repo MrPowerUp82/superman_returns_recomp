@@ -13,6 +13,23 @@ void Renderer::CaptureMotionClipDraw(uint8_t* base,uint32_t dev,D3D12_PRIMITIVE_
       {reinterpret_cast<uintptr_t>(bound_rts_[0]->resource.Get()),reinterpret_cast<uintptr_t>(bound_ds_->resource.Get())})) return;
   const uint32_t vertices=graphics::PostVertexCapacity(count,topology==D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
   if(!vertices) return;
+  if(cmd && cmd->observed_render.token.generation && motion_owner_reports_[current_vs_hash_==0xC687EB65D635C5D7ull?1:0]<16 &&
+     graphics::IsObservedSkinnedMotionShader(current_vs_hash_)) {
+    ++motion_owner_reports_[current_vs_hash_==0xC687EB65D635C5D7ull?1:0];
+    const auto& owner=cmd->observed_render;
+    REXLOG_INFO("native instance worker provenance: phase={} frame={} serial={} vs={:016X} owner={:08X} generation={} render={:08X} vtable={:08X} packet={:08X} packet_word16={:08X} motion_identity_verified=false",
+        motion_capture_phase_,frame_count_+1,cmd->command_serial,current_vs_hash_,owner.token.address,
+        owner.token.generation,owner.render,owner.vtable,owner.packet,owner.packet_word16);
+    const auto& part=owner.part;
+    REXLOG_INFO("native observed part route: phase={} serial={} checked={} model={:08X} sections={:08X} origin={} lod_slice={} group={} attachment={} stream_offset={} submesh={} actor_palette={:08X} part_identity_verified=false",
+        motion_capture_phase_,cmd->command_serial,part.source_route_observed,part.model,part.sections,
+        part.origin,part.lod_slice,part.group,part.attachment,part.stream_offset,part.submesh,part.actor_palette);
+    graphics::ObservedSkinnedMotionInputs inputs;
+    if(cb_vs_version_==mirror_.vs_version && cb_vs_gpu_ &&
+       graphics::CaptureObservedSkinnedMotionInputs(current_vs_hash_,owner,mirror_.FloatConstants(false),motion_uploaded_vs_bools_,inputs))
+      REXLOG_INFO("native observed skin inputs: phase={} serial={} bank_bool_signature={:016X} uploaded_bool0={:08X} submesh_identity_verified=false",
+          motion_capture_phase_,cmd->command_serial,XXH3_64bits(inputs.position_words.data(),sizeof(inputs.position_words)),motion_uploaded_vs_bools_[0]);
+  }
   const uint32_t declaration=Load32(base,dev+kDevVertexDecl);
   const auto& attributes=ReadVertexDeclaration(base,declaration);
   const uint64_t declaration_hash=XXH3_64bits(attributes.data(),attributes.size()*sizeof(attributes[0]));
@@ -73,7 +90,19 @@ void Renderer::CaptureMotionClipDraw(uint8_t* base,uint32_t dev,D3D12_PRIMITIVE_
   std::array<uint32_t,16> projection_words{};
   bool shared_world_camera=false,dependencies_valid=false;
   uint64_t position_signature=0;
-  if(current_vs_hash_==0x2C45BFFE76D77398ull && vertex_range_valid &&
+  graphics::ObservedSkinnedMotionInputs observed_skin;
+  graphics::ObservedSkinnedPartKey observed_part;
+  const bool observed_skin_inputs=REXCVAR_GET(sr_native_debug_observed_skin_motion) && cmd &&
+      motion_coverage_draw_active_ && current_motion_raster_.coverage_id &&
+      graphics::IsPixelCoverageShaderPair(current_vs_hash_,current_ps_hash_) &&
+      graphics::CaptureObservedSkinnedPartKey(cmd->observed_render,observed_part) &&
+      graphics::CaptureObservedSkinnedMotionInputs(current_vs_hash_,cmd->observed_render,
+          words,motion_uploaded_vs_bools_,observed_skin);
+  if(observed_skin_inputs && vertex_range_valid) {
+    projection_words=observed_skin.clip_rows;
+    dependencies_valid=true; // Object-to-clip, not a shared camera.
+    position_signature=XXH3_64bits(observed_skin.position_words.data(),sizeof(observed_skin.position_words));
+  } else if(current_vs_hash_==0x2C45BFFE76D77398ull && vertex_range_valid &&
      graphics::CaptureStaticWorldDependenciesInVertexRange(current_vs_hash_,words,vertex_first,vertex_last,world_dependencies)) {
     std::copy_n(words.begin(),16,projection_words.begin());
     shared_world_camera=true;dependencies_valid=true;
@@ -125,6 +154,11 @@ void Renderer::CaptureMotionClipDraw(uint8_t* base,uint32_t dev,D3D12_PRIMITIVE_
       const auto clip_inputs=graphics::CaptureTemporalProjectionInputs(projection_words,motion_clip_fixup_);
       sample.projection_inputs=XXH3_64bits(clip_inputs.data(),sizeof(clip_inputs));
       sample.proof=graphics::GeometryHistoryProof::kStaticWorldInputs;
+      if(observed_skin_inputs) {
+        sample.proof=graphics::GeometryHistoryProof::kVerifiedInstance;
+        sample.instance=XXH3_64bits(observed_part.instance_words.data(),sizeof(observed_part.instance_words));
+        sample.instance_generation=observed_part.generation;
+      }
       if(motion_signature_reports_++<12) {
         REXLOG_INFO("native motion input proof: phase={} mesh={:016X} buffers={:016X} fetch={:016X} world={:016X} domain={:016X} count={} first={} base={}",
             motion_capture_phase_,sample.mesh,buffers_signature,fetch_hash,sample.geometry_inputs,sample.camera_domain,count,first,base_vertex);
@@ -169,9 +203,8 @@ D3D12_CPU_DESCRIPTOR_HANDLE Renderer::MotionCoverageView() const {
 void Renderer::ConfigureMotionCoverage(HostSurface* color,HostSurface* depth,
     uint64_t vs,uint64_t ps,bool single_color) {
   motion_coverage_draw_active_=false;motion_coverage_draw_id_=0;motion_coverage_shader_=nullptr;
-  const bool paired=(vs==0x4F17209D364D5B51ull && ps==0x559F422BEF5E5714ull) ||
-      (vs==0x18B4F69400B7F0AFull && ps==0x220353EB37491B13ull);
-  if(!paired || !motion_capture_active_ || motion_scene_finished_ || !single_color || !color || !depth ||
+  const bool paired=graphics::IsPixelCoverageShaderPair(vs,ps);
+  if(!paired || motion_coverage_failed_shaders_.contains(ps) || !motion_capture_active_ || motion_scene_finished_ || !single_color || !color || !depth ||
      color->guest_format!=12 || color->width!=kOutputWidth || color->height!=kOutputHeight ||
      color->samples!=1 || depth->samples!=1 || !REXCVAR_GET(sr_native_shader_dir).empty() ||
      motion_coverage_next_id_>=4096) return;
@@ -211,6 +244,7 @@ void Renderer::ConfigureMotionCoverage(HostSurface* color,HostSurface* depth,
 void Renderer::BeginMotionCapture() {
   ReportMotionReadbacks(frame_index_);
   motion_capture_active_=false;motion_scene_finished_=false;
+  motion_jitter_draw_active_=motion_jitter_applied_=motion_jitter_ready_=false;motion_frame_jitter_={};
   motion_captured_depth_.Reset();motion_captured_color_.Reset();
   motion_coverage_draw_active_=false;motion_coverage_bound_=false;motion_coverage_cleared_=false;
   motion_coverage_next_id_=motion_coverage_draw_id_=0;motion_coverage_shader_=nullptr;
@@ -224,7 +258,11 @@ void Renderer::BeginMotionCapture() {
     motion_clips_=std::move(clips);
   }
   if(!motion_clips_->Begin(command_list_.Get(),frame_index_)) {motion_capture_done_=true;return;}
-  ++motion_capture_phase_;motion_capture_active_=true;motion_signature_reports_=0;
+  ++motion_capture_phase_;motion_capture_active_=true;motion_signature_reports_=0;motion_owner_reports_={};
+  if(motion_capture_phase_==1) {motion_previous_jitter_={};ArmInstanceProbe();}
+  motion_jitter_ready_=graphics::MakeSceneRasterJitter(motion_capture_phase_-1,
+      HostPx(kOutputWidth,render_scale_),HostPx(kOutputHeight,render_scale_),
+      REXCVAR_GET(sr_native_debug_motion_jitter),motion_frame_jitter_);
   motion_camera_valid_=motion_camera_conflict_=false;motion_rasters_.clear();
   motion_history_.Begin(frame_count_+1,HostPx(kOutputWidth,render_scale_),HostPx(kOutputHeight,render_scale_),motion_previous_camera_bad_);
 }
@@ -246,7 +284,7 @@ void Renderer::FinishMotionScene(HostSurface* depth) {
   if(!depth || depth->resource.Get()!=motion_captured_depth_.Get() || !motion_clips_ ||
      motion_scene_finished_ || motion_history_.samples().empty()) return;
   motion_scene_finished_=true;motion_clips_->Finish(command_list_.Get());motion_history_.Seal();
-  uint32_t matched=0,unverified=0,missing=0,ambiguous=0;uint64_t vertex_total=0;
+  uint32_t matched=0,observed_skin_matches=0,unverified=0,missing=0,ambiguous=0;uint64_t vertex_total=0;
   struct Family {uint32_t draws=0,opaque=0,matches=0,stencil=0,no_depth_write=0,blend=0,alpha_test=0;};
   std::unordered_map<uint64_t,Family> families;
   std::vector<MotionGeometry> geometry;
@@ -271,6 +309,7 @@ void Renderer::FinishMotionScene(HostSurface* depth) {
     draw.correspondence_valid=match.status==graphics::GeometryHistoryStatus::kMatch &&
         !motion_camera_conflict_ && !motion_previous_camera_bad_ && !motion_clips_->dropped() && !motion_history_.dropped();
     if(draw.correspondence_valid) {
+      observed_skin_matches+=sample.proof==graphics::GeometryHistoryProof::kVerifiedInstance;
       draw.previousClip=motion_clips_->Buffer(match.previous.slot);draw.previous_offset=match.previous.offset;
     }
     const auto& raster=motion_rasters_[i];
@@ -292,7 +331,7 @@ void Renderer::FinishMotionScene(HostSurface* depth) {
     draw.scissor.bottom=std::max(draw.scissor.top,draw.scissor.bottom);
     geometry.push_back(draw);
   }
-  REXLOG_INFO("native motion clip history: phase={} frame={} guest_swap={} draws={} vertices={} matched={} unverified={} missing={} ambiguous={} camera_conflict={} dropped={} (partial static-world proof; objects/deformation unverified)",
+  REXLOG_INFO("native motion clip history: phase={} frame={} guest_swap={} draws={} vertices={} matched={} unverified={} missing={} ambiguous={} camera_conflict={} dropped={} (partial position proof; unsupported objects/deformation unverified)",
       motion_capture_phase_,frame_count_+1,swap_number_,geometry.size(),vertex_total,matched,unverified,missing,ambiguous,
       motion_camera_conflict_,motion_clips_->dropped()+motion_history_.dropped());
   for(const auto& [shader,family]:families)
@@ -318,6 +357,9 @@ void Renderer::FinishMotionScene(HostSurface* depth) {
   Transition(motion_depth_snapshot_.Get(),snapshot_state,D3D12_RESOURCE_STATE_DEPTH_READ);
   TemporalMotionInputs input;
   input.depth=motion_depth_snapshot_.Get();input.width=uint32_t(dimensions.Width);input.height=dimensions.Height;
+  input.current_jitter[0]=motion_jitter_applied_?motion_frame_jitter_.pixel_x:0;
+  input.current_jitter[1]=motion_jitter_applied_?motion_frame_jitter_.pixel_y:0;
+  input.previous_jitter[0]=motion_previous_jitter_[0];input.previous_jitter[1]=motion_previous_jitter_[1];
   if(motion_coverage_cleared_) {
     Transition(motion_coverage_[frame_index_].Get(),motion_coverage_state_[frame_index_],D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     input.coverage=motion_coverage_[frame_index_].Get();
@@ -366,14 +408,39 @@ void Renderer::FinishMotionScene(HostSurface* depth) {
     if(SUCCEEDED(candidate_hr)) candidate_hr=motion_static_candidate_->Render(command_list_.Get(),input,static_only);
     if(SUCCEEDED(candidate_hr)) {
       const auto candidate=motion_static_candidate_->Outputs();
-      QueueMotionReadback(candidate.velocity,D3D12_RESOURCE_STATE_RENDER_TARGET,"candidate_static_only_motion_velocity");
-      QueueMotionReadback(candidate.validity,D3D12_RESOURCE_STATE_RENDER_TARGET,"candidate_static_only_motion_validity");
+      QueueMotionReadback(candidate.velocity,D3D12_RESOURCE_STATE_RENDER_TARGET,"candidate_matched_only_motion_velocity");
+      QueueMotionReadback(candidate.validity,D3D12_RESOURCE_STATE_RENDER_TARGET,"candidate_matched_only_motion_validity");
       REXLOG_INFO("native motion candidate-only GPU recorded: draws={} unknown_geometry_omitted=true DLSS_input=false (diagnostic upper bound, not verified scene coverage)",static_only.size());
     } else REXLOG_WARN("native motion candidate-only render failed {:08X}: {}",uint32_t(candidate_hr),motion_static_candidate_->LastError());
   }
+  // Attribute actual valid pixels to C209 without mistaking a later static
+  // writer for a skinned pixel. Preserve every other draw as a zero-validity
+  // invalidator in original order, with the SAME final depth/coverage tests.
+  if(observed_skin_matches && REXCVAR_GET(sr_native_debug_observed_skin_motion)) {
+    if(!motion_observed_skin_attribution_) {
+      auto candidate=std::make_unique<TemporalMotion>();
+      if(SUCCEEDED(candidate->Initialize(device_))) motion_observed_skin_attribution_=std::move(candidate);
+    }
+    if(motion_observed_skin_attribution_) {
+      auto attribution=geometry;
+      for(size_t i=0;i<attribution.size();++i)
+        if(!graphics::IsObservedSkinnedMotionShader(motion_rasters_[i].shader) ||
+           motion_history_.samples()[i].proof!=graphics::GeometryHistoryProof::kVerifiedInstance)
+          attribution[i].correspondence_valid=false;
+      HRESULT skin_hr=motion_observed_skin_attribution_->BeginFrame(frame_index_);
+      if(SUCCEEDED(skin_hr)) skin_hr=motion_observed_skin_attribution_->Render(command_list_.Get(),input,attribution);
+      if(SUCCEEDED(skin_hr)) {
+        const auto skin=motion_observed_skin_attribution_->Outputs();
+        QueueMotionReadback(skin.velocity,D3D12_RESOURCE_STATE_RENDER_TARGET,"observed_skin_motion_velocity");
+        QueueMotionReadback(skin.validity,D3D12_RESOURCE_STATE_RENDER_TARGET,"observed_skin_motion_validity");
+        REXLOG_INFO("native observed skin attribution GPU recorded: matches={} other_writers_invalidated=true DLSS_input=false",observed_skin_matches);
+      } else REXLOG_WARN("native observed skin attribution failed {:08X}: {}",uint32_t(skin_hr),motion_observed_skin_attribution_->LastError());
+    }
+  }
   motion_color_pairs_.clear();motion_pre_hud_pending_=true;
-  REXLOG_INFO("native motion GPU recorded: {}x{} static_matches={} object_motion_verified=false raster_jitter_applied=false DLSS_applied=Off",
-      input.width,input.height,matched);
+  REXLOG_INFO("native motion GPU recorded: {}x{} position_matches={} observed_skin_matches={} complete_object_motion_verified=false raster_jitter_applied={} current_jitter_px={},{} previous_jitter_px={},{} candidate_scene_scope_only=true DLSS_applied=Off",
+      input.width,input.height,matched,observed_skin_matches,motion_jitter_applied_,input.current_jitter[0],input.current_jitter[1],
+      input.previous_jitter[0],input.previous_jitter[1]);
 }
 
 void Renderer::QueueMotionReadback(ID3D12Resource* texture,D3D12_RESOURCE_STATES state,const std::string& name) {
@@ -464,9 +531,11 @@ void Renderer::EndMotionCapture() {
   const bool valid_scene=motion_scene_finished_ && !motion_history_.samples().empty();
   if(!motion_scene_finished_) {motion_clips_->Finish(command_list_.Get());motion_history_.Seal();}
   motion_history_.End();motion_previous_camera_bad_=motion_camera_conflict_ || !motion_camera_valid_;
+  motion_previous_jitter_=motion_jitter_applied_ ?
+      std::array<float,2>{motion_frame_jitter_.pixel_x,motion_frame_jitter_.pixel_y}:std::array<float,2>{};
   motion_capture_active_=false;
   if(!valid_scene) motion_capture_phase_=0;
-  else if(motion_capture_phase_>=2) motion_capture_done_=true;
+  else if(motion_capture_phase_>=2) {motion_capture_done_=true;ReportInstanceProbe();}
 }
 
 void Renderer::RecordMotionColorBinding(uint32_t slot,const uint32_t* fetch,uint32_t descriptor) {
@@ -592,6 +661,12 @@ void Renderer::CaptureMotionInlineColorGeometry(uint8_t* base,uint32_t declarati
 }
 
 void Renderer::AfterMotionColorDraw() {
+  if(motion_capture_active_ && motion_jitter_draw_active_ && !motion_jitter_applied_) {
+    motion_jitter_applied_=true;
+    REXLOG_INFO("native motion scene jitter issued: phase={} frame={} pixels={},{} ndc={},{} shared_halfpixel_bits={:08X},{:08X} actual_original_draw=true (candidate scene experiment)",
+        motion_capture_phase_,frame_count_+1,motion_frame_jitter_.pixel_x,motion_frame_jitter_.pixel_y,
+        motion_frame_jitter_.ndc_x,motion_frame_jitter_.ndc_y,motion_clip_fixup_[4],motion_clip_fixup_[5]);
+  }
   if(!motion_capture_active_ || motion_capture_phase_!=2) return;
   const uint64_t serial=++motion_color_serial_;
   if(motion_coverage_draw_active_ && motion_color_reports_<64)

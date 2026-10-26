@@ -8,14 +8,18 @@
 
 using namespace superman_returns::graphics;
 namespace {
-constexpr std::array<uint64_t, 2> kPs{0x559F422BEF5E5714ull, 0x220353EB37491B13ull};
-constexpr std::array<uint64_t, 2> kVs{0x4F17209D364D5B51ull, 0x18B4F69400B7F0AFull};
+constexpr std::array<uint64_t, 5> kPs{0x559F422BEF5E5714ull, 0x220353EB37491B13ull, 0xE6C740EAC16B70D4ull, 0x3EF6A4A3C740ADB1ull, 0xE83A13DF3297C6CBull};
+constexpr std::array<uint64_t, 5> kVs{0x4F17209D364D5B51ull, 0x18B4F69400B7F0AFull, 0xC20921D0DBBD2F1Full, 0xC687EB65D635C5D7ull, 0xC687EB65D635C5D7ull};
 constexpr std::string_view kOutput = "out float4 oC0 : SV_Target0)";
 constexpr std::string_view kExtra = ",\n\tout uint srCoverageId : SV_Target1";
 constexpr std::string_view kAssignment = "\n\tsrCoverageId = g_SrPixelCoverageId;\n\t";
 
 std::string Source(uint64_t hash) {
-  const char* name = hash == kPs[0] ? "559F422BEF5E5714.ps.hlsl" : "220353EB37491B13.ps.hlsl";
+  constexpr const char* names[]{"559F422BEF5E5714.ps.hlsl","220353EB37491B13.ps.hlsl",
+      "E6C740EAC16B70D4.ps.hlsl","3EF6A4A3C740ADB1.ps.hlsl","E83A13DF3297C6CB.ps.hlsl"};
+  const char* name=nullptr;
+  for(size_t i=0;i<kPs.size();++i) if(hash==kPs[i]) name=names[i];
+  SR_CHECK(name!=nullptr);if(!name)return {};
   const auto root = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path();
   std::ifstream stream(root / "artifacts/shaders/hlsl" / name, std::ios::binary);
   SR_CHECK(stream.good());
@@ -39,10 +43,11 @@ void Replace(std::string& source, std::string_view old, std::string_view value) 
 }  // namespace
 
 SR_TEST(pixel_coverage_only_audited_ps_and_exact_vs_ps_pairs_are_supported) {
-  for (size_t i = 0; i < 2; ++i) {
+  for (size_t i = 0; i < kPs.size(); ++i) {
     SR_CHECK(IsPixelCoverageShader(kPs[i]));
     SR_CHECK(IsPixelCoverageShaderPair(kVs[i], kPs[i]));
-    SR_CHECK(!IsPixelCoverageShaderPair(kVs[1 - i], kPs[i]));
+    for(size_t j=0;j<kVs.size();++j) if(kVs[j]!=kVs[i])
+      SR_CHECK(!IsPixelCoverageShaderPair(kVs[j],kPs[i]));
     SR_CHECK(!IsPixelCoverageShaderPair(0, kPs[i]));
   }
   for (uint64_t hash : {0ull, 0xC20921D0DBBD2F1Full, 0x9A62E7C65051447Aull, kPs[0] ^ 1ull}) {

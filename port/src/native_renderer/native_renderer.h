@@ -53,6 +53,7 @@
 #include "../graphics/guest/texture_capture.h"
 #include "../graphics/guest/render_packet.h"
 #include "../graphics/temporal_frame.h"
+#include "../graphics/scene_raster_jitter.h"
 #include "../graphics/camera_candidate_probe.h"
 #include "../graphics/surface_sequence.h"
 #include "../graphics/geometry_submission_probe.h"
@@ -570,12 +571,15 @@ class Renderer : public NativeFrontend {
   std::unique_ptr<graphics::d3d12::PostVertexClipCapture> motion_clips_;
   std::unique_ptr<graphics::d3d12::TemporalMotion> temporal_motion_;
   std::unique_ptr<graphics::d3d12::TemporalMotion> motion_static_candidate_;
+  std::unique_ptr<graphics::d3d12::TemporalMotion> motion_observed_skin_attribution_;
   graphics::TemporalGeometryHistory motion_history_;
   std::vector<MotionRaster> motion_rasters_;
   std::vector<MotionReadback> motion_readbacks_;
   std::unordered_map<uint64_t,Microsoft::WRL::ComPtr<ID3D12PipelineState>> motion_clip_pipelines_;
   uint32_t motion_capture_phase_=0;
   uint32_t motion_signature_reports_=0;
+  std::array<uint32_t,2> motion_owner_reports_{};
+  std::array<uint32_t,4> motion_uploaded_vs_bools_{};
   std::vector<std::array<uint64_t,2>> motion_color_pairs_;
   struct MotionColorSource {
     uint64_t resource=0,source=0,frame=0,serial=0;
@@ -584,6 +588,9 @@ class Renderer : public NativeFrontend {
   uint64_t motion_color_serial_=0;
   uint32_t motion_color_reports_=0;
   bool motion_capture_active_=false,motion_scene_finished_=false,motion_capture_done_=false;
+  graphics::SceneRasterJitter motion_frame_jitter_;
+  std::array<float,2> motion_previous_jitter_{};
+  bool motion_jitter_draw_active_=false,motion_jitter_applied_=false,motion_jitter_ready_=false;
   bool motion_camera_valid_=false,motion_camera_conflict_=false,motion_previous_camera_bad_=false;
   bool motion_pre_hud_pending_=false;
   std::array<uint32_t,16> motion_camera_words_{};
@@ -594,6 +601,7 @@ class Renderer : public NativeFrontend {
   D3D12_RESOURCE_STATES motion_coverage_state_[3]{D3D12_RESOURCE_STATE_RENDER_TARGET,
       D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_RENDER_TARGET};
   std::unordered_map<uint64_t,std::vector<uint8_t>> motion_coverage_shaders_;
+  std::unordered_set<uint64_t> motion_coverage_failed_shaders_;
   const std::vector<uint8_t>* motion_coverage_shader_=nullptr;
   bool motion_coverage_draw_active_=false,motion_coverage_bound_=false,motion_coverage_cleared_=false;
   uint32_t motion_coverage_next_id_=0,motion_coverage_draw_id_=0;

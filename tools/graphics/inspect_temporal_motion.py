@@ -35,7 +35,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('directory', type=Path)
     args = parser.parse_args()
-    report = {'meaning': 'Partial static-world motion experiment; objects/deformation unverified', 'captures': []}
+    report = {'meaning': 'Partial motion experiment; unsupported objects/deformation unverified', 'captures': []}
     for path in sorted(args.directory.glob('*motion_velocity_*.raw')):
         fmt, velocity = read_raw(path)
         _, coverage = read_raw(path.with_name(path.name.replace('motion_velocity_', 'motion_validity_')))
@@ -51,8 +51,9 @@ def main():
         Image.fromarray(picture).save(path.with_suffix('.png'))
         Image.fromarray((valid * 255).astype(np.uint8)).save(path.with_name(path.stem.replace('velocity', 'validity') + '.png'))
         report['captures'].append({'file': path.name, 'width': valid.shape[1], 'height': valid.shape[0],
-            'diagnostic_upper_bound_only': path.name.startswith('candidate_static_only_'),
-            'unknown_geometry_omitted': path.name.startswith('candidate_static_only_'),
+            'diagnostic_upper_bound_only': path.name.startswith(('candidate_static_only_', 'candidate_matched_only_')),
+            'unknown_geometry_omitted': path.name.startswith(('candidate_static_only_', 'candidate_matched_only_')),
+            'family_only_attribution': path.name.startswith('observed_skin_'),
             'valid_pixels': int(valid.sum()), 'coverage_fraction': float(valid.mean()),
             'moving_pixels_above_0_01': int((valid & (magnitude > .01)).sum()),
             'magnitude_percentiles': np.percentile(magnitude[valid], [0, 50, 95, 100]).tolist() if valid.any() else [],

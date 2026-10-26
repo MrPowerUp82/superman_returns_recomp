@@ -4,6 +4,7 @@
 #include <rex/logging.h>
 #include "native_renderer.h"
 #include "guest_cpu_profile.h"
+#include "instance_probe.h"
 #include <array>
 #include <algorithm>
 #include <chrono>
@@ -95,11 +96,20 @@ SR_PROFILE_GUEST(82316958,3)
 SR_PROFILE_GUEST(82319108,4)
 SR_PROFILE_GUEST(826092B8,5)
 SR_PROFILE_GUEST(821078C0,6)
-SR_PROFILE_GUEST(8230F8E0,7)
 SR_PROFILE_GUEST(827838D0,8)
-SR_PROFILE_GUEST(82300328,9)
 SR_PROFILE_GUEST(822E9E68,10)
 SR_PROFILE_GUEST(82307CF8,11)
-SR_PROFILE_GUEST(823103C8,12)
 SR_PROFILE_GUEST(822F5290,13)
 #undef SR_PROFILE_GUEST
+// These two entry points also carry the opt-in lifetime association scope.
+// Keep one strong wrapper per guest symbol, including when CPU timing is off.
+#define SR_PROFILE_RENDER(address,index) \
+  REX_EXTERN(__imp__sub_##address); \
+  extern "C" REX_FUNC(sub_##address) { \
+    if(!Enabled()) {superman_returns::native::InvokeInstanceProbeRender(0x##address,__imp__sub_##address,ctx,base);return;} \
+    Scope scope(index);superman_returns::native::InvokeInstanceProbeRender(0x##address,__imp__sub_##address,ctx,base); \
+  }
+SR_PROFILE_RENDER(8230F8E0,7)
+SR_PROFILE_RENDER(823103C8,12)
+SR_PROFILE_RENDER(82300328,9)
+#undef SR_PROFILE_RENDER

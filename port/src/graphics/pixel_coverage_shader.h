@@ -6,7 +6,7 @@
 
 namespace superman_returns::graphics {
 
-// Capture-only specialization of original PS 559F/2203. This says nothing
+// Capture-only specialization of original PS 559F/2203/E6C7/3EF6/E83A. This says nothing
 // about motion correspondence, blending, material identity or scene coverage.
 bool IsPixelCoverageShader(uint64_t ps_hash);
 bool IsPixelCoverageShaderPair(uint64_t vs_hash, uint64_t ps_hash);

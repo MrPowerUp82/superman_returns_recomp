@@ -35,6 +35,7 @@
 #include "native_bridge.h"
 #include "native_graphics_system.h"
 #include "native_renderer.h"
+#include "instance_probe.h"
 #include "sdk_compat.h"
 #include "checked_guest_memory.h"
 #include "idle_yield.h"
@@ -394,9 +395,11 @@ SR_DEFINE_HOOK(SR_ADDR_FRAME_HANDOFF) {
 #if SR_HOOK_ENABLED(DRAW_VERTICES)
 // D3DDevice_DrawVertices(dev, PrimType, StartVertex, VertexCount)
 SR_DEFINE_HOOK(SR_ADDR_DRAW_VERTICES) {
+  const uint32_t probe_caller=uint32_t(ctx.lr),probe_stack=ctx.r1.u32;
   const uint32_t dev = ctx.r3.u32, prim = ctx.r4.u32, start = ctx.r5.u32, count = ctx.r6.u32;
   OnDeviceCall("DrawVertices", dev, prim);
   native::ProfileGuestGraphicsOriginal(SR_ADDRESS(SR_ADDR_DRAW_VERTICES),SR_ORIGINAL(SR_ADDR_DRAW_VERTICES),ctx,base);
+  native::NoteInstanceProbeDraw(base,dev,"DrawVertices",count,probe_caller,probe_stack);
   if (native::Enabled()) native::Renderer::Get().DrawVertices(base, prim, start, count);
 }
 #endif
@@ -404,10 +407,12 @@ SR_DEFINE_HOOK(SR_ADDR_DRAW_VERTICES) {
 #if SR_HOOK_ENABLED(DRAW_INDEXED_VERTICES)
 // D3DDevice_DrawIndexedVertices(dev, PrimType, BaseVertexIndex, StartIndex, IndexCount)
 SR_DEFINE_HOOK(SR_ADDR_DRAW_INDEXED_VERTICES) {
+  const uint32_t probe_caller=uint32_t(ctx.lr),probe_stack=ctx.r1.u32;
   const uint32_t dev = ctx.r3.u32, prim = ctx.r4.u32, base_vertex = ctx.r5.u32,
                  start = ctx.r6.u32, count = ctx.r7.u32;
   OnDeviceCall("DrawIndexedVertices", dev, prim);
   native::ProfileGuestGraphicsOriginal(SR_ADDRESS(SR_ADDR_DRAW_INDEXED_VERTICES),SR_ORIGINAL(SR_ADDR_DRAW_INDEXED_VERTICES),ctx,base);
+  native::NoteInstanceProbeDraw(base,dev,"DrawIndexedVertices",count,probe_caller,probe_stack);
   if (native::Enabled()) {
     native::Renderer::Get().DrawIndexedVertices(base, prim, int32_t(base_vertex), start, count);
   }
@@ -417,12 +422,14 @@ SR_DEFINE_HOOK(SR_ADDR_DRAW_INDEXED_VERTICES) {
 #if SR_HOOK_ENABLED(DRAW_VERTICES_UP)
 // D3DDevice_DrawVerticesUP(dev, PrimType, VertexCount, pVertexData, Stride) - Begin/End based.
 SR_DEFINE_HOOK(SR_ADDR_DRAW_VERTICES_UP) {
+  const uint32_t probe_caller=uint32_t(ctx.lr),probe_stack=ctx.r1.u32;
   const uint32_t dev = ctx.r3.u32, prim = ctx.r4.u32, count = ctx.r5.u32, data = ctx.r6.u32,
                  stride = ctx.r7.u32;
   OnDeviceCall("DrawVerticesUP", dev, prim);
   t_in_draw_up = true;
   native::ProfileGuestGraphicsOriginal(SR_ADDRESS(SR_ADDR_DRAW_VERTICES_UP),SR_ORIGINAL(SR_ADDR_DRAW_VERTICES_UP),ctx,base);
   t_in_draw_up = false;
+  native::NoteInstanceProbeDraw(base,dev,"DrawVerticesUP",count,probe_caller,probe_stack);
   if (native::Enabled()) native::Renderer::Get().DrawInlineVertices(base, prim, data, count, stride);
 }
 #endif
@@ -446,6 +453,7 @@ SR_DEFINE_HOOK(SR_ADDR_END_VERTICES) {
   native::NoteHookCall("EndVertices", ctx.r3.u32, 0);
   if (g_pending_inline.active) {
     g_pending_inline.active = false;
+    native::NoteInstanceProbeDraw(base,ctx.r3.u32,"EndVertices",g_pending_inline.count,uint32_t(ctx.lr),ctx.r1.u32);
     native::Renderer::Get().DrawInlineVertices(base, g_pending_inline.prim, g_pending_inline.data,
                                                g_pending_inline.count, g_pending_inline.stride);
   }
