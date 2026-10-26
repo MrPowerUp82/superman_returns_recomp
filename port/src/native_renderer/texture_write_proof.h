@@ -19,6 +19,15 @@ inline bool SameCoveredContent(std::span<const RexTrackingStamp> before,
   return true;
 }
 enum class TextureTrackingMode { Off, Compare, On };
+inline TextureTrackingMode ParseTextureTrackingMode(std::string_view value);
+inline TextureTrackingMode ResolveTextureTrackingMode(bool bundle_tracking_on, std::string_view value, bool* invalid = nullptr) {
+  if(invalid) *invalid = false;
+  if(value.empty()) return bundle_tracking_on ? TextureTrackingMode::On : TextureTrackingMode::Off;
+  if(value == "off") return TextureTrackingMode::Off;
+  const auto mode = ParseTextureTrackingMode(value);
+  if(mode == TextureTrackingMode::Off && invalid) *invalid = true;
+  return mode;
+}
 inline TextureTrackingMode ParseTextureTrackingMode(std::string_view value) {
   if(value=="compare") return TextureTrackingMode::Compare;
   if(value=="on") return TextureTrackingMode::On;

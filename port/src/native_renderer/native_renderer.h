@@ -775,6 +775,7 @@ class Renderer : public NativeFrontend {
     TextureHashBackoff hash_backoff;
     // Write watch: page write sequence when the watch was armed.
     uint32_t watch_seq = 0;
+    CleanTextureWatchScan watch_scan;
     uint32_t guest_format = 0;
     D3D12_RESOURCE_STATES debug_state = D3D12_RESOURCE_STATE_COMMON;  // frame dumps
   };

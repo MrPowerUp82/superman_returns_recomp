@@ -1,4 +1,5 @@
 #include "cpu_bundle.h"
+#include "texture_write_proof.h"
 #include "resolve_identity.h"
 #include "test_main.h"
 #include <bit>
@@ -77,4 +78,24 @@ SR_TEST(resolve_identity_keeps_complete_dimensions_and_interpretation_distinct) 
   v=base;v.depth=true;check(v);
   v=base;v.shadow=true;check(v);
   SR_CHECK_EQ(ids.size(),10u);
+}
+
+SR_TEST(resolve_texture_tracking_mode_respects_bundle_default_and_explicit_env_overrides) {
+  bool invalid=true;
+  SR_CHECK(ResolveTextureTrackingMode(false,"",&invalid)==TextureTrackingMode::Off);
+  SR_CHECK(!invalid);
+  invalid=true;
+  SR_CHECK(ResolveTextureTrackingMode(true,"",&invalid)==TextureTrackingMode::On);
+  SR_CHECK(!invalid);
+  invalid=true;
+  SR_CHECK(ResolveTextureTrackingMode(true,"off",&invalid)==TextureTrackingMode::Off);
+  SR_CHECK(!invalid);
+  invalid=true;
+  SR_CHECK(ResolveTextureTrackingMode(true,"compare",&invalid)==TextureTrackingMode::Compare);
+  SR_CHECK(!invalid);
+  invalid=true;
+  SR_CHECK(ResolveTextureTrackingMode(false,"on",&invalid)==TextureTrackingMode::On);
+  SR_CHECK(!invalid);
+  SR_CHECK(ResolveTextureTrackingMode(true,"invalid_mode",&invalid)==TextureTrackingMode::Off);
+  SR_CHECK(invalid);
 }

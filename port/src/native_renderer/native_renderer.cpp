@@ -157,10 +157,10 @@ REXCVAR_DEFINE_DOUBLE(sr_native_trace_frame_at_s, 0.0, "Superman Returns Native"
 REXCVAR_DEFINE_STRING(sr_native_trace_trigger_path, "", "Superman Returns Native",
                      "Debug: trace one frame when this file exists; empty disables file polling")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-REXCVAR_DEFINE_BOOL(sr_native_stacked_resolves, false, "Superman Returns Native",
+REXCVAR_DEFINE_BOOL(sr_native_stacked_resolves, true, "Superman Returns Native",
                    "Experimental D3D12 stacked color resolves via Texture3D; mip 0, one sample")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-REXCVAR_DEFINE_INT32(sr_native_buffer_srv_cache, 0, "Superman Returns Native",
+REXCVAR_DEFINE_INT32(sr_native_buffer_srv_cache, 4096, "Superman Returns Native",
                     "Experimental D3D12 resident buffer SRV cache capacity (0 disables, max 8192)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_STRING(sr_native_pass_mask, "", "Superman Returns Native",
@@ -181,7 +181,7 @@ REXCVAR_DEFINE_BOOL(sr_native_pm4_mirror, true, "Superman Returns Native",
 REXCVAR_DEFINE_BOOL(sr_native_pm4_bounded_reads, true, "Superman Returns Native",
                     "Copy live PM4 constant sources with bounded checked reads instead of "
                     "VirtualQuery validation (D3D12, restart required; false = legacy path)");
-REXCVAR_DEFINE_BOOL(sr_native_cpu_bundle, false, "Superman Returns Native",
+REXCVAR_DEFINE_BOOL(sr_native_cpu_bundle, true, "Superman Returns Native",
                     "Experiment: combine verified texture tracking, bounded PM4 reads, CPU "
                     "upload staging and complete resolve reuse (D3D12, restart required)");
 REXCVAR_DEFINE_BOOL(sr_native_shared_staging, true, "Superman Returns Native",
@@ -1214,12 +1214,14 @@ bool Renderer::EnsureInitialized() {
   complete_resolve_identity_=cpu_options.resolve_identity;
   stage_shared_constants_=cpu_options.shared_staging;
   const char* tracking_env=std::getenv("SR_D3D12_TEXTURE_WRITE_TRACKING");
-  texture_tracking_mode_=cpu_options.tracking_on?TextureTrackingMode::On:ParseTextureTrackingMode(tracking_env?tracking_env:"");
-  if(tracking_env && *tracking_env && texture_tracking_mode_==TextureTrackingMode::Off && std::string_view(tracking_env)!="off")
+  bool invalid_tracking_mode=false;
+  texture_tracking_mode_=ResolveTextureTrackingMode(cpu_options.tracking_on,tracking_env?tracking_env:"",&invalid_tracking_mode);
+  if(invalid_tracking_mode)
     REXLOG_WARN("native texture tracking: invalid mode; using off");
   REXLOG_INFO("native texture tracking: mode={}",texture_tracking_mode_==TextureTrackingMode::On?"on":texture_tracking_mode_==TextureTrackingMode::Compare?"compare":"off");
   const char* pm4_reads_profile=std::getenv("SR_NATIVE_PM4_READ_PROFILE");
   mirror_.bounded_alu_reads = cpu_options.bounded_reads;
+  capture_mirror_.bounded_alu_reads = REXCVAR_GET(sr_native_pm4_bounded_reads);
   mirror_.alu_read_profile.enabled = !packet_sink_ && CpuProfiling() &&
       pm4_reads_profile && *pm4_reads_profile && *pm4_reads_profile!='0';
   REXLOG_INFO("native PM4 live read profiling: {}",mirror_.alu_read_profile.enabled?"on":"off");
@@ -3596,23 +3598,23 @@ uint32_t Renderer::GetTextureSrvIndex(uint8_t* base, const uint32_t fetch[6]) {
           return REX_KERNEL_MEMORY()->TranslatePhysical<const uint8_t*>(address);
         }, TextureHash());
       };
+      bool reused_by_tracking = false;
+      if(texture_tracking_mode_==TextureTrackingMode::On && entry.tracking) {
+        auto& tracking=*entry.tracking;
+        const auto query_start=CpuProfiling()?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
+        resource_write_tracker_.Sample(tracking.watch,tracking.current);
+        if(CpuProfiling()) tracking_query_ns_+=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-query_start).count();
+        reused_by_tracking=CanReuseTexture(tracking.upload,tracking.current,entry.resource?entry.resource_version:0);
+      }
       CpuTimer watch_timer(cpu_timings.texture_watch_ns);
-      const bool written = texture_watch_ &&
-          TextureContentWritten(entry.guest_ranges, entry.watch_seq, written_since);
+      const bool written = !reused_by_tracking && texture_watch_ &&
+          (TextureWatchScanCaching() ? [&] { bool reused=false; return entry.watch_scan.Written(0, completed_texture_writes_.load(std::memory_order_acquire), entry.watch_seq, [&] { return TextureContentWritten(entry.guest_ranges, entry.watch_seq, written_since); }, reused); }() : TextureContentWritten(entry.guest_ranges, entry.watch_seq, written_since));
       watch_timer.Stop();
       // Preserve the existing base-level threshold; adding mip coverage must
       // not move an existing per-frame texture into the slower policy.
       bool check = entry.hash_backoff.ShouldValidate(entry.guest_size,texture_watch_,written,
           frame_count_,entry.hashed_frame,REXCVAR_GET(sr_native_texture_hash_backoff));
-      if(check && texture_tracking_mode_==TextureTrackingMode::On && entry.tracking) {
-        auto& tracking=*entry.tracking;
-        const auto query_start=CpuProfiling()?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
-        resource_write_tracker_.Sample(tracking.watch,tracking.current);
-        if(CpuProfiling()) tracking_query_ns_+=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-query_start).count();
-        if(CanReuseTexture(tracking.upload,tracking.current,entry.resource?entry.resource_version:0)) {
-          check=false;++tracking_skipped_checks_;tracking_skipped_bytes_+=entry.guest_hash_bytes;
-        }
-      }
+      if(check && reused_by_tracking) { check=false;++tracking_skipped_checks_;tracking_skipped_bytes_+=entry.guest_hash_bytes; }
       if (REXCVAR_GET(sr_native_debug_texture_format) >= 0 &&
           int32_t(fetch[1] & 0x3F) == REXCVAR_GET(sr_native_debug_texture_format)) {
         static int logged = 0;

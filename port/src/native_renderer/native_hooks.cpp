@@ -322,7 +322,7 @@ namespace {
 bool NativeBulkConstantsEnabled() {
   static const bool enabled=[] {
     const char* value=std::getenv("SR_NATIVE_XDK_BULK_COPY");
-    return value && *value && *value!='0';
+    return !value || !*value || *value!='0';
   }();
   return enabled;
 }
@@ -345,7 +345,7 @@ namespace {
 bool IdleYieldBackoffEnabled() {
   static const bool enabled=[] {
     const char* value=std::getenv("SR_NATIVE_IDLE_YIELD");
-    return value && *value && *value!='0';
+    return !value || !*value || *value!='0';
   }();
   return enabled;
 }
