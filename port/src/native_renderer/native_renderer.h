@@ -581,6 +581,7 @@ class Renderer : public NativeFrontend {
   uint32_t motion_capture_phase_=0;
   uint32_t motion_signature_reports_=0;
   std::array<uint32_t,2> motion_owner_reports_{};
+  uint32_t motion_cloth_reports_=0;
   std::array<uint32_t,4> motion_uploaded_vs_bools_{};
   std::vector<std::array<uint64_t,2>> motion_color_pairs_;
   struct MotionColorSource {
@@ -613,6 +614,7 @@ class Renderer : public NativeFrontend {
   uint32_t motion_captured_color_edram_=0,motion_captured_color_width_=0,motion_captured_color_height_=0;
   float motion_captured_color_scale_=0;
   void BeginMotionCapture();
+  void ReportObservedClothDraw(const WorkBatch& batch,const WorkCmd& cmd);
   void CaptureMotionClipDraw(uint8_t* base,uint32_t dev,D3D12_PRIMITIVE_TOPOLOGY topology,
       bool indexed,uint32_t count,uint32_t first,int32_t base_vertex,
       D3D12_INDEX_BUFFER_STRIP_CUT_VALUE cut,const WorkBatch* batch,const WorkCmd* cmd);

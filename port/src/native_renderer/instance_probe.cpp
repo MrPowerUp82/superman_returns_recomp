@@ -22,7 +22,7 @@ namespace {
 using graphics::ObservedInstanceToken;
 std::atomic<bool> failed{false};
 struct State {
-  graphics::ObservedInstanceLifetimes lifetimes;
+  graphics::ObservedInstanceLifetimes lifetimes,cloth_topologies;
   std::mutex mutex;
   std::atomic<bool> armed{false};
   uint64_t created=0,destroyed=0,unreadable=0,entered=0,tracked_scopes=0,draws=0,scoped_draws=0,tracked_draws=0;
@@ -33,7 +33,7 @@ struct State {
 State& Probe() {static State state;return state;}
 struct ActiveScope {uint32_t owner=0,render=0,vtable=0;ObservedInstanceToken token;bool dispatch=false;};
 thread_local ActiveScope current;
-thread_local uint32_t current_packet=0;
+thread_local uint32_t current_packet=0,current_draw_caller=0;
 thread_local graphics::ObservedPartSelection current_part;
 bool Word(uint8_t* base,uint32_t address,uint32_t& value) {
   if(!base || address<0x10000 || uint64_t(address)+4>(uint64_t{1}<<32)) return false;
@@ -49,7 +49,12 @@ void Created(uint8_t* base,uint32_t owner,uint32_t expected_table=0x820211C0) no
     // Base constructor returns with its own vptr before derived construction.
     if(!Word(base,owner,table) || table!=expected_table) {++state.unreadable;return;}
     const auto token=state.lifetimes.Create(owner);
-    if(token) ++state.created;
+    state.cloth_topologies.Destroy(owner);
+    if(token) {
+      ++state.created;
+      if(expected_table==0x82021DA8) state.cloth_topologies.Create(owner);
+    }
+    if(state.cloth_topologies.exhausted()) failed.store(true);
     if(state.lifetimes.exhausted()) failed.store(true);
   } catch(...) {failed.store(true);}
 }
@@ -58,6 +63,7 @@ void Destroyed(uint32_t owner) noexcept {
   try {auto& state=Probe();std::lock_guard lock(state.mutex);
     if(state.lifetimes.Find(owner)) ++state.destroyed;
     state.lifetimes.Destroy(owner);
+    state.cloth_topologies.Destroy(owner);
   } catch(...) {failed.store(true);}
 }
 }
@@ -126,12 +132,12 @@ class InstanceProbePacketScope {
 };
 class InstanceProbeScope {
   ActiveScope previous_;
-  uint32_t previous_packet_;
+  uint32_t previous_packet_,previous_draw_caller_;
   graphics::ObservedPartSelection previous_part_;
  public:
   InstanceProbeScope(uint8_t* base,uint32_t owner,uint32_t render):previous_(current),
-      previous_packet_(current_packet),previous_part_(current_part) {
-    current={};current.owner=owner;current.render=render;current_packet=0;current_part={};
+      previous_packet_(current_packet),previous_draw_caller_(current_draw_caller),previous_part_(current_part) {
+    current={};current.owner=owner;current.render=render;current_packet=0;current_draw_caller=0;current_part={};
     try {
       auto& state=Probe();uint32_t target=0;
       current.dispatch=Word(base,owner,current.vtable) && current.vtable<=UINT32_MAX-8 &&
@@ -143,8 +149,38 @@ class InstanceProbeScope {
     } catch(...) {failed.store(true);}
   }
   InstanceProbeScope(const InstanceProbeScope&)=delete;
-  ~InstanceProbeScope() {current=previous_;current_packet=previous_packet_;current_part=previous_part_;}
+  ~InstanceProbeScope() {current=previous_;current_packet=previous_packet_;current_draw_caller=previous_draw_caller_;current_part=previous_part_;}
 };
+bool ClothBuffer(uint8_t* base,uint32_t object,bool index,graphics::ObservedClothBuffer& out,bool* index32=nullptr) noexcept {
+  uint32_t data=0,size=0,header=0;
+  if(object>UINT32_MAX-0x1C || !Word(base,object+0x18,data) || !Word(base,object+0x1C,size) ||
+     (index && !Word(base,object,header))) return false;
+  if(!index) data&=~3u;
+  const uint32_t physical=(data&0x1FFFFFFFu)+(data>=0xE0000000u?0x1000u:0u);
+  const uint32_t bytes=index?(size&0xFFFFFF):((size>>2)&0xFFFFFF)*4;
+  if(!physical || !bytes || uint64_t(physical)+bytes>0x20000000ull) return false;
+  out={object,physical,bytes};if(index32)*index32=(header&0x80000000u)!=0;return true;
+}
+graphics::ObservedClothSelection CaptureCloth(uint8_t* base,const graphics::ObservedInstanceToken& topology) noexcept {
+  graphics::ObservedClothSelection c;
+  if(current.render!=0x82301510 || current.vtable!=0x82021DA8 ||
+     current_draw_caller!=0x822F43C0 || current.owner>UINT32_MAX-28264 || !topology.generation) return c;
+  c.caller=current_draw_caller;c.topology_generation=topology.generation;
+  const uint32_t owner=current.owner;
+  if(!Word(base,owner+22544,c.vertices) || !Word(base,owner+22548,c.quads) ||
+     !Word(base,owner+28260,c.ring) || c.ring>2 || !c.vertices || c.vertices>0x1000000 ||
+     !c.quads || uint64_t(c.quads)*6>4194303) return c;
+  const uint32_t offsets[]{28196+c.ring*4,28208+c.ring*4,28232,28220+c.ring*4};
+  for(uint32_t i=0;i<4;++i) {
+    uint32_t object=0;
+    if(!Word(base,owner+offsets[i],object) || !ClothBuffer(base,object,false,c.streams[i]) ||
+       uint64_t(c.vertices)*(i==2?8:16)>c.streams[i].bytes) return c;
+  }
+  uint32_t ib=0;
+  if(!Word(base,owner+28236,ib) || !ClothBuffer(base,ib,true,c.indices,&c.index32) ||
+     c.index32 || uint64_t(c.quads)*8>c.indices.bytes) return c;
+  c.caller=current_draw_caller;c.topology_generation=topology.generation;c.source_route_observed=true;return c;
+}
 graphics::ObservedRenderInvocation CaptureInstanceProbeInvocation(uint8_t* base) noexcept {
   if(!InstanceProbeEnabled() || !current.dispatch) return {};
   try {
@@ -152,7 +188,10 @@ graphics::ObservedRenderInvocation CaptureInstanceProbeInvocation(uint8_t* base)
     if(state.lifetimes.IsAlive(current.token)) {
       uint32_t palette=0;
       const bool packet_ok=current_packet && current_packet<=UINT32_MAX-16 && Word(base,current_packet+16,palette);
-      return {current.token,current.render,current.vtable,packet_ok?current_packet:0,packet_ok?palette:0,packet_ok?current_part:graphics::ObservedPartSelection{}};
+      graphics::ObservedRenderInvocation invocation{current.token,current.render,current.vtable,
+          packet_ok?current_packet:0,packet_ok?palette:0,packet_ok?current_part:graphics::ObservedPartSelection{}};
+      if(const auto topology=state.cloth_topologies.Find(current.owner)) invocation.cloth=CaptureCloth(base,*topology);
+      return invocation;
     }
   } catch(...) {failed.store(true);}
   return {};
@@ -167,6 +206,7 @@ void ArmInstanceProbe() noexcept {
 }
 void NoteInstanceProbeDraw(uint8_t* base,uint32_t device,const char* kind,uint32_t count,uint32_t caller,uint32_t stack) noexcept {
   if(!InstanceProbeEnabled()) return;
+  current_draw_caller=caller;
   try {auto& state=Probe();if(!state.armed.load()) return;
     uint64_t vs=0,ps=0;
     for(const uint32_t offset:{profile::kDevice.shader_a,profile::kDevice.shader_b}) {
@@ -205,6 +245,25 @@ void ReportInstanceProbe() noexcept {
         state.created,state.destroyed,state.entered,state.tracked_scopes,state.draws,state.scoped_draws,state.tracked_draws);
     for(const auto& [vs,f]:state.families)
       REXLOG_INFO("native instance probe family: vs={:016X} draws={} scoped={} tracked={}",vs,f.draws,f.scoped,f.tracked);
+  } catch(...) {failed.store(true);}
+}
+graphics::ObservedInstanceToken BeginClothRebuild(uint8_t* base,uint32_t owner) noexcept {
+  if(!InstanceProbeEnabled()) return {};
+  try {auto& state=Probe();std::lock_guard lock(state.mutex);uint32_t table=0;
+    if(!Word(base,owner,table) || table!=0x82021DA8)return {};
+    if(const auto token=state.lifetimes.Find(owner)) {
+      state.cloth_topologies.Destroy(owner);return *token;
+    }
+  } catch(...) {failed.store(true);}
+  return {};
+}
+void EndClothRebuild(uint8_t* base,graphics::ObservedInstanceToken token) noexcept {
+  if(!InstanceProbeEnabled() || !token.generation)return;
+  try {auto& state=Probe();std::lock_guard lock(state.mutex);uint32_t table=0;
+    if(state.lifetimes.IsAlive(token) && Word(base,token.address,table) && table==0x82021DA8) {
+      state.cloth_topologies.Create(token.address);
+      if(state.cloth_topologies.exhausted())failed.store(true);
+    }
   } catch(...) {failed.store(true);}
 }
 void InvokeInstanceProbeRender(uint32_t address,PPCFunc* original,PPCContext& ctx,uint8_t* base) {
@@ -254,4 +313,11 @@ REX_EXTERN(__imp__sub_82301368);
 extern "C" REX_FUNC(sub_82301368) {
   superman_returns::native::Destroyed(ctx.r3.u32);
   __imp__sub_82301368(ctx,base);
+}
+
+REX_EXTERN(__imp__sub_822F3638);
+extern "C" REX_FUNC(sub_822F3638) {
+  const auto token=superman_returns::native::BeginClothRebuild(base,ctx.r3.u32);
+  __imp__sub_822F3638(ctx,base);
+  superman_returns::native::EndClothRebuild(base,token);
 }

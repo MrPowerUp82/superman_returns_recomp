@@ -2,6 +2,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <array>
 #include <limits>
 #include <optional>
 #include <unordered_map>
@@ -20,6 +21,17 @@ struct ObservedPartSelection {
     bool source_route_observed = false;
 };
 
+struct ObservedClothBuffer {
+    uint32_t object=0,physical=0,bytes=0;
+};
+struct ObservedClothSelection {
+    uint64_t topology_generation=0;
+    uint32_t vertices=0,quads=0,ring=0,caller=0;
+    std::array<ObservedClothBuffer,4> streams{};
+    ObservedClothBuffer indices;
+    bool index32=false,source_route_observed=false;
+};
+
 // Immutable frontend observation carried with a draw to the worker. This is
 // provenance for diagnostics, not a GeometryHistoryProof or actor class.
 struct ObservedRenderInvocation {
@@ -27,6 +39,7 @@ struct ObservedRenderInvocation {
     uint32_t render = 0, vtable = 0;
     uint32_t packet = 0, packet_word16 = 0; // Observed only; no lifetime/part identity.
     ObservedPartSelection part;
+    ObservedClothSelection cloth;
 };
 
 // Observations only: Create follows a normal constructor return; Destroy

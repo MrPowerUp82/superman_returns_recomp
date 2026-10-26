@@ -69,6 +69,7 @@
 #include "../graphics/motion_depth_boundary.h"
 #include "../graphics/scene_color_vertex_input.h"
 #include "../graphics/pixel_coverage_shader.h"
+#include "../graphics/motion_raster_coverage.h"
 #include "instance_probe.h"
 #include "../graphics/observed_skinned_motion.h"
 #include "../graphics/observed_skinned_part_key.h"
@@ -523,7 +524,7 @@ bool TextureSlotLookupCaching() {
   }();
   return enabled;
 }
-// Ponteiro do host para uma faixa do jogo, ou nullptr se ela cai fora do espaÃƒÂ§o de endereÃƒÂ§os.
+// Ponteiro do host para uma faixa do jogo, ou nullptr se ela cai fora do espaÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§o de endereÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§os.
 const uint8_t* GuestSource(uint8_t* base, uint32_t address, uint32_t length) {
   if(uint64_t(address)+length>(uint64_t{1}<<32)) return nullptr;
   if(address>=0xa0000000u && address<0xc0000000u) {
@@ -3150,9 +3151,9 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
   current_motion_raster_.color_mask=color_mask;current_motion_raster_.stencil_enabled=depth.stencil_enable;
   current_motion_raster_.z_write=depth.z_write_enable;
   current_motion_raster_.coverage_id=coverage_variant ? motion_coverage_draw_id_ : 0;
-  current_motion_raster_.opaque=bound_samples_==1 && depth.z_enable && depth.z_write_enable &&
-      !depth.stencil_enable && !REXCVAR_GET(sr_native_debug_no_ztest) &&
-      (((blend.value&0x1fff)==1 && (!(motion_color&8) || (motion_color&7)==7)) || coverage_variant);
+  current_motion_raster_.opaque=graphics::CanReplayMotionRasterCoverage(bound_samples_,depth.z_enable,
+      depth.z_write_enable,depth.stencil_enable,REXCVAR_GET(sr_native_debug_no_ztest),
+      blend.value,motion_color,current_motion_raster_.coverage_id);
   uint32_t slope_bits;
   std::memcpy(&slope_bits, &slope_bias, 4);
 
@@ -6233,6 +6234,7 @@ void Renderer::ExecDrawIndexedVertices(uint8_t* base, const WorkBatch& batch,
     D3D12_INDEX_BUFFER_VIEW qv{tris.gpu, quad_indices * 4, DXGI_FORMAT_R32_UINT};
     command_list_->IASetIndexBuffer(&qv);
     if (!SkipGpuDraw()) {BeforeMotionColorDraw();command_list_->DrawIndexedInstanced(quad_indices, 1, 0, base_vertex, 0);AfterMotionColorDraw();}
+    ReportObservedClothDraw(batch,cmd);
     // Generated/inline geometry has no attested temporal identity here.
     CaptureMotionClipDraw(base,dev,topology,true,quad_indices,0,base_vertex,
         D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED,nullptr,nullptr);

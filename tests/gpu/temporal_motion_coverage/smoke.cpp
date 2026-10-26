@@ -142,8 +142,8 @@ struct Scene {
   ComPtr<ID3D12Resource> mask,clip,bg_previous,fg_previous;
   ComPtr<ID3D12DescriptorHeap> rtv;
   ComPtr<ID3D12RootSignature> root;
-  ComPtr<ID3D12PipelineState> pso;
-  Scene(GPU& gpu,uint32_t foreground_id=2,bool unowned=false,bool foreground_unmasked=false):depth(gpu) {
+  ComPtr<ID3D12PipelineState> pso,stencil_mark;
+  Scene(GPU& gpu,uint32_t foreground_id=2,bool unowned=false,bool foreground_unmasked=false,bool stencil_fixture=false):depth(gpu) {
     clip=gpu.Upload(Fullscreen());bg_previous=gpu.Upload(Previous(2,-1));fg_previous=gpu.Upload(Previous(-3,2));
     auto desc=depth.texture->GetDesc();desc.Format=DXGI_FORMAT_R32_UINT;desc.Flags=D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
     mask=Texture(gpu,desc,D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -162,6 +162,14 @@ struct Scene {
     pd.RasterizerState.FillMode=D3D12_FILL_MODE_SOLID;pd.RasterizerState.CullMode=D3D12_CULL_MODE_NONE;pd.RasterizerState.DepthClipEnable=TRUE;
     pd.DepthStencilState.DepthEnable=TRUE;pd.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ALL;
     pd.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_LESS_EQUAL;pd.DSVFormat=DXGI_FORMAT_D24_UNORM_S8_UINT;
+    if(stencil_fixture) {
+      pd.DepthStencilState.StencilEnable=TRUE;pd.DepthStencilState.StencilReadMask=0xFF;
+      pd.DepthStencilState.StencilWriteMask=0;
+      pd.DepthStencilState.FrontFace=pd.DepthStencilState.BackFace={D3D12_STENCIL_OP_KEEP,
+          D3D12_STENCIL_OP_KEEP,D3D12_STENCIL_OP_KEEP,D3D12_COMPARISON_FUNC_EQUAL};
+      // Equal depth on BOTH halves: depth replay alone cannot recover stencil coverage.
+      gpu.list->ClearDepthStencilView(depth.dsv,D3D12_CLEAR_FLAG_DEPTH|D3D12_CLEAR_FLAG_STENCIL,.5f,0,0,nullptr);
+    }
     pd.NumRenderTargets=1;pd.RTVFormats[0]=DXGI_FORMAT_R32_UINT;
     auto& blend=pd.BlendState.RenderTarget[0];blend.SrcBlend=blend.SrcBlendAlpha=D3D12_BLEND_ONE;
     blend.DestBlend=blend.DestBlendAlpha=D3D12_BLEND_ZERO;blend.BlendOp=blend.BlendOpAlpha=D3D12_BLEND_OP_ADD;
@@ -173,12 +181,26 @@ struct Scene {
     gpu.list->RSSetViewports(1,&vp);gpu.list->RSSetScissorRects(1,&sc);
     gpu.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);gpu.list->OMSetRenderTargets(1,&target,FALSE,&depth.dsv);
     const uint32_t background[2]{1,0},foreground[2]{foreground_id,1};
+    if(stencil_fixture) {
+      auto mark=pd;mark.DepthStencilState.DepthEnable=FALSE;mark.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO;
+      mark.DepthStencilState.StencilWriteMask=0xFF;
+      mark.DepthStencilState.FrontFace=mark.DepthStencilState.BackFace={D3D12_STENCIL_OP_KEEP,
+          D3D12_STENCIL_OP_KEEP,D3D12_STENCIL_OP_REPLACE,D3D12_COMPARISON_FUNC_ALWAYS};
+      mark.BlendState.RenderTarget[0].RenderTargetWriteMask=0;
+      Check(gpu.device->CreateGraphicsPipelineState(&mark,IID_PPV_ARGS(&stencil_mark)),"stencil mark PSO");
+      const D3D12_RECT left{0,0,LONG(W/2),LONG(H)};gpu.list->OMSetStencilRef(1);
+      gpu.list->SetPipelineState(stencil_mark.Get());gpu.list->RSSetScissorRects(1,&left);
+      gpu.list->SetGraphicsRoot32BitConstants(1,2,background,0);gpu.list->DrawInstanced(3,1,0,0);
+      gpu.list->SetPipelineState(pso.Get());gpu.list->RSSetScissorRects(1,&sc);
+    }
     gpu.list->SetGraphicsRoot32BitConstants(1,2,background,0);gpu.list->DrawInstanced(3,1,0,0);
     // Unsupported writer explicitly unbinds the coverage MRT. Last audited
     // background ID remains; it is NOT a global nearest-writer identifier.
     if(foreground_unmasked) gpu.list->OMSetRenderTargets(0,nullptr,FALSE,&depth.dsv);
     gpu.list->SetGraphicsRoot32BitConstants(1,2,foreground,0);gpu.list->DrawInstanced(3,1,0,0);
     if(unowned) {const D3D12_RECT empty{0,0,8,LONG(H)};gpu.list->ClearRenderTargetView(target,zero,1,&empty);}
+    if(stencil_fixture)
+      gpu.list->ClearDepthStencilView(depth.dsv,D3D12_CLEAR_FLAG_STENCIL,1,2,0,nullptr);
     gpu.list->OMSetRenderTargets(0,nullptr,FALSE,nullptr);
     Transition(gpu.list.Get(),mask.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     Transition(gpu.list.Get(),depth.texture.Get(),D3D12_RESOURCE_STATE_DEPTH_WRITE,D3D12_RESOURCE_STATE_DEPTH_READ);
@@ -197,8 +219,8 @@ struct Scene {
 };
 static bool CoverageCase(GPU& gpu,TemporalMotion& motion,const char* name,bool bg_unknown,bool fg_unknown,
                          bool reverse=false,bool unowned=false,uint32_t foreground_id=2,bool no_mask=false,bool foreground_unmasked=false,
-                         bool depth_control=false) {
-  Check(motion.BeginFrame(0),"fenced coverage BeginFrame");Scene scene(gpu,foreground_id,unowned,foreground_unmasked);
+                         bool depth_control=false,bool stencil_fixture=false) {
+  Check(motion.BeginFrame(0),"fenced coverage BeginFrame");Scene scene(gpu,foreground_id,unowned,foreground_unmasked,stencil_fixture);
   if(depth_control) {
     Transition(gpu.list.Get(),scene.depth.texture.Get(),D3D12_RESOURCE_STATE_DEPTH_READ,D3D12_RESOURCE_STATE_DEPTH_WRITE);
     gpu.list->ClearDepthStencilView(scene.depth.dsv,D3D12_CLEAR_FLAG_DEPTH,.75f,0,0,nullptr);
@@ -221,7 +243,7 @@ static bool CoverageCase(GPU& gpu,TemporalMotion& motion,const char* name,bool b
     uint32_t id=0,z=0,z_after=0;std::memcpy(&id,ids.data()+owner.layout.Offset+y*owner.layout.Footprint.RowPitch+x*4,4);
     std::memcpy(&z,before.data()+original_depth.layout.Offset+y*original_depth.layout.Footprint.RowPitch+x*4,4);
     std::memcpy(&z_after,after.data()+final_depth.layout.Offset+y*final_depth.layout.Footprint.RowPitch+x*4,4);
-    const uint32_t expected_owner=foreground_unmasked ? 1:(unowned&&x<8 ? 0:(((x/4+y/4)&1) ? 1:foreground_id));
+    const uint32_t expected_owner=stencil_fixture && x>=W/2 ? 0:foreground_unmasked ? 1:(unowned&&x<8 ? 0:(((x/4+y/4)&1) ? 1:foreground_id));
     const bool fg=no_mask||foreground_unmasked ? !reverse:id==foreground_id;
     const bool invalid=depth_control||(no_mask ? (fg ? fg_unknown:bg_unknown):(id==0||(fg ? fg_unknown:bg_unknown)));
     const float expected_x=invalid ? 0:(fg ? -3.f:2.f),expected_y=invalid ? 0:(fg ? 2.f:-1.f);
@@ -304,6 +326,8 @@ int main() {
     ++cases;if(!CoverageCase(gpu,motion,"unmasked unknown invalidates despite retained audited ID",false,true,false,false,2,false,true)) ++failures;
     ++cases;if(!CoverageCase(gpu,motion,"unmasked known draw ignores retained audited ID",false,false,false,false,2,false,true)) ++failures;
     ++cases;if(!CoverageCase(gpu,motion,"matching owner cannot bypass depth EQUAL",false,false,false,false,2,false,false,true)) ++failures;
+    ++cases;if(!CoverageCase(gpu,motion,"original stencil coverage with later stencil replacement",false,false,false,false,2,false,false,false,true)) ++failures;
+    ++cases;if(!CoverageCase(gpu,motion,"unknown stencil writer invalidates only original passing fragments",false,true,false,false,2,false,false,false,true)) ++failures;
     run("null coverage legacy output",false,false,false,false,2,true);
     run("null coverage legacy unknown invalidation",false,true,false,false,2,true);
     ++cases;if(!ValidationCases(gpu,motion)) ++failures;

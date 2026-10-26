@@ -1,5 +1,24 @@
 // Included inside native_renderer.cpp's namespace to share its audited IA helpers.
 // Opt-in two-frame experiment. This does not claim gameplay DLSS readiness.
+void Renderer::ReportObservedClothDraw(const WorkBatch& batch,const WorkCmd& cmd) {
+  if(!motion_capture_active_ || motion_scene_finished_ || motion_cloth_reports_>=2 ||
+     current_vs_hash_!=0xA5232A3184AA617Cull || cmd.observed_render.render!=0x82301510) return;
+  ++motion_cloth_reports_;const auto& c=cmd.observed_render.cloth;
+  REXLOG_INFO("native observed cloth route: phase={} serial={} owner={:08X} generation={} checked={} topology_generation={} caller={:08X} vertices={} quads={} ring={} index32={} expected_ib={:08X}/{} actual_ib={:08X}/{} streams={} identity_verified=false",
+      motion_capture_phase_,cmd.command_serial,cmd.observed_render.token.address,cmd.observed_render.token.generation,
+      c.source_route_observed,c.topology_generation,c.caller,c.vertices,c.quads,c.ring,c.index32,
+      c.indices.physical,c.indices.bytes,cmd.index.address,cmd.index.size,cmd.stream_count);
+  if(uint64_t(cmd.stream_first)+cmd.stream_count>batch.streams.size()) return;
+  for(uint32_t i=0;i<cmd.stream_count;++i) {
+    const auto& stream=batch.streams[cmd.stream_first+i];
+    if(stream.stream>=4)continue;
+    const auto& expected=c.streams[stream.stream];
+    REXLOG_INFO("native observed cloth stream: phase={} serial={} role={} expected_object={:08X} expected_physical={:08X} expected_bytes={} actual_physical={:08X} actual_bytes={} offset={} stride={} view_bytes={}",
+        motion_capture_phase_,cmd.command_serial,stream.stream,expected.object,expected.physical,expected.bytes,
+        stream.buffer.address,stream.buffer.size,stream.offset,stream.stride,stream.size);
+  }
+}
+
 void Renderer::CaptureMotionClipDraw(uint8_t* base,uint32_t dev,D3D12_PRIMITIVE_TOPOLOGY topology,
     bool indexed,uint32_t count,uint32_t first,int32_t base_vertex,
     D3D12_INDEX_BUFFER_STRIP_CUT_VALUE cut,const WorkBatch* batch,const WorkCmd* cmd) {
@@ -258,7 +277,7 @@ void Renderer::BeginMotionCapture() {
     motion_clips_=std::move(clips);
   }
   if(!motion_clips_->Begin(command_list_.Get(),frame_index_)) {motion_capture_done_=true;return;}
-  ++motion_capture_phase_;motion_capture_active_=true;motion_signature_reports_=0;motion_owner_reports_={};
+  ++motion_capture_phase_;motion_capture_active_=true;motion_signature_reports_=0;motion_owner_reports_={};motion_cloth_reports_=0;
   if(motion_capture_phase_==1) {motion_previous_jitter_={};ArmInstanceProbe();}
   motion_jitter_ready_=graphics::MakeSceneRasterJitter(motion_capture_phase_-1,
       HostPx(kOutputWidth,render_scale_),HostPx(kOutputHeight,render_scale_),

@@ -50,6 +50,7 @@ add_executable(sr_native_tests
     test_observed_skinned_part_key.cpp
     test_rt_shadow_shader.cpp
     test_pixel_coverage_shader.cpp
+    test_motion_raster_coverage.cpp
     "${SR_NATIVE_DIR}/../graphics/pixel_coverage_shader.cpp"
     "${SR_NATIVE_DIR}/../graphics/rt_shadow_shader.cpp"
     "${SR_NATIVE_DIR}/../graphics/graphics_preferences.cpp"
