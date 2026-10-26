@@ -43,4 +43,22 @@ SR_TEST(checked_guest_reads_reuse_slots_without_aliasing_successful_reads) {
   SR_CHECK_EQ(a[0],31u);SR_CHECK_EQ(b[0],23u);
   reads.Reset();SR_CHECK_EQ(reads.Read(second.data(),128)[0],23u);
 }
+SR_TEST(checked_guest_reads_scratch_does_not_disturb_nested_slots) {
+  CheckedGuestReads reads;
+  std::array<uint8_t, 64> indirect{}, alu1{}, alu2{};
+  indirect.fill(0xAA);
+  alu1.fill(0x11);
+  alu2.fill(0x22);
+  auto outer = reads.Read(indirect.data(), uint32_t(indirect.size()));
+  const auto* outer_ptr = outer.data();
+  auto s1 = reads.ReadScratch(alu1.data(), uint32_t(alu1.size()));
+  SR_CHECK_EQ(s1.size(), alu1.size());
+  SR_CHECK_EQ(s1[0], 0x11u);
+  auto s2 = reads.ReadScratch(alu2.data(), uint32_t(alu2.size()));
+  SR_CHECK_EQ(s2.size(), alu2.size());
+  SR_CHECK_EQ(s2[0], 0x22u);
+  SR_CHECK(outer.data() == outer_ptr);
+  SR_CHECK_EQ(outer[0], 0xAAu);
+  SR_CHECK(reads.ReadScratch(nullptr, 16).empty());
+}
 #endif

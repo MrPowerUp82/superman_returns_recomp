@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <array>
+#include <algorithm>
 #include <cstring>
 #include <functional>
 #include <span>
@@ -106,7 +107,11 @@ private:
     if (index >= kRegisterCount)
       return;
     if (index - kAluConstantBase < 0x800u && regs_[index] != value) {
-      ++(index < kAluConstantBase + 0x400 ? vs_version : ps_version);
+      const uint32_t bank = (index < kAluConstantBase + 0x400) ? 0 : 1;
+      const uint32_t offset = (index - kAluConstantBase) & 0x3FFu;
+      float_dirty_min_[bank] = std::min(float_dirty_min_[bank], offset);
+      float_dirty_max_[bank] = std::max(float_dirty_max_[bank], offset + 1);
+      ++(bank == 0 ? vs_version : ps_version);
     }
     regs_[index] = value;
     if (index >= kAluConstantBase && index < kAluConstantBase + kTrackedCount) {
@@ -115,6 +120,8 @@ private:
   }
   uint32_t regs_[kRegisterCount] = {};
   bool written_[kTrackedCount] = {};
+  mutable std::array<uint32_t, 2> float_dirty_min_{0, 0};
+  mutable std::array<uint32_t, 2> float_dirty_max_{1024, 1024};
   mutable std::array<std::array<uint32_t,1024>,2> float_cache_{};
   mutable std::array<uint64_t,2> float_cache_version_{};
   mutable std::array<std::shared_ptr<const std::array<uint32_t,1024>>,2> float_snapshots_;

@@ -262,6 +262,37 @@ SR_TEST(cached_float_constants_refresh_on_change_and_preserve_raw_mirror) {
   SR_CHECK_EQ(m.FloatConstants(false)[3],0u);
 }
 
+SR_TEST(float_constants_incremental_dirty_range_sanitizes_nans_and_preserves_clean_words) {
+  Pm4Mirror m;
+  Stream s1;
+  // Write VS c0.x = 1.0f, c0.y = quiet NaN (0x7FC00001), PS c255.w (offset 1023) = 2.0f.
+  s1.Type0(Pm4Mirror::kAluConstantBase, {0x3F800000u, 0x7FC00001u, 0x40000000u, 0x40400000u});
+  s1.Type0(Pm4Mirror::kAluConstantBase + 1024 + 1023, {0x40000000u});
+  m.ScanCopy(nullptr, s1.bytes.data(), s1.size());
+
+  const auto& vs1 = m.FloatConstants(false);
+  const auto& ps1 = m.FloatConstants(true);
+  SR_CHECK_EQ(vs1[0], 0x3F800000u);
+  SR_CHECK_EQ(vs1[1], 0u); // NaN sanitized to 0
+  SR_CHECK_EQ(vs1[2], 0x40000000u);
+  SR_CHECK_EQ(vs1[3], 0x40400000u);
+  SR_CHECK_EQ(ps1[1023], 0x40000000u);
+
+  // Partial update: modify only VS c10.x (offset 40) to NaN and c10.y (offset 41) to 4.0f.
+  Stream s2;
+  s2.Type0(Pm4Mirror::kAluConstantBase + 40, {0x7F800005u, 0x40800000u});
+  m.ScanCopy(nullptr, s2.bytes.data(), s2.size());
+
+  const auto& vs2 = m.FloatConstants(false);
+  SR_CHECK_EQ(vs2[0], 0x3F800000u);
+  SR_CHECK_EQ(vs2[1], 0u);
+  SR_CHECK_EQ(vs2[2], 0x40000000u);
+  SR_CHECK_EQ(vs2[3], 0x40400000u);
+  SR_CHECK_EQ(vs2[40], 0u);
+  SR_CHECK_EQ(vs2[41], 0x40800000u);
+  SR_CHECK_EQ(m.ShareFloatConstants(false)->at(41), 0x40800000u);
+}
+
 SR_TEST(load_alu_constant_reads_guest_memory) {
   GuestMemory mem;
   mem.Store(0x100, 0xDEADBEEF);

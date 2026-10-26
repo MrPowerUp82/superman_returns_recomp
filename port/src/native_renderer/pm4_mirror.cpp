@@ -22,9 +22,17 @@ const std::array<uint32_t,1024>& Pm4Mirror::FloatConstants(bool pixel) const {
   const uint32_t bank=pixel?1:0;
   const uint64_t version=pixel?ps_version:vs_version;
   if(float_cache_version_[bank]!=version) {
-    std::string error;
-    graphics::guest::CaptureFloatConstants({regs_+kAluConstantBase+bank*1024,1024},false,float_cache_[bank],error);
-    float_cache_version_[bank]=version;
+    const auto* src = regs_ + kAluConstantBase + bank * 1024;
+    auto& dst = float_cache_[bank];
+    const uint32_t start = std::min(float_dirty_min_[bank], 1024u);
+    const uint32_t end = std::min(float_dirty_max_[bank], 1024u);
+    for(uint32_t i = start; i < end; ++i) {
+      const uint32_t v = src[i];
+      dst[i] = ((v & 0x7f800000u) == 0x7f800000u && (v & 0x007fffffu)) ? 0u : v;
+    }
+    float_dirty_min_[bank] = 1024;
+    float_dirty_max_[bank] = 0;
+    float_cache_version_[bank] = version;
   }
   return float_cache_[bank];
 }
@@ -78,16 +86,27 @@ void Pm4Mirror::WriteRange(uint32_t first,const uint8_t* words,uint32_t count) {
      count<=kAluConstantBase+0x800-first) {
     while(count) {
       const bool pixel=first>=kAluConstantBase+0x400;
+      const uint32_t bank=pixel?1:0;
       const uint32_t end=kAluConstantBase+(pixel?0x800:0x400);
       const uint32_t length=std::min(count,end-first);
+      const uint32_t bank_offset=(first-kAluConstantBase)&0x3FFu;
+      uint32_t first_change=length,last_change=0;
       uint32_t changes=0;
       auto* destination=regs_+first;
       for(size_t i=0;i<length;++i) {
         uint32_t value;
         std::memcpy(&value,words+i*4,4);
         value=__builtin_bswap32(value);
-        changes+=destination[i]!=value;
-        destination[i]=value;
+        if(destination[i]!=value) {
+          ++changes;
+          first_change=std::min(first_change,uint32_t(i));
+          last_change=uint32_t(i+1);
+          destination[i]=value;
+        }
+      }
+      if(changes) {
+        float_dirty_min_[bank]=std::min(float_dirty_min_[bank],bank_offset+first_change);
+        float_dirty_max_[bank]=std::max(float_dirty_max_[bank],bank_offset+last_change);
       }
       std::memset(written_+first-kAluConstantBase,1,length);
       (pixel?ps_version:vs_version)+=changes;
@@ -267,9 +286,7 @@ void Pm4Mirror::ScanFrom(const uint8_t *base, const uint8_t *stream,
           if (bounded_alu_reads) {
             // WriteRange consumes this span synchronously. No source span
             // survives into the next ALU load or a nested command scan.
-            thread_local CheckedGuestReads reads;
-            reads.Reset();
-            captured = reads.Read(live_source, size * 4);
+            captured = indirect_reads.ReadScratch(live_source, size * 4);
             readable = captured.size() >= size * 4;
             source = captured.data();
             if (profile) ++profile->bounded_calls;

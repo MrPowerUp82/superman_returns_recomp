@@ -28,15 +28,26 @@ class CheckedGuestReads {
     ++used_;
     return bytes;
   }
+  std::span<const uint8_t> ReadScratch(const void* source, uint32_t length) {
+    if (!source || !length || length > 0x20000000u) return {};
+    scratch_.resize(length);
+    SIZE_T copied = 0;
+    if (!ReadProcessMemory(GetCurrentProcess(), source, scratch_.data(), length, &copied) || copied != length) {
+      return {};
+    }
+    return scratch_;
+  }
   void Reset() {
     // Reuse small draw/PM4 reads, but never retain an unbounded streaming
     // snapshot. At most 32 slots of 64 KiB (2 MiB) survive a command.
     copies_.resize(std::min(copies_.size(),size_t{32}));
     for(auto& bytes:copies_) if(bytes.capacity()>64*1024) std::vector<uint8_t>().swap(bytes);
+    if(scratch_.capacity()>64*1024) std::vector<uint8_t>().swap(scratch_);
     used_=0;
   }
  private:
   std::vector<std::vector<uint8_t>> copies_;
+  std::vector<uint8_t> scratch_;
   size_t used_=0;
 };
 } // namespace superman_returns::native

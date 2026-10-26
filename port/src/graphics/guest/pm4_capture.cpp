@@ -12,6 +12,25 @@ inline uint64_t NowNs() {
                       std::chrono::steady_clock::now().time_since_epoch())
                       .count());
 }
+
+struct Dependency {
+  uint32_t address = 0;
+  std::vector<uint8_t> bytes;
+};
+
+struct DependencyArena {
+  std::vector<Dependency> slots;
+  size_t used = 0;
+
+  void Reset() {
+    slots.resize(std::min(slots.size(), size_t{32}));
+    for (auto &slot : slots) {
+      if (slot.bytes.capacity() > 64 * 1024)
+        std::vector<uint8_t>().swap(slot.bytes);
+    }
+    used = 0;
+  }
+};
 } // namespace
 bool CapturePm4Dependencies(WorkBatch &batch, const WorkCmd &cmd,
                             const GuestMemoryReader &read, std::string &error,
@@ -29,10 +48,8 @@ bool CapturePm4Dependencies(WorkBatch &batch, const WorkCmd &cmd,
   const auto primary=std::span<const uint8_t>(batch.bytes).subspan(cmd.ring_offset,cmd.ring_bytes);
   if (probe)
     probe->primary_ns += NowNs() - primary_t0;
-  struct Dependency {uint32_t address;std::vector<uint8_t> bytes;};
-  // Moving an inner vector keeps its allocation (and recursive reader spans)
-  // stable when this outer vector grows. No allocation without dependencies.
-  std::vector<Dependency> sources;
+  thread_local DependencyArena arena;
+  arena.Reset();
   const size_t initial_bytes = batch.bytes.size(),
                initial_ranges = batch.ranges.size();
   try {
@@ -67,21 +84,26 @@ bool CapturePm4Dependencies(WorkBatch &batch, const WorkCmd &cmd,
             probe->bytes += length;
           }
           const uint64_t copy_t0 = probe ? NowNs() : 0;
-          sources.push_back({address,{source.begin(),source.begin()+length}});
-          staged_bytes+=length;
+          if (arena.used == arena.slots.size())
+            arena.slots.emplace_back();
+          auto &slot = arena.slots[arena.used++];
+          slot.address = address;
+          slot.bytes.assign(source.begin(), source.begin() + length);
+          staged_bytes += length;
           if (probe)
             probe->copy_ns += NowNs() - copy_t0;
-          return sources.back().bytes;
+          return slot.bytes;
         });
     if (scanner.unreadable_alu_loads == alu_before &&
         scanner.unreadable_indirect_buffers == indirect_before) {
       const uint64_t copy_t0=probe?NowNs():0;
       // Preserve vector's geometric growth across commands in a batch. Exact
       // size reserves here would recopy the accumulated arena on every draw.
-      for(const auto& source:sources) {
-        const auto offset=uint32_t(batch.bytes.size());
-        batch.bytes.insert(batch.bytes.end(),source.bytes.begin(),source.bytes.end());
-        batch.ranges.push_back({source.address,uint32_t(source.bytes.size()),offset});
+      for (size_t i = 0; i < arena.used; ++i) {
+        const auto &source = arena.slots[i];
+        const auto offset = uint32_t(batch.bytes.size());
+        batch.bytes.insert(batch.bytes.end(), source.bytes.begin(), source.bytes.end());
+        batch.ranges.push_back({source.address, uint32_t(source.bytes.size()), offset});
       }
       if(probe) probe->copy_ns+=NowNs()-copy_t0;
       return true;
