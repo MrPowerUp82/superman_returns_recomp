@@ -80,6 +80,7 @@ struct WorkCmd {
   uint32_t range_first = 0, range_count = 0;
   uint32_t stream_first = 0, stream_count = 0;
   bool streams_ok = true;
+  bool dynamic_vertex_fetch = false;
   bool pm4_capture_ok = true;
   bool resolve_copy_draw=false;
   uint32_t resolve_copy_dest_info=0;

@@ -14,7 +14,7 @@ public sealed class LauncherSettings
     public string Gpu { get; set; } = "Auto";
     public int GpuIndex { get; set; } = -1;
     public string GpuLuid { get; set; } = "";
-    public bool VSync { get; set; } = true;
+    public bool VSync { get; set; } = false;
     public string FpsLimit { get; set; } = "0";
     public string RenderScale { get; set; } = "100";
     public string TextureFilter { get; set; } = "Original";

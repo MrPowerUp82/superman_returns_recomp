@@ -75,6 +75,12 @@ public:
            index < kAluConstantBase + kTrackedCount &&
            written_[index - kAluConstantBase];
   }
+  uint64_t fetch_version(uint32_t slot) const {
+    return slot < fetch_versions_.size() ? fetch_versions_[slot] : 0;
+  }
+  bool fetch_complete(uint32_t slot) const {
+    return slot < fetch_written_masks_.size() && fetch_written_masks_[slot] == 0x3Fu;
+  }
 
   uint64_t packets = 0;
   uint64_t dwords = 0;
@@ -106,6 +112,14 @@ private:
   void Write(uint32_t index, uint32_t value) {
     if (index >= kRegisterCount)
       return;
+    if (index >= kFetchConstantBase && index < kFetchConstantBase + fetch_versions_.size() * 6) {
+      const uint32_t offset = index - kFetchConstantBase;
+      const uint32_t slot = offset / 6;
+      const uint8_t bit = uint8_t(1u << (offset % 6));
+      if (!(fetch_written_masks_[slot] & bit) || regs_[index] != value)
+        ++fetch_versions_[slot];
+      fetch_written_masks_[slot] |= bit;
+    }
     if (index - kAluConstantBase < 0x800u && regs_[index] != value) {
       const uint32_t bank = (index < kAluConstantBase + 0x400) ? 0 : 1;
       const uint32_t offset = (index - kAluConstantBase) & 0x3FFu;
@@ -120,6 +134,8 @@ private:
   }
   uint32_t regs_[kRegisterCount] = {};
   bool written_[kTrackedCount] = {};
+  std::array<uint64_t,16> fetch_versions_{};
+  std::array<uint8_t,16> fetch_written_masks_{};
   mutable std::array<uint32_t, 2> float_dirty_min_{0, 0};
   mutable std::array<uint32_t, 2> float_dirty_max_{1024, 1024};
   mutable std::array<std::array<uint32_t,1024>,2> float_cache_{};

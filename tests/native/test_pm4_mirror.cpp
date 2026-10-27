@@ -212,6 +212,36 @@ SR_TEST(set_constant_targets_each_register_file) {
   SR_CHECK(!m.written(Pm4Mirror::kAluConstantBase + 9));
 }
 
+SR_TEST(fetch_slot_versions_track_complete_mirror_state) {
+  Pm4Mirror m;
+  constexpr uint32_t slot = 1;
+  constexpr uint32_t first = Pm4Mirror::kFetchConstantBase + slot * 6;
+  const uint64_t initial = m.fetch_version(slot);
+  SR_CHECK(!m.fetch_complete(slot));
+
+  Stream partial;
+  partial.Type0(first, {0x11, 0x22, 0x33, 0x44, 0x55});
+  m.ScanCopy(nullptr, partial.bytes.data(), partial.size());
+  SR_CHECK(m.fetch_version(slot) > initial);
+  SR_CHECK(!m.fetch_complete(slot));
+
+  Stream last;
+  last.Type0(first + 5, {0x66});
+  m.ScanCopy(nullptr, last.bytes.data(), last.size());
+  SR_CHECK(m.fetch_complete(slot));
+  const uint64_t complete_version = m.fetch_version(slot);
+
+  Stream identical;
+  identical.Type0(first, {0x11, 0x22, 0x33, 0x44, 0x55, 0x66});
+  m.ScanCopy(nullptr, identical.bytes.data(), identical.size());
+  SR_CHECK_EQ(m.fetch_version(slot), complete_version);
+
+  Stream changed;
+  changed.Type0(first + 2, {0x99});
+  m.ScanCopy(nullptr, changed.bytes.data(), changed.size());
+  SR_CHECK(m.fetch_version(slot) > complete_version);
+}
+
 SR_TEST(pixel_constant_writes_bump_only_the_ps_version) {
   Pm4Mirror m;
   Stream s;

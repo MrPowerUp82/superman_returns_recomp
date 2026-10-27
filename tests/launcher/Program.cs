@@ -5,6 +5,8 @@ void Check(bool condition, string name) { Console.WriteLine($"{(condition ? "PAS
 var settings = new LauncherSettings { GraphicsApi = "d3d12", RenderScale = "150", FpsLimit = "60", Antialiasing = "FXAA", TextureFilter = "Anisotropic8x" };
 var commandArgs = settings.BuildArguments();
 Check(new LauncherSettings().BuildArgumentList().Contains("--sr_native_fps_limit=0"), "new installs launch without the native 30 FPS limit");
+Check(new LauncherSettings().BuildArgumentList().Contains("--vsync=false"), "new installs select Canary's no-vsync unlock mode");
+Check(new LauncherSettings { VSync = true }.BuildArgumentList().Contains("--vsync=true"), "explicit VSync remains selectable");
 foreach (var api in new[] { "d3d12", "vulkan" })
 foreach (var fps in new[] { "0", "30", "60", "120" }) {
     var fpsArgs = new LauncherSettings { GraphicsApi = api, FpsLimit = fps }.BuildArgumentList();
@@ -99,6 +101,11 @@ foreach (var fps in new[] { "0", "30", "60", "120" }) {
 foreach (var invalidFps in new[] { "", "-1", "29", "240", "garbage" })
     Check(new LauncherSettings { FpsLimit = invalidFps }.BuildArgumentList().Contains("--sr_native_fps_limit=0"),
         $"invalid FPS {invalidFps} uses the uncapped default");
+foreach (var vsync in new[] { false, true }) {
+    var syncPath = Path.Combine(fixture, "vsync.ini");
+    new LauncherSettings { VSync = vsync }.Save(syncPath);
+    Check(LauncherSettings.Load(syncPath).VSync == vsync, $"saved VSync {vsync} survives restart");
+}
 Check(LauncherSettings.Load(ini).Renderer == "native", "renderer default survives round trip");
 Console.WriteLine($"{failed} failed checks");
 return failed == 0 ? 0 : 1;

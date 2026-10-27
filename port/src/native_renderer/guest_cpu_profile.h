@@ -2,6 +2,10 @@
 #include <chrono>
 #include "guest_sleep_profile.h"
 #include <rex/ppc/func.h>
+// SR_NATIVE_PRESENT_INTERVAL_PROBE_TRIGGER_PATH=<file>: independent diagnostic.
+// Logs the first eight interval setters, then up to 128 pre-Swap calls and
+// 128 Swap-owned fence waits once the file exists (trigger remains latched).
+// Disabled by default; wrappers always execute their original exactly once.
 namespace superman_returns::native {
 // Diagnostic wrapper: always calls the original exactly once. Uses the same
 // opt-in switch as the sampled guest functions; timings are wall time.

@@ -1,5 +1,10 @@
 # Otimizações de CPU e desbloqueio de FPS — 27/10/2026
 
+> Continuação: [port do mecanismo do Xenia Canary](xenia-canary-fps-unlock-2026-10-27.md).
+> A cadência de 240 Hz descrita nas medições históricas abaixo foi substituída
+> por vblank + espera de 1 ms no modo sem limite e sem VSync. O contador de
+> varredura passou a avançar e as novas preferências deixam VSync desligado.
+
 ## O que mudou
 
 O build normal agora prepara e verifica o runtime ReXGlue v0.10.0 com o patch
@@ -32,7 +37,7 @@ das preferências salvas. As preferências locais das instalações Release e
 Esses caminhos de CPU são do D3D12 nativo. A implementação Vulkan permanece
 disponível; não se afirma que o pacote D3D12 seja aplicado a ela.
 
-## Limite de apresentação e tempo do jogo
+## Limite de apresentação e tempo do jogo antes do port Canary
 
 O controle existente regula os vblanks nativos: 30 seleciona 60 Hz, 60 seleciona
 120 Hz e 120 seleciona 240 Hz, conforme a hipótese de dois vblanks por quadro.
@@ -94,3 +99,28 @@ a 60 FPS. A timeline apontou o jogo como limitante em 98% das amostras, com
 Esses números incluem diagnóstico e timeline. A medição sem esses instrumentos
 é registrada separadamente. As capturas foram inspecionadas e mostram Superman,
 cidade e HUD; não houve comparação visual alinhada contra uma referência Xbox.
+
+## Rodada sem diagnóstico e investigação do relógio
+
+`cpu_unlock_clean_20261027`: 29,4 FPS parado (mínimo de amostra 23,8) e
+29,6 em movimento (28,1), com VSync ligado e todos os perfis desligados.
+Essa rodada terminou em voo, com câmera diferente da rodada diagnóstica;
+não usar a diferença como ganho causal. O HUD e o minimapa foram observados.
+
+`cpu_unlock_clock_20261027`: diagnóstico com `vsync=false`, limite nativo zero,
+timeline e contadores de consultas ao relógio. Médias 27,3/25,4 FPS na cidade.
+Uma thread consultou os pontos `825F77D0`, `825F7880`,
+`822B5974` e `826D2774` aproximadamente 30 vezes/s, mesmo com a renderização
+abaixo disso. A análise posterior identificou esses callbacks no `AptAuxCore`
+e as duas primeiras funções como cronômetros: isso não comprova uma trava da
+física a 30 Hz. Esses dados não comprovam que todos os limitadores
+internos do jogo foram removidos.
+
+`SR_NATIVE_GUEST_CLOCK_PROFILE=1` conta os chamadores da função de relógio
+`824680D0` por thread, em armazenamento fixo. Não altera os resultados do
+relógio. O polling intenso de `825667C8` ocorreu durante a inicialização;
+nas janelas posteriores ele voltou a dezenas de consultas por segundo.
+Instrumentação fica desligada por padrão e seus FPS não são aceitação limpa.
+
+Os testes finais do setup passaram, incluindo preservação de timestamps e
+atualizações canônicas autorizadas com rejeição de mudanças desconhecidas.

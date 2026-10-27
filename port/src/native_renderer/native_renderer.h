@@ -430,13 +430,20 @@ class Renderer : public NativeFrontend {
     std::unordered_map<uint32_t, uint32_t> raw_srv_by_mapping;
   };
 
+  struct TextureLookupMetadata {
+    float resolve_scale = 1.0f;
+    bool resolve_shadow = false;
+    bool resolve_depth = false;
+  };
+
   const std::vector<uint8_t>* LoadShader(uint64_t hash, bool vertex);
   ID3D12PipelineState* GetPipeline(uint8_t* base, uint32_t dev, uint64_t vs_hash, uint64_t ps_hash,
                                    uint32_t decl, D3D12_PRIMITIVE_TOPOLOGY_TYPE topology_type,
                                    const DXGI_FORMAT rtv_formats[4], uint32_t rt_count,
                                    DXGI_FORMAT dsv_format,
                                    D3D12_INDEX_BUFFER_STRIP_CUT_VALUE strip_cut);
-  uint32_t GetTextureSrvIndex(uint8_t* base, const uint32_t fetch[6]);
+  uint32_t GetTextureSrvIndex(uint8_t* base, const uint32_t fetch[6],
+                              TextureLookupMetadata& metadata);
   uint32_t GetSamplerIndex(const uint32_t fetch[6], bool force_linear = false,
                            float lod_bias = 0.0f);
   bool UploadConstants(uint8_t* base, uint32_t dev);
@@ -860,12 +867,19 @@ class Renderer : public NativeFrontend {
   uint64_t cb_vs_version_ = 0, cb_ps_version_ = 0;
   D3D12_GPU_VIRTUAL_ADDRESS cb_vs_gpu_ = 0, cb_ps_gpu_ = 0;
   SharedConstantsCache shared_constants_cache_;
-  // Per fetch slot: last fetch constant and its SRV index this frame.
+  // Per fetch slot: a few recent fetch constants and their SRV indices this
+  // frame. Games often alternate A->B->A in the same slot; a one-entry cache
+  // needlessly re-ran the full texture lookup on every alternation.
   struct SlotCache {
-    uint32_t fetch[6] = {};
-    uint32_t srv = 0;
-    uint64_t frame = ~0ull;
-    bool smooth = false;  // point fetch of an upscaled color target -> linear
+    struct SrvEntry {
+      uint32_t fetch[6] = {};
+      uint32_t srv = 0;
+      uint64_t frame = ~0ull;
+      uint64_t fetch_version = 0;
+      bool smooth = false;  // point fetch of an upscaled color target -> linear
+    } srv_entries[8];
+    uint32_t next_srv_entry = 0;
+    uint32_t active_srv_entry = 0;
     // Sampler descriptors survive frame boundaries and resolve invalidations.
     // Unlike the SRV, only their sampling key determines whether to reuse one.
     uint64_t sampler_key = 0;
@@ -891,6 +905,7 @@ class Renderer : public NativeFrontend {
   // Byte-swapped host copies of guest vertex/index buffers.
   struct BufferEntry {
     Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+    D3D12_GPU_VIRTUAL_ADDRESS gpu_address = 0;
     uint32_t raw_srv = 0;
     uint64_t raw_srv_fence = 0;
     uint64_t resource_generation = 0;
@@ -904,6 +919,12 @@ class Renderer : public NativeFrontend {
     D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
   };
   std::unordered_map<uint64_t, BufferEntry> buffers_;
+  struct WorkerBufferLookupSlot {
+    uint64_t key = 0;
+    BufferEntry* entry = nullptr;
+  };
+  static constexpr size_t kWorkerBufferLookupCount = 4096;
+  std::array<WorkerBufferLookupSlot, kWorkerBufferLookupCount> worker_buffer_lookup_{};
   std::optional<BufferSrvCache> buffer_srv_cache_;
   uint64_t next_buffer_generation_ = 1;
   uint64_t next_buffer_content_version_ = 1;

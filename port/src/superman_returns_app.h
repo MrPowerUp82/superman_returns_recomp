@@ -87,6 +87,19 @@ class SupermanReturnsApp : public rex::ReXApp {
     gpu_default("render_target_path_d3d12", "rtv");
     gpu_default("depth_float24_convert_in_pixel_shader", "true");
     gpu_default("native_stencil_value_output_d3d12_intel", "true");
+#if SR_HAS_NATIVE
+    if(native && rex::cvar::Query<int32_t>("sr_native_fps_limit")==0)
+      gpu_default("vsync", "false");
+    if(native) {
+      // Both the vblank cadence and Vulkan swapchain read this option at
+      // setup. Advertise the actual lifecycle instead of promising a live
+      // change that would leave one of those owners on its old setting.
+      for(auto& flag:rex::cvar::GetRegistry()) if(flag.name=="vsync") {
+        flag.lifecycle=rex::cvar::Lifecycle::kRequiresRestart;
+        break;
+      }
+    }
+#endif
     if (!config.graphics && native) {
 #if SR_HAS_NATIVE
       config.graphics = superman_returns::native::CreateNativeGraphicsSystem(

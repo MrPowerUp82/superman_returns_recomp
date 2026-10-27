@@ -406,7 +406,8 @@ struct StreamDetailTimings {
   uint64_t setup_ns=0,apply_ns=0,ia_ns=0,srv_ns=0,declaration_ns=0,metadata_ns=0;
   uint64_t calls=0,streams=0,ia_binds=0,missing=0,failed_calls=0,dynamic_streams=0;
   uint64_t srv_created=0,srv_reused=0,srv_failed=0,declaration_reads=0,attributes=0,metadata_writes=0;
-  uint64_t srv_retained_hits=0,cache_evicted=0,cache_invalidated=0;
+  uint64_t srv_retained_hits=0,srv_same_fence_hits=0,cache_evicted=0,cache_invalidated=0;
+  uint64_t buffer_lookup_hits=0,buffer_lookup_maps=0;
   uint64_t actions[4]{}; // Plan actions 0/1/2/other, not actual upload counts.
 };
 thread_local StreamDetailTimings stream_detail_timings;
@@ -3491,8 +3492,10 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
   return pso.Get();
 }
 
-uint32_t Renderer::GetTextureSrvIndex(uint8_t* base, const uint32_t fetch[6]) {
+uint32_t Renderer::GetTextureSrvIndex(uint8_t* base, const uint32_t fetch[6],
+                                      TextureLookupMetadata& metadata) {
   CpuTimer cpu_timer(cpu_timings.texture_lookup_ns);
+  metadata = {};
   // Textures produced by resolves live on the host GPU only.
   uint32_t base_address = GuestPhysical(fetch[1] & 0xFFFFF000u);
   auto latest = resolve_latest_.find(base_address);
@@ -3507,6 +3510,9 @@ uint32_t Renderer::GetTextureSrvIndex(uint8_t* base, const uint32_t fetch[6]) {
         return 0;
       }
     }
+    metadata.resolve_scale = rt.scale;
+    metadata.resolve_shadow = rt.shadow;
+    metadata.resolve_depth = rt.format == DXGI_FORMAT_R32_FLOAT;
     xenos::xe_gpu_texture_fetch_t f;
     std::memcpy(&f, fetch, sizeof(f));
     // Component mapping from the fetch swizzle (source components clamped to
@@ -4437,9 +4443,23 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
   setup_timer.Stop();
   CpuTimer slots_timer(cpu_timings.constant_slots_ns);
   for (uint32_t slot = 0; slot < 16; ++slot) {
+    SlotCache& sc = slot_cache_[slot];
+    SlotCache::SrvEntry* cached = nullptr;
     uint32_t fetch[6]{};
-    fetch[0] = GpuConstant(base, dev, Pm4Mirror::kFetchConstantBase + 6 * slot,
-                           kDevFetchConstants + 24 * slot, use_mirror);
+    const bool versioned_fetch = use_mirror && mirror_.fetch_complete(slot);
+    const uint64_t fetch_version = versioned_fetch ? mirror_.fetch_version(slot) : 0;
+    if (versioned_fetch) {
+      auto& active = sc.srv_entries[sc.active_srv_entry];
+      if (active.frame == frame_count_ && active.fetch_version == fetch_version)
+        cached = &active;
+    }
+    const bool version_hit = cached != nullptr;
+    if (version_hit) {
+      std::memcpy(fetch, cached->fetch, sizeof(fetch));
+    } else {
+      fetch[0] = GpuConstant(base, dev, Pm4Mirror::kFetchConstantBase + 6 * slot,
+                             kDevFetchConstants + 24 * slot, use_mirror);
+    }
     // Empty slots have no texture or sampler. Their three SRV dimensions use
     // the same null descriptors regardless of the remaining fetch words.
     // Motion capture still needs fetch[1] for the first three slots.
@@ -4448,52 +4468,78 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
       s[32 + slot] = 2;
       continue;
     }
-    for (uint32_t d = 1; d < 6; ++d) {
-      fetch[d] = GpuConstant(base, dev, Pm4Mirror::kFetchConstantBase + 6 * slot + d,
-                             kDevFetchConstants + 24 * slot + 4 * d, use_mirror);
-    }
+    if (!version_hit)
+      for (uint32_t d = 1; d < 6; ++d) {
+        fetch[d] = GpuConstant(base, dev, Pm4Mirror::kFetchConstantBase + 6 * slot + d,
+                               kDevFetchConstants + 24 * slot + 4 * d, use_mirror);
+      }
     uint32_t srv = 0, sampler = 0;
     if (IsTextureBound(fetch[0])) {
-      SlotCache& sc = slot_cache_[slot];
-      // Same fetch as the previous draw in this frame: the SRV cannot have
-      // changed (resolves invalidate the cache below).
-      if (sc.frame == frame_count_ && !std::memcmp(sc.fetch, fetch, sizeof(sc.fetch))) {
+      if (!cached) {
+        for (uint32_t i = 0; i < std::size(sc.srv_entries); ++i) {
+          auto& entry = sc.srv_entries[i];
+          if (entry.frame == frame_count_ &&
+              !std::memcmp(entry.fetch, fetch, sizeof(entry.fetch))) {
+            cached = &entry;
+            sc.active_srv_entry = i;
+            break;
+          }
+        }
+      }
+      // Same fetch as one of the recent bindings in this frame: the SRV cannot
+      // have changed (resolves invalidate every entry below).
+      bool smooth = false;
+      if (cached) {
         if(CpuProfiling()) ++cpu_timings.slot_hits;
-        srv = sc.srv;
+        srv = cached->srv;
+        smooth = cached->smooth;
+        if (versioned_fetch) cached->fetch_version = fetch_version;
       } else {
         if(CpuProfiling()) ++cpu_timings.slot_misses;
-        srv = GetTextureSrvIndex(base, fetch);
+        TextureLookupMetadata texture_metadata;
+        srv = GetTextureSrvIndex(base, fetch, texture_metadata);
         // Resolve textures rendered at render_scale / shadow_quality: bits
         // 29-30 carry scale - 1 so the shader keeps texel offsets and filter
         // weights in guest texels (TEX_SCALE in the XenosRecomp patch).
-        auto latest = resolve_latest_.find(GuestPhysical(fetch[1] & 0xFFFFF000u));
-        if (srv > 2 && latest != resolve_latest_.end()) {
-          auto rt = resolve_textures_.find(latest->second);
-          // Not for the shadow atlas: its receivers run the whole PCF kernel
-          // on the host texel grid (g_ShadowAtlasTexelScale scales the baked
-          // tap offsets instead, EXP-041).
-          if (rt != resolve_textures_.end() && rt->second.scale != 1.0f &&
-              (!rt->second.shadow || REXCVAR_GET(sr_native_shadow_pcf_mode) == 1)) {
-            // Bits 16-27: scale in 8.8 fixed point (TEX_SCALE in the
-            // XenosRecomp patch); SRV indices use bits 0-14.
-            uint32_t fixed = uint32_t(std::lround(double(rt->second.scale) * 256.0));
-            srv |= std::min(fixed, 0xFFFu) << 16;
-            // Point fetches of an upscaled color target (post-process chains:
-            // glow, bloom downsamples) sample linearly: at the guest texel
-            // positions the game samples, bilinear averages exactly the host
-            // texels covering that guest texel. Point sampling picked one of
-            // them and turned small bright details into square/striped
-            // patterns (EXP-045). Depth resolves (R32F) stay point-sampled.
-            sc.smooth = rt->second.format != DXGI_FORMAT_R32_FLOAT;
-          } else {
-            sc.smooth = false;
-          }
+        // Not for the shadow atlas: its receivers run the whole PCF kernel on
+        // the host texel grid (g_ShadowAtlasTexelScale scales the baked tap
+        // offsets instead, EXP-041).
+        if (srv > 2 && texture_metadata.resolve_scale != 1.0f &&
+            (!texture_metadata.resolve_shadow || REXCVAR_GET(sr_native_shadow_pcf_mode) == 1)) {
+          // Bits 16-27: scale in 8.8 fixed point (TEX_SCALE in the
+          // XenosRecomp patch); SRV indices use bits 0-14.
+          uint32_t fixed = uint32_t(std::lround(double(texture_metadata.resolve_scale) * 256.0));
+          srv |= std::min(fixed, 0xFFFu) << 16;
+          // Point fetches of an upscaled color target (post-process chains:
+          // glow, bloom downsamples) sample linearly: at the guest texel
+          // positions the game samples, bilinear averages exactly the host
+          // texels covering that guest texel. Point sampling picked one of
+          // them and turned small bright details into square/striped patterns
+          // (EXP-045). Depth resolves (R32F) stay point-sampled.
+          smooth = !texture_metadata.resolve_depth;
         } else {
-          sc.smooth = false;
+          smooth = false;
         }
-        std::memcpy(sc.fetch, fetch, sizeof(sc.fetch));
-        sc.srv = srv;
-        sc.frame = frame_count_;
+        SlotCache::SrvEntry* insert = nullptr;
+        uint32_t insert_index = 0;
+        for (uint32_t i = 0; i < std::size(sc.srv_entries); ++i) {
+          auto& entry = sc.srv_entries[i];
+          if (entry.frame != frame_count_) {
+            insert = &entry;
+            insert_index = i;
+            break;
+          }
+        }
+        if (!insert) {
+          insert_index = sc.next_srv_entry++ % std::size(sc.srv_entries);
+          insert = &sc.srv_entries[insert_index];
+        }
+        std::memcpy(insert->fetch, fetch, sizeof(insert->fetch));
+        insert->srv = srv;
+        insert->frame = frame_count_;
+        insert->fetch_version = versioned_fetch ? fetch_version : 0;
+        insert->smooth = smooth;
+        sc.active_srv_entry = insert_index;
       }
       float sampler_bias = 0.0f;
       // Smooth effects: small textures of blended draws (particles, glows,
@@ -4511,11 +4557,11 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
         }
       }
       const uint32_t bias_q = uint32_t(std::clamp(sampler_bias, 0.0f, 7.9f) * 16.0f);
-      const uint64_t sampler_key = SamplerKey(fetch, sc.smooth, bias_q);
+      const uint64_t sampler_key = SamplerKey(fetch, smooth, bias_q);
       if (sc.sampler_valid && sc.sampler_key == sampler_key) {
         sampler = sc.sampler_index;
       } else {
-        sampler = GetSamplerIndex(fetch, sc.smooth, sampler_bias);
+        sampler = GetSamplerIndex(fetch, smooth, sampler_bias);
         sc.sampler_key = sampler_key;
         sc.sampler_index = sampler;
         sc.sampler_valid = true;
@@ -5370,9 +5416,28 @@ Renderer::BufferEntry* Renderer::ApplyBuffer(
     uint8_t* base, const BufferPlan& plan, uint32_t position_sample_offset,
     graphics::PositionValueEvidence* position_sample) {
   thread_local std::vector<uint8_t> scratch;
-  auto it = buffers_.find(plan.key);
-  if (it != buffers_.end() && plan.action != 2) {
-    BufferEntry& entry = it->second;
+  BufferEntry* existing = nullptr;
+  WorkerBufferLookupSlot* lookup_slot = nullptr;
+  if (plan.action != 2) {
+    const size_t lookup_index = size_t((plan.key ^ (plan.key >> 32)) &
+                                       (kWorkerBufferLookupCount - 1));
+    lookup_slot = &worker_buffer_lookup_[lookup_index];
+    if (lookup_slot->entry && lookup_slot->key == plan.key) {
+      existing = lookup_slot->entry;
+      if (StreamDetailProfiling()) ++stream_detail_timings.buffer_lookup_hits;
+    }
+    if (!existing) {
+      auto it = buffers_.find(plan.key);
+      if (StreamDetailProfiling()) ++stream_detail_timings.buffer_lookup_maps;
+      if (it != buffers_.end()) {
+        existing = &it->second;
+        lookup_slot->key = plan.key;
+        lookup_slot->entry = existing;
+      }
+    }
+  }
+  if (existing) {
+    BufferEntry& entry = *existing;
     if (plan.action == 1 && plan.end > plan.begin) {
       uint32_t b = plan.begin, e = plan.end;
       UploadAlloc upload;
@@ -5448,9 +5513,14 @@ Renderer::BufferEntry* Renderer::ApplyBuffer(
     entry.state = D3D12_RESOURCE_STATE_COPY_DEST;
     if (FAILED(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, entry.state,
                                                 nullptr, IID_PPV_ARGS(&entry.resource)))) {
+      const size_t lookup_index = size_t((plan.key ^ (plan.key >> 32)) &
+                                         (kWorkerBufferLookupCount - 1));
+      auto& slot = worker_buffer_lookup_[lookup_index];
+      if (slot.entry && slot.key == plan.key) slot = {};
       buffers_.erase(plan.key);
       return nullptr;
     }
+    entry.gpu_address = entry.resource->GetGPUVirtualAddress();
     entry.raw_srv = 0;
     entry.raw_srv_fence = 0;
     // Track generation even without the optional SRV cache so RT diagnostics
@@ -5464,6 +5534,11 @@ Renderer::BufferEntry* Renderer::ApplyBuffer(
              D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_INDEX_BUFFER |
              D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
   entry.content_version = next_buffer_content_version_++;
+  const size_t lookup_index = size_t((plan.key ^ (plan.key >> 32)) &
+                                     (kWorkerBufferLookupCount - 1));
+  auto& slot = worker_buffer_lookup_[lookup_index];
+  slot.key = plan.key;
+  slot.entry = &entry;
   if (position_sample && position_sample_offset != UINT32_MAX) {
     *position_sample = graphics::DecodeHostFloat3(
         std::span<const uint8_t>(scratch.data(), scratch.size()), position_sample_offset);
@@ -5673,7 +5748,8 @@ bool Renderer::PlanStreams(uint8_t* base, uint32_t dev, uint32_t decl, VertexRan
   DetailScope scope(capture_timings.fe_streams_ns);
   if (!decl) return false;
   DetailScope prep_scope(capture_timings.fs_prep_ns);
-  if (DynamicVertexFetch(base, dev)) range = nullptr;
+  cur_.dynamic_vertex_fetch = DynamicVertexFetch(base, dev);
+  if (cur_.dynamic_vertex_fetch) range = nullptr;
   const uint32_t streams_used = ReadVertexDeclarationInfo(base, decl).streams_used & 0xFFFFu;
   prep_scope.Stop();
   const bool allow_cache = !REXCVAR_GET(sr_native_debug_buffers_always_dirty);
@@ -5852,8 +5928,7 @@ bool Renderer::BindVertexStreams(uint8_t* base, const WorkBatch& batch, const Wo
       }
     }
   }
-  const uint32_t dev = GuestDevice(base);
-  const bool dynamic_fetch = dev && DynamicVertexFetch(base, dev);
+  const bool dynamic_fetch = cmd.dynamic_vertex_fetch;
   if (dynamic_fetch) {
     for (auto& meta : vertex_fetch_) {
       meta[0] = 0;
@@ -5907,7 +5982,7 @@ bool Renderer::BindVertexStreams(uint8_t* base, const WorkBatch& batch, const Wo
     }
     {
     CpuTimer timer(timings.ia_ns,detail);
-    D3D12_VERTEX_BUFFER_VIEW view{vb->resource->GetGPUVirtualAddress() + sp.offset, sp.size,
+    D3D12_VERTEX_BUFFER_VIEW view{vb->gpu_address + sp.offset, sp.size,
                                   sp.stride};
     const uint16_t stream_bit = sp.stream < 16 ? uint16_t(1u << sp.stream) : 0u;
     if (sp.stream >= 16 || !(bound_vertex_views_mask_ & stream_bit) ||
@@ -5930,10 +6005,18 @@ bool Renderer::BindVertexStreams(uint8_t* base, const WorkBatch& batch, const Wo
     BufferEntry& entry = *vb;
     bool retained_hit=false;
     if(buffer_srv_cache_) {
-      // The entry field may still name an evicted index. Only the lease cache
-      // owns it across submissions, keyed by the actual host resource lifetime.
-      entry.raw_srv=buffer_srv_cache_->Find(entry.resource_generation);
-      retained_hit=entry.raw_srv && entry.raw_srv_fence!=next_fence_value_;
+      // A descriptor retired from the lease cache cannot be recycled before
+      // this submission's fence completes, so a buffer already used on the
+      // current fence can reuse its exact index without another LRU lookup.
+      const bool same_fence=entry.raw_srv && entry.raw_srv_fence==next_fence_value_;
+      if(same_fence) {
+        if(detail) ++timings.srv_same_fence_hits;
+      } else {
+        // Across submissions, only the lease cache proves that the descriptor
+        // is still owned by this host resource generation.
+        entry.raw_srv=buffer_srv_cache_->Find(entry.resource_generation);
+        retained_hit=entry.raw_srv && entry.raw_srv_fence!=next_fence_value_;
+      }
     }
     if (!entry.raw_srv || (!buffer_srv_cache_ && entry.raw_srv_fence != next_fence_value_)) {
       entry.raw_srv = AllocSrvIndex();
@@ -6289,7 +6372,7 @@ void Renderer::ExecDrawIndexedVertices(uint8_t* base, const WorkBatch& batch,
     ++stats_.pass_draws[g_current_pass & 31];
     return;
   }
-  D3D12_INDEX_BUFFER_VIEW ibv{ib->resource->GetGPUVirtualAddress(), cmd.index_size,
+  D3D12_INDEX_BUFFER_VIEW ibv{ib->gpu_address, cmd.index_size,
                               cmd.index32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT};
   command_list_->IASetIndexBuffer(&ibv);
   if (!REXCVAR_GET(sr_native_debug_vs).empty() &&
@@ -6635,7 +6718,8 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
       REXLOG_INFO("native: dumped before resolve {}", index);
     }
   }
-  for (SlotCache& sc : slot_cache_) sc.frame = ~0ull;
+  for (SlotCache& sc : slot_cache_)
+    for (auto& entry : sc.srv_entries) entry.frame = ~0ull;
   // The command's PM4 words were scanned by Execute (copy draw included).
   uint32_t ring_before = ring_last_;
   uint64_t copies_before = exec_copies_before_;
@@ -8572,7 +8656,7 @@ void Renderer::WorkerMain() {
               const auto& d=stream_detail_timings;
               REXLOG_INFO("native CPU stream detail (ms/frame over 120, disjoint within streams): setup={:.4f} apply={:.4f} ia={:.4f} srv={:.4f} declaration={:.4f} metadata={:.4f}",d.setup_ns/120000000.0,d.apply_ns/120000000.0,d.ia_ns/120000000.0,d.srv_ns/120000000.0,d.declaration_ns/120000000.0,d.metadata_ns/120000000.0);
               REXLOG_INFO("native CPU stream totals (120 swaps): calls={} streams={} ia_binds={} missing={} failed_calls={} dynamic_streams={} srv_created={} srv_reused={} srv_failed={} declaration_reads={} attributes={} metadata_writes={} action0={} action1={} action2={} action_other={}",d.calls,d.streams,d.ia_binds,d.missing,d.failed_calls,d.dynamic_streams,d.srv_created,d.srv_reused,d.srv_failed,d.declaration_reads,d.attributes,d.metadata_writes,d.actions[0],d.actions[1],d.actions[2],d.actions[3]);
-              REXLOG_INFO("native buffer SRV cache interval: retained_hits={} evicted={} invalidated={} live={}",d.srv_retained_hits,d.cache_evicted,d.cache_invalidated,buffer_srv_cache_?buffer_srv_cache_->size():0);
+              REXLOG_INFO("native buffer caches interval: lookup_hits={} map_lookups={} srv_retained_hits={} srv_same_fence_hits={} evicted={} invalidated={} live={}",d.buffer_lookup_hits,d.buffer_lookup_maps,d.srv_retained_hits,d.srv_same_fence_hits,d.cache_evicted,d.cache_invalidated,buffer_srv_cache_?buffer_srv_cache_->size():0);
               stream_detail_timings={};
             }
             p.execute_ns=p.prepare_ns=p.constants_ns=p.streams_ns=p.swaps=0;

@@ -22,6 +22,8 @@ add_executable(sr_native_tests
     test_backend_selection.cpp
     test_checked_guest_memory.cpp
     test_idle_yield.cpp
+    test_vblank_policy.cpp
+    test_guest_render_scheduler.cpp
     test_guest_sleep_profile.cpp
     test_xma_flush_policy.cpp
     test_frame_generation_policy.cpp

@@ -2,14 +2,19 @@
 // Every call executes the original; no guest registers/memory are changed.
 #include <rex/ppc.h>
 #include <rex/logging.h>
+#include <rex/chrono/clock.h>
 #include "native_renderer.h"
 #include "guest_cpu_profile.h"
 #include "instance_probe.h"
 #include <array>
+#include <atomic>
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
+#include <filesystem>
 #include <mutex>
+#include "checked_guest_memory.h"
 
 namespace {
 using Clock=std::chrono::steady_clock;
@@ -28,6 +33,72 @@ bool SleepProfileEnabled() {
   static const bool on=[] {auto* v=std::getenv("SR_NATIVE_GUEST_SLEEP_PROFILE");return v && *v && *v!='0';}();
   return on;
 }
+bool ClockProfileEnabled() {
+  static const bool on=[] {auto* v=std::getenv("SR_NATIVE_GUEST_CLOCK_PROFILE");return v && *v && *v!='0';}();
+  return on;
+}
+const char* PresentProbePath() {
+  static const char* path=[] {
+    const auto* value=std::getenv("SR_NATIVE_PRESENT_INTERVAL_PROBE_TRIGGER_PATH");
+    return value && *value ? value : nullptr;
+  }();
+  return path;
+}
+struct PresentProbe {
+  std::atomic<bool> triggered{false};
+  std::atomic<uint32_t> pre_swap{0},fence{0},setter{0};
+};
+PresentProbe& PresentProbeState() {static PresentProbe state;return state;}
+bool ClaimPresentProbe(std::atomic<uint32_t>& count,uint32_t limit,uint32_t& sample) {
+  auto value=count.load(std::memory_order_relaxed);
+  while(value<limit) {
+    if(count.compare_exchange_weak(value,value+1,std::memory_order_relaxed)) {
+      sample=value+1;return true;
+    }
+  }
+  return false;
+}
+bool PresentProbeTriggered() {
+  auto& state=PresentProbeState();
+  if(state.triggered.load(std::memory_order_relaxed)) return true;
+  std::error_code error;
+  if(!std::filesystem::exists(PresentProbePath(),error) || error) return false;
+  state.triggered.store(true,std::memory_order_relaxed);
+  return true;
+}
+// Diagnostic reads may encounter a device during teardown. A failed/partial
+// read is logged explicitly; never let observing it fault the guest thread.
+bool PresentProbeRead(uint8_t* base,uint32_t device,uint32_t offset,uint32_t& value) {
+  value=0;
+  if(!base || !device || uint64_t(device)+offset+sizeof(value)>0x100000000ull) return false;
+  SIZE_T copied=0;
+  if(!ReadProcessMemory(GetCurrentProcess(),base+uint64_t(device)+offset,&value,sizeof(value),&copied)
+      || copied!=sizeof(value)) {value=0;return false;}
+  value=__builtin_bswap32(value);return true;
+}
+struct ClockProfile {
+  struct Caller {uint32_t address=0,parent=0;uint64_t calls=0;};
+  std::array<Caller,64> callers{};
+  uint64_t epoch=0,calls=0,overflow=0;
+  void Record(uint32_t caller,uint32_t parent,uint64_t tick) {
+    if(!epoch || tick<epoch) epoch=tick;
+    ++calls;
+    bool recorded=false;
+    for(auto& row:callers) if((row.address==caller && row.parent==parent) || !row.calls) {
+      row.address=caller;row.parent=parent;++row.calls;recorded=true;break;
+    }
+    if(!recorded) ++overflow;
+    // Reuse the clock value produced by the original guest function. No
+    // extra host clock query, lock or allocation on a potentially hot poll.
+    static const uint64_t frequency=rex::chrono::Clock::guest_tick_frequency();
+    if(!frequency || (tick-epoch)/frequency<2) return;
+    const double seconds=double(tick-epoch)/double(frequency);
+    REXLOG_INFO("native guest clock: hook=824680D0 interval_s={:.3f} calls={} overflow={}",seconds,calls,overflow);
+    for(const auto& row:callers) if(row.calls)
+      REXLOG_INFO("native guest clock caller: return={:08X} parent={:08X} calls={} calls_per_s={:.1f}",row.address,row.parent,row.calls,row.calls/seconds);
+    callers={};calls=overflow=0;epoch=tick;
+  }
+};
 struct SleepProfile {
   std::mutex mutex;
   superman_returns::native::GuestSleepWindow window;
@@ -164,4 +235,80 @@ extern "C" REX_FUNC(sub_8246A898) {
     state.window.Record(caller,requested_ms,ns);
   }
   ReportGuestSleeps(end);
+}
+
+REX_EXTERN(__imp__sub_824680D0);
+extern "C" REX_FUNC(sub_824680D0) {
+  if(!ClockProfileEnabled()) {__imp__sub_824680D0(ctx,base);return;}
+  const uint32_t caller=ctx.lr;
+  __imp__sub_824680D0(ctx,base);
+  // The generated original leaves its mftb value in r11 and writes the same
+  // value to the caller's output pointer. Its entire output context survives.
+  thread_local ClockProfile profile;
+  uint32_t parent=0;
+  if(caller==0x825667DC) {
+    // The millisecond helper 825667C8 saves its incoming LR at SP+88 in
+    // its 96-byte frame before calling this clock routine. Resolve that
+    // verified frame only; do not attempt a heuristic guest stack walk.
+    std::memcpy(&parent,base+ctx.r1.u32+88,sizeof(parent));
+    parent=__builtin_bswap32(parent);
+  }
+  profile.Record(caller,parent,ctx.r11.u64);
+}
+
+// Independent diagnostic: the cached null-path check is the entire disabled
+// overhead. Originals receive the untouched input context exactly once and
+// their complete output context is returned (never restore input registers).
+REX_EXTERN(__imp__sub_82111EC8);
+extern "C" REX_FUNC(sub_82111EC8) {
+  if(!PresentProbePath()) {__imp__sub_82111EC8(ctx,base);return;}
+  uint32_t sample=0;
+  if(!PresentProbeTriggered() || !ClaimPresentProbe(PresentProbeState().pre_swap,128,sample)) {
+    __imp__sub_82111EC8(ctx,base);return;
+  }
+  const uint32_t caller=ctx.lr,device=ctx.r3.u32;
+  uint32_t interval=0,gate=0,writeback=0,counter=0;
+  uint32_t valid=PresentProbeRead(base,device,0x33A4,interval) ? 1u : 0u;
+  if(PresentProbeRead(base,device,13456,gate)) valid|=2;
+  if(PresentProbeRead(base,device,10772,writeback)) valid|=4;
+  if(PresentProbeRead(base,device,15132,counter)) valid|=8;
+  const auto begin=Clock::now();
+  __imp__sub_82111EC8(ctx,base);
+  const double elapsed_ms=std::chrono::duration<double,std::milli>(Clock::now()-begin).count();
+  REXLOG_INFO("native present interval pre-swap: sample={} return={:08X} dev={:08X} interval={:08X} gate={:08X} writeback={:08X} counter={} valid_mask={:X} elapsed_ms={:.6f}",
+      sample,caller,device,interval,gate,writeback,counter,valid,elapsed_ms);
+}
+
+REX_EXTERN(__imp__sub_820FD9A8);
+extern "C" REX_FUNC(sub_820FD9A8) {
+  if(!PresentProbePath()) {__imp__sub_820FD9A8(ctx,base);return;}
+  // Generated Swap occupies [82112050,82112750); its final fence call
+  // returns to 82112720. Exclude every resource wait outside this routine.
+  const uint32_t caller=ctx.lr;
+  uint32_t sample=0;
+  if(caller<0x82112050 || caller>=0x82112750 || !PresentProbeTriggered()
+      || !ClaimPresentProbe(PresentProbeState().fence,128,sample)) {
+    __imp__sub_820FD9A8(ctx,base);return;
+  }
+  const uint32_t device=ctx.r3.u32,request=ctx.r4.u32,reason=ctx.r5.u32;
+  const auto begin=Clock::now();
+  __imp__sub_820FD9A8(ctx,base);
+  const double elapsed_ms=std::chrono::duration<double,std::milli>(Clock::now()-begin).count();
+  REXLOG_INFO("native present interval fence: sample={} return={:08X} dev={:08X} request={:08X} reason={} elapsed_ms={:.6f}",
+      sample,caller,device,request,reason,elapsed_ms);
+}
+
+REX_EXTERN(__imp__sub_820F1D10);
+extern "C" REX_FUNC(sub_820F1D10) {
+  if(!PresentProbePath()) {__imp__sub_820F1D10(ctx,base);return;}
+  uint32_t sample=0;
+  // Capture the first eight writes even before the HUD trigger: otherwise
+  // device initialization may be invisible in the gameplay-only window.
+  if(!ClaimPresentProbe(PresentProbeState().setter,8,sample)) {
+    __imp__sub_820F1D10(ctx,base);return;
+  }
+  const uint32_t caller=ctx.lr,device=ctx.r3.u32,interval=ctx.r4.u32;
+  __imp__sub_820F1D10(ctx,base);
+  REXLOG_INFO("native present interval setter: sample={} return={:08X} dev={:08X} interval={:08X}",
+      sample,caller,device,interval);
 }

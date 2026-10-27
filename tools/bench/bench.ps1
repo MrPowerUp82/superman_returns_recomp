@@ -136,6 +136,37 @@ function Has-Gameplay-Frame($proc) {
   }
 }
 
+# The renderer logs the guest's actual pause state when Superman enters/leaves the
+# in-game pause menu (state 4/3). This is a stronger gameplay signal than the HUD
+# heuristic and also lets the benchmark recover if an Enter used to skip the opening
+# cinematic actually opened the pause menu after gameplay had already started.
+function Get-LatestGuestPauseLine() {
+  return @(Select-String -LiteralPath $log -Pattern 'native graphics guest pause:' -ErrorAction SilentlyContinue) |
+    Select-Object -Last 1
+}
+
+function Has-VerifiedGameplayRunning() {
+  $lastPause = Get-LatestGuestPauseLine
+  return $lastPause -and $lastPause.Line -match 'paused=false.*valid=true.*state=3'
+}
+
+function Resume-VerifiedGameplayIfPaused($proc) {
+  $lastPause = Get-LatestGuestPauseLine
+  if(-not $lastPause -or $lastPause.Line -notmatch 'paused=true.*valid=true.*state=4') { return $false }
+  $resumeBefore = @(Select-String -LiteralPath $log -Pattern 'native graphics guest pause: paused=false.*valid=true.*state=3').Count
+  Focus $proc; Key 0x0D
+  $deadline = (Get-Date).AddSeconds(5)
+  do {
+    Start-Sleep -Milliseconds 250
+    $resumeNow = @(Select-String -LiteralPath $log -Pattern 'native graphics guest pause: paused=false.*valid=true.*state=3').Count
+  } while($resumeNow -le $resumeBefore -and (Get-Date) -lt $deadline -and -not $proc.HasExited)
+  if($resumeNow -gt $resumeBefore) {
+    Step 'gameplay qualified by guest pause state; resumed accidental pause from skip input'
+    return $true
+  }
+  return $false
+}
+
 # Saves the game window's client area as PNG (the image gate compares it with a reference).
 function Save-GameRegion($proc, $path) {
   $region = Game-Region $proc
@@ -154,7 +185,7 @@ function Save-GameRegion($proc, $path) {
 function Assert-Gameplay($proc) {
   for ($i = 0; $i -lt 4; $i++) {
     if ($i -gt 0) { Start-Sleep 1 }
-    if (Has-Gameplay-Frame $proc) { return }
+    if ((Has-Gameplay-Frame $proc) -or (Has-VerifiedGameplayRunning)) { return }
   }
   Screenshot "$root\logs\bench_${Name}_not_gameplay.png"
   throw "scene is not gameplay during measurement (menu or title?)"
@@ -251,6 +282,13 @@ try {
   while ($true) {
     Focus $proc
     $frameReady=Has-Gameplay-Frame $proc
+    if(-not $frameReady) {
+      $frameReady=Resume-VerifiedGameplayIfPaused $proc
+      if(-not $frameReady -and (Has-VerifiedGameplayRunning)) {
+        $frameReady=$true
+        Step 'gameplay qualified by guest pause/resume state after HUD heuristic missed it'
+      }
+    }
     if($GraphicsMenuChecks -and $env:SR_BENCH_MOTION_CAPTURE_TRIGGER) {
       # Cinematic colors can satisfy the visual HUD heuristic. A motion run
       # must first prove the source-audited gameplay -> pause -> gameplay path.

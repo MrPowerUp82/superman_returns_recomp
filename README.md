@@ -48,9 +48,17 @@ Os dois aceitam opções extras, por exemplo `run.cmd --fullscreen`. O log fica 
 
 O limite nativo de 30 FPS foi retirado do padrão: o executável e novas preferências
 do launcher usam `sr_native_fps_limit=0`. É possível selecionar 30, 60 ou 120 no
-launcher ou passar `--sr_native_fps_limit=60`. O VSync continua separado. O modo
-sem limite usa a cadência configurável `sr_native_unlocked_vblank_hz` (240 Hz por
-padrão); isso não comprova simulação ou imagens únicas acima de 30 FPS.
+launcher ou passar `--sr_native_fps_limit=60`. O modo sem limite agora usa o
+mecanismo do Xenia Canary: `sr_native_fps_limit=0`, VSync desligado e vblank
+seguido de espera de 1 ms. Esse é o padrão nativo para opções não definidas;
+opções explícitas prevalecem. Com limite zero e VSync ligado, a cadência de
+vblank fica em 60 Hz. O port também faz o contador de varredura avançar.
+Um segundo gate, interno ao scheduler de renderização do jogo, também segue
+o alvo de FPS: limite zero usa um piso de 1 ms; 30 mantém o comportamento
+original. O peer de simulação permanece com seu tick original. Para comparar
+com o gate interno de 30 Hz, use `--sr_native_guest_render_scheduler=false`.
+O desempenho medido na cidade ainda não comprova 60 FPS. Detalhes e limites em
+[desbloqueio do Xenia Canary](docs/xenia-canary-fps-unlock-2026-10-27.md).
 
 O `build.cmd` agora inclui por padrão o runtime verificado com rastreamento de
 escritas, necessário para evitar hashes de texturas com conteúdo comprovadamente

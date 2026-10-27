@@ -101,7 +101,7 @@ public partial class MainWindow : Window
             : _settings.FpsLimit == "30"
                 ? "Temporização nativa original. O VSync pode limitar a apresentação separadamente."
                 : _settings.FpsLimit == "0"
-                    ? "Sem limite nativo de 30 FPS. O FPS real depende do PC e do jogo; acima de 30 ainda é experimental. O VSync segue sua configuração."
+                    ? (_settings.VSync ? "O VSync está ligado. Desative-o para testar o alvo sem limite de 30 FPS." : "Alvo sem limite de 30 FPS. O desempenho depende da cena e do PC; acima de 30 ainda é experimental.")
                     : "O desempenho depende do PC e do jogo; acima de 30 FPS ainda é experimental. O VSync segue sua configuração.";
         EngineNote.Text = _settings.UsesVulkan ? "Vulkan: escala interna, FXAA, MSAA, sombras e filtro anisotrópico ficam no padrão do jogo. A primeira execução traduz os shaders e demora alguns minutos." : _settings.Renderer == "xenos" ? (_settings.RenderScale is "50" or "75" ? "Xenos não suporta 50%/75%: escolha Nativo com Direct3D 12 para reduzir a resolução interna." : "Xenos é o motor alternativo, mais lento e menos corrigido; use apenas se o nativo falhar.") : _settings.RenderScale is "50" or "75" ? "D3D12: reduz os alvos internos e os resolves juntos; exibição e HUD permanecem na área total da janela." : "Nativo: renderizador atual, com as correções de cutscenes, HUD e War World.";
         ArgumentsPreview.Text = _settings.BuildArguments();
