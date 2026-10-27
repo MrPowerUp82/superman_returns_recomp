@@ -1,5 +1,6 @@
 #pragma once
 #include <chrono>
+#include "guest_sleep_profile.h"
 #include <rex/ppc/func.h>
 namespace superman_returns::native {
 // Diagnostic wrapper: always calls the original exactly once. Uses the same

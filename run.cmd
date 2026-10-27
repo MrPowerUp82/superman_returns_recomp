@@ -9,4 +9,6 @@ if not exist "%EXE%" (
 if not exist "%ROOT%logs" mkdir "%ROOT%logs"
 rem Os padroes de GPU (rtv, correcao do ceu, stencil Intel) ficam no app:
 rem port/src/superman_returns_app.h. Qualquer --opcao passada aqui prevalece.
+rem FPS nativo sem limite por padrao; selecione --sr_native_fps_limit=30, 60, 120 ou 0.
+rem A opcao controla vblank nativo; FPS guest e ritmo acima de 30 ainda nao validados.
 start "" /D "%ROOT%port\out\build\win-amd64-release" "%EXE%" --game_data_root="%ROOT%game" --log_file="%ROOT%logs\game.log" %*

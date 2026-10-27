@@ -15,7 +15,7 @@ public sealed class LauncherSettings
     public int GpuIndex { get; set; } = -1;
     public string GpuLuid { get; set; } = "";
     public bool VSync { get; set; } = true;
-    public string FpsLimit { get; set; } = "30";
+    public string FpsLimit { get; set; } = "0";
     public string RenderScale { get; set; } = "100";
     public string TextureFilter { get; set; } = "Original";
     public string Antialiasing { get; set; } = "Off";
@@ -111,7 +111,7 @@ public sealed class LauncherSettings
             $"--fullscreen={(DisplayMode != "Windowed").ToString().ToLowerInvariant()}",
             $"--vsync={VSync.ToString().ToLowerInvariant()}",
             "--d3d12_adapter=-1",
-            $"--sr_native_fps_limit={ValidChoice(FpsLimit, 30, 0, 30, 60, 120)}",
+            $"--sr_native_fps_limit={ValidChoice(FpsLimit, 0, 0, 30, 60, 120)}",
             $"--sr_native_render_scale={scale.ToString("0.##", CultureInfo.InvariantCulture)}",
             $"--sr_native_anisotropic_filtering={filter}",
             $"--sr_native_fxaa={(!vulkan && Antialiasing == "FXAA").ToString().ToLowerInvariant()}",

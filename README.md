@@ -46,6 +46,22 @@ Os dois aceitam opções extras, por exemplo `run.cmd --fullscreen`. O log fica 
 
 ### Desempenho
 
+O limite nativo de 30 FPS foi retirado do padrão: o executável e novas preferências
+do launcher usam `sr_native_fps_limit=0`. É possível selecionar 30, 60 ou 120 no
+launcher ou passar `--sr_native_fps_limit=60`. O VSync continua separado. O modo
+sem limite usa a cadência configurável `sr_native_unlocked_vblank_hz` (240 Hz por
+padrão); isso não comprova simulação ou imagens únicas acima de 30 FPS.
+
+O `build.cmd` agora inclui por padrão o runtime verificado com rastreamento de
+escritas, necessário para evitar hashes de texturas com conteúdo comprovadamente
+inalterado. O D3D12 já usa staging em CPU, leituras limitadas de constantes e
+cache de resolves por identidade completa. Sem cobertura segura, a validação
+por hash continua. `set SR_MEMORY_TRACKING_SDK=OFF` permite compilar com o runtime
+original. Detalhes e validação em
+[CPU e desbloqueio de FPS](docs/cpu-optimization-unlock-fps-2026-10-27.md).
+
+As medições abaixo são históricas e registram explicitamente os limites usados.
+
 O jogo roda a 30 FPS no Xbox 360. Aqui o gargalo é a emulação da GPU do Xbox 360 (Xenos): com GPU integrada, ela fica a ~98% nas cenas 3D. Medições num i5-13420H com Intel UHD:
 
 | Modo de render (`--render_target_path_d3d12`) | Vídeos de abertura | Cena 3D (tela de título) |

@@ -8,7 +8,9 @@ O launcher só envia `--sr_native_gpu_luid` quando uma GPU específica foi escol
 
 Oferece resolução, tela cheia sem bordas/janela, GPU DXGI, teclado/mouse ou controle,
 escala interna, FXAA, filtro de texturas, sombras, MSAA, VSync e limite de FPS.
-30 FPS é o padrão; 60/120 FPS são experimentais e não garantem ganho de desempenho.
+Sem limite nativo é o padrão para novas preferências; 30/60/120 FPS continuam
+selecionáveis. Preferências salvas são respeitadas. O VSync é independente e o
+FPS real acima de 30 ainda precisa de validação no jogo.
 A escala interna no D3D12 nativo aceita 50% (640x360) e 75% (960x540),
 além de 100% e valores superiores. O renderizador dimensiona os alvos e resolves
 no host e preserva o tamanho lógico 1280x720, inclusive na composição e no HUD.

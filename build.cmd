@@ -15,11 +15,13 @@ call "%VSROOT%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64 >nul
 if errorlevel 1 exit /b 1
 set "PATH=%ROOT%.tools\clang+llvm-23.1.2-x86_64-pc-windows-msvc\bin;%VSROOT%\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin;%VSROOT%\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;%PATH%"
 set "SDK=%ROOT%.tools\rexglue-sdk\win-amd64"
-if not defined SR_MEMORY_TRACKING_SDK set "SR_MEMORY_TRACKING_SDK=OFF"
+rem Texture hash reuse needs the pinned runtime's write-tracking API.
+rem Set SR_MEMORY_TRACKING_SDK=OFF to use the stock runtime and hash fallback.
+if not defined SR_MEMORY_TRACKING_SDK set "SR_MEMORY_TRACKING_SDK=ON"
 set "SR_MEMORY_SDK_DIR="
 set "SR_MEMORY_SDK_ARGS="
 if /i "%SR_MEMORY_TRACKING_SDK%"=="ON" (
-  powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%tools\setup_memory_tracking_sdk.ps1" -VerifyOnly
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%tools\setup_memory_tracking_sdk.ps1"
   if errorlevel 1 exit /b 1
   set "SR_MEMORY_SDK_DIR=%ROOT%.tools/rexglue-write-tracking-source"
   set "SR_MEMORY_SDK_ARGS=-DREXGLUE_ENABLE_TRACY=OFF -DREXGLUE_USE_VULKAN=OFF"

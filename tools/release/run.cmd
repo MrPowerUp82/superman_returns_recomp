@@ -12,4 +12,6 @@ if not exist "%ROOT%game\default.xex" (
 )
 if not exist "%ROOT%logs" mkdir "%ROOT%logs"
 rem Qualquer --opcao passada aqui prevalece sobre os padroes do jogo.
+rem FPS nativo sem limite por padrao; selecione --sr_native_fps_limit=30, 60, 120 ou 0.
+rem A opcao controla vblank nativo; FPS guest e ritmo acima de 30 ainda nao validados.
 start "" /D "%ROOT%" "%ROOT%superman_returns.exe" --game_data_root="%ROOT%game" --log_file="%ROOT%logs\game.log" %*

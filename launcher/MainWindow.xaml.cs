@@ -53,7 +53,7 @@ public partial class MainWindow : Window
         SetChoices(RenderScaleBox, new("50", "50% — 360p (nativo D3D12)"), new("75", "75% — 540p (nativo D3D12)"), new("100", "100% — 720p original"), new("125", "125% — 900p"), new("150", "150% — 1080p"), new("200", "200% — 1440p"), new("300", "300% — 2160p"), new("400", "400% — 2880p"));
         SetChoices(AaBox, new("Off", "Desativado"), new("FXAA", "FXAA"));
         SetChoices(FilterBox, new("Original", "Original do jogo"), new("Anisotropic2x", "Anisotrópico 2×"), new("Anisotropic4x", "Anisotrópico 4×"), new("Anisotropic8x", "Anisotrópico 8×"), new("Anisotropic16x", "Anisotrópico 16×"));
-        SetChoices(FpsBox, new("30", "30 FPS — original"), new("60", "60 FPS — experimental"), new("120", "120 FPS — experimental"), new("0", "Sem limite — experimental"));
+        SetChoices(FpsBox, new("0", "Sem limite nativo — padrão"), new("30", "30 FPS — original"), new("60", "60 FPS — experimental"), new("120", "120 FPS — experimental"));
         SetChoices(ShadowBox, new("1", "Original"), new("2", "2×"), new("4", "4×"));
         SetChoices(MsaaBox, new("1", "Desativado"), new("4", "4×"), new("8", "8×"));
         GpuBox.ItemsSource = GpuEnumerator.GetAdapters();
@@ -96,7 +96,13 @@ public partial class MainWindow : Window
         SummaryText.Text = _settings.UsesVulkan
             ? $"Vulkan · Nativo · {_settings.Resolution.Replace("x", " × ")} · 100% interno"
             : $"Direct3D 12 · {(_settings.Renderer == "xenos" ? "Xenos" : "Nativo")} · {_settings.Resolution.Replace("x", " × ")} · {_settings.RenderScale}% interno";
-        FpsNote.Text = _settings.FpsLimit == "30" ? "30 FPS preserva o ritmo original do jogo." : "FPS acima de 30 é experimental e pode alterar o ritmo do jogo.";
+        FpsNote.Text = !_settings.UsesVulkan && _settings.Renderer == "xenos"
+            ? "O limite nativo não se aplica ao Xenos. O VSync é configurado separadamente."
+            : _settings.FpsLimit == "30"
+                ? "Temporização nativa original. O VSync pode limitar a apresentação separadamente."
+                : _settings.FpsLimit == "0"
+                    ? "Sem limite nativo de 30 FPS. O FPS real depende do PC e do jogo; acima de 30 ainda é experimental. O VSync segue sua configuração."
+                    : "O desempenho depende do PC e do jogo; acima de 30 FPS ainda é experimental. O VSync segue sua configuração.";
         EngineNote.Text = _settings.UsesVulkan ? "Vulkan: escala interna, FXAA, MSAA, sombras e filtro anisotrópico ficam no padrão do jogo. A primeira execução traduz os shaders e demora alguns minutos." : _settings.Renderer == "xenos" ? (_settings.RenderScale is "50" or "75" ? "Xenos não suporta 50%/75%: escolha Nativo com Direct3D 12 para reduzir a resolução interna." : "Xenos é o motor alternativo, mais lento e menos corrigido; use apenas se o nativo falhar.") : _settings.RenderScale is "50" or "75" ? "D3D12: reduz os alvos internos e os resolves juntos; exibição e HUD permanecem na área total da janela." : "Nativo: renderizador atual, com as correções de cutscenes, HUD e War World.";
         ArgumentsPreview.Text = _settings.BuildArguments();
     }

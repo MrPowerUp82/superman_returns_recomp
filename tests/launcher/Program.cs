@@ -4,6 +4,13 @@ int failed = 0;
 void Check(bool condition, string name) { Console.WriteLine($"{(condition ? "PASS" : "FAIL")} {name}"); if (!condition) failed++; }
 var settings = new LauncherSettings { GraphicsApi = "d3d12", RenderScale = "150", FpsLimit = "60", Antialiasing = "FXAA", TextureFilter = "Anisotropic8x" };
 var commandArgs = settings.BuildArguments();
+Check(new LauncherSettings().BuildArgumentList().Contains("--sr_native_fps_limit=0"), "new installs launch without the native 30 FPS limit");
+foreach (var api in new[] { "d3d12", "vulkan" })
+foreach (var fps in new[] { "0", "30", "60", "120" }) {
+    var fpsArgs = new LauncherSettings { GraphicsApi = api, FpsLimit = fps }.BuildArgumentList();
+    Check(fpsArgs.Count(a => a.StartsWith("--sr_native_fps_limit=")) == 1 &&
+        fpsArgs.Contains("--sr_native_fps_limit=" + fps), $"{api} forwards exactly one FPS choice: {fps}");
+}
 Check(commandArgs.Contains("--sr_native_render_scale=1.5"), "scale targets native renderer using invariant decimals");
 Check(commandArgs.Contains("--sr_native_fps_limit=60"), "frame limit targets native presentation");
 Check(commandArgs.Contains("--sr_native_fxaa=true"), "FXAA uses supported option");
@@ -14,7 +21,7 @@ Check(settings.BuildArgumentList().Contains("--sr_native_render_scale=1.5"), "Po
 settings.InputMode = "Controller";
 Check(settings.BuildArgumentList().Contains("--mnk_mode=false") && settings.BuildArgumentList().Contains("--mnk_mouse=false"), "controller overrides keyboard settings");
 var invalid = new LauncherSettings { Resolution = "0x0", RenderScale = "50", FpsLimit = "garbage", Msaa = "2" };
-Check(invalid.BuildArgumentList().Contains("--window_width=1280") && invalid.BuildArgumentList().Contains("--sr_native_render_scale=1") && invalid.BuildArgumentList().Contains("--sr_native_fps_limit=30") && invalid.BuildArgumentList().Contains("--sr_native_msaa_samples=1"), "invalid preferences fall back to supported defaults");
+Check(invalid.BuildArgumentList().Contains("--window_width=1280") && invalid.BuildArgumentList().Contains("--sr_native_render_scale=1") && invalid.BuildArgumentList().Contains("--sr_native_fps_limit=0") && invalid.BuildArgumentList().Contains("--sr_native_msaa_samples=1"), "invalid preferences fall back to supported defaults");
 var automatic = new LauncherSettings { GraphicsApi = "d3d12" }.BuildArgumentList();
 Check(!automatic.Any(a => a.EndsWith('=')) && !automatic.Any(a => a.StartsWith("--sr_native_gpu_luid")), "automatic GPU sends no empty argument (the engine would read the next argument as its value)");
 var fixture = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "fixture com espaço ç", Guid.NewGuid().ToString("N")));
@@ -82,6 +89,16 @@ Check(d3d.BuildArgumentList().Contains("--sr_native_api=d3d12") && d3d.BuildArgu
     d3d.BuildArgumentList().Contains("--sr_native_fxaa=true"), "Direct3D 12 keeps its enhancement options");
 var oldIni = Path.Combine(fixture, "old.ini");File.WriteAllText(oldIni, "graphics_api=d3d12\n");
 Check(LauncherSettings.Load(oldIni).GraphicsApi == "d3d12", "a saved Direct3D 12 choice is kept");
+Check(LauncherSettings.Load(oldIni).BuildArgumentList().Contains("--sr_native_fps_limit=0"), "old preferences without FPS use the uncapped default");
+foreach (var fps in new[] { "0", "30", "60", "120" }) {
+    var fpsPath = Path.Combine(fixture, "fps.ini");
+    new LauncherSettings { FpsLimit = fps }.Save(fpsPath);
+    Check(LauncherSettings.Load(fpsPath).BuildArgumentList().Contains("--sr_native_fps_limit=" + fps),
+        $"saved FPS choice {fps} survives restart, including original 30 FPS preferences");
+}
+foreach (var invalidFps in new[] { "", "-1", "29", "240", "garbage" })
+    Check(new LauncherSettings { FpsLimit = invalidFps }.BuildArgumentList().Contains("--sr_native_fps_limit=0"),
+        $"invalid FPS {invalidFps} uses the uncapped default");
 Check(LauncherSettings.Load(ini).Renderer == "native", "renderer default survives round trip");
 Console.WriteLine($"{failed} failed checks");
 return failed == 0 ? 0 : 1;

@@ -54,11 +54,13 @@ if ($diff -ne $patchText) {
   Invoke-SdkGit -Arguments @('apply',$patch) | Out-Null
 }
 $installed = [ordered]@{}
+$copyFiles = @()
 foreach ($file in $sharedFiles) {
   $relative = $file.FullName.Substring($shared.Length + 1).Replace('\','/')
   $key = 'src/system/write_tracking/' + $relative
   $destination = Join-Path $Checkout $key
   $canonicalHash = Hash $file.FullName
+  $currentHash = $null
   if (Test-Path -LiteralPath $destination) {
     $currentHash = Hash $destination
     if ($currentHash -ne $canonicalHash) {
@@ -68,10 +70,11 @@ foreach ($file in $sharedFiles) {
     }
   } elseif ($VerifyOnly) { throw "SDK source missing: $key" }
   $installed[$key] = $canonicalHash
+  if ($currentHash -ne $canonicalHash) { $copyFiles += $file }
 }
 # Preflight every file before writing any shared source.
 if (-not $VerifyOnly) {
-  foreach ($file in $sharedFiles) {
+  foreach ($file in $copyFiles) {
     $key = 'src/system/write_tracking/' + $file.FullName.Substring($shared.Length + 1)
     $destination = Join-Path $Checkout $key
     New-Item -ItemType Directory -Force (Split-Path $destination -Parent) | Out-Null
@@ -89,8 +92,14 @@ if ($VerifyOnly) {
     if ($manifest.files.PSObject.Properties[$key].Value -ne $installed[$key]) { throw "SDK manifest mismatch: $key" }
   }
 } else {
-  [ordered]@{ revision=$expected; patch_sha256=$patchHash; files=$installed } |
-    ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+  $manifestJson = [ordered]@{ revision=$expected; patch_sha256=$patchHash; files=$installed } |
+    ConvertTo-Json -Depth 4
+  # Set-Content appends a newline. Compare the serialized content first so an
+  # unchanged setup never dirties build inputs or the verification manifest.
+  if (-not (Test-Path -LiteralPath $manifestPath) -or
+      [IO.File]::ReadAllText($manifestPath) -cne ($manifestJson + [Environment]::NewLine)) {
+    $manifestJson | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+  }
 }
 if (-not $SkipDependencies) {
   $modules = @('cli11','libmspack','FFmpeg','tomlplusplus','simde','xxHash','spdlog','fmt','utfcpp','imgui','sdl3','o1heap','inja') |

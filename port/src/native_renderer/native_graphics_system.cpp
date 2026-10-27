@@ -58,18 +58,21 @@
 #include "presenter_factory.h"
 #endif
 
-REXCVAR_DEFINE_INT32(sr_native_fps_limit, 30, "Superman Returns Native",
-                     "Native graphics system frame rate limit (30 = original, up to 120; 0 = "
-                     "sr_native_unlocked_vblank_hz)")
-    .range(0, 1000);
+REXCVAR_DEFINE_INT32(sr_native_fps_limit, 0, "Superman Returns Native",
+                     "Native vblank pacing target (30 = original; 60/120 experimental; "
+                     "0 = unlocked native pacing, using sr_native_unlocked_vblank_hz). "
+                     "Does not bypass guest timing loops or host VSync")
+    .range(0, 1000)
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(sr_native_gpu_trace, false, "Superman Returns Native", "Debug: log native GPU packets/registers");
 REXCVAR_DEFINE_STRING(sr_native_gpu_luid, "", "Superman Returns Native",
                      "Launcher GPU identity (16 hexadecimal digits); empty uses d3d12_adapter");
 // The kit's fork declares unlocked_vblank_rate in the runtime; the stock SDK
 // does not, so the unlocked rate is a project cvar.
 REXCVAR_DEFINE_INT32(sr_native_unlocked_vblank_hz, 240, "Superman Returns Native",
-                     "Guest vblank rate with sr_native_fps_limit=0 (benchmarks)")
-    .range(1, 2000);
+                     "Guest interrupt cadence with sr_native_fps_limit=0; not a guest FPS guarantee")
+    .range(1, 2000)
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 namespace superman_returns::native {
 
@@ -422,7 +425,8 @@ void D3D12NativeGraphicsSystem::VsyncThreadMain() {
   int32_t fps = REXCVAR_GET(sr_native_fps_limit);
   int32_t vblank_hz = fps > 0 ? int32_t(profile::kVblanksPerFrame) * std::clamp(fps, 10, 1000)
                               : std::max(int32_t(1), REXCVAR_GET(sr_native_unlocked_vblank_hz));
-  REXLOG_INFO("native graphics: frame rate limit {} (guest vblank {} Hz)", fps, vblank_hz);
+  REXLOG_INFO("native graphics: native pacing target {} (0=uncapped; guest vblank {} Hz); "
+              "guest timing loops and timebase are unchanged; host VSync is separate", fps, vblank_hz);
   uint64_t interval = std::max(uint64_t(1), freq / uint64_t(vblank_hz));
   VblankPacer pacer(rex::chrono::Clock::QueryGuestTickCount(), interval);
   while (running_) {

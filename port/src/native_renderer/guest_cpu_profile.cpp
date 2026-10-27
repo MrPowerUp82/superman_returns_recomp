@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <mutex>
 
 namespace {
 using Clock=std::chrono::steady_clock;
@@ -20,6 +21,36 @@ constexpr std::array<uint32_t,24> addresses{0x823055A8,0x82783948,0x82305B88,0x8
 bool Enabled() {
   static const bool on=[] {auto* v=std::getenv("SR_NATIVE_GUEST_CPU_PROFILE");return v && *v && *v!='0';}();
   return on && superman_returns::native::Enabled();
+}
+bool SleepProfileEnabled() {
+  // Independent opt-in. Also enable SR_NATIVE_GUEST_CPU_PROFILE to emit
+  // zero-call windows from render-thread profiler activity during gameplay.
+  static const bool on=[] {auto* v=std::getenv("SR_NATIVE_GUEST_SLEEP_PROFILE");return v && *v && *v!='0';}();
+  return on;
+}
+struct SleepProfile {
+  std::mutex mutex;
+  superman_returns::native::GuestSleepWindow window;
+  Clock::time_point epoch=Clock::now();
+};
+SleepProfile& SleepState() {static SleepProfile state;return state;}
+void ReportGuestSleeps(Clock::time_point now) {
+  if(!SleepProfileEnabled()) return;
+  auto& state=SleepState();
+  superman_returns::native::GuestSleepWindow snapshot;
+  double seconds;
+  {
+    std::lock_guard lock(state.mutex);
+    seconds=std::chrono::duration<double>(now-state.epoch).count();
+    if(seconds<2) return;
+    snapshot=state.window;state.window={};state.epoch=now;
+  }
+  REXLOG_INFO("native guest sleep: hook=8246A898 interval_s={:.3f} calls={} elapsed_ms={:.3f} movie33_calls={} movie33_ms={:.3f} overflow_calls={} overflow_ms={:.3f}",
+      seconds,snapshot.calls,snapshot.elapsed_ns/1e6,snapshot.callers[0].calls,
+      snapshot.callers[0].elapsed_ns/1e6,snapshot.overflow_calls,snapshot.overflow_ns/1e6);
+  for(const auto& row:snapshot.callers) if(row.calls)
+    REXLOG_INFO("native guest sleep caller: return={:08X} requested_ms={} calls={} elapsed_ms={:.3f} max_ms={:.3f}",
+        row.caller,row.requested_ms,row.calls,row.elapsed_ns/1e6,row.max_ns/1e6);
 }
 struct Counters {uint64_t calls=0,inclusive_ns=0,self_ns=0,capture_ns=0;};
 struct Scope;
@@ -49,6 +80,7 @@ struct Scope {
     if(parent) {parent->children_ns+=ns;return;}
     const double seconds=std::chrono::duration<double>(end-guest_thread_profile.epoch).count();
     if(seconds<2) return;
+    ReportGuestSleeps(end);
     for(size_t i=0;i<addresses.size();++i) if(auto& count=guest_thread_profile.counters[i];count.calls) {
       REXLOG_INFO("native guest CPU: address={:08X} interval_s={:.3f} calls={} inclusive_ms={:.3f} tracked_self_ms={:.3f} nested_capture_ms={:.3f}",
           addresses[i],seconds,count.calls,count.inclusive_ns/1e6,count.self_ns/1e6,count.capture_ns/1e6);
@@ -113,3 +145,23 @@ SR_PROFILE_RENDER(8230F8E0,7)
 SR_PROFILE_RENDER(823103C8,12)
 SR_PROFILE_RENDER(82300328,9)
 #undef SR_PROFILE_RENDER
+
+// The 19 statically identified Sleep/SleepEx call sites reach this routine.
+// Capture inputs before the original overwrites volatile registers. Never
+// restore the input context: the original's complete output must reach callers.
+// Disabled path performs only the cached switch check and original call.
+REX_EXTERN(__imp__sub_8246A898);
+extern "C" REX_FUNC(sub_8246A898) {
+  if(!SleepProfileEnabled()) {__imp__sub_8246A898(ctx,base);return;}
+  const uint32_t caller=ctx.lr,requested_ms=ctx.r3.u32;
+  const auto begin=Clock::now();
+  __imp__sub_8246A898(ctx,base);
+  const auto end=Clock::now();
+  const auto ns=uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(end-begin).count());
+  auto& state=SleepState();
+  {
+    std::lock_guard lock(state.mutex);
+    state.window.Record(caller,requested_ms,ns);
+  }
+  ReportGuestSleeps(end);
+}

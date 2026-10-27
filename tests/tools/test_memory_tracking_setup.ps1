@@ -22,7 +22,54 @@ $fixture = Join-Path $fixtures 'sdk'
 if ($LASTEXITCODE) { throw 'fixture clone failed' }
 Run-Setup $fixture $true
 Run-Setup $fixture $true -VerifyOnly
+$manifestPath = Join-Path $fixture '.sr-memory-tracking.json'
+$installedFiles = @(Get-ChildItem -LiteralPath (Join-Path $fixture 'src/system/write_tracking') -File -Recurse) + @(Get-Item -LiteralPath $manifestPath)
+$unchanged = @{}
+foreach ($file in $installedFiles) {
+  # Distinct historical timestamps catch writes without sleeps or filesystem
+  # clock-resolution assumptions, even when Copy-Item preserves source times.
+  $stamp = [datetime]::SpecifyKind([datetime]'2001-02-03', [DateTimeKind]::Utc).AddSeconds($unchanged.Count)
+  [IO.File]::SetLastWriteTimeUtc($file.FullName, $stamp)
+  $unchanged[$file.FullName] = @{ ticks=$stamp.Ticks; hash=(Get-FileHash -LiteralPath $file.FullName).Hash }
+}
 Run-Setup $fixture $true
+Run-Setup $fixture $true -VerifyOnly
+$rewritten = @()
+foreach ($path in $unchanged.Keys) {
+  if ((Get-Item -LiteralPath $path).LastWriteTimeUtc.Ticks -ne $unchanged[$path].ticks -or
+      (Get-FileHash -LiteralPath $path).Hash -ne $unchanged[$path].hash) { $rewritten += $path }
+}
+if ($rewritten.Count) { throw "unchanged setup inputs were rewritten: $($rewritten -join ', ')" }
+
+# Model an older installed canonical revision, authorized by its manifest.
+# Only the fixture changes; the workspace's canonical sources stay untouched.
+$header = Join-Path $fixture 'src/system/write_tracking/include/rex_memory_tracking_abi.h'
+[IO.File]::AppendAllText($header, "`n// previous canonical revision`n")
+$previousHeaderHash = (Get-FileHash -LiteralPath $header).Hash
+$manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+$headerKey = @($manifest.files.PSObject.Properties.Name | Where-Object { $_ -match 'rex_memory_tracking_abi\.h$' })[0]
+$manifest.files.PSObject.Properties[$headerKey].Value = $previousHeaderHash
+$manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+Run-Setup $fixture $false -VerifyOnly -FailurePattern 'SDK source manifest mismatch'
+
+# An unknown edit later in preflight must prevent even an authorized update.
+$peer = Join-Path $fixture 'src/system/write_tracking/src/write_tracking_state.h'
+$savedPeer = [IO.File]::ReadAllBytes($peer)
+[IO.File]::AppendAllText($peer, "`n// unrecognized edit during canonical update`n")
+$beforeRejectedManifest = (Get-FileHash -LiteralPath $manifestPath).Hash
+$beforeRejectedTime = (Get-Item -LiteralPath $manifestPath).LastWriteTimeUtc.Ticks
+Run-Setup $fixture $false -FailurePattern 'Unrecognized source edit'
+if ((Get-FileHash -LiteralPath $header).Hash -ne $previousHeaderHash) { throw 'preflight partially updated an authorized source' }
+if ((Get-FileHash -LiteralPath $manifestPath).Hash -ne $beforeRejectedManifest -or
+    (Get-Item -LiteralPath $manifestPath).LastWriteTimeUtc.Ticks -ne $beforeRejectedTime) { throw 'failed preflight rewrote manifest' }
+[IO.File]::WriteAllBytes($peer, $savedPeer)
+[IO.File]::SetLastWriteTimeUtc($peer, [datetime]::new($unchanged[$peer].ticks, [DateTimeKind]::Utc))
+Run-Setup $fixture $true
+Run-Setup $fixture $true -VerifyOnly
+if ((Get-FileHash -LiteralPath $header).Hash -ne $unchanged[$header].hash) { throw 'authorized canonical update was not installed' }
+$updatedManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+if ($updatedManifest.files.PSObject.Properties[$headerKey].Value -ne $unchanged[$header].hash) { throw 'manifest did not record canonical update' }
+if ((Get-Item -LiteralPath $peer).LastWriteTimeUtc.Ticks -ne $unchanged[$peer].ticks) { throw 'canonical update rewrote an unchanged peer' }
 $unknown = Join-Path $fixture 'src/system/tracking_unexpected.cpp'
 [IO.File]::WriteAllText($unknown, '// unrecognized build input')
 Run-Setup $fixture $false
@@ -33,7 +80,6 @@ New-Item -ItemType Directory -Force $dependency | Out-Null
 & git -C $dependency init --quiet
 & git -C $dependency -c user.name=Fixture -c user.email=fixture@example.invalid commit --quiet --allow-empty -m fixture
 Run-Setup $fixture $false -VerifyOnly -CheckDependencies -FailurePattern 'dependency revision'
-$header = Join-Path $fixture 'src/system/write_tracking/include/rex_memory_tracking_abi.h'
 $saved = [IO.File]::ReadAllBytes($header)
 [IO.File]::AppendAllText($header, "`n// unexpected local edit`n")
 Run-Setup $fixture $false -VerifyOnly
@@ -55,4 +101,4 @@ $partial = Join-Path $fixtures 'partial'
 if ($LASTEXITCODE) { throw 'partial fixture clone failed' }
 [IO.File]::AppendAllText((Join-Path $partial 'src/system/CMakeLists.txt'), "`n# partial edit`n")
 Run-Setup $partial $false
-Write-Output 'PASS setup idempotence, revision/path checks, partial patch and local edit preservation'
+Write-Output 'PASS setup timestamp idempotence, authorized canonical updates, preflight guards, revision/path checks, partial patch and local edit preservation'
