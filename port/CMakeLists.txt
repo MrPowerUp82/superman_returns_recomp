@@ -62,6 +62,8 @@ set(SUPERMANRETURNS_SOURCES
     src/graphics/backend_selection.cpp
     src/sr_preset.cpp
     src/skip_intro.cpp
+    src/guest_memory_diagnostics.cpp
+    src/guest_physical_allocation.cpp
     src/renderdoc_capture.cpp
     src/render_scale.cpp
     src/lsfg_settings.cpp
