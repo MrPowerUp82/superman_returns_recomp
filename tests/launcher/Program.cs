@@ -107,5 +107,13 @@ foreach (var vsync in new[] { false, true }) {
     Check(LauncherSettings.Load(syncPath).VSync == vsync, $"saved VSync {vsync} survives restart");
 }
 Check(LauncherSettings.Load(ini).Renderer == "native", "renderer default survives round trip");
+var bench = new LauncherSettings { GraphicsApi = "d3d12", SkipIntro = false }.BuildArgumentList(benchmark: true);
+Check(bench.Count(a => a.StartsWith("--sr_skip_intro=")) == 1 && bench.Contains("--sr_skip_intro=true"), "benchmark skips the intro once even when the preference is off");
+Check(bench.Count(a => a.StartsWith("--sr_benchmark=")) == 1 && bench.Contains("--sr_benchmark=true"), "benchmark flag sent once");
+Check(!new LauncherSettings().BuildArgumentList().Any(a => a.StartsWith("--sr_benchmark")), "normal play sends no benchmark flag");
+var xenosMessage = "";
+try { new LauncherSettings { GraphicsApi = "d3d12", Renderer = "xenos" }.CreateLaunch(AppContext.BaseDirectory, benchmark: true); }
+catch (InvalidOperationException error) { xenosMessage = error.Message; }
+Check(xenosMessage == "O benchmark precisa do renderizador Nativo (Direct3D 12 ou Vulkan).", "benchmark refuses the Xenos renderer");
 Console.WriteLine($"{failed} failed checks");
 return failed == 0 ? 0 : 1;

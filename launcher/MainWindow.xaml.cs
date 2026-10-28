@@ -111,12 +111,14 @@ public partial class MainWindow : Window
         try { ReadSettings(); _settings.Save(_settingsPath); StatusText.Text = "Preferências salvas para a próxima execução."; }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException) { StatusText.Text = "Não foi possível salvar: " + error.Message; }
     }
-    private void Play_Click(object sender, RoutedEventArgs e)
+    private void Play_Click(object sender, RoutedEventArgs e) => Launch(benchmark: false);
+    private void Benchmark_Click(object sender, RoutedEventArgs e) => Launch(benchmark: true);
+    private void Launch(bool benchmark)
     {
         try
         {
             ReadSettings();
-            var start = _settings.CreateLaunch(AppContext.BaseDirectory);
+            var start = _settings.CreateLaunch(AppContext.BaseDirectory, benchmark);
             _settings.Save(_settingsPath);
             Process.Start(start);
             Close();

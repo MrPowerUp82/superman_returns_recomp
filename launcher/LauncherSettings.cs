@@ -84,7 +84,9 @@ public sealed class LauncherSettings
     private static int ValidChoice(string value, int fallback, params int[] choices) =>
         int.TryParse(value, out var number) && choices.Contains(number) ? number : fallback;
 
-    public IReadOnlyList<string> BuildArgumentList()
+    // benchmark: title-screen benchmark (always skips the intro; the engine
+    // rejects a flag given twice, so the intro value is replaced, not appended).
+    public IReadOnlyList<string> BuildArgumentList(bool benchmark = false)
     {
         var resolution = Resolution.Split('x');
         int width = 1280, height = 720;
@@ -105,7 +107,7 @@ public sealed class LauncherSettings
         var result = new List<string> {
             $"--sr_renderer={(Renderer == "xenos" && !vulkan ? "xenos" : "native")}", "--sr_preset=custom",
             $"--sr_native_api={(vulkan ? "vulkan" : "d3d12")}",
-            $"--sr_skip_intro={SkipIntro.ToString().ToLowerInvariant()}",
+            $"--sr_skip_intro={(SkipIntro || benchmark).ToString().ToLowerInvariant()}",
             "--sr_render_scale=100",
             $"--window_width={width}", $"--window_height={height}",
             $"--fullscreen={(DisplayMode != "Windowed").ToString().ToLowerInvariant()}",
@@ -126,6 +128,7 @@ public sealed class LauncherSettings
             result.Add("--sr_lsfg_mode=performance");
             if (!string.IsNullOrWhiteSpace(FrameGenerationDll)) result.Add("--sr_lsfg_dll=" + FrameGenerationDll.Trim());
         }
+        if (benchmark) result.Add("--sr_benchmark=true");
         if (InputMode == "KeyboardMouse") { result.Add("--mnk_mode=true"); result.Add("--mnk_mouse=true"); }
         else { result.Add("--mnk_mode=false"); result.Add("--mnk_mouse=false"); }
         return result;
@@ -133,8 +136,10 @@ public sealed class LauncherSettings
 
     public string BuildArguments() => string.Join(' ', BuildArgumentList());
 
-    public ProcessStartInfo CreateLaunch(string baseDirectory)
+    public ProcessStartInfo CreateLaunch(string baseDirectory, bool benchmark = false)
     {
+        if (benchmark && !UsesVulkan && Renderer == "xenos")
+            throw new InvalidOperationException("O benchmark precisa do renderizador Nativo (Direct3D 12 ou Vulkan).");
         if (!UsesVulkan && Renderer == "xenos" && ValidChoice(RenderScale, 100, 50, 75, 100, 125, 150, 200, 300, 400) < 100)
             throw new InvalidOperationException("Xenos ainda não suporta resolução interna abaixo de 100%. Selecione o renderizador Nativo com Direct3D 12 para usar 540p ou 360p.");
         var exe = Path.GetFullPath(GameExe, baseDirectory);
@@ -148,7 +153,7 @@ public sealed class LauncherSettings
         var logDir = Path.Combine(Path.GetDirectoryName(exe)!, "logs");
         Directory.CreateDirectory(logDir);
         var start = new ProcessStartInfo(exe) { WorkingDirectory = Path.GetDirectoryName(exe)!, UseShellExecute = false };
-        foreach (var argument in BuildArgumentList()) start.ArgumentList.Add(argument);
+        foreach (var argument in BuildArgumentList(benchmark)) start.ArgumentList.Add(argument);
         start.ArgumentList.Add($"--game_data_root={data}");
         start.ArgumentList.Add($"--log_file={Path.Combine(logDir, "game.log")}");
         return start;
