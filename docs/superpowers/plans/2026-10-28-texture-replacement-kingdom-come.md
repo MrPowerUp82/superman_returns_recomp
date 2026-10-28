@@ -121,7 +121,7 @@
 
 **Interfaces:**
 - Consumes: `Image`, `TextureMods::SetRecipe` (Tasks 1–2), `KingdomComeSkinActive` (Task 3), chaves e regiões (Task 4).
-- Produces: `bool PaintKingdomCome(uint64_t key, Image&)` (false para chave desconhecida); operações puras usadas por ela:
+- Produces: `bool PaintKingdomCome(uint64_t key, Image&)` (false para chave desconhecida); operações puras usadas por ela (incluindo `FillEllipse` para a fivela, com a mesma assinatura de `FillPolygon` trocando os vértices por centro e raios):
   - `void RecolorHue(Image&, Rect, float hue_from, float hue_width, Rgb target)`: troca os pixels cuja cor está dentro da faixa de matiz por `target`, preservando a luminância relativa.
   - `void FillPolygon(Image&, std::span<const Vec2>, Rgba, Rect clip)`: preenchimento com antialiasing, para desenhar o emblema.
   - `void Lighten(Image&, Rect, float amount)`.
@@ -131,7 +131,7 @@
   - `polygon_stays_inside_clip`: um triângulo maior que o `clip` não altera pixels fora dele.
   - `unknown_key_paints_nothing`: `PaintKingdomCome` com uma chave fora da tabela devolve false, e a imagem fica intacta.
   - `skin_warns_once_when_no_key_matches`: com a skin ativa e nenhuma chave conhecida aplicada em N texturas, sai um único aviso.
-- [ ] **Step 2: Ver falhar**, implementar as operações e a tabela (chaves e regiões da Task 4; cores: traje cinza-escuro `#2B2D33` com a luminância original, emblema em vermelho `#B3141B` sobre preto `#111111`, têmporas clareadas em 35%). Os tons finais podem mudar no Step 4.
+- [ ] **Step 2: Ver falhar**, implementar as operações e a tabela (chaves e regiões da Task 4). Visual-alvo: o Reino do Amanhã da CW (Brandon Routh), descrito na spec. Traje azul no tom do filme, emblema com escudo vermelho `#B3141B` e o "S" em formas pretas `#111111`, sunga e botas vermelhas, cinto preto `#151515` com fivela oval dourada `#C9A23A`, capa vermelho-escura `#6E1218`, sempre preservando a luminância original. Os tons finais podem mudar no Step 4.
 - [ ] **Step 3: Rodar testes e `build.cmd`.**
 - [ ] **Step 4: Prints para o usuário** — D3D12 e Vulkan com `--sr_costume=2 --sr_costume_skin=kingdom_come`, de frente, de costas e voando. **Parar e pedir aprovação ou ajustes da arte ao usuário** antes de seguir. Os ajustes são feitos na tabela, sempre com os testes verdes.
 - [ ] **Step 5: Commit** — `feat(textures): Kingdom Come skin over the Golden Age costume`

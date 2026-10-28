@@ -10,12 +10,12 @@ O plano é repintar as texturas do Golden Age como Reino do Amanhã em tempo de 
 
 1. **Dump:** uma opção grava as texturas que o jogo usa, uma vez por textura distinta, com nome estável derivado do conteúdo. Serve para achar as texturas do Golden Age.
 2. **Substituição:** o renderer procura, numa pasta, um arquivo com o mesmo nome e usa a imagem nova no lugar da original, nos backends **D3D12 e Vulkan**.
-3. **Arte (receita no código):** texturas do Golden Age repintadas como Reino do Amanhã, aplicadas pela receita a partir dos pixels originais de cada jogo:
-   - traje cinza-escuro em vez de azul;
-   - emblema novo no lugar do "S" (o "S" do Reino do Amanhã em vermelho e preto, desenhado por script, original);
-   - têmporas grisalhas, se o cabelo tiver textura própria.
-
-   As cores e a capa seguem o visual do Reino do Amanhã, sem copiar arte de outro jogo.
+3. **Arte (receita no código):** o Golden Age repintado como o **Reino do Amanhã da CW, vestido por Brandon Routh** (o mesmo ator do filme do jogo, na série Crisis on Infinite Earths). Referência visual dada pelo usuário em 28/10. A receita parte dos pixels originais de cada jogo:
+   - traje **azul**, no tom do filme (não cinza);
+   - **emblema do Reino do Amanhã**: escudo vermelho com o "S" estilizado em formas pretas, desenhado por formas vetoriais próprias no lugar do emblema do Golden Age;
+   - **sunga vermelha**, **cinto preto com fivela dourada oval** e **botas vermelhas**, ajustando as partes que o Golden Age já tem no modelo; se alguma não existir na textura, registrar e falar com o usuário;
+   - **capa vermelho-escura**;
+   - cabelo como no original (no visual da referência, o grisalho é discreto; fica como ajuste opcional).
 4. **Vestir direto:** um campo "Traje" no launcher (Padrão do jogo, Superman Returns, Pod Suit, Reino do Amanhã) que vira `--sr_costume=default|0|1|2`. Ele veste o traje escolhido ao entrar no gameplay, sem precisar desbloquear. "Reino do Amanhã" é o traje 2 com as texturas novas. "Padrão do jogo" não interfere.
 5. Texturas novas ligadas por padrão, com opção para desligar e ver o Golden Age original.
 
