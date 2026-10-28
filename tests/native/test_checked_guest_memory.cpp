@@ -61,4 +61,19 @@ SR_TEST(checked_guest_reads_scratch_does_not_disturb_nested_slots) {
   SR_CHECK_EQ(outer[0], 0xAAu);
   SR_CHECK(reads.ReadScratch(nullptr, 16).empty());
 }
+SR_TEST(copy_guest_bytes_survives_faults_without_a_syscall) {
+  auto* pages=static_cast<uint8_t*>(VirtualAlloc(nullptr,8192,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE));
+  SR_CHECK(pages!=nullptr);if(!pages) return;
+  pages[4095]=42;
+  DWORD previous=0;SR_CHECK(VirtualProtect(pages+4096,4096,PAGE_NOACCESS,&previous));
+  std::array<uint8_t,16> out{};
+  SR_CHECK(superman_returns::native::CopyGuestBytes(out.data(),pages+4095,1));
+  SR_CHECK_EQ(out[0],42u);
+  // Faults in the middle of a copy and on the first byte are both reported.
+  SR_CHECK(!superman_returns::native::CopyGuestBytes(out.data(),pages+4090,16));
+  SR_CHECK(!superman_returns::native::CopyGuestBytes(out.data(),pages+4096,1));
+  CheckedGuestReads reads;
+  SR_CHECK(reads.ReadScratch(pages+4090,16).empty());
+  SR_CHECK(VirtualFree(pages,0,MEM_RELEASE));
+}
 #endif

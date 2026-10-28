@@ -7,7 +7,7 @@
 #include <cstdint>
 
 namespace superman_returns::native {
-// Hasheia memória do jogo onde ela está, sem a cópia de ReadProcessMemory de CheckedGuestReads.
+// Hasheia memória do jogo onde ela está, sem a cópia de CheckedGuestReads.
 // `hash(data, size, seed)` roda dentro de um frame SEH: uma faixa não confirmada ou ilegível devolve
 // false e deixa `out` intacto, como uma leitura checada que falha. O valor é o mesmo que o hash de
 // uma cópia daria.
