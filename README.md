@@ -10,11 +10,16 @@ Projeto experimental de recompilação estática da versão Xbox 360 de **Superm
 
 ## Estado atual
 
-O jogo compila, carrega os arquivos `.AST`, renderiza via D3D12 (plugin `xenos`) e chega à tela de título 3D (**PRESS START**) com áudio. Menus e gameplay ainda não foram testados.
+O objetivo do projeto é um **renderizador nativo próprio** (`sr_renderer=native`, o padrão), com dois backends: **Direct3D 12** e **Vulkan** (`--sr_native_api=d3d12|vulkan`). Ele intercepta as chamadas Direct3D do XDK e desenha direto na GPU do PC, sem emular a GPU Xenos do Xbox 360. O jogo compila, chega à gameplay com áudio, e o renderer nativo desenha a cidade, o Superman, o HUD e o minimapa. A imagem ainda não está validada em todas as fases, então o projeto continua experimental.
 
-Em 2026-10-02, o renderer `native` (Direct3D 12) também chegou ao início da gameplay: Superman, rua, prédios, HUD e minimapa aparecem, e o movimento com teclado foi verificado. Foram corrigidos o layout do viewport e o hook de clear com cor float4. Ainda há geometria deformada, iluminação escura e pipelines ausentes; a imagem não está validada contra o Xenos. Detalhes em [validação da gameplay nativa](docs/native-gameplay-validation.md).
+O backend **Xenos** (a emulação da GPU herdada do Xenia, plugin `xenos`) continua disponível só como compatibilidade, quando escolhido explicitamente (`--sr_renderer=xenos` ou "Xenos (compatibilidade)" no launcher). Opções desse backend, como `render_target_path_d3d12` (RTV/ROV), **não afetam o renderer nativo**.
 
-Em 2026-10-05 o renderer nativo ganhou um segundo backend, **Vulkan** (`--sr_native_api=vulkan`), que o launcher passou a oferecer como padrão. Ele é experimental: a validação de cenas ainda está em andamento ([`docs/vulkan-m3.md`](docs/vulkan-m3.md)) e, em GPU integrada, o D3D12 nativo ainda é mais rápido (~25–28 FPS no fechamento contra ~17–18 FPS do Vulkan após o ciclo 3 de otimizações de CPU; números em [Desempenho](#desempenho)). Nesse dia também foram corrigidos dois problemas que afetavam o D3D12: a queda para o backend Xenos (9–11 FPS) quando o launcher mandava uma GPU em branco, e a tela preta com som causada por uma biblioteca de pré-shaders incompleta (veja [Solução de problemas](#solução-de-problemas)).
+Marcos recentes:
+
+- 2026-10-05: backend Vulkan; correção da queda silenciosa para o Xenos quando o launcher mandava uma GPU em branco (o nativo nunca mais troca de backend sozinho).
+- 2026-10-27/28: limite interno de 30 Hz removido do padrão, correção da música que parava após a decolagem (último bloco do XMA), otimizações de CPU no D3D12 nativo, [benchmark embutido](#benchmark) e binds de `Shift`/`Ctrl`/`Alt` sozinhos no teclado.
+
+Histórico e validações: [gameplay nativa](docs/native-gameplay-validation.md), [Vulkan](docs/vulkan-m3.md), [pistas de desempenho de 28/10](docs/perf-hunt-game-xenia-2026-10-28.md).
 
 ### Correções específicas do jogo
 
@@ -44,6 +49,17 @@ Depois de compilar com `build.cmd`:
 
 Os dois aceitam opções extras, por exemplo `run.cmd --fullscreen`. O log fica em `logs/game.log`. Para escolher a API fora do launcher, use `--sr_native_api=d3d12` ou `--sr_native_api=vulkan` (o padrão do executável continua `d3d12`).
 
+### Benchmark
+
+O botão **BENCHMARK** do launcher abre o jogo direto no sobrevoo da cidade da tela de título, sem logo nem menu, com as configurações escolhidas. Depois de 5 s de aquecimento, ele mede 60 s e mostra FPS médio, mínimo, 1% e 0,1% low, tempos de quadro e as configurações usadas. `Esc` ou `Enter` fecham o jogo. O resultado também é salvo em `benchmarks\benchmark-AAAAMMDD-HHMMSS.json`, com o tempo de cada quadro num `.csv`. Teclado e controle ficam desligados durante a rodada.
+
+- Por linha de comando: `run.cmd --sr_benchmark=true`. Com `--sr_benchmark_exit=true`, o jogo fecha sozinho depois de salvar, com código de saída 0 se a rodada for válida e 1 se não for.
+- A rodada é marcada como inválida se a cena 3D parar ou se o vídeo de demonstração do título começar (~77 s depois da cena).
+- O voo não é idêntico a cada abertura: no mesmo PC, a média variou ±4,5% entre rodadas. Para comparar builds, use a média de três rodadas.
+- Medido em 28/10 num i5-13420H + Intel UHD, 1280x720, sem limite: Direct3D 12 com 55,1 / 57,9 / 53,0 FPS e Vulkan com 41,6 FPS.
+
+Detalhes no [design do benchmark](docs/superpowers/specs/2026-10-28-title-benchmark-design.md).
+
 ### Desempenho
 
 O limite nativo de 30 FPS foi retirado do padrão: o executável e novas preferências
@@ -68,18 +84,9 @@ por hash continua. `set SR_MEMORY_TRACKING_SDK=OFF` permite compilar com o runti
 original. Detalhes e validação em
 [CPU e desbloqueio de FPS](docs/cpu-optimization-unlock-fps-2026-10-27.md).
 
-As medições abaixo são históricas e registram explicitamente os limites usados.
+No renderer nativo, num i5-13420H + Intel UHD, o quadro é limitado pela GPU integrada: a cena principal ocupa ~72% do tempo de GPU. O trabalho de CPU do worker D3D12 fica em ~13 ms por quadro. Números atuais na seção [Benchmark](#benchmark); análise em [pistas de desempenho de 28/10](docs/perf-hunt-game-xenia-2026-10-28.md).
 
-O jogo roda a 30 FPS no Xbox 360. Aqui o gargalo é a emulação da GPU do Xbox 360 (Xenos): com GPU integrada, ela fica a ~98% nas cenas 3D. Medições num i5-13420H com Intel UHD:
-
-| Modo de render (`--render_target_path_d3d12`) | Vídeos de abertura | Cena 3D (tela de título) |
-| --- | --- | --- |
-| `rov` (padrão do runtime) | 30 FPS | ~2 FPS |
-| `rtv` (padrão do `run.cmd`) | ~16 FPS | ~10 FPS |
-
-O jogo já aplica por padrão, em `port/src/superman_returns_app.h`, as opções de GPU medidas neste hardware: `render_target_path_d3d12=rtv`, `depth_float24_convert_in_pixel_shader=true` (sem ela o céu e o fundo ficam pretos no `rtv`) e `native_stencil_value_output_d3d12_intel=true` (dica do Xenia para GPUs Intel, [xenia-canary#542](https://github.com/xenia-canary/xenia-canary/issues/542): 7,6 → 10,2 FPS na rua). Qualquer opção passada na linha de comando prevalece.
-
-O renderer `native` (o padrão) é muito mais leve que a emulação do Xenos. Medido no fechamento do ciclo 3 em 2026-10-06 no mesmo i5-13420H + Intel UHD, com `tools\bench\bench_api.ps1` (New Game, 20 s parado e 20 s andando, janela 1280x720, limite de 30 FPS; o script só mede depois de ver o HUD do jogo na tela):
+As medições abaixo são históricas e registram explicitamente os limites usados. Medido no fechamento do ciclo 3 em 2026-10-06 no mesmo i5-13420H + Intel UHD, com `tools\bench\bench_api.ps1` (New Game, 20 s parado e 20 s andando, janela 1280x720, limite de 30 FPS; o script só mede depois de ver o HUD do jogo na tela):
 
 | Renderer | Parado | Andando | Observação |
 | --- | --- | --- | --- |
@@ -88,7 +95,18 @@ O renderer `native` (o padrão) é muito mais leve que a emulação do Xenos. Me
 
 O ciclo 3 reduziu o custo da gravação Vulkan de ~50–56 ms para ~28–32 ms, mantendo texturas exatas por quadro e posse dos recursos até o fence. O FPS ainda depende do worker de replay, da captura na thread do jogo e da GPU. No fechamento, o D3D12 mediu 25,5 FPS parado e 27,5 andando; a câmera variável impede concluir ausência de regressão com uma única execução. Resultados por tarefa e limitações dos testes estão no [spec do ciclo 3](docs/superpowers/specs/2026-10-06-vulkan-fps-parity-cycle3-design.md#resultado-2026-10-06-ciclo-3). Novas otimizações exigem uma decisão de escopo.
 
-O backend `xenos` é o da tabela acima e só roda quando você o escolhe. Se o D3D12 nativo ficar em 9–11 FPS com a GPU a 100%, o jogo provavelmente está no backend Xenos: confira o log (veja [Solução de problemas](#solução-de-problemas)).
+#### Backend Xenos (compatibilidade)
+
+O backend `xenos` emula a GPU do Xbox 360 e só roda quando você o escolhe. Ele não é o foco do projeto e é bem mais pesado que o nativo: numa GPU integrada fica a ~98% nas cenas 3D. As opções abaixo valem **só para ele**. Medições num i5-13420H com Intel UHD:
+
+| Modo de render (`--render_target_path_d3d12`) | Vídeos de abertura | Cena 3D (tela de título) |
+| --- | --- | --- |
+| `rov` (padrão do runtime) | 30 FPS | ~2 FPS |
+| `rtv` (padrão deste projeto) | ~16 FPS | ~10 FPS |
+
+Neste hardware o RTV ficou bem à frente, então o jogo aplica por padrão, em `port/src/superman_returns_app.h`: `render_target_path_d3d12=rtv`, `depth_float24_convert_in_pixel_shader=true` (sem ela o céu e o fundo ficam pretos no `rtv`) e `native_stencil_value_output_d3d12_intel=true` (dica do Xenia para GPUs Intel, [xenia-canary#542](https://github.com/xenia-canary/xenia-canary/issues/542): 7,6 → 10,2 FPS na rua). Em outras GPUs o ROV pode se sair melhor: qualquer opção passada na linha de comando prevalece, por exemplo `run.cmd --sr_renderer=xenos --render_target_path_d3d12=rov`.
+
+Se o D3D12 nativo ficar em 9–11 FPS com a GPU a 100%, o jogo provavelmente está no backend Xenos: confira o log (veja [Solução de problemas](#solução-de-problemas)).
 
 Para medir, `F3` abre um painel com o FPS do jogo, e `set SR_LOG_FPS=1` antes de rodar grava o FPS em `logs/game.log` a cada 2 s. `F4` abre as configurações do runtime.
 
@@ -141,7 +159,7 @@ As ações de cada botão são as do jogo original no Xbox 360. Para mudar um at
 run_keyboard.cmd --keybind_a=Space,LMB --keybind_x=RMB --mnk_sensitivity=1.5
 ```
 
-Opções disponíveis: `--keybind_a`, `_b`, `_x`, `_y`, `_left_trigger`, `_right_trigger`, `_left_shoulder`, `_right_shoulder`, `_lstick_up/down/left/right/press`, `_rstick_up/down/left/right/press`, `_dpad_up/down/left/right`, `_back`, `_start`, `_guide`. As teclas aceitam letras e números, `Space`, `Return`, `Tab`, `Backspace`, `Escape`, setas (`Up`, `Down`, `Left`, `Right`), combinações com `Shift+`/`Control+`/`Alt+` e os botões do mouse `LMB`, `RMB`, `MMB`. Sem `--mnk_mouse`, a câmera fica só nas setas. `--mnk_sensitivity` ajusta a velocidade do mouse (padrão `1.0`).
+Opções disponíveis: `--keybind_a`, `_b`, `_x`, `_y`, `_left_trigger`, `_right_trigger`, `_left_shoulder`, `_right_shoulder`, `_lstick_up/down/left/right/press`, `_rstick_up/down/left/right/press`, `_dpad_up/down/left/right`, `_back`, `_start`, `_guide`. As teclas aceitam letras e números, `Space`, `Return`, `Tab`, `Backspace`, `Escape`, setas (`Up`, `Down`, `Left`, `Right`), combinações com `Shift+`/`Control+`/`Alt+` e os botões do mouse `LMB`, `RMB`, `MMB`. `Shift`, `Ctrl` e `Alt` também podem ser usados sozinhos, como botão (por exemplo `--keybind_a=Shift`); um modificador usado assim não bloqueia os outros binds (WASD continua respondendo com ele pressionado). Sem bind assim, a comparação de modificadores é exata, e por isso as setas ficam livres para o D-pad em `Shift` + setas. Sem `--mnk_mouse`, a câmera fica só nas setas. `--mnk_sensitivity` ajusta a velocidade do mouse (padrão `1.0`).
 
 ## Estrutura
 
