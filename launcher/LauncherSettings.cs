@@ -23,7 +23,8 @@ public sealed class LauncherSettings
     public string Msaa { get; set; } = "1";
     public string InputMode { get; set; } = "KeyboardMouse";
     public string Renderer { get; set; } = "native";
-    public string GraphicsApi { get; set; } = "vulkan";
+    // Direct3D 12 is the validated and faster native backend; Vulkan stays selectable.
+    public string GraphicsApi { get; set; } = "d3d12";
     public bool UsesVulkan => GraphicsApi == "vulkan";
     public bool SkipIntro { get; set; }
     public bool FrameGeneration { get; set; }
@@ -57,7 +58,7 @@ public sealed class LauncherSettings
                 case "msaa": s.Msaa = value; break;
                 case "input": s.InputMode = value; break;
                 case "renderer": s.Renderer = value; break;
-                case "graphics_api": s.GraphicsApi = value == "d3d12" ? "d3d12" : "vulkan"; break;
+                case "graphics_api": s.GraphicsApi = value == "vulkan" ? "vulkan" : "d3d12"; break;
                 case "skip_intro": if (bool.TryParse(value, out var si)) s.SkipIntro = si; break;
                 case "frame_generation": if (bool.TryParse(value, out var fg)) s.FrameGeneration = fg; break;
                 case "frame_generation_dll": s.FrameGenerationDll = value; break;

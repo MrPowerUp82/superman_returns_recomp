@@ -130,3 +130,10 @@ SR_TEST(benchmark_scene_latch_keeps_a_lost_frame_until_read) {
   SR_CHECK(!latch.Consume());
   SR_CHECK(latch.Consume());            // cleared once read; latest frame had the scene
 }
+
+SR_TEST(benchmark_headless_always_exits_after_saving) {
+  // Headless has no results screen to close, so it ends like --sr_benchmark_exit.
+  SR_CHECK(ExitAfterSave(false, true));
+  SR_CHECK(ExitAfterSave(true, false));
+  SR_CHECK(!ExitAfterSave(false, false));
+}

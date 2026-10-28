@@ -22,7 +22,7 @@ System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.Cultu
 Check(settings.BuildArgumentList().Contains("--sr_native_render_scale=1.5"), "Portuguese locale does not change numeric arguments");
 settings.InputMode = "Controller";
 Check(settings.BuildArgumentList().Contains("--mnk_mode=false") && settings.BuildArgumentList().Contains("--mnk_mouse=false"), "controller overrides keyboard settings");
-var invalid = new LauncherSettings { Resolution = "0x0", RenderScale = "50", FpsLimit = "garbage", Msaa = "2" };
+var invalid = new LauncherSettings { GraphicsApi = "vulkan", Resolution = "0x0", RenderScale = "50", FpsLimit = "garbage", Msaa = "2" };
 Check(invalid.BuildArgumentList().Contains("--window_width=1280") && invalid.BuildArgumentList().Contains("--sr_native_render_scale=1") && invalid.BuildArgumentList().Contains("--sr_native_fps_limit=0") && invalid.BuildArgumentList().Contains("--sr_native_msaa_samples=1"), "invalid preferences fall back to supported defaults");
 var automatic = new LauncherSettings { GraphicsApi = "d3d12" }.BuildArgumentList();
 Check(!automatic.Any(a => a.EndsWith('=')) && !automatic.Any(a => a.StartsWith("--sr_native_gpu_luid")), "automatic GPU sends no empty argument (the engine would read the next argument as its value)");
@@ -78,8 +78,8 @@ bool rejectedXenosScale = false;
 try { weak.CreateLaunch(fixture); } catch (InvalidOperationException) { rejectedXenosScale = true; }
 Check(rejectedXenosScale, "Xenos does not start with a known-broken low guest resolution");
 Check(settings.BuildArgumentList().Contains("--sr_render_scale=100") && settings.BuildArgumentList().Contains("--sr_skip_intro=false"), "defaults keep full quality");
-Check(new LauncherSettings().UsesVulkan, "Vulkan is the default graphics API");
-var vk = new LauncherSettings { GameExe = settings.GameExe, GameData = settings.GameData, Renderer = "xenos", RenderScale = "200",
+Check(new LauncherSettings().GraphicsApi == "d3d12", "Direct3D 12 is the default (recommended) graphics API");
+var vk = new LauncherSettings { GraphicsApi = "vulkan", GameExe = settings.GameExe, GameData = settings.GameData, Renderer = "xenos", RenderScale = "200",
     Antialiasing = "FXAA", Msaa = "4", ShadowQuality = "4", TextureFilter = "Anisotropic16x" };
 var vkLaunch = vk.CreateLaunch(fixture);
 Check(vkLaunch.ArgumentList.Contains("--sr_native_api=vulkan") && vkLaunch.ArgumentList.Contains("--sr_renderer=native"), "Vulkan launches the native renderer");
@@ -107,6 +107,11 @@ foreach (var vsync in new[] { false, true }) {
     Check(LauncherSettings.Load(syncPath).VSync == vsync, $"saved VSync {vsync} survives restart");
 }
 Check(LauncherSettings.Load(ini).Renderer == "native", "renderer default survives round trip");
+foreach (var api in new[] { "vulkan", "d3d12" }) {
+    var apiPath = Path.Combine(fixture, "api.ini");
+    new LauncherSettings { GraphicsApi = api }.Save(apiPath);
+    Check(LauncherSettings.Load(apiPath).GraphicsApi == api, $"saved {api} preference survives the new default");
+}
 var bench = new LauncherSettings { GraphicsApi = "d3d12", SkipIntro = false }.BuildArgumentList(benchmark: true);
 Check(bench.Count(a => a.StartsWith("--sr_skip_intro=")) == 1 && bench.Contains("--sr_skip_intro=true"), "benchmark skips the intro once even when the preference is off");
 Check(bench.Count(a => a.StartsWith("--sr_benchmark=")) == 1 && bench.Contains("--sr_benchmark=true"), "benchmark flag sent once");

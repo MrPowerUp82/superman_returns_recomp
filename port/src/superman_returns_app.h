@@ -47,6 +47,7 @@ class SupermanReturnsApp : public rex::ReXApp {
   void OnPreSetup(rex::RuntimeConfig& config) override {
     // Title benchmark: no key or pad may advance the title menu. Tool mode
     // creates only the NOP driver, whatever input_backend (SDL, XInput) says.
+    superman_returns::benchmark::NoteStartup();
     if(superman_returns::benchmark::Active()) {
       config.input_factory=[](bool) {return rex::input::CreateDefaultInputSystem(true);};
       REXLOG_INFO("benchmark: game input disabled");

@@ -34,8 +34,8 @@ Quem não quer compilar pode usar a página do instalador (GitHub Pages deste re
 
 ## Como jogar
 
-O launcher com GUI permite escolher a API gráfica (Vulkan, o padrão, ou Direct3D 12), GPU, resolução, controles e opções gráficas antes
-de iniciar. Com Vulkan, escala interna, FXAA, MSAA, sombras e filtro anisotrópico ficam no padrão do jogo; essas opções só valem em Direct3D 12. Compile o launcher com `powershell -File tools/build_launcher.ps1` e abra
+O launcher com GUI permite escolher a API gráfica (Direct3D 12, o padrão recomendado, ou Vulkan, experimental), GPU, resolução, controles e opções gráficas antes
+de iniciar. Preferências já salvas mantêm a API escolhida. Com Vulkan, escala interna, FXAA, MSAA, sombras e filtro anisotrópico ficam no padrão do jogo; essas opções só valem em Direct3D 12. Compile o launcher com `powershell -File tools/build_launcher.ps1` e abra
 `artifacts/launcher/SupermanReturnsLauncher.exe`. A versão portátil inclui .NET;
 detalhes em [launcher/README.md](launcher/README.md). O pacote de distribuição também
 inclui o launcher. A seleção de GPU exige o executável do jogo da mesma build.
@@ -54,6 +54,7 @@ Os dois aceitam opções extras, por exemplo `run.cmd --fullscreen`. O log fica 
 O botão **BENCHMARK** do launcher abre o jogo direto no sobrevoo da cidade da tela de título, sem logo nem menu, com as configurações escolhidas. Depois de 5 s de aquecimento, ele mede 60 s e mostra FPS médio, mínimo, 1% e 0,1% low, tempos de quadro e as configurações usadas. `Esc` ou `Enter` fecham o jogo. O resultado também é salvo em `benchmarks\benchmark-AAAAMMDD-HHMMSS.json`, com o tempo de cada quadro num `.csv`. Teclado e controle ficam desligados durante a rodada.
 
 - Por linha de comando: `run.cmd --sr_benchmark=true`. Com `--sr_benchmark_exit=true`, o jogo fecha sozinho depois de salvar, com código de saída 0 se a rodada for válida e 1 se não for.
+- Sem janela na tela (para scripts): `--sr_benchmark_headless=true`. A janela vai para fora da tela assim que o jogo começa a apresentar quadros, o foco do teclado volta para a janela que abriu o jogo, e ao fim o jogo fecha sozinho (como `--sr_benchmark_exit`) e escreve uma linha de resumo no stdout (redirecione a saída para lê-la). O jogo continua renderizando normalmente na GPU: ocultar ou minimizar a janela pararia a apresentação, por isso ela só é movida.
 - A rodada é marcada como inválida se a cena 3D parar ou se o vídeo de demonstração do título começar (~77 s depois da cena).
 - O voo não é idêntico a cada abertura: no mesmo PC, a média variou ±4,5% entre rodadas. Para comparar builds, use a média de três rodadas.
 - Medido em 28/10 num i5-13420H + Intel UHD, 1280x720, sem limite: Direct3D 12 com 55,1 / 57,9 / 53,0 FPS e Vulkan com 41,6 FPS.

@@ -46,7 +46,7 @@ public partial class MainWindow : Window
     private void PopulateChoices()
     {
         SetChoices(RendererBox, new("native", "Nativo (recomendado)"), new("xenos", "Xenos (compatibilidade)"));
-        SetChoices(ApiBox, new("vulkan", "Vulkan (recomendado)"), new("d3d12", "Direct3D 12"));
+        SetChoices(ApiBox, new("d3d12", "Direct3D 12 (recomendado)"), new("vulkan", "Vulkan (experimental)"));
         SetChoices(ResolutionBox, new("960x540", "960 × 540 (PC fraco)"), new("1280x720", "1280 × 720"), new("1600x900", "1600 × 900"), new("1920x1080", "1920 × 1080"), new("2560x1440", "2560 × 1440"), new("3840x2160", "3840 × 2160"));
         SetChoices(DisplayModeBox, new("Fullscreen", "Tela cheia sem bordas"), new("Windowed", "Janela"));
         SetChoices(InputBox, new("KeyboardMouse", "Teclado e mouse"), new("Controller", "Controle Xbox / XInput"));

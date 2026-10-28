@@ -99,6 +99,10 @@ class Clock {
   std::vector<double> frame_ms_;
 };
 
+// --sr_benchmark_headless has no results screen to close, so it always ends
+// the process after saving, like --sr_benchmark_exit.
+inline bool ExitAfterSave(bool exit_flag, bool headless) { return exit_flag || headless; }
+
 struct Stats {
   double avg_fps = 0, min_fps = 0, low1_fps = 0, low01_fps = 0;
   double p50_ms = 0, p95_ms = 0, p99_ms = 0, max_ms = 0, seconds = 0;
