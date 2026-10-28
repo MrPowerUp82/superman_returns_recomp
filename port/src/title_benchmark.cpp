@@ -46,8 +46,7 @@ State& GetState() {
   static State state;
   return state;
 }
-// -1 until a renderer reports a frame.
-std::atomic<int> last_scene{-1};
+SceneLatch scene_latch;
 
 std::string SettingsText(const std::string& gpu) {
   const auto flag = [](const char* name) { return rex::cvar::GetFlagByName(name); };
@@ -97,7 +96,7 @@ void Finish(State& s) {
 
 bool Active() { return REXCVAR_GET(sr_benchmark); }
 
-void NoteRendererFrame(bool scene_drawn) { last_scene.store(scene_drawn ? 1 : 0, std::memory_order_relaxed); }
+void NoteRendererFrame(bool scene_drawn) { scene_latch.Note(scene_drawn); }
 
 void OnGuestPresent() {
   if (!Active()) return;
@@ -114,7 +113,7 @@ void OnGuestPresent() {
     }
     const double t = std::chrono::duration<double>(now - *s.first_present).count();
     const Phase before = s.clock->phase();
-    s.clock->OnFrame(t, last_scene.load(std::memory_order_relaxed) == 1);
+    s.clock->OnFrame(t, scene_latch.Consume());
     s.result.phase = s.clock->phase();
     if (s.clock->phase() != before && s.clock->phase() != Phase::Done)
       REXLOG_INFO("benchmark: phase {} at {:.1f} s", int(s.clock->phase()), t);

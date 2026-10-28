@@ -107,3 +107,26 @@ SR_TEST(benchmark_result_reports_unsaved_file) {
   SR_CHECK(!r.saved); SR_CHECK(r.json_path.empty());
   std::filesystem::remove(blocker);
 }
+
+SR_TEST(benchmark_result_saves_under_a_unicode_folder) {
+  // A name outside the ANSI code page must not throw from path::string().
+  const auto dir = std::filesystem::temp_directory_path() / std::filesystem::path(u8"sr_bench_Łukasz_日本") / "benchmarks";
+  std::error_code ignored;
+  std::filesystem::remove_all(dir.parent_path(), ignored);
+  Result r; r.phase = Phase::Done; r.valid = true;
+  const std::vector<double> frames{16.5};
+  SaveResult(r, dir, "20261028-120000", frames);
+  SR_CHECK(r.saved);
+  SR_CHECK(r.json_path.find(reinterpret_cast<const char*>(u8"Łukasz")) != std::string::npos);  // UTF-8 for ImGui and the log
+  SR_CHECK(std::filesystem::exists(dir / "benchmark-20261028-120000.csv"));
+  std::filesystem::remove_all(dir.parent_path(), ignored);
+}
+
+SR_TEST(benchmark_scene_latch_keeps_a_lost_frame_until_read) {
+  SceneLatch latch;
+  SR_CHECK(!latch.Consume());          // nothing reported yet
+  latch.Note(true); SR_CHECK(latch.Consume());
+  latch.Note(false); latch.Note(true);  // a loss between two presents
+  SR_CHECK(!latch.Consume());
+  SR_CHECK(latch.Consume());            // cleared once read; latest frame had the scene
+}

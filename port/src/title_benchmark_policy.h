@@ -2,6 +2,7 @@
 // Title-screen benchmark rules (docs/superpowers/specs/2026-10-28-title-benchmark-design.md).
 // Pure: no SDK, so tests/native exercises them directly.
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <span>
@@ -27,6 +28,25 @@ class UiCut {
 
  private:
   bool scene_drawn_ = false;
+};
+
+// Renderer frames -> guest presents. Renderers may finish several frames
+// between two presents; a frame without the scene must not be overwritten
+// by a later one before the controller reads it.
+class SceneLatch {
+ public:
+  void Note(bool scene) {
+    if (!scene) lost_.store(true, std::memory_order_relaxed);
+    latest_.store(scene ? 1 : 0, std::memory_order_relaxed);
+  }
+  // True when the latest frame had the scene and none was lost since the last call.
+  bool Consume() {
+    const bool lost = lost_.exchange(false, std::memory_order_relaxed);
+    return !lost && latest_.load(std::memory_order_relaxed) == 1;
+  }
+ private:
+  std::atomic<bool> lost_{false};
+  std::atomic<int> latest_{-1};  // -1 until a renderer reports
 };
 
 enum class Phase { WaitingScene, Warmup, Measuring, Done };

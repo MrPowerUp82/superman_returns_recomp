@@ -60,28 +60,36 @@ inline std::string FormatResultJson(const Result& r, std::string_view timestamp)
 
 // Writes benchmark-<stamp>.json and .csv into `directory`. A failure leaves
 // saved=false and json_path empty; the results screen still shows the numbers.
+// Paths stay wide: path::string() throws for names outside the ANSI code page,
+// and json_path is UTF-8 for ImGui and the log.
 inline void SaveResult(Result& r, const std::filesystem::path& directory, std::string_view stamp,
                        std::span<const double> frame_ms) {
   r.saved = false;
   r.json_path.clear();
-  std::error_code error;
-  std::filesystem::create_directories(directory, error);
-  if (error) return;
-  const auto base = directory / ("benchmark-" + std::string(stamp));
-  const auto json_path = std::filesystem::path(base.string() + ".json");
-  std::ofstream json(json_path, std::ios::binary);
-  std::ofstream csv(base.string() + ".csv", std::ios::binary);
-  if (!json || !csv) return;
-  json << FormatResultJson(r, stamp);
-  csv << "frame_ms\n";
-  for (const double ms : frame_ms) {
-    char text[32];
-    std::snprintf(text, sizeof(text), "%.6g\n", ms);
-    csv << text;
+  try {
+    std::error_code error;
+    std::filesystem::create_directories(directory, error);
+    if (error) return;
+    const auto name = "benchmark-" + std::string(stamp);
+    const auto json_path = directory / (name + ".json");
+    std::ofstream json(json_path, std::ios::binary);
+    std::ofstream csv(directory / (name + ".csv"), std::ios::binary);
+    if (!json || !csv) return;
+    json << FormatResultJson(r, stamp);
+    csv << "frame_ms\n";
+    for (const double ms : frame_ms) {
+      char text[32];
+      std::snprintf(text, sizeof(text), "%.6g\n", ms);
+      csv << text;
+    }
+    if (!json.flush() || !csv.flush()) return;
+    const auto utf8 = json_path.u8string();
+    r.json_path.assign(reinterpret_cast<const char*>(utf8.data()), utf8.size());
+    r.saved = true;
+  } catch (const std::exception&) {
+    r.saved = false;
+    r.json_path.clear();
   }
-  if (!json.flush() || !csv.flush()) return;
-  r.saved = true;
-  r.json_path = json_path.string();
 }
 
 }  // namespace superman_returns::benchmark

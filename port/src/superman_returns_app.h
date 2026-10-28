@@ -45,6 +45,12 @@ class SupermanReturnsApp : public rex::ReXApp {
   // sr_renderer=native (docs/native-port-plan.md) uses the native renderer
   // when the build and the game profile allow it, else xenos.
   void OnPreSetup(rex::RuntimeConfig& config) override {
+    // Title benchmark: no key or pad may advance the title menu. Tool mode
+    // creates only the NOP driver, whatever input_backend (SDL, XInput) says.
+    if(superman_returns::benchmark::Active()) {
+      config.input_factory=[](bool) {return rex::input::CreateDefaultInputSystem(true);};
+      REXLOG_INFO("benchmark: game input disabled");
+    }
 #if SR_HAS_NATIVE
     superman_returns::graphics::InitializeGraphicsSettings(graphics_preferences_path_);
 #endif
@@ -149,10 +155,6 @@ class SupermanReturnsApp : public rex::ReXApp {
   // Feed the F3 debug overlay with the guest frame rate.
   void OnPostSetup() override {
     SetGuestFrameStats(SampleGuestFrameStats);InstallBenchmarkInput(*runtime());
-    // Title benchmark: no key or pad may advance the title menu.
-    if(superman_returns::benchmark::Active())
-      if(auto* input=static_cast<rex::input::InputSystem*>(runtime()->input_system()))
-        input->SetActiveCallback([] { return false; });
   }
 
   // Override virtual hooks for customization:
