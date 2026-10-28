@@ -8108,13 +8108,22 @@ void Renderer::DumpFrameResources(const std::string& prefix, bool surfaces_only,
                   uint32_t(rt.format),rt.width, rt.height,static_cast<unsigned long long>(key));
     items.push_back({n, rt.resource.Get(), &rt.state});
   }
-  uint32_t written = 0;
+  uint32_t written = 0, written_slices = 0;
   for (Item& item : items) {
     D3D12_RESOURCE_DESC desc = item.resource->GetDesc();
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp;
     UINT rows;
     UINT64 row_size, total;
     device_->GetCopyableFootprints(&desc, 0, 1, 0, &fp, &rows, &row_size, &total);
+    // A depth/stencil plane may have a different copy format from its 2D
+    // parent resource. Enforce volume identity for the Texture3D mip0 path.
+    if(total>SIZE_MAX || fp.Offset>total ||
+       (desc.Dimension==D3D12_RESOURCE_DIMENSION_TEXTURE3D &&
+        (fp.Footprint.Width!=desc.Width || fp.Footprint.Height!=desc.Height ||
+         fp.Footprint.Format!=desc.Format || fp.Footprint.Depth!=desc.DepthOrArraySize))) {
+      REXLOG_ERROR("native: inconsistent readback footprint for {}{}",prefix,item.name);
+      continue;
+    }
     D3D12_HEAP_PROPERTIES heap{};
     heap.Type = D3D12_HEAP_TYPE_READBACK;
     D3D12_RESOURCE_DESC buf{};
@@ -8153,24 +8162,36 @@ void Renderer::DumpFrameResources(const std::string& prefix, bool surfaces_only,
     void* data = nullptr;
     D3D12_RANGE range{0, size_t(total)};
     if (SUCCEEDED(readback->Map(0, &range, &data))) {
-      std::ofstream out(std::filesystem::u8path(dir)/(prefix+item.name+".raw"),std::ios::binary);
-      if (out) {
+      const uint32_t depth=desc.Dimension==D3D12_RESOURCE_DIMENSION_TEXTURE3D?fp.Footprint.Depth:1;
+      const uint64_t slice_pitch=uint64_t(fp.Footprint.RowPitch)*rows;
+      bool complete=row_size<=UINT32_MAX && slice_pitch<=SIZE_MAX && depth>0;
+      for(uint32_t z=0;complete && z<depth;++z) {
+        const std::string name=prefix+item.name+(depth>1?fmt::format("_z{:03}",z):"")+".raw";
+        std::ofstream out(std::filesystem::u8path(dir)/name,std::ios::binary);
+        if(!out) {
+          REXLOG_ERROR("native: cannot write dump {}/{}",dir,name);
+          complete=false;break;
+        }
         uint32_t header[4] = {uint32_t(desc.Width), desc.Height, uint32_t(desc.Format),
                               fp.Footprint.RowPitch};
         out.write(reinterpret_cast<const char*>(header),sizeof(header));
-        const bool valid_rows=row_size<=UINT32_MAX && graphics::WritePaddedReadbackRows(out,
-            {static_cast<const uint8_t*>(data),size_t(total)},size_t(fp.Offset),
-            uint32_t(row_size),fp.Footprint.RowPitch,rows);
+        const bool valid_rows=graphics::WritePaddedReadbackSlice(out,
+            {static_cast<const uint8_t*>(data),size_t(total)},
+            {size_t(fp.Offset),uint32_t(row_size),fp.Footprint.RowPitch,rows,depth,size_t(slice_pitch)},z);
         out.close();
-        if(valid_rows && out) ++written;
-        else REXLOG_ERROR("native: incomplete dump {}/{}{}.raw",dir,prefix,item.name);
-      } else {
-        REXLOG_ERROR("native: cannot write dump {}/{}{}.raw", dir, prefix, item.name);
+        complete=valid_rows && bool(out);
+        if(complete) ++written_slices;
+        else REXLOG_ERROR("native: incomplete dump {}/{}",dir,name);
+      }
+      if(complete) {
+        ++written;
+        if(depth>1) REXLOG_INFO("native: dumped volume {}{} depth={} slice_pitch={} row_bytes={} row_pitch={}",
+            prefix,item.name,depth,slice_pitch,row_size,fp.Footprint.RowPitch);
       }
       readback->Unmap(0, nullptr);
     }
   }
-  REXLOG_INFO("native: dumped {}/{} frame resources to {}", written, items.size(), dir);
+  REXLOG_INFO("native: dumped {}/{} frame resources ({} slices) to {}", written, items.size(), written_slices, dir);
 }
 
 // ---------------------------------------------------------------------------

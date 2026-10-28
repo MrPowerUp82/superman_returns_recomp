@@ -2,11 +2,14 @@
 // reference/conan/port/src/native/d3d_capture.cpp and native_hooks.cpp
 // (Conan native renderer). The kit ships no license file at that revision.
 //
-// Hooks on the game's statically linked XDK Direct3D functions. Every hook
-// calls the recompiled original first (as in the kit: the original flushes
+// Hooks on the game's statically linked XDK Direct3D functions. Normally these
+// call the recompiled original first (as in the kit: the original flushes
 // the draw's dirty state into the command segment the PM4 mirror parses),
 // then forwards to the renderer when it is active. With the renderer off the
 // hooks are pass-throughs plus, with sr_native_capture, a call record.
+// SR_NATIVE_XDK_DRAW_SUBMISSION=1 replaces admitted regular/indexed draws and
+// their generic dirty-state emitters natively. Unported special states retain
+// the original path; this is an experimental step toward complete XDK bypass.
 //
 // Changes from the kit:
 //  * Addresses come from game_profile.h by role. A hook is compiled only when
@@ -40,6 +43,7 @@
 #include "checked_guest_memory.h"
 #include "idle_yield.h"
 #include "xdk_constant_copy.h"
+#include "xdk_draw_submission.h"
 #include "guest_cpu_profile.h"
 #include "resource_unlock_audit.h"
 
@@ -326,6 +330,227 @@ bool NativeBulkConstantsEnabled() {
   }();
   return enabled;
 }
+
+bool TryNativeDrawSubmission(PPCContext& ctx,uint8_t* base,bool indexed) {
+  static const bool enabled=[] {
+    const auto* value=std::getenv("SR_NATIVE_XDK_DRAW_SUBMISSION");
+    return value && *value=='1';
+  }();
+  if(!enabled || !native::Enabled() || !base) return false;
+  const uint64_t dev=ctx.r3.u64;
+  if(!dev || (dev&15) || dev+native::profile::kDevice.size>0xa0000000ull) return false;
+  auto device=std::span<uint8_t>(base+dev,native::profile::kDevice.size);
+  const uint32_t write=native::ReadXdkWord(device,40),limit=native::ReadXdkWord(device,44);
+  native::XdkDrawArguments args{indexed,ctx.r4.u32,ctx.r5.u32,
+      indexed?ctx.r7.u32:ctx.r6.u32,indexed?ctx.r6.u32:0,0,0};
+  if(indexed) {
+    const uint32_t object=native::ReadXdkWord(device,native::profile::kDevice.index_buffer);
+    if(!object || uint64_t(object)+28>0xa0000000ull) return false;
+    const auto index=std::span<const uint8_t>(base+object,28);
+    args.index_header=native::ReadXdkWord(index,0);args.index_address=native::ReadXdkWord(index,24);
+  }
+  native::XdkDrawResult result=native::XdkDrawResult::RingFull;
+  native::XdkDrawRefusal refusal=native::XdkDrawRefusal::None;
+  const auto ring=native::PlanNativeXdkRing(write,limit,uint32_t(dev),uint32_t(device.size()));
+  if(ring) result=native::SubmitNativeXdkDraw(device,{base+ring->host_offset,ring->bytes},args,
+      {base,0xa0000000u},&refusal);
+  thread_local std::array<uint64_t,3> counts{};
+  thread_local std::array<uint64_t,size_t(native::XdkDrawRefusal::Count)> unsupported_refusal_reasons{};
+  thread_local std::array<uint64_t,64> unsupported_state_bits{},unsupported_context_bits{},unsupported_misc_bits{};
+  thread_local std::array<uint64_t,16> unsupported_shader_masks{};
+  thread_local std::array<uint64_t,256> unsupported_shader_mask3_signatures{};
+  thread_local std::array<uint64_t,8> unsupported_shader_mask3_modes{};
+  thread_local std::array<uint64_t,2> unsupported_shader_mask3_metadata_diff{};
+  thread_local std::array<uint64_t,2> unsupported_shader_mask3_ps_alt{};
+  thread_local std::array<uint64_t,2> unsupported_shader_mask3_rt_complex{};
+  thread_local uint64_t unsupported_shader_mask3_metadata_unreadable=0;
+  thread_local std::array<uint64_t,16> unsupported_shader_simple_08470{};
+  thread_local std::array<uint64_t,16> unsupported_shader_heavy_08520{};
+  thread_local std::array<uint64_t,16> unsupported_shader_heavy_08300{};
+  thread_local std::array<uint64_t,16> unsupported_shader_branch_unreadable{};
+  thread_local std::array<uint64_t,16> unsupported_shader_08520_cache_hit{};
+  thread_local std::array<uint64_t,16> unsupported_shader_08520_cache_miss{};
+  thread_local std::array<uint64_t,16> unsupported_shader_08520_ps_alt{};
+  thread_local std::array<uint64_t,16> unsupported_shader_08520_program{};
+  thread_local uint64_t unsupported_count=0,unsupported_flags=0,unsupported_layout=0;
+  if(result==native::XdkDrawResult::UnsupportedState) {
+    const auto unsupported=native::InspectNativeXdkUnsupportedState(device,args);
+    unsupported_count+=unsupported.count_too_large;
+    unsupported_flags+=unsupported.draw_flags;
+    unsupported_layout+=unsupported.device_too_small;
+    auto accumulate=[](uint64_t mask,std::array<uint64_t,64>& bits) {
+      while(mask) {const unsigned bit=std::countr_zero(mask);++bits[bit];mask&=mask-1;}
+    };
+    accumulate(unsupported.state,unsupported_state_bits);
+    accumulate(unsupported.context,unsupported_context_bits);
+    accumulate(unsupported.misc,unsupported_misc_bits);
+    const unsigned shader_mask=(unsupported.state>>49)&0xfu;
+    ++unsupported_shader_masks[shader_mask];
+    if(shader_mask==0xdu || shader_mask==0xfu) {
+      const uint32_t ps=native::ReadXdkWord(device,12420);
+      const uint32_t vs=native::ReadXdkWord(device,12416);
+      const uint32_t aux=native::ReadXdkWord(device,11536);
+      bool readable=ps!=0 && vs!=0 &&
+          uint64_t(ps)+908<=0xa0000000ull && uint64_t(vs)+68<=0xa0000000ull;
+      bool metadata_diff=false;
+      uint32_t ps_flags=0;
+      if(readable) {
+        const auto ps_head=std::span<const uint8_t>(base+ps,908);
+        const auto vs_head=std::span<const uint8_t>(base+vs,68);
+        ps_flags=native::ReadXdkWord(ps_head,872);
+        const bool ps_alt=(ps_flags&0x20u)!=0;
+        const uint32_t vs_block=native::ReadXdkWord(vs_head,64);
+        const uint32_t ps_block=native::ReadXdkWord(ps_head,ps_alt?904:896);
+        const uint64_t vs_meta=uint64_t(vs)+vs_block+40;
+        const uint64_t ps_meta=uint64_t(ps)+ps_block+872;
+        readable=vs_meta+24<=0xa0000000ull && ps_meta+24<=0xa0000000ull;
+        if(readable) {
+          const auto vs_view=std::span<const uint8_t>(base+vs_meta,24);
+          const auto ps_view=std::span<const uint8_t>(base+ps_meta,24);
+          metadata_diff=((native::ReadXdkWord(vs_view,20)^native::ReadXdkWord(ps_view,20))&0x7ffffu)!=0;
+        }
+      }
+      if(!readable) {
+        ++unsupported_shader_branch_unreadable[shader_mask];
+      } else if((device[10810]&0x80u)!=0 || metadata_diff) {
+        ++unsupported_shader_heavy_08300[shader_mask];
+      } else if(aux!=0 && (ps_flags&0x40u)==0) {
+        if((device[10808]&0x80u)!=0) {
+          ++unsupported_shader_heavy_08300[shader_mask];
+        } else {
+          ++unsupported_shader_heavy_08520[shader_mask];
+          unsupported_shader_08520_ps_alt[shader_mask]+=((ps_flags&0x20u)!=0);
+          unsupported_shader_08520_program[shader_mask]+=((device[10808]&0x40u)!=0);
+          auto guest64=[&](uint64_t address) {
+            const auto view=std::span<const uint8_t>(base+size_t(address),8);
+            return (uint64_t(native::ReadXdkWord(view,0))<<32)|native::ReadXdkWord(view,4);
+          };
+          const bool cache_readable=uint64_t(ps)+64<=0xa0000000ull &&
+              uint64_t(aux)+56<=0xa0000000ull;
+          const bool cache_hit=cache_readable &&
+              native::ReadXdkWord(std::span<const uint8_t>(base+ps,64),40)==
+                  native::ReadXdkWord(std::span<const uint8_t>(base+aux,56),48) &&
+              (((guest64(uint64_t(ps)+48)^guest64(uint64_t(dev)+12256))&
+                  guest64(uint64_t(aux)+32))==0) &&
+              (((guest64(uint64_t(ps)+56)^guest64(uint64_t(dev)+12264))&
+                  guest64(uint64_t(aux)+40))==0);
+          ++(cache_hit?unsupported_shader_08520_cache_hit[shader_mask]:
+              unsupported_shader_08520_cache_miss[shader_mask]);
+        }
+      } else {
+        ++unsupported_shader_simple_08470[shader_mask];
+      }
+    }
+    if(shader_mask==3) {
+      unsigned signature=0;
+      signature|=native::ReadXdkWord(device,12420)!=0 ? 1u<<0 : 0;
+      signature|=native::ReadXdkWord(device,12416)!=0 ? 1u<<1 : 0;
+      signature|=native::ReadXdkWord(device,11536)!=0 ? 1u<<2 : 0;
+      signature|=(device[10808]&0x40)!=0 ? 1u<<3 : 0;
+      signature|=(device[10810]&0x80)!=0 ? 1u<<4 : 0;
+      signature|=(device[10810]&0x40)!=0 ? 1u<<5 : 0;
+      signature|=(unsupported.state&(uint64_t{1}<<8))!=0 ? 1u<<6 : 0;
+      signature|=(native::ReadXdkWord(device,10452)&7u)==5u ? 1u<<7 : 0;
+      ++unsupported_shader_mask3_signatures[signature];
+      ++unsupported_shader_mask3_modes[native::ReadXdkWord(device,10452)&7u];
+      ++unsupported_shader_mask3_rt_complex[(device[10811]&0x20)!=0];
+      const uint32_t ps=native::ReadXdkWord(device,12420),vs=native::ReadXdkWord(device,12416);
+      bool readable=ps!=0 && vs!=0 && uint64_t(ps)+908<=0xa0000000ull && uint64_t(vs)+68<=0xa0000000ull;
+      bool ps_alt=false,metadata_diff=false;
+      if(readable) {
+        const auto ps_head=std::span<const uint8_t>(base+ps,908);
+        const auto vs_head=std::span<const uint8_t>(base+vs,68);
+        const uint32_t vs_block=native::ReadXdkWord(vs_head,64);
+        const uint32_t ps_block=native::ReadXdkWord(ps_head,896);
+        ps_alt=(native::ReadXdkWord(ps_head,872)&0x20u)!=0;
+        const uint32_t ps_alt_block=ps_alt?native::ReadXdkWord(ps_head,904):ps_block;
+        const uint64_t vs_meta=uint64_t(vs)+vs_block+40;
+        const uint64_t ps_meta=uint64_t(ps)+ps_alt_block+872;
+        readable=vs_meta+24<=0xa0000000ull && ps_meta+24<=0xa0000000ull;
+        if(readable) {
+          const auto vs_view=std::span<const uint8_t>(base+vs_meta,24);
+          const auto ps_view=std::span<const uint8_t>(base+ps_meta,24);
+          metadata_diff=((native::ReadXdkWord(vs_view,20)^native::ReadXdkWord(ps_view,20))&0x7ffffu)!=0;
+        }
+      }
+      if(readable) {
+        ++unsupported_shader_mask3_metadata_diff[metadata_diff];
+        ++unsupported_shader_mask3_ps_alt[ps_alt];
+      } else ++unsupported_shader_mask3_metadata_unreadable;
+    }
+  }
+  if(counts[0]+counts[1]+counts[2]==0)
+    REXLOG_INFO("native XDK draw ring: write={:08X} hard_limit={:08X} soft_limit={:08X} mapped={}",
+        write,limit,native::ReadXdkWord(device,48),bool(ring));
+  ++counts[size_t(result)];
+  ++unsupported_refusal_reasons[size_t(refusal)];
+  if((counts[0]+counts[1]+counts[2])%65536==0) {
+    auto top=[](const std::array<uint64_t,64>& bits) {
+      unsigned index=0;for(unsigned i=1;i<bits.size();++i)if(bits[i]>bits[index])index=i;
+      return std::pair<unsigned,uint64_t>{index,bits[index]};
+    };
+    const auto [state_bit,state_hits]=top(unsupported_state_bits);
+    const auto [context_bit,context_hits]=top(unsupported_context_bits);
+    const auto [misc_bit,misc_hits]=top(unsupported_misc_bits);
+    unsigned shader_mask=0;
+    for(unsigned i=1;i<unsupported_shader_masks.size();++i)
+      if(unsupported_shader_masks[i]>unsupported_shader_masks[shader_mask])shader_mask=i;
+    unsigned shader_mask3_signature=0;
+    for(unsigned i=1;i<unsupported_shader_mask3_signatures.size();++i)
+      if(unsupported_shader_mask3_signatures[i]>unsupported_shader_mask3_signatures[shader_mask3_signature])shader_mask3_signature=i;
+    REXLOG_INFO("native XDK draw submission: submitted={} unsupported_state={} ring_full={} (thread cumulative)",
+        counts[0],counts[1],counts[2]);
+    REXLOG_INFO("native XDK unsupported: count={} flags={} layout={} top_state=b{}:{} top_context=b{}:{} top_misc=b{}:{} shader_mask={:X}:{}",
+        unsupported_count,unsupported_flags,unsupported_layout,state_bit,state_hits,
+        context_bit,context_hits,misc_bit,misc_hits,shader_mask,unsupported_shader_masks[shader_mask]);
+    REXLOG_INFO("native XDK shader masks: 1={} 2={} 3={} 5={} 9={} B={} D={} F={}",
+        unsupported_shader_masks[1],unsupported_shader_masks[2],unsupported_shader_masks[3],
+        unsupported_shader_masks[5],unsupported_shader_masks[9],unsupported_shader_masks[11],
+        unsupported_shader_masks[13],unsupported_shader_masks[15]);
+    REXLOG_INFO("native XDK shader D/F branches: D simple={} cache08520={} direct08300={} unreadable={} ; F simple={} cache08520={} direct08300={} unreadable={}",
+        unsupported_shader_simple_08470[13],unsupported_shader_heavy_08520[13],
+        unsupported_shader_heavy_08300[13],unsupported_shader_branch_unreadable[13],
+        unsupported_shader_simple_08470[15],unsupported_shader_heavy_08520[15],
+        unsupported_shader_heavy_08300[15],unsupported_shader_branch_unreadable[15]);
+    REXLOG_INFO("native XDK shader D/F cache: D hit={} miss={} ps_alt={} program={} ; F hit={} miss={} ps_alt={} program={}",
+        unsupported_shader_08520_cache_hit[13],unsupported_shader_08520_cache_miss[13],
+        unsupported_shader_08520_ps_alt[13],unsupported_shader_08520_program[13],
+        unsupported_shader_08520_cache_hit[15],unsupported_shader_08520_cache_miss[15],
+        unsupported_shader_08520_ps_alt[15],unsupported_shader_08520_program[15]);
+    REXLOG_INFO("native XDK refusal reasons: gen_unsupported={} miss_ptr={} mode_not_4={} dev_flags={} prog_bit48={} ps_alt20={} meta_diff={} heavy_ps40={} dev10808_80={} vs_list={} ps_list={} cache_tag={} cache_mask={} unreadable={} ring_limit={} ring_full={}",
+        unsupported_refusal_reasons[size_t(native::XdkDrawRefusal::GeneralUnsupported)],
+        unsupported_refusal_reasons[size_t(native::XdkDrawRefusal::MissingPointers)],
+        unsupported_refusal_reasons[size_t(native::XdkDrawRefusal::Mode10452Not4)],
+        unsupported_refusal_reasons[size_t(native::XdkDrawRefusal::DeviceFlags10810_10811)],
+        unsupported_refusal_reasons[size_t(native::XdkDrawRefusal::ProgramDirtyBit48)],
+        unsupported_refusal_reasons[size_t(native::XdkDrawRefusal::PsFlagsAlt20)],
+        unsupported_refusal_reasons[size_t(native::XdkDrawRefusal::VsPsMetaMismatch)],
+        unsupported_refusal_reasons[size_t(native::XdkDrawRefusal::PsFlagsHeavy40)],
+        unsupported_refusal_reasons[size_t(native::XdkDrawRefusal::Device10808_80)],
+        unsupported_refusal_reasons[size_t(native::XdkDrawRefusal::VsListNotEmpty)],
+        unsupported_refusal_reasons[size_t(native::XdkDrawRefusal::PsListNotEmpty)],
+        unsupported_refusal_reasons[size_t(native::XdkDrawRefusal::CacheTagMismatch)],
+        unsupported_refusal_reasons[size_t(native::XdkDrawRefusal::CacheMaskMismatch)],
+        unsupported_refusal_reasons[size_t(native::XdkDrawRefusal::UnreadableMemory)],
+        unsupported_refusal_reasons[size_t(native::XdkDrawRefusal::FastRingLimit)],
+        unsupported_refusal_reasons[size_t(native::XdkDrawRefusal::RingBufferFull)]);
+    REXLOG_INFO("native XDK shader mask3 signature: 0x{:02X}:{} [ps={} vs={} aux={} f10808_40={} f10810_80={} f10810_40={} state8={} mode5={}]",
+        shader_mask3_signature,unsupported_shader_mask3_signatures[shader_mask3_signature],
+        bool(shader_mask3_signature&1),bool(shader_mask3_signature&2),bool(shader_mask3_signature&4),
+        bool(shader_mask3_signature&8),bool(shader_mask3_signature&16),bool(shader_mask3_signature&32),
+        bool(shader_mask3_signature&64),bool(shader_mask3_signature&128));
+    unsigned shader_mode=0;
+    for(unsigned i=1;i<unsupported_shader_mask3_modes.size();++i)
+      if(unsupported_shader_mask3_modes[i]>unsupported_shader_mask3_modes[shader_mode])shader_mode=i;
+    REXLOG_INFO("native XDK shader mask3 branch: mode={}:{} metadata_same={} metadata_diff={} ps_primary={} ps_alt={} unreadable={}",
+        shader_mode,unsupported_shader_mask3_modes[shader_mode],unsupported_shader_mask3_metadata_diff[0],
+        unsupported_shader_mask3_metadata_diff[1],unsupported_shader_mask3_ps_alt[0],
+        unsupported_shader_mask3_ps_alt[1],unsupported_shader_mask3_metadata_unreadable);
+    REXLOG_INFO("native XDK shader mask3 RT branch: simple={} complex={}",
+        unsupported_shader_mask3_rt_complex[0],unsupported_shader_mask3_rt_complex[1]);
+  }
+  return result==native::XdkDrawResult::Submitted;
+}
 }
 #if SR_HOOK_ENABLED(FLOAT_COPY_VS)
 SR_DEFINE_HOOK(SR_ADDR_FLOAT_COPY_VS) {
@@ -398,7 +623,8 @@ SR_DEFINE_HOOK(SR_ADDR_DRAW_VERTICES) {
   const uint32_t probe_caller=uint32_t(ctx.lr),probe_stack=ctx.r1.u32;
   const uint32_t dev = ctx.r3.u32, prim = ctx.r4.u32, start = ctx.r5.u32, count = ctx.r6.u32;
   OnDeviceCall("DrawVertices", dev, prim);
-  native::ProfileGuestGraphicsOriginal(SR_ADDRESS(SR_ADDR_DRAW_VERTICES),SR_ORIGINAL(SR_ADDR_DRAW_VERTICES),ctx,base);
+  if(!TryNativeDrawSubmission(ctx,base,false))
+    native::ProfileGuestGraphicsOriginal(SR_ADDRESS(SR_ADDR_DRAW_VERTICES),SR_ORIGINAL(SR_ADDR_DRAW_VERTICES),ctx,base);
   native::NoteInstanceProbeDraw(base,dev,"DrawVertices",count,probe_caller,probe_stack);
   if (native::Enabled()) native::Renderer::Get().DrawVertices(base, prim, start, count);
 }
@@ -411,7 +637,8 @@ SR_DEFINE_HOOK(SR_ADDR_DRAW_INDEXED_VERTICES) {
   const uint32_t dev = ctx.r3.u32, prim = ctx.r4.u32, base_vertex = ctx.r5.u32,
                  start = ctx.r6.u32, count = ctx.r7.u32;
   OnDeviceCall("DrawIndexedVertices", dev, prim);
-  native::ProfileGuestGraphicsOriginal(SR_ADDRESS(SR_ADDR_DRAW_INDEXED_VERTICES),SR_ORIGINAL(SR_ADDR_DRAW_INDEXED_VERTICES),ctx,base);
+  if(!TryNativeDrawSubmission(ctx,base,true))
+    native::ProfileGuestGraphicsOriginal(SR_ADDRESS(SR_ADDR_DRAW_INDEXED_VERTICES),SR_ORIGINAL(SR_ADDR_DRAW_INDEXED_VERTICES),ctx,base);
   native::NoteInstanceProbeDraw(base,dev,"DrawIndexedVertices",count,probe_caller,probe_stack);
   if (native::Enabled()) {
     native::Renderer::Get().DrawIndexedVertices(base, prim, int32_t(base_vertex), start, count);

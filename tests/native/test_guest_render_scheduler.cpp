@@ -40,3 +40,48 @@ SR_TEST(render_scheduler_rejects_unknown_types_modes_rates_and_short_objects) {
   SR_CHECK(!ApplyGuestRenderSchedulerPeriod(std::span(b).first(79),0));SR_CHECK(b==original);
   SR_CHECK(!ApplyGuestRenderSchedulerPeriod(b,-1));SR_CHECK(b==original);
 }
+
+SR_TEST(render_scheduler_admission_is_limited_to_render_among_four_engine_peers) {
+  // 8218CFE8 constructs all four. Table 82911888 supplies 60,30,30,60;
+  // the fixed peers feed +72 directly into the callback delta in 82720740.
+  // 82720418 uses single-precision division/addition, so 60 Hz is 16666668 ns.
+  struct Peer { uint32_t vtable,mode,rate;uint64_t period;bool render; };
+  for(const auto peer:{Peer{0x82005B70,0,0x42700000,16666668,false}, // core
+      Peer{0x82005B98,1,0x41F00000,33333334,true},                 // render
+      Peer{0x82005BC4,0,0x41F00000,33333334,false},                // simulation
+      Peer{0x82005BEC,1,0x42700000,16666668,false}}) {             // sound
+    for(const auto [fps,period]:{std::pair{0,1000000ull},
+        std::pair{60,16666667ull},std::pair{120,8333334ull}}) {
+      auto b=ObservedScheduler();
+      Put(b,0,peer.vtable,4);Put(b,52,peer.mode,4);
+      Put(b,60,peer.rate,4);Put(b,72,peer.period,8);
+      const auto original=b;
+      SR_CHECK_EQ(ApplyGuestRenderSchedulerPeriod(b,fps),peer.render);
+      if(peer.render) {
+        SR_CHECK_EQ(Get(b,72,8),period);
+        for(size_t i=0;i<b.size();++i) if(i<72 || i>=80) SR_CHECK_EQ(b[i],original[i]);
+      } else SR_CHECK(b==original);
+    }
+  }
+}
+
+SR_TEST(render_scheduler_peer_identity_is_required_even_with_render_timing_fields) {
+  // A mode-only unlock would also admit the sound peer (821663E8), while
+  // a rate-only unlock would also admit the simulation peer (821780C0).
+  // Give each peer render-like fields to exercise the class guard independently.
+  for(const uint32_t vtable:{0x82005B70u,0x82005BC4u,0x82005BECu}) {
+    auto b=ObservedScheduler();Put(b,0,vtable,4);const auto original=b;
+    SR_CHECK(!ApplyGuestRenderSchedulerPeriod(b,0));SR_CHECK(b==original);
+  }
+}
+
+SR_TEST(render_scheduler_reapplication_preserves_already_published_period_and_state) {
+  auto b=ObservedScheduler();
+  SR_CHECK(ApplyGuestRenderSchedulerPeriod(b,120));
+  // The constructor hook runs before publication; the helper must not become
+  // a live retargeting path that overwrites an already adjusted scheduler.
+  const auto adjusted=b;
+  for(const int32_t fps:{0,30,60,120}) {
+    SR_CHECK(!ApplyGuestRenderSchedulerPeriod(b,fps));SR_CHECK(b==adjusted);
+  }
+}
