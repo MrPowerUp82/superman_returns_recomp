@@ -7,6 +7,7 @@
 #include "../frame_generation_policy.h"
 #include "../../../native_renderer/native_renderer.h"
 #include "../../../native_renderer/hang_watchdog.h"
+#include "../../../title_benchmark.h"
 #include <rex/ui/surface_win.h>
 #include <rex/logging.h>
 #include <algorithm>
@@ -57,6 +58,8 @@ struct Host {
     TextureDecoder decode=[](const guest::TextureCapture& capture,guest::LinearTexture& result,std::string& error){return guest::DecodeTextureLayout(capture.fetch,capture.memory,result,error);};
     game=std::make_unique<GameFrame>(context,gpu_mutex,std::move(lookup),std::move(decode));
     game->compilation_progress=[] {native::HangWatchdogBeat();};
+    benchmark::SetGpuName(context.selected.name);
+    if(benchmark::Active()) game->Renderer().EnableUiCut([](bool scene) {benchmark::NoteRendererFrame(scene);});
     resources=std::make_unique<ResourceStore>(context);compositor=std::make_unique<FrontbufferCompositor>(context);immediate=std::make_unique<ImmediateRenderer>(context);
     return game->Initialize(config.driver_cache,e,config.global_resources) && compositor->Initialize(e) && immediate->Initialize(e);
   }

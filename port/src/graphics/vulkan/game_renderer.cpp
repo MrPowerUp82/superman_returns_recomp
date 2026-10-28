@@ -59,7 +59,7 @@ std::shared_ptr<TextureResource> GameRenderer::SelectFrontbuffer(const guest::Sw
   } catch(const std::exception& ex) {e={"Captured frontbuffer",VK_ERROR_INITIALIZATION_FAILED,ex.what()};return {};}
 }
 bool GameRenderer::BeginSubmission(VkCommandBuffer command,uint64_t serial,Error& e,VkCommandBuffer upload) {
-  constant_bank_cache_.Reset();
+  constant_bank_cache_.Reset();ui_cut_.BeginFrame();
   open_pass_.reset();bound_pipeline_=VK_NULL_HANDLE;bound_global_set_=VK_NULL_HANDLE;shadow_.Invalidate();
   if(!resources_.BeginSubmission(command,serial,e,upload) || !targets_.BeginSubmission(command,serial,e)) return false;
   command_=command;serial_=serial;merge_passes_=upload!=VK_NULL_HANDLE;recording_.store(command,std::memory_order_relaxed);
@@ -73,6 +73,7 @@ void GameRenderer::ClosePass() {
 }
 void GameRenderer::FinishSubmission() {
   ClosePass();resources_.FinishUploads();recording_.store(VK_NULL_HANDLE,std::memory_order_relaxed);
+  if(ui_cut_report_) ui_cut_report_(ui_cut_.scene_drawn());
 }
 void GameRenderer::Retire(uint64_t serial) {
   for(auto it=transient_buffers_.begin();it!=transient_buffers_.end() && it->first<=serial;) {for(auto id:it->second) resources_.ForgetBuffer(id);it=transient_buffers_.erase(it);}
@@ -187,6 +188,8 @@ bool GameRenderer::Draw(const guest::DrawPacket& draw,VkCommandBuffer command,Er
   auto index_id=draw.indices.plan.key;
   if(!draw.expanded_indices.empty()) {index_id=ExpandedIndexBufferBase|draw.command_serial;if(!resources_.UploadTransient(index_id,std::as_bytes(std::span(draw.expanded_indices)),0,e)) return false;transient_buffers_[serial_].push_back(index_id);}
   if(!draw.count) {e={};return true;}
+  // Uploads above are consumed even for a cut draw: later packets reference them.
+  if(ui_cut_report_ && ui_cut_.ShouldSkip(draw.pixel_shader?draw.pixel_shader->hash:0)) {e={};return true;}
   if(!draw.vertex_shader || !shaders_) return Fail(e,"Captured vertex shader/lookup absent");
   auto vs=shaders_(*draw.vertex_shader);shaders::ShaderResult ps{shaders::ShaderPoll::ready,{},{}};
   if(draw.pixel_shader) ps=shaders_(*draw.pixel_shader);

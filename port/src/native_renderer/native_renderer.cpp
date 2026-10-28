@@ -49,6 +49,7 @@
 #include <fstream>
 
 #include <fmt/format.h>
+#include "../title_benchmark.h"
 #include <rex/cvar.h>
 #include <rex/filesystem.h>
 #include <rex/graphics/registers.h>
@@ -5141,6 +5142,7 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
     return v.empty() ? 0ull : std::stoull(v, nullptr, 16);
   }();
   if (skip_ps && ps_hash == skip_ps) return false;
+  if (benchmark::Active() && benchmark_cut_.ShouldSkip(ps_hash)) return false;
   if (trace_state_ == 1) {
     uint32_t n = decl ? Load32(base, decl + 0x18) : 0;
     std::string els;
@@ -7716,6 +7718,8 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
     }
   }
   std::memset(pass_draw_index_, 0, sizeof(pass_draw_index_));
+  if (benchmark::Active()) benchmark::NoteRendererFrame(benchmark_cut_.scene_drawn());
+  benchmark_cut_.BeginFrame();
   if (trace_state_ == 1) {
     REXLOG_INFO("trace end of frame ({} draws since last event)", trace_draws_);
     trace_state_ = 2;
@@ -7911,6 +7915,12 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
         Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
         if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
           factory->EnumAdapterByLuid(device_->GetAdapterLuid(), IID_PPV_ARGS(&adapter));
+        }
+        DXGI_ADAPTER_DESC1 desc{};
+        if (adapter && SUCCEEDED(adapter->GetDesc1(&desc))) {
+          char name[256]{};
+          WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1, name, sizeof(name), nullptr, nullptr);
+          benchmark::SetGpuName(name);
         }
       }
       DXGI_QUERY_VIDEO_MEMORY_INFO local{}, nonlocal{};

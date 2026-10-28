@@ -36,6 +36,7 @@
 #include "resolve_identity.h"
 #include "resource_write_tracking.h"
 #include "buffer_tracking_policy.h"
+#include "../title_benchmark_policy.h"
 
 #include <atomic>
 #include <chrono>
@@ -908,6 +909,8 @@ class Renderer : public NativeFrontend {
   } slot_cache_[16];
   // Drops the cached bindings whose fetch base is `dest_base`; ~0u drops all.
   void InvalidateSlotBindings(uint32_t dest_base);
+  // Title benchmark: draws after the scene filter are skipped (sr_benchmark).
+  superman_returns::benchmark::UiCut benchmark_cut_;
   uint64_t edram_write_seq_ = 0;
   HostSurface* bind_set_[5] = {};
   void MarkWritten(HostSurface* s) {

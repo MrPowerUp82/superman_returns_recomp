@@ -5,6 +5,8 @@
 #include "constant_bank_cache.h"
 #include "global_draw_bindings.h"
 #include "../guest/texture_capture.h"
+#include "../../title_benchmark_policy.h"
+#include <functional>
 #include <atomic>
 #include <chrono>
 namespace superman_returns::graphics::vulkan {
@@ -48,6 +50,9 @@ public:
   // Diagnostics (SR_VULKAN_DUMP_FRAME): while a dump is active, Record logs
   // every packet and reads back each resolve destination when it is written.
   struct DumpImage {std::string name;std::shared_ptr<BufferResource> buffer;VkFormat format=VK_FORMAT_UNDEFINED;VkExtent3D extent{};uint32_t texel=0;};
+  // Title benchmark: skip every draw after the scene filter of each frame and
+  // report per frame whether the filter was drawn.
+  void EnableUiCut(std::function<void(bool)> report) {ui_cut_report_=std::move(report);}
   void BeginDump() {dumping_=true;dump_log_.clear();dump_images_.clear();dump_packet_=0;}
   bool DumpTargets(VkCommandBuffer,Error&);
   bool WriteDump(const std::filesystem::path&,Error&);
@@ -78,6 +83,7 @@ private:
   std::map<guest::ResourceId,ResolveView> resolve_views_;
   uint64_t resolve_generation_=0;
   VkCommandBuffer command_=VK_NULL_HANDLE;uint64_t serial_=0;bool dummies_=false;
+  superman_returns::benchmark::UiCut ui_cut_;std::function<void(bool)> ui_cut_report_;
   GameRenderStats stats_;
   std::map<uint64_t,std::vector<guest::ResourceId>> transient_buffers_;
   VkExtent2D tiling_{};
