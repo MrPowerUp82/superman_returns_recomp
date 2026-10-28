@@ -31,3 +31,20 @@ Causa: `ExecResolve` apagava as 8 entradas dos 16 slots a cada resolve, forçand
 - Volta ao comportamento antigo: `SR_NATIVE_TARGETED_SLOT_INVALIDATION=0`.
 - Medir: `SR_NATIVE_CPU_PROFILE=1`, linha `native CPU constants`: `slot_misses` e `texture_lookup` devem cair; `hash_checks` não deve mudar.
 - Risco visual a observar: textura de resolve antiga (sombra, reflexo, pós-processo) aparecendo um resolve atrasada. Se aparecer, comparar com a variável em 0.
+
+## Medição após os dois commits (notebook de trabalho, Intel UHD)
+
+`bench_api.ps1 -Api d3d12 -Name streams_20261028 -FpsLimit 60 -Profile`, com `SR_NATIVE_CPU_PROFILE`, `SR_NATIVE_STREAMS_PROFILE` e `SR_NATIVE_CONSTANTS_PROFILE` ligados (há overhead de relógios). Uma rodada só; cena de idle/forward do bench. Log: `logs/bench_streams_20261028.log`.
+
+| Medida (ms/quadro, blocos de 120 swaps) | Valor |
+| --- | ---: |
+| FPS do bench, idle / forward | 37,3 / 38,2 (GPU 99%) |
+| Execute (worker) | 25,1–27,1 |
+| Espera de fence da GPU em BeginFrame | ~12 |
+| PrepareDraw | 8,1–8,6 |
+| UploadConstants | 5,7–6,1 |
+| Slots / lookup de texturas | 1,83 / 1,2 (misses 2.400 por quadro) |
+| Streams | 1,8–3,0 (apply 0,64–0,76, srv 0,38) |
+| Captura no front-end / espera pelo worker | 4,0 / 9,1 |
+
+Conclusões: o lookup de texturas caiu da faixa de 5,5–6,5 ms dos perfis de 23/10 para ~1,2 ms (cenas e builds diferentes; não é um A/B isolado). Streams já não são gargalo: o cache de SRV de buffer (srv_created ~1/quadro) e a tabela de lookup de buffers resolveram o que o perfil de 23/10 apontava. Neste notebook o quadro é limitado pela GPU (UHD a 99%, ~12 ms/quadro esperando fence); o trabalho de CPU do worker fica em ~13 ms, perto dos ~10 ms relatados pelo gangg111. Ganhos de CPU adicionais só aparecem em FPS numa GPU dedicada (RTX 2060).
