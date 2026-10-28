@@ -1,7 +1,8 @@
 # Launcher Windows
 
 GUI WPF em português, adaptada do pacote fornecido pelo usuário. Inicia o renderer
-nativo com a API escolhida: Vulkan (padrão, experimental) ou Direct3D 12 (`--sr_native_api`).
+nativo com a API escolhida: Direct3D 12 (padrão e recomendado) ou Vulkan (experimental)
+(`--sr_native_api`). Preferências de API já salvas são respeitadas.
 Com Vulkan, escala interna, FXAA, MSAA, sombras e filtro anisotrópico ficam no padrão do jogo.
 O launcher só envia `--sr_native_gpu_luid` quando uma GPU específica foi escolhida: um argumento
 `--opção=` vazio faz o parser do engine ler o argumento seguinte como valor.
@@ -24,6 +25,11 @@ Detecta o executável e a pasta `game` ou permite selecioná-los. Valida `defaul
 e `DATA` antes de iniciar. As preferências ficam em
 `%LOCALAPPDATA%\SupermanReturns\launcher\<identificador-da-instalação>.ini`.
 O jogo grava `logs/game.log` ao lado do executável.
+
+O botão **BENCHMARK** inicia o sobrevoo da cidade da tela de título com as opções
+escolhidas, mede após 5 s de aquecimento por 60 s e exibe os resultados ao final.
+Os resultados também são salvos em JSON e CSV na pasta `benchmarks`.
+Para execução sem janela visível, use `--sr_benchmark_headless=true` no executável.
 
 A GPU selecionada é enviada pelo LUID do DXGI e resolvida dentro do processo do jogo,
 pois a preferência gráfica do Windows pode mudar a ordem dos adaptadores por aplicativo.
