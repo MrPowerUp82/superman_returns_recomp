@@ -527,6 +527,15 @@ bool TextureSlotLookupCaching() {
   }();
   return enabled;
 }
+// SR_NATIVE_TARGETED_SLOT_INVALIDATION=0 restores dropping every slot binding
+// on each resolve (~26 per frame) instead of only those at its destination.
+bool TargetedSlotInvalidation() {
+  static const bool enabled=[] {
+    const char* value=std::getenv("SR_NATIVE_TARGETED_SLOT_INVALIDATION");
+    return !value || !*value || *value!='0';
+  }();
+  return enabled;
+}
 // Ponteiro do host para uma faixa do jogo, ou nullptr se ela cai fora do espaÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§o de endereÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â§os.
 const uint8_t* GuestSource(uint8_t* base, uint32_t address, uint32_t length) {
   if(uint64_t(address)+length>(uint64_t{1}<<32)) return nullptr;
@@ -3729,6 +3738,13 @@ uint32_t Renderer::GetTextureSrvIndex(uint8_t* base, const uint32_t fetch[6],
   return entry.srv_index;
 }
 
+void Renderer::InvalidateSlotBindings(uint32_t dest_base) {
+  for (SlotCache& sc : slot_cache_)
+    for (auto& entry : sc.srv_entries)
+      if (dest_base == ~0u || GuestPhysical(entry.fetch[1] & 0xFFFFF000u) == dest_base)
+        entry.frame = ~0ull;
+}
+
 void Renderer::RetireSrvIndex(uint32_t index) {
   if (index > 2) retired_srvs_.emplace_back(next_fence_value_, index);
 }
@@ -6718,8 +6734,7 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
       REXLOG_INFO("native: dumped before resolve {}", index);
     }
   }
-  for (SlotCache& sc : slot_cache_)
-    for (auto& entry : sc.srv_entries) entry.frame = ~0ull;
+  if (!TargetedSlotInvalidation()) InvalidateSlotBindings(~0u);
   // The command's PM4 words were scanned by Execute (copy draw included).
   uint32_t ring_before = ring_last_;
   uint64_t copies_before = exec_copies_before_;
@@ -6753,6 +6768,9 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
     uint32_t fetch[6];
     for (uint32_t d = 0; d < 6; ++d) fetch[d] = Load32(base, dest_texture + 0x1C + 4 * d);
     uint32_t dest_base = GuestPhysical(fetch[1] & 0xFFFFF000u);
+    // Only bindings of this base can change: GetTextureSrvIndex finds resolve
+    // textures by exact base, and nothing below touches another base.
+    if (TargetedSlotInvalidation()) InvalidateSlotBindings(dest_base);
     uint32_t dest_w = (fetch[2] & 0x1FFF) + 1;
     uint32_t dest_h = ((fetch[2] >> 13) & 0x1FFF) + 1;
     const auto stack_plan=stacked_resolves_?PlanStackedResolve(fetch,level,slice):std::nullopt;

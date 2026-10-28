@@ -886,6 +886,8 @@ class Renderer : public NativeFrontend {
     uint32_t sampler_index = 0;
     bool sampler_valid = false;
   } slot_cache_[16];
+  // Drops the cached bindings whose fetch base is `dest_base`; ~0u drops all.
+  void InvalidateSlotBindings(uint32_t dest_base);
   uint64_t edram_write_seq_ = 0;
   HostSurface* bind_set_[5] = {};
   void MarkWritten(HostSurface* s) {

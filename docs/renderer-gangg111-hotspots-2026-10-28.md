@@ -21,3 +21,13 @@ Relato externo (fork privado, não medido aqui): worker ~20 ms/quadro por (1) le
 ## A validar no jogo
 
 Ganho esperado pequeno (ordem de 1 ms/quadro no worker D3D12, mais a parte de cópias do `fe_pm4` no Vulkan). Comparar `native CPU PM4 live reads` (`SR_NATIVE_PM4_READ_PROFILE=1` + CPU profiling): `validation_ms` deve cair de ~1,0–1,3 ms. O resto dos 60 FPS continua em `UploadConstants` (~12 ms, slots ~6–7 ms) e streams (~6 ms), conforme `docs/d3d12-pm4-read-profile-2026-10-24.md`.
+
+## UploadConstants: invalidação dirigida do cache de slots
+
+Perfis anteriores: dentro de `UploadConstants`, slots ~6–11 ms/quadro, dos quais o lookup de texturas ~5,5–6,5 ms com hash de só ~0,4 ms (tracking On). Logs antigos mostram ~3.800 misses de slot por quadro contra ~750 checagens de textura, e ~26 resolves por quadro (`resolves` cumulativo 15.601 a cada 600 quadros).
+
+Causa: `ExecResolve` apagava as 8 entradas dos 16 slots a cada resolve, forçando novo `GetTextureSrvIndex` em todos os bindings seguintes. Mas, dentro de um quadro, o resultado de `GetTextureSrvIndex(fetch)` só muda quando `resolve_latest_`/`resolve_textures_` mudam para a base exata do fetch (a revalidação de conteúdo roda uma vez por quadro, em `checked_frame`). Agora o resolve invalida apenas as entradas cuja base é `dest_base`.
+
+- Volta ao comportamento antigo: `SR_NATIVE_TARGETED_SLOT_INVALIDATION=0`.
+- Medir: `SR_NATIVE_CPU_PROFILE=1`, linha `native CPU constants`: `slot_misses` e `texture_lookup` devem cair; `hash_checks` não deve mudar.
+- Risco visual a observar: textura de resolve antiga (sombra, reflexo, pós-processo) aparecendo um resolve atrasada. Se aparecer, comparar com a variável em 0.
