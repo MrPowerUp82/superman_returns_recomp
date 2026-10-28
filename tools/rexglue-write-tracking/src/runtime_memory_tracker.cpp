@@ -12,6 +12,10 @@
 namespace sr::tracking {
 namespace {
 constexpr uint32_t kPage = WriteTrackingState::kPageSize;
+// RexTrackingFastView storage: static, so readers never touch a stopped monitor.
+constexpr uint32_t kPageCount = 0x20000000 / kPage;
+uint64_t fast_page_epochs[kPageCount];
+uint64_t fast_domain_epoch = 1;
 struct View {
   uint8_t* host;
   uint32_t physical_start, length;
@@ -33,6 +37,11 @@ struct Monitor {
   bool closing = false;
   Monitor(rex::memory::Memory* mem, uint64_t id) : memory(mem), session(id), references(0x20000000 / kPage),
       host_writers(0x20000000 / kPage) {
+    // A new state restarts its epochs at zero: clear the mirror first and
+    // retire every proof of an earlier session through the domain epoch.
+    for (auto& epoch : fast_page_epochs) __atomic_store_n(&epoch, 0, __ATOMIC_RELEASE);
+    __atomic_add_fetch(&fast_domain_epoch, 1, __ATOMIC_ACQ_REL);
+    state.SetEpochMirror(fast_page_epochs, &fast_domain_epoch);
     auto* base = mem->virtual_membase();
     views = {View{mem->physical_membase(), 0, 0x20000000, {}},
              View{base + 0xA0000000ull, 0, 0x20000000, {}},
@@ -128,7 +137,10 @@ RexTrackingStatus Start(void* memory, RexTrackingSession* out) {
 }
 void Stop(RexTrackingSession session) {
   auto lock = rex::thread::global_critical_region::AcquireDirect();
-  if (auto* m = Find(session)) { m->Restore(); monitor.reset(); }
+  if (auto* m = Find(session)) {
+    __atomic_add_fetch(&fast_domain_epoch, 1, __ATOMIC_ACQ_REL);
+    m->Restore(); monitor.reset();
+  }
 }
 RexTrackingStatus WatchRanges(RexTrackingSession session, const RexTrackingRange* ranges,
                              uint32_t count, RexTrackingWatch* out) {
@@ -359,6 +371,12 @@ bool TrackingFault(rex::memory::Memory* memory, void* address, bool write) {
   return false;
 }
 }  // namespace sr::tracking
+
+extern "C" const RexTrackingFastView* RexGetMemoryTrackingFastView(uint32_t version) {
+  using namespace sr::tracking;
+  static const RexTrackingFastView view{1, kPageCount, fast_page_epochs, &fast_domain_epoch};
+  return version == 1 ? &view : nullptr;
+}
 
 extern "C" const RexMemoryTrackingApiV1* RexGetMemoryTrackingApi(uint32_t version, uint32_t caller_size) {
   using namespace sr::tracking;

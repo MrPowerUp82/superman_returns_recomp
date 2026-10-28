@@ -18,6 +18,8 @@ add_executable(sr_native_tests
     test_benchmark_input.cpp
     test_descriptor_recycling.cpp
     test_buffer_srv_cache.cpp
+    test_buffer_tracking_policy.cpp
+    test_tracking_fast_view.cpp
     test_cpu_bundle.cpp
     test_xdk_draw_submission.cpp
     test_backend_selection.cpp

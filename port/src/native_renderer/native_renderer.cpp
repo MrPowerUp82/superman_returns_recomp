@@ -1229,6 +1229,14 @@ bool Renderer::EnsureInitialized() {
   if(invalid_tracking_mode)
     REXLOG_WARN("native texture tracking: invalid mode; using off");
   REXLOG_INFO("native texture tracking: mode={}",texture_tracking_mode_==TextureTrackingMode::On?"on":texture_tracking_mode_==TextureTrackingMode::Compare?"compare":"off");
+  // Tracking proofs replace the once-per-frame hash of small buffers, checked
+  // lock-free through the runtime's fast view (~0.5 ms/frame less front end,
+  // docs/perf-hunt-game-xenia-2026-10-28.md). SR_NATIVE_BUFFER_TRACKING=0
+  // restores the hash.
+  const char* buffer_tracking_env=std::getenv("SR_NATIVE_BUFFER_TRACKING");
+  buffer_tracking_=texture_tracking_mode_==TextureTrackingMode::On &&
+      !(buffer_tracking_env && *buffer_tracking_env=='0');
+  REXLOG_INFO("native buffer tracking: {}",buffer_tracking_.load()?"on":"off");
   const char* pm4_reads_profile=std::getenv("SR_NATIVE_PM4_READ_PROFILE");
   mirror_.bounded_alu_reads = cpu_options.bounded_reads;
   capture_mirror_.bounded_alu_reads = REXCVAR_GET(sr_native_pm4_bounded_reads);
@@ -2041,7 +2049,9 @@ void Renderer::BeginFrameTimestamp() {
       std::string split;
       for (int pass = 0; pass < 32; ++pass) {
         if (ts_pass_ms_[pass] / double(ts_frames_) >= 0.005) {
-          split += fmt::format(" p{}:{:.3f}", pass, ts_pass_ms_[pass] / double(ts_frames_));
+          const char* name = pass >= 1 && size_t(pass) <= ts_target_classes_.size()
+              ? ts_target_classes_[pass - 1].second.c_str() : "";
+          split += fmt::format(" p{}{}:{:.3f}", pass, name, ts_pass_ms_[pass] / double(ts_frames_));
         }
       }
       REXLOG_INFO("native: GPU ms/frame per pass:{}", split);
@@ -2055,6 +2065,19 @@ void Renderer::BeginFrameTimestamp() {
   ts_last_pass_ = -1;
   ts_open_ = true;
   PassTimestamp(g_current_pass);
+}
+
+int Renderer::TargetTimingClass(HostSurface* const rts[4], HostSurface* ds) {
+  const HostSurface* rt = rts[0] ? rts[0] : ds;
+  if (!rt) return 0;
+  const uint64_t key = (uint64_t(rt->guest_format) << 48) | (uint64_t(rt->width) << 32) |
+      (uint64_t(rt->height) << 16) | (rts[0] && ds ? 1u : 0u) | (rts[1] ? 2u : 0u);
+  for (size_t i = 0; i < ts_target_classes_.size(); ++i)
+    if (ts_target_classes_[i].first == key) return int(i + 1);
+  if (ts_target_classes_.size() >= 31) return 0;
+  ts_target_classes_.emplace_back(key, fmt::format("[{}{}x{} f{}{}]", rts[0] ? "" : "depth ",
+      rt->width, rt->height, rt->guest_format, rts[0] && ds ? " +ds" : ""));
+  return int(ts_target_classes_.size());
 }
 
 void Renderer::PassTimestamp(int pass) {
@@ -2983,6 +3006,7 @@ bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_fo
                   SurfaceName(rts[3]), SurfaceName(ds));
       trace_draws_ = 0;
     }
+    if (REXCVAR_GET(sr_native_gpu_pass_timing)) PassTimestamp(TargetTimingClass(rts, ds));
     std::memcpy(bound_rts_, rts, sizeof(rts));
     bound_rt_count_ = rt_count;
     bound_ds_ = ds;
@@ -5596,14 +5620,31 @@ bool Renderer::RefreshTrackedBuffer(TrackedBuffer& t) {
   bool changed = page_written;
   if (t.size <= kHashedBufferMax) {
     // Confirm page-level notifications against the actual allocation. Keep
-    // the once-per-frame fallback for writes through unobserved virtual aliases.
-    changed = t.content.Refresh(front_frame_, page_written, [&] {
-      DetailScope hash_scope(capture_timings.fb_hash_ns);
-      if (graphics::FrameTimeline::Detail()) {++stream_plan_counters.refresh_hashes;stream_plan_counters.refresh_hash_bytes+=t.size;}
-      return TextureHash()(
-          REX_KERNEL_MEMORY()->TranslatePhysical<const uint8_t*>(t.address & 0x1FFFFFFF), t.size, 0);
-    },every_use);
-    if (changed) ++stats_.buffer_hash_dirty;
+    // the once-per-frame fallback for writes through unobserved virtual aliases,
+    // unless write tracking proves no write reached the bytes since their hash.
+    const bool frame_fallback = t.content.valid && t.content.frame != front_frame_ &&
+        !page_written && !every_use;
+    if (frame_fallback && BufferProofHolds(t)) {
+      t.content.frame = front_frame_;
+      ++stats_.buffer_tracking_reused;
+    } else {
+      // Sample before hashing: the proof needs the same stamp (and fast-view
+      // domain) on both sides.
+      const uint64_t domain = resource_write_tracker_.FastDomain();
+      RexTrackingStamp before{};
+      const bool sampled = t.tracking_watch &&
+          resource_write_tracker_.Sample(t.tracking_watch, {&before, 1});
+      bool hashed = false;
+      changed = t.content.Refresh(front_frame_, page_written, [&] {
+        DetailScope hash_scope(capture_timings.fb_hash_ns);
+        if (graphics::FrameTimeline::Detail()) {++stream_plan_counters.refresh_hashes;stream_plan_counters.refresh_hash_bytes+=t.size;}
+        hashed = true;
+        return TextureHash()(
+            REX_KERNEL_MEMORY()->TranslatePhysical<const uint8_t*>(t.address & 0x1FFFFFFF), t.size, 0);
+      },every_use);
+      if (changed) ++stats_.buffer_hash_dirty;
+      if (hashed && buffer_tracking_) UpdateBufferProof(t, changed, sampled ? &before : nullptr, domain);
+    }
   }
   if (changed) {
     t.dirty = true;
@@ -5611,6 +5652,61 @@ bool Renderer::RefreshTrackedBuffer(TrackedBuffer& t) {
     if (page_written) ++stats_.buffer_watch_dirty;
   }
   return t.dirty;
+}
+
+bool Renderer::BufferProofHolds(TrackedBuffer& t) {
+  if (!buffer_tracking_ || !t.tracking_proven) return false;
+  if (t.tracking_domain) {
+    // Lock-free: the page epochs only move when coverage of the bytes is lost.
+    if (resource_write_tracker_.FastStampHolds({t.address & 0x1FFFFFFFu, t.size},
+            t.tracking_baseline.invalidation_epoch, t.tracking_domain))
+      return true;
+  } else {
+    RexTrackingStamp now{};
+    if (resource_write_tracker_.Sample(t.tracking_watch, {&now, 1}) &&
+        SameCoveredContent({&t.tracking_baseline, 1}, {&now, 1}))
+      return true;
+  }
+  DropBufferWatch(t);
+  return false;
+}
+
+void Renderer::UpdateBufferProof(TrackedBuffer& t, bool changed, const RexTrackingStamp* before,
+                                 uint64_t domain) {
+  if (changed) {
+    if (t.tracking_watch) DropBufferWatch(t);
+    else t.tracking_policy.OnProofLost();
+    return;
+  }
+  t.tracking_policy.OnUnchangedHash();
+  if (!t.tracking_watch) {
+    if (!t.tracking_policy.ReadyToWatch() || !resource_write_tracker_.active()) return;
+    const RexTrackingRange range{t.address & 0x1FFFFFFFu, t.size};
+    t.tracking_watch = resource_write_tracker_.Watch({&range, 1});
+    // Not a tracked allocation (or no coverage): retry much later.
+    if (!t.tracking_watch) t.tracking_policy.OnProofLost();
+    else ++stats_.buffer_tracking_watches;
+    // Coverage starts now; the next hash, sampled on both sides, proves it.
+    return;
+  }
+  RexTrackingStamp after{};
+  if (before && resource_write_tracker_.Sample(t.tracking_watch, {&after, 1}) &&
+      SameCoveredContent({before, 1}, {&after, 1}) &&
+      resource_write_tracker_.FastDomain() == domain) {
+    t.tracking_baseline = *before;
+    t.tracking_domain = domain;
+    t.tracking_proven = true;
+  } else {
+    DropBufferWatch(t);
+  }
+}
+
+void Renderer::DropBufferWatch(TrackedBuffer& t) {
+  if (t.tracking_watch) resource_write_tracker_.Unwatch(t.tracking_watch);
+  t.tracking_watch = 0;
+  t.tracking_proven = false;
+  t.tracking_policy.OnProofLost();
+  ++stats_.buffer_tracking_drops;
 }
 
 Renderer::BufferPlan Renderer::PlanBuffer(uint8_t* base, uint32_t address, uint32_t size,
@@ -7831,8 +7927,10 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
                   upload_peak_ >> 10, overflow_pages_created_);
     }
     REXLOG_INFO("native: EDRAM reinterpretations {} over {} frames", stats_.edram_reinterprets, frame_count_);
-    REXLOG_INFO("native: buffers made dirty by the write watch {} / by the per-frame hash {}",
-                stats_.buffer_watch_dirty, stats_.buffer_hash_dirty);
+    REXLOG_INFO("native: buffers made dirty by the write watch {} / by the per-frame hash {}; "
+                "tracking proofs reused {} watches {} drops {}",
+                stats_.buffer_watch_dirty, stats_.buffer_hash_dirty, stats_.buffer_tracking_reused,
+                stats_.buffer_tracking_watches, stats_.buffer_tracking_drops);
     REXLOG_INFO("native: gpu fence wait {} ms total, frames {}", stats_.gpu_wait_us / 1000,
                 frame_count_);
     REXLOG_INFO("native: pm4 mirror packets {} dwords {} indirect {} ({} dwords) resyncs {} "
@@ -8787,7 +8885,7 @@ void Renderer::Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd
   t_capture_bytes = batch.bytes.data();
   t_capture_bytes_size = batch.bytes.size();
   g_current_pass = cmd.pass;
-  if (frame_open_ && REXCVAR_GET(sr_native_gpu_pass_timing)) PassTimestamp(cmd.pass);
+
   if (cmd.pass != last_exec_pass_) {
     if (temporal_probe_ && kPassRenderHud >= 0 && cmd.pass == kPassRenderHud &&
         frame_open_) {

@@ -21,6 +21,9 @@ class WriteTrackingState {
   void Reset();
   bool MarkCovered(RexTrackingRange range);
   RexTrackingStamp Sample(RexTrackingRange range) const;
+  // Lock-free copies of page epochs and domain losses (RexTrackingFastView).
+  // Set before any other call; the arrays must outlive this state.
+  void SetEpochMirror(uint64_t* pages, uint64_t* domain) { mirror_pages_ = pages; mirror_domain_ = domain; }
 
  private:
   friend struct WriteTrackingTestAccess;
@@ -37,5 +40,13 @@ class WriteTrackingState {
   Allocations allocations_;
   uint64_t generation_ = 0, sequence_ = 0;
   bool exhausted_ = false;
+  uint64_t* mirror_pages_ = nullptr;
+  uint64_t* mirror_domain_ = nullptr;
+  void PublishPage(uint32_t page, uint64_t epoch) {
+    if (mirror_pages_) __atomic_store_n(&mirror_pages_[page], epoch, __ATOMIC_RELEASE);
+  }
+  void PublishDomainLoss() {
+    if (mirror_domain_) __atomic_add_fetch(mirror_domain_, 1, __ATOMIC_ACQ_REL);
+  }
 };
 }  // namespace sr::tracking

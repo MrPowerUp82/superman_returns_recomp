@@ -35,6 +35,7 @@
 #include "cpu_bundle.h"
 #include "resolve_identity.h"
 #include "resource_write_tracking.h"
+#include "buffer_tracking_policy.h"
 
 #include <atomic>
 #include <chrono>
@@ -194,6 +195,7 @@ class Renderer : public NativeFrontend {
     std::map<std::tuple<uint64_t, uint64_t, int>, uint64_t> skip_pso_pairs;
     uint64_t buffer_watch_dirty = 0;
     uint64_t buffer_hash_dirty = 0;
+    uint64_t buffer_tracking_reused = 0, buffer_tracking_watches = 0, buffer_tracking_drops = 0;
     uint64_t edram_reinterprets = 0;
     uint64_t shader_pending_draws = 0;
     uint64_t resolves = 0;
@@ -267,7 +269,20 @@ class Renderer : public NativeFrontend {
     uint32_t watch_seq = 0, checked_seq = 0;  // physical write watch
     bool watched = false;
     BufferContent content;
+    // Write-tracking proof that the bytes still hash to content.value; while
+    // it holds, the once-per-frame fallback hash is skipped.
+    RexTrackingWatch tracking_watch = 0;
+    RexTrackingStamp tracking_baseline{};
+    uint64_t tracking_domain = 0;  // FastDomain() when the proof was taken
+    bool tracking_proven = false;
+    BufferTrackingPolicy tracking_policy;
   };
+  // Set at init (worker), read by the front end.
+  std::atomic<bool> buffer_tracking_{false};
+  bool BufferProofHolds(TrackedBuffer& t);
+  void UpdateBufferProof(TrackedBuffer& t, bool changed, const RexTrackingStamp* before,
+                         uint64_t domain);
+  void DropBufferWatch(TrackedBuffer& t);
   static constexpr uint32_t kHashedBufferMax = 32 * 1024;
   uint64_t front_frame_ = 0;  // guest swaps seen by the front end
   // Node-based: TrackedBuffer pointers stay valid (page index below).
@@ -325,12 +340,17 @@ class Renderer : public NativeFrontend {
   bool ts_open_ = false;
   double ts_accum_ms_ = 0.0;
   // Per-pass split (sr_native_gpu_pass_timing): timestamps at pass changes.
-  static constexpr uint32_t kTsPerFrame = 64;
+  static constexpr uint32_t kTsPerFrame = 512;
   uint32_t ts_count_[3] = {};                  // timestamps written per frame slot
   uint8_t ts_pass_[3][kTsPerFrame] = {};       // pass of the segment starting at i
   int ts_last_pass_ = -1;
   double ts_pass_ms_[32] = {};
   void PassTimestamp(int pass);
+  // The game profile has no pass roles (every draw is pass 0), so the split
+  // groups by bound render target signature instead: class 1..31, 0 = other.
+  std::vector<std::pair<uint64_t, std::string>> ts_target_classes_;
+  struct HostSurface;
+  int TargetTimingClass(HostSurface* const rts[4], HostSurface* ds);
   // Per-command GPU profile of one frame (sr_native_profile_frame_at_s).
   static constexpr uint32_t kProfMax = 16384;
   struct ProfMark {

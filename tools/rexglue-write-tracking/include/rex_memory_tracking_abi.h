@@ -37,6 +37,21 @@ struct RexMemoryTrackingApiV1 {
 extern "C" const RexMemoryTrackingApiV1* RexGetMemoryTrackingApi(uint32_t version, uint32_t caller_size);
 using RexGetMemoryTrackingApiFn = decltype(&RexGetMemoryTrackingApi);
 
+// Optional lock-free view for proof checks. Page epochs only grow: every loss
+// of coverage (guest write fault, host producer, allocation or protection
+// change, unwatch) stores a new epoch to each affected page before it takes
+// effect. domain_epoch grows on session start/stop, reset and whole-domain
+// loss. A Complete, writer-free stamp therefore still holds while the domain
+// and the largest page epoch of its range are unchanged. Read both with
+// acquire loads; the arrays outlive every session.
+struct RexTrackingFastView {
+  uint32_t version, page_count;
+  const uint64_t* page_epochs;   // one per 4 KiB physical page
+  const uint64_t* domain_epoch;
+};
+extern "C" const RexTrackingFastView* RexGetMemoryTrackingFastView(uint32_t version);
+using RexGetMemoryTrackingFastViewFn = decltype(&RexGetMemoryTrackingFastView);
+
 static_assert(sizeof(void*) == 8);
 static_assert(sizeof(RexTrackingRange) == 8);
 static_assert(sizeof(RexTrackingStamp) == 32 && offsetof(RexTrackingStamp, coverage) == 28);
