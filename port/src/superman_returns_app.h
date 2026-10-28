@@ -13,6 +13,8 @@
 
 #include "frame_stats.h"
 #include "benchmark_input_driver.h"
+#include "title_benchmark.h"
+#include <rex/input/input_system.h>
 #include "sr_settings.h"
 #include "graphics/backend_selection.h"
 #include "native_renderer/native_bridge.h"
@@ -144,7 +146,13 @@ class SupermanReturnsApp : public rex::ReXApp {
   }
 
   // Feed the F3 debug overlay with the guest frame rate.
-  void OnPostSetup() override { SetGuestFrameStats(SampleGuestFrameStats);InstallBenchmarkInput(*runtime()); }
+  void OnPostSetup() override {
+    SetGuestFrameStats(SampleGuestFrameStats);InstallBenchmarkInput(*runtime());
+    // Title benchmark: no key or pad may advance the title menu.
+    if(superman_returns::benchmark::Active())
+      if(auto* input=static_cast<rex::input::InputSystem*>(runtime()->input_system()))
+        input->SetActiveCallback([] { return false; });
+  }
 
   // Override virtual hooks for customization:
 #if SR_HAS_NATIVE

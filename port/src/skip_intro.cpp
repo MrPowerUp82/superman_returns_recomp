@@ -12,6 +12,7 @@
 
 #include "generated/default/superman_returns_init.h"
 #include "sr_settings.h"
+#include "title_benchmark.h"
 
 namespace {
 
@@ -28,7 +29,9 @@ void Store32(uint8_t* base, uint32_t addr, uint32_t value) {
 REX_HOOK_RAW(sub_822A8BC0) {
   // Mirrors the original early-out: [[0x829761E0] + 4] != 0 disables the sequence.
   const bool sequence_disabled = Load32(base, Load32(base, 0x829761E0) + 4) != 0;
-  if (!REXCVAR_GET(sr_skip_intro) || sequence_disabled) {
+  // The title benchmark always starts at the title screen.
+  const bool skip = REXCVAR_GET(sr_skip_intro) || superman_returns::benchmark::Active();
+  if (!skip || sequence_disabled) {
     __imp__sub_822A8BC0(ctx, base);
     return;
   }

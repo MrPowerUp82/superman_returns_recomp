@@ -47,3 +47,52 @@ SR_TEST(benchmark_stats_use_slowest_frames_for_lows) {
   SR_CHECK(s.p50_ms == 10.0 && s.max_ms == 100.0);
   SR_CHECK(ComputeStats({}).frames == 0);
 }
+
+#include "../../port/src/title_benchmark_format.h"
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+
+SR_TEST(benchmark_result_json_contains_metrics_and_reason) {
+  Result r;
+  r.phase = Phase::Done; r.valid = false;
+  r.reason = "a cena 3D foi interrompida (vídeo de demonstração ou carregamento)";
+  r.stats.avg_fps = 41.25; r.stats.frames = 2475;
+  r.settings_text = "API d3d12 \"teste\" C:\\jogo";
+  const auto json = FormatResultJson(r, "2026-10-28T12:00:00");
+  SR_CHECK(json.find("\"valid\": false") != std::string::npos);
+  SR_CHECK(json.find(r.reason) != std::string::npos);
+  SR_CHECK(json.find("\"avg_fps\": 41.25") != std::string::npos);
+  SR_CHECK(json.find("\"frames\": 2475") != std::string::npos);
+  SR_CHECK(json.find("\"timestamp\": \"2026-10-28T12:00:00\"") != std::string::npos);
+  SR_CHECK(json.find("API d3d12 \\\"teste\\\" C:\\\\jogo") != std::string::npos);  // escaped
+}
+
+SR_TEST(benchmark_result_saves_json_and_frame_csv) {
+  const auto dir = std::filesystem::temp_directory_path() / "sr_benchmark_test_save";
+  std::filesystem::remove_all(dir);
+  Result r; r.phase = Phase::Done; r.valid = true;
+  const std::vector<double> frames{16.5, 33.25};
+  SaveResult(r, dir, "20261028-120000", frames);
+  SR_CHECK(r.saved);
+  SR_CHECK(r.json_path == (dir / "benchmark-20261028-120000.json").string());
+  std::stringstream text;
+  {
+    std::ifstream csv(dir / "benchmark-20261028-120000.csv");
+    text << csv.rdbuf();
+  }  // Windows cannot delete the directory while the file is open.
+  SR_CHECK(text.str() == "frame_ms\n16.5\n33.25\n");
+  std::error_code ignored;
+  std::filesystem::remove_all(dir, ignored);
+}
+
+SR_TEST(benchmark_result_reports_unsaved_file) {
+  // A regular file where the directory should be: creation fails.
+  const auto blocker = std::filesystem::temp_directory_path() / "sr_benchmark_test_blocker";
+  std::filesystem::remove_all(blocker);
+  std::ofstream(blocker) << "x";
+  Result r; r.phase = Phase::Done; r.valid = true;
+  SaveResult(r, blocker / "benchmarks", "20261028-120000", {});
+  SR_CHECK(!r.saved); SR_CHECK(r.json_path.empty());
+  std::filesystem::remove(blocker);
+}

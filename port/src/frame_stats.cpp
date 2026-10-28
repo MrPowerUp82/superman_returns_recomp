@@ -16,6 +16,7 @@
 #include "generated/default/superman_returns_init.h"
 #include "native_renderer/native_bridge.h"
 #include "renderdoc_capture.h"
+#include "title_benchmark.h"
 
 namespace {
 
@@ -51,6 +52,7 @@ REX_HOOK_RAW(sub_82112050) {
   const uint32_t device = ctx.r3.u32, front_buffer = ctx.r4.u32;
   __imp__sub_82112050(ctx, base);
   superman_returns::native::OnFrameStatsSwap(base, device, front_buffer);
+  superman_returns::benchmark::OnGuestPresent();
 }
 
 rex::ui::FrameStats SampleGuestFrameStats() {

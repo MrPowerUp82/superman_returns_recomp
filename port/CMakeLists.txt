@@ -56,6 +56,7 @@ endif()
 set(SUPERMANRETURNS_SOURCES
     src/main.cpp
     src/frame_stats.cpp
+    src/title_benchmark.cpp
     src/benchmark_input_driver.cpp
     src/xma_fixes.cpp
     src/sr_settings.cpp
