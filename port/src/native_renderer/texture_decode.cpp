@@ -7,6 +7,7 @@
 #include "texture_decode.h"
 #include "../graphics/guest/texture_capture.h"
 #include "../graphics/guest/texture_layout.h"
+#include "../graphics/texture_mods/texture_mods_runtime.h"
 #include "xenos_tiling.h"
 
 #include <algorithm>
@@ -145,6 +146,7 @@ bool DecodeTexture(const uint32_t fetch_dwords[6], DecodedTexture& out, const ch
     if(reason) *reason=last_error.c_str();
     return false;
   }
+  graphics::texture_mods::ApplyTextureMods(linear);
   return ConvertLinear(std::move(linear),out);
 }
 
@@ -155,6 +157,7 @@ bool DecodeTexture(const graphics::guest::TextureCapture& capture, DecodedTextur
     thread_local std::string last_error;
     last_error=std::move(error); if(reason) *reason=last_error.c_str(); return false;
   }
+  graphics::texture_mods::ApplyTextureMods(linear);
   return ConvertLinear(std::move(linear),out);
 }
 

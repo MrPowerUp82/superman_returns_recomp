@@ -124,7 +124,8 @@ set(SR_XXHASH_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../../.tools/rexglue-sdk/win-
 if(WIN32 AND EXISTS "${SR_XXHASH_INCLUDE}/xxhash.h")
     target_sources(sr_native_tests PRIVATE test_xxh3_avx2.cpp xxh3_reference.cpp "${SR_NATIVE_DIR}/xxh3_avx2.cpp")
     # Texture mods hash with XXH3 (inlined) and read PNG with the vendored stb_image.
-    target_sources(sr_native_tests PRIVATE test_texture_image.cpp "${SR_NATIVE_DIR}/../graphics/texture_mods/texture_image.cpp")
+    target_sources(sr_native_tests PRIVATE test_texture_image.cpp test_texture_mods.cpp "${SR_NATIVE_DIR}/../graphics/texture_mods/texture_image.cpp"
+        "${SR_NATIVE_DIR}/../graphics/texture_mods/texture_mods.cpp")
     set_source_files_properties("${SR_NATIVE_DIR}/../graphics/texture_mods/texture_image.cpp" PROPERTIES
         INCLUDE_DIRECTORIES "${SR_XXHASH_INCLUDE};${CMAKE_CURRENT_SOURCE_DIR}/../../port/third_party")
     set_source_files_properties("${SR_NATIVE_DIR}/xxh3_avx2.cpp" PROPERTIES
