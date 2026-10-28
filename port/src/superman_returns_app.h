@@ -14,6 +14,7 @@
 #include "frame_stats.h"
 #include "benchmark_input_driver.h"
 #include "title_benchmark.h"
+#include "title_benchmark_dialog.h"
 #include <rex/input/input_system.h>
 #include "sr_settings.h"
 #include "graphics/backend_selection.h"
@@ -165,6 +166,8 @@ class SupermanReturnsApp : public rex::ReXApp {
   }
   void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
     graphics_dialog_=superman_returns::graphics::GraphicsOptionsDialog::Install(drawer);
+    if(superman_returns::benchmark::Active())
+      benchmark_dialog_=superman_returns::benchmark::ResultsDialog::Install(drawer,[] {superman_returns::benchmark::ExitNow(0);});
   }
   void OnGuestThreadExit(rex::system::XThread*) override {
     superman_returns::graphics::ClearGraphicsGuestPause();
@@ -173,6 +176,8 @@ class SupermanReturnsApp : public rex::ReXApp {
     superman_returns::graphics::SynchronizeGraphicsSettings(true);
     delete graphics_dialog_; // Persistent dialog never self-closes; drawer is still alive here.
     graphics_dialog_=nullptr;
+    delete benchmark_dialog_;
+    benchmark_dialog_=nullptr;
   }
   bool OnWindowCloseRequested() override {
     // ReXGlue's normal OnClosing path hard-exits after TerminateTitle and does
@@ -196,6 +201,7 @@ class SupermanReturnsApp : public rex::ReXApp {
 #if SR_HAS_NATIVE
  private:
   superman_returns::graphics::GraphicsOptionsDialog* graphics_dialog_=nullptr;
+  superman_returns::benchmark::ResultsDialog* benchmark_dialog_=nullptr;
   std::filesystem::path graphics_preferences_path_;
 #endif
 };

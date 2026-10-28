@@ -37,6 +37,7 @@ MenuInputSample KeyboardSample() {
 }
 }
 void SetGraphicsOptionsFont(ImFont* font) { menu_font=font; }
+ImFont* GraphicsOptionsFont() { return menu_font; }
 
 GraphicsOptionsDialog::GraphicsOptionsDialog(rex::ui::ImGuiDrawer* drawer,
                                              std::shared_ptr<GraphicsOptionsMenu> menu)

@@ -6,6 +6,8 @@ struct ImFont;
 
 namespace superman_returns::graphics {
 void SetGraphicsOptionsFont(ImFont* font);
+// Arial with Latin-1 accents when the app loaded it; nullptr otherwise.
+ImFont* GraphicsOptionsFont();
 
 // Host panel installed by SupermanReturnsApp. graphics_options_hooks.cpp
 // authenticates the existing guest pause and filters its polled gamepad path.

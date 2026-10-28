@@ -13,4 +13,7 @@ void OnGuestPresent();
 void SetGpuName(std::string name);
 // Copy for the results screen (UI thread).
 Result Snapshot();
+// Results are already on disk: flush the log and end the process. The SDK's
+// deferred quit does not return from the title screen.
+[[noreturn]] void ExitNow(int code);
 }  // namespace superman_returns::benchmark

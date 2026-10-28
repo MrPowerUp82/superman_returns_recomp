@@ -1,6 +1,7 @@
 #include "title_benchmark.h"
 
 #include <atomic>
+#include <cstdlib>
 #include <chrono>
 #include <ctime>
 #include <mutex>
@@ -124,15 +125,15 @@ void OnGuestPresent() {
       valid = s.result.valid;
     }
   }
-  if (exit_now) {
-    // Scripted runs: the files are written and closed; the log is flushed.
-    rex::FlushLogging();
+  if (exit_now) ExitNow(valid ? 0 : 1);
+}
+
+void ExitNow(int code) {
+  rex::FlushLogging();
 #if defined(_WIN32)
-    TerminateProcess(GetCurrentProcess(), valid ? 0 : 1);
-#else
-    std::_Exit(valid ? 0 : 1);
+  TerminateProcess(GetCurrentProcess(), UINT(code));
 #endif
-  }
+  std::_Exit(code);
 }
 
 void SetGpuName(std::string name) {
