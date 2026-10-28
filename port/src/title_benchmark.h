@@ -8,6 +8,8 @@ namespace superman_returns::benchmark {
 bool Active();
 // Renderers (D3D12 worker, Vulkan replay) at the end of each frame.
 void NoteRendererFrame(bool scene_drawn);
+// FMV player start (sub_8235F2D0): the attract demo video.
+void NoteVideoStarted();
 // Guest present hook (sub_82112050): advances the clock, saves on completion.
 void OnGuestPresent();
 void SetGpuName(std::string name);

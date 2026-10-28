@@ -29,6 +29,17 @@ SR_TEST(benchmark_clock_invalidates_when_the_scene_stops) {
   SR_CHECK(c.reason() == "a cena 3D foi interrompida (vídeo de demonstração ou carregamento)");
 }
 
+SR_TEST(benchmark_clock_invalidates_when_a_video_starts) {
+  // The attract video plays over the still-rendered scene: the scene filter
+  // keeps being drawn, so the video start itself must end the run.
+  Clock c; c.OnFrame(1, true); c.OnFrame(7, true);
+  c.Interrupt();
+  SR_CHECK(c.phase() == Phase::Done); SR_CHECK(!c.valid());
+  SR_CHECK(c.reason() == "a cena 3D foi interrompida (vídeo de demonstração ou carregamento)");
+  Clock waiting; waiting.Interrupt();  // before the scene (boot videos): ignored
+  SR_CHECK(waiting.phase() == Phase::WaitingScene);
+}
+
 SR_TEST(benchmark_clock_gives_up_when_the_title_never_appears) {
   Clock c; c.OnFrame(119, false); SR_CHECK(c.phase() == Phase::WaitingScene);
   c.OnFrame(121, false); SR_CHECK(c.phase() == Phase::Done); SR_CHECK(!c.valid());

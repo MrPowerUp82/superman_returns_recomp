@@ -65,3 +65,22 @@ Por quê: hoje o benchmark (`tools/bench/*.ps1`) abre o jogo normal, passa os me
 - Três aberturas seguidas na mesma máquina: nenhuma interface visível nos quadros medidos (dump de quadro no começo, meio e fim), nenhuma rodada inválida e FPS médio dentro de ±3% entre elas. Se o voo não se repetir e a variação passar disso, relatar com números antes de aceitar.
 - Uma rodada com o título deixado parado até o vídeo, para provar que a detecção marca inválido se a janela for estendida além dos ~78 s.
 - Se houver acesso a uma GPU dedicada (RTX 2060), conferir que o vídeo não chega antes do fim da janela.
+
+## Verificação (28/10, notebook i5-13420H + Intel UHD, build do branch `feat/title-benchmark`)
+
+Argumentos iguais aos do botão do launcher (1280×720, escala 1, sombra 1, MSAA 1, VSync off, sem limite), com `--sr_benchmark_exit=true`:
+
+| Rodada | Saída | Válida | FPS médio | Mínimo | 1% low | Quadros |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+| D3D12 #1 | 0 | sim | 55,1 | 8,4 | 14,0 | 3.305 |
+| D3D12 #2 | 0 | sim | 57,9 | 8,7 | 16,4 | 3.472 |
+| D3D12 #3 | 0 | sim | 53,0 | 7,6 | 15,0 | 3.178 |
+| Vulkan | 0 | sim | 41,6 | 8,9 | 16,4 | 2.499 |
+| D3D12, Enter/Espaço apertados aos ~30 s | 0 | sim | 61,1 | 12,0 | 20,3 | 3.667 |
+| D3D12, medição estendida a 120 s | 1 | não ("a cena 3D foi interrompida…") | — | — | — | — |
+
+Cada rodada leva ~78 s do início ao fim. Trace de um quadro em D3D12: o filtro final da cena é o último draw emitido. Prints em D3D12 e Vulkan: sem logo, sem "PRESS START", sem moldura. Esc na tela de resultados encerra o jogo.
+
+- **Repetibilidade abaixo da meta:** o FPS médio variou ±4,5% entre as três rodadas D3D12 (meta ±3%). O voo do título não é idêntico a cada abertura, ou o tráfego e a câmera variam. Para comparar builds, usar a média de três rodadas.
+- **Correção do design, vídeo de demonstração:** ele não remove a cena. O vídeo é desenhado por cima da cena 3D, que continua sendo renderizada, então o critério "quadro sem filtro final" não o detectava (a rodada de 120 s saiu válida, com FPS travado em ~31 a partir de ~77 s). Agora a chamada do tocador de FMV `sub_8235F2D0` durante o aquecimento ou a medição invalida a rodada (`port/src/title_benchmark_hooks.cpp`). O vídeo começou ~77 s depois da cena nas rodadas a 41 e a 55 FPS: o gatilho é por tempo, e a janela padrão (5 + 60 s) termina ~12 s antes.
+- **Não verificado:** clique no botão "Fechar" (fica fora da tela deste notebook com escala de exibição); RTX 2060.

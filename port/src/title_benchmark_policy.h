@@ -57,6 +57,11 @@ class Clock {
         break;
     }
   }
+  // A video started (the attract demo draws over the still-rendered scene).
+  // Ignored before the scene: boot videos are not part of the run.
+  void Interrupt() {
+    if (phase_ == Phase::Warmup || phase_ == Phase::Measuring) Finish(kInterrupted);
+  }
   Phase phase() const { return phase_; }
   bool valid() const { return valid_; }
   const std::string& reason() const { return reason_; }

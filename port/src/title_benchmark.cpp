@@ -136,6 +136,24 @@ void ExitNow(int code) {
   std::_Exit(code);
 }
 
+void NoteVideoStarted() {
+  if (!Active()) return;
+  auto& s = GetState();
+  bool exit_now = false, valid = false;
+  {
+    std::lock_guard lock(s.mutex);
+    if (s.finished || !s.clock) return;
+    s.clock->Interrupt();
+    if (s.clock->phase() != Phase::Done) return;
+    REXLOG_INFO("benchmark: a video started during the run");
+    s.finished = true;
+    Finish(s);
+    exit_now = REXCVAR_GET(sr_benchmark_exit);
+    valid = s.result.valid;
+  }
+  if (exit_now) ExitNow(valid ? 0 : 1);
+}
+
 void SetGpuName(std::string name) {
   auto& s = GetState();
   std::lock_guard lock(s.mutex);
