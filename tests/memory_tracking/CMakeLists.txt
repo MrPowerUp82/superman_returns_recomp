@@ -21,6 +21,7 @@ else()
     ../../port/src/graphics/texture_mods/texture_mods.cpp
     ../../port/src/graphics/texture_mods/texture_mods_runtime.cpp
     ../../port/src/graphics/texture_mods/costume_skin.cpp
+    ../../port/src/graphics/texture_mods/kingdom_come.cpp
     ../../port/src/graphics/guest/texture_capture.cpp
     ../../port/src/graphics/guest/texture_layout.cpp
     ../../port/src/graphics/guest/captured_batch.cpp)

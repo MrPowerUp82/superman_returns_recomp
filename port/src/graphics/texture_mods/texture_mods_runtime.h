@@ -6,7 +6,8 @@ class TextureMods;
 // Configured from sr_texture_* on first use (both backends decode on worker threads).
 TextureMods& GlobalTextureMods();
 // Called right after each guest texture is decoded, before upload.
-void ApplyTextureMods(guest::LinearTexture& texture);
+// True when the content was replaced: it is RGBA8 now, whatever the guest format.
+bool ApplyTextureMods(guest::LinearTexture& texture);
 // Registers the selected costume skin's recipe (costume_skin.cpp); no-op without one.
 void InstallCostumeSkin(TextureMods& mods);
 // Suit body textures, decoded whenever the game dresses Superman in that suit.

@@ -72,6 +72,6 @@ TextureMods& GlobalTextureMods() {
 uint32_t FilmSuitDecodes() { return film_suit_decodes.load(std::memory_order_relaxed); }
 uint32_t GoldenAgeDecodes() { return golden_age_decodes.load(std::memory_order_relaxed); }
 
-void ApplyTextureMods(guest::LinearTexture& texture) { GlobalTextureMods().Apply(texture); }
+bool ApplyTextureMods(guest::LinearTexture& texture) { return GlobalTextureMods().Apply(texture); }
 
 }  // namespace superman_returns::graphics::texture_mods

@@ -242,6 +242,7 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
             ${SR_NATIVE_ROOT}/../graphics/texture_mods/texture_mods.cpp
             ${SR_NATIVE_ROOT}/../graphics/texture_mods/texture_mods_runtime.cpp
             ${SR_NATIVE_ROOT}/../graphics/texture_mods/costume_skin.cpp
+            ${SR_NATIVE_ROOT}/../graphics/texture_mods/kingdom_come.cpp
             ${SR_NATIVE_ROOT}/shader_registry.cpp
             ${SR_NATIVE_ROOT}/shader_translator.cpp
             ${SR_NATIVE_ROOT}/pipeline_cache.cpp

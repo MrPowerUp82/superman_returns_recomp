@@ -33,7 +33,10 @@ TextureMods::TextureMods(ModConfig config) : config_(std::move(config)) {
   }
 }
 
-void TextureMods::SetRecipe(std::function<bool(uint64_t, Image&)> recipe) { recipe_ = std::move(recipe); }
+void TextureMods::SetRecipe(std::function<bool(uint64_t, Image&)> recipe, std::function<bool(uint64_t)> wants) {
+  recipe_ = std::move(recipe);
+  recipe_wants_ = std::move(wants);
+}
 void TextureMods::SetWarn(std::function<void(const std::string&)> warn) { warn_ = std::move(warn); }
 void TextureMods::SetNote(std::function<void(const std::string&)> note) { note_ = std::move(note); }
 void TextureMods::SetObserver(std::function<void(uint64_t)> observer) { observer_ = std::move(observer); }
@@ -94,7 +97,7 @@ bool TextureMods::Apply(guest::LinearTexture& texture) {
       return true;
     }
   }
-  if (recipe_) {
+  if (recipe_ && (!recipe_wants_ || recipe_wants_(key))) {
     Image image;
     if (BaseLevelToImage(texture, image) && recipe_(key, image)) {
       ImageToTexture(image, texture);

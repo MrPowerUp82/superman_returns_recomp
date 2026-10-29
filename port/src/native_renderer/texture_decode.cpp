@@ -99,13 +99,15 @@ HostFormat MapFormat(xenos::TextureFormat f) {
   }
 }
 
-bool ConvertLinear(graphics::guest::LinearTexture linear, DecodedTexture& out) {
+// `replaced`: texture mods swapped the content for RGBA8 (the guest format no longer applies).
+bool ConvertLinear(graphics::guest::LinearTexture linear, DecodedTexture& out, bool replaced) {
   DecodedTexture decoded;
   decoded.width=linear.width; decoded.height=linear.height; decoded.depth=linear.depth;
   decoded.mip_levels=linear.mip_levels; decoded.dimension=linear.dimension;
   decoded.guest_format=linear.guest_format; decoded.base_address=linear.base_address;
   decoded.base_size=linear.base_size;
-  decoded.format=MapFormat(static_cast<xenos::TextureFormat>(linear.guest_format)).format;
+  decoded.format=replaced ? DXGI_FORMAT_R8G8B8A8_UNORM
+                          : MapFormat(static_cast<xenos::TextureFormat>(linear.guest_format)).format;
   uint32_t mapping=1u<<12;
   for(uint32_t i=0;i<4;++i) mapping|=linear.swizzle[i]<<(3*i);
   decoded.component_mapping=mapping;
@@ -146,8 +148,8 @@ bool DecodeTexture(const uint32_t fetch_dwords[6], DecodedTexture& out, const ch
     if(reason) *reason=last_error.c_str();
     return false;
   }
-  graphics::texture_mods::ApplyTextureMods(linear);
-  return ConvertLinear(std::move(linear),out);
+  const bool replaced = graphics::texture_mods::ApplyTextureMods(linear);
+  return ConvertLinear(std::move(linear),out,replaced);
 }
 
 bool DecodeTexture(const graphics::guest::TextureCapture& capture, DecodedTexture& out, const char** reason) {
@@ -157,8 +159,8 @@ bool DecodeTexture(const graphics::guest::TextureCapture& capture, DecodedTextur
     thread_local std::string last_error;
     last_error=std::move(error); if(reason) *reason=last_error.c_str(); return false;
   }
-  graphics::texture_mods::ApplyTextureMods(linear);
-  return ConvertLinear(std::move(linear),out);
+  const bool replaced = graphics::texture_mods::ApplyTextureMods(linear);
+  return ConvertLinear(std::move(linear),out,replaced);
 }
 
 bool WriteDds(const DecodedTexture& tex, const char* path) {

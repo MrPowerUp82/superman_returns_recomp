@@ -23,8 +23,10 @@ class TextureMods {
   // textures (one slice) are dumped or replaced; others pass untouched. With
   // nothing active it returns at once, without hashing.
   bool Apply(guest::LinearTexture& texture);
-  // In-code repaint by key; a user PNG for the same key wins.
-  void SetRecipe(std::function<bool(uint64_t key, Image&)> recipe);
+  // In-code repaint by key; a user PNG for the same key wins. `wants` picks the
+  // keys worth converting to an Image first (empty = every texture).
+  void SetRecipe(std::function<bool(uint64_t key, Image&)> recipe,
+                 std::function<bool(uint64_t key)> wants = {});
   void SetWarn(std::function<void(const std::string&)> warn);
   // Once per replaced key: which key and whether a PNG or the recipe did it.
   void SetNote(std::function<void(const std::string&)> note);
@@ -40,6 +42,7 @@ class TextureMods {
   ModConfig config_;
   std::set<uint64_t> replace_keys_;
   std::function<bool(uint64_t, Image&)> recipe_;
+  std::function<bool(uint64_t)> recipe_wants_;
   std::function<void(const std::string&)> warn_, note_;
   std::function<void(uint64_t)> observer_;
   std::mutex mutex_;  // dump state, warnings; backends decode on several threads
