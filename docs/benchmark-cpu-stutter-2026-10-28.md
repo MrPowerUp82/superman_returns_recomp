@@ -1,5 +1,15 @@
 # Benchmark: alocação de buffers D3D12 e stuttering — 28/10/2026
 
+## Decisão de integração
+
+Após a comparação posterior no Vulkan, o usuário escolheu manter somente a
+otimização D3D12. A experiência de cache Vulkan não demonstrou redução de CPU
+por quadro e não integra esta linha de desenvolvimento. O backend Vulkan
+existente permanece disponível, sem as alterações experimentais de cache.
+
+O pool D3D12 continua ligado por padrão, com o controle de reversão
+`--sr_native_buffer_heap_pool=false` e o custo adicional de VRAM documentado abaixo.
+
 ## Resultado aquecido
 
 Três pares intercalados no mesmo executável, com
