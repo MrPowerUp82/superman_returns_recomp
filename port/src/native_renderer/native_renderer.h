@@ -32,6 +32,7 @@
 #include "shared_constants_cache.h"
 #include "descriptor_recycling.h"
 #include "buffer_srv_cache.h"
+#include "d3d12_buffer_heap_pool.h"
 #include "cpu_bundle.h"
 #include "resolve_identity.h"
 #include "resource_write_tracking.h"
@@ -517,6 +518,8 @@ class Renderer : public NativeFrontend {
   rex::ui::d3d12::D3D12Presenter* presenter_ = nullptr;
   const rex::ui::d3d12::D3D12Provider* provider_ = nullptr;
   ID3D12Device* device_ = nullptr;
+  // Declared before all resource holders so heaps outlive live and retired buffers.
+  D3D12BufferHeapPool buffer_heap_pool_;
   ID3D12CommandQueue* queue_ = nullptr;
   // Own direct queue (sr_native_own_queue): isolated from the presenter/Xenos.
   Microsoft::WRL::ComPtr<ID3D12CommandQueue> own_queue_;

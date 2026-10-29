@@ -332,6 +332,8 @@ REXCVAR_DEFINE_BOOL(sr_native_debug_disable_driver_shader_cache, false, "Superma
 REXCVAR_DEFINE_BOOL(sr_native_pipeline_cache, true, "Superman Returns Native",
                     "Precompile the known pipelines at startup and record new ones "
                     "(superman_returns_pipelines.bin) against shader-compilation stutter");
+REXCVAR_DEFINE_BOOL(sr_native_buffer_heap_pool, true, "Superman Returns Native",
+                    "Place native vertex/index buffers in shared heaps to reduce allocation stalls");
 REXCVAR_DEFINE_INT32(sr_native_shadow_pcf_mode, 0, "Superman Returns Native",
                      "Debug: shadow atlas PCF at shadow_quality > 1 (0 = kernel on the host texel "
                      "grid, 1 = EXP-038 guest-texel kernel)");
@@ -405,6 +407,7 @@ bool StreamDetailProfiling() {
 }
 struct StreamDetailTimings {
   uint64_t setup_ns=0,apply_ns=0,ia_ns=0,srv_ns=0,declaration_ns=0,metadata_ns=0;
+  uint64_t buffer_create_ns=0,buffer_creates=0,buffer_create_max_ns=0;
   uint64_t calls=0,streams=0,ia_binds=0,missing=0,failed_calls=0,dynamic_streams=0;
   uint64_t srv_created=0,srv_reused=0,srv_failed=0,declaration_reads=0,attributes=0,metadata_writes=0;
   uint64_t srv_retained_hits=0,srv_same_fence_hits=0,cache_evicted=0,cache_invalidated=0;
@@ -5553,8 +5556,29 @@ Renderer::BufferEntry* Renderer::ApplyBuffer(
     desc.SampleDesc.Count = 1;
     desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     entry.state = D3D12_RESOURCE_STATE_COPY_DEST;
-    if (FAILED(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, entry.state,
-                                                nullptr, IID_PPV_ARGS(&entry.resource)))) {
+    const bool profile_creation = StreamDetailProfiling();
+    const auto creation_start = profile_creation ? std::chrono::steady_clock::now() :
+        std::chrono::steady_clock::time_point{};
+    HRESULT creation_hr;
+    if (REXCVAR_GET(sr_native_buffer_heap_pool)) {
+      const HRESULT previous_failure = buffer_heap_pool_.failure();
+      creation_hr = buffer_heap_pool_.CreateOrCommitted(device_, desc, entry.state, entry.resource);
+      if (SUCCEEDED(previous_failure) && FAILED(buffer_heap_pool_.failure()))
+        REXLOG_WARN("native buffer heap pool disabled after allocation failure {:08X}; using committed buffers",
+            uint32_t(buffer_heap_pool_.failure()));
+    } else {
+      creation_hr = device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+          entry.state, nullptr, IID_PPV_ARGS(&entry.resource));
+    }
+    if (profile_creation) {
+      const uint64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - creation_start).count();
+      stream_detail_timings.buffer_create_ns += ns;
+      ++stream_detail_timings.buffer_creates;
+      stream_detail_timings.buffer_create_max_ns = std::max(stream_detail_timings.buffer_create_max_ns, ns);
+      if (ns >= 2000000) REXLOG_INFO("native buffer allocation spike: bytes={} ms={:.3f}", size, ns / 1000000.0);
+    }
+    if (FAILED(creation_hr)) {
       const size_t lookup_index = size_t((plan.key ^ (plan.key >> 32)) &
                                          (kWorkerBufferLookupCount - 1));
       auto& slot = worker_buffer_lookup_[lookup_index];
@@ -8804,6 +8828,11 @@ void Renderer::WorkerMain() {
               REXLOG_INFO("native CPU stream detail (ms/frame over 120, disjoint within streams): setup={:.4f} apply={:.4f} ia={:.4f} srv={:.4f} declaration={:.4f} metadata={:.4f}",d.setup_ns/120000000.0,d.apply_ns/120000000.0,d.ia_ns/120000000.0,d.srv_ns/120000000.0,d.declaration_ns/120000000.0,d.metadata_ns/120000000.0);
               REXLOG_INFO("native CPU stream totals (120 swaps): calls={} streams={} ia_binds={} missing={} failed_calls={} dynamic_streams={} srv_created={} srv_reused={} srv_failed={} declaration_reads={} attributes={} metadata_writes={} action0={} action1={} action2={} action_other={}",d.calls,d.streams,d.ia_binds,d.missing,d.failed_calls,d.dynamic_streams,d.srv_created,d.srv_reused,d.srv_failed,d.declaration_reads,d.attributes,d.metadata_writes,d.actions[0],d.actions[1],d.actions[2],d.actions[3]);
               REXLOG_INFO("native buffer caches interval: lookup_hits={} map_lookups={} srv_retained_hits={} srv_same_fence_hits={} evicted={} invalidated={} live={}",d.buffer_lookup_hits,d.buffer_lookup_maps,d.srv_retained_hits,d.srv_same_fence_hits,d.cache_evicted,d.cache_invalidated,buffer_srv_cache_?buffer_srv_cache_->size():0);
+              REXLOG_INFO("native buffer allocation (120 swaps): calls={} ms_per_frame={:.3f} max_ms={:.3f}",d.buffer_creates,d.buffer_create_ns/120000000.0,d.buffer_create_max_ns/1000000.0);
+              REXLOG_INFO("native buffer heap pool: requested={} active={} heaps={} reserved_mb={} placed={} oversized_fallbacks={} failure_fallbacks={} failure={:08X}",
+                  REXCVAR_GET(sr_native_buffer_heap_pool),REXCVAR_GET(sr_native_buffer_heap_pool)&&SUCCEEDED(buffer_heap_pool_.failure()),
+                  buffer_heap_pool_.pages(),buffer_heap_pool_.pages()*16,buffer_heap_pool_.placed(),
+                  buffer_heap_pool_.oversized_fallbacks(),buffer_heap_pool_.failure_fallbacks(),uint32_t(buffer_heap_pool_.failure()));
               stream_detail_timings={};
             }
             p.execute_ns=p.prepare_ns=p.constants_ns=p.streams_ns=p.swaps=0;

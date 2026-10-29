@@ -18,6 +18,7 @@ add_executable(sr_native_tests
     test_benchmark_input.cpp
     test_descriptor_recycling.cpp
     test_buffer_srv_cache.cpp
+    test_buffer_heap_layout.cpp
     test_buffer_tracking_policy.cpp
     test_tracking_fast_view.cpp
     test_title_benchmark_policy.cpp
@@ -138,6 +139,13 @@ target_compile_definitions(sr_dlss_contract_tests PRIVATE SR_HAS_DLSS=0)
 add_test(NAME sr_dlss_contract_tests COMMAND sr_dlss_contract_tests)
 add_test(NAME sr_native_tests COMMAND sr_native_tests)
 set_tests_properties(sr_native_tests PROPERTIES TIMEOUT 30)
+if(WIN32)
+  add_executable(sr_buffer_heap_pool_tests test_d3d12_buffer_heap_pool.cpp)
+  target_include_directories(sr_buffer_heap_pool_tests PRIVATE "${SR_NATIVE_DIR}")
+  target_link_libraries(sr_buffer_heap_pool_tests PRIVATE d3d12 dxgi)
+  add_test(NAME sr_buffer_heap_pool_tests COMMAND sr_buffer_heap_pool_tests)
+  set_tests_properties(sr_buffer_heap_pool_tests PROPERTIES TIMEOUT 30)
+endif()
 
 add_executable(sr_capture_budget test_capture_budget.cpp
     "${SR_NATIVE_DIR}/../graphics/guest/pm4_capture.cpp"
