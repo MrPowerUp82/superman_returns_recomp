@@ -59,6 +59,7 @@ set(SUPERMANRETURNS_SOURCES
     src/title_benchmark.cpp
     src/title_benchmark_dialog.cpp
     src/title_benchmark_hooks.cpp
+    src/costume_override.cpp
     src/benchmark_input_driver.cpp
     src/xma_fixes.cpp
     src/sr_settings.cpp

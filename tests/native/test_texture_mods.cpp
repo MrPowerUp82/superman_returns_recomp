@@ -127,6 +127,19 @@ SR_TEST(mods_skip_non_2d_textures) {
   SR_CHECK_EQ(volume.data[0], 9u);
 }
 
+SR_TEST(mods_observer_sees_every_decode) {
+  TextureMods mods(ModConfig{{}, {}, true});
+  std::vector<uint64_t> keys;
+  mods.SetObserver([&](uint64_t key) { keys.push_back(key); });
+  auto a = Rgba8x8(9), b = Rgba8x8(9);
+  const auto before = a.data;
+  SR_CHECK(!mods.Apply(a));
+  mods.Apply(b);
+  SR_CHECK_EQ(keys.size(), 2u);  // every decode, not once per key
+  SR_CHECK_EQ(keys[0], TextureKey(b));
+  SR_CHECK(a.data == before);
+}
+
 SR_TEST(mods_report_each_replacement_once) {
   TextureMods mods(ModConfig{{}, {}, true});
   mods.SetRecipe([](uint64_t, Image& image) { image.rgba[0] = 50; return true; });

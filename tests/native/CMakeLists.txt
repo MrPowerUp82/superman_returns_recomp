@@ -22,6 +22,7 @@ add_executable(sr_native_tests
     test_tracking_fast_view.cpp
     test_title_benchmark_policy.cpp
     test_mnk_bind_match.cpp
+    test_costume_override_policy.cpp
     test_cpu_bundle.cpp
     test_xdk_draw_submission.cpp
     test_backend_selection.cpp

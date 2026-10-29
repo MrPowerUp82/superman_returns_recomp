@@ -9,4 +9,11 @@ TextureMods& GlobalTextureMods();
 void ApplyTextureMods(guest::LinearTexture& texture);
 // Registers the selected costume skin's recipe (costume_skin.cpp); no-op without one.
 void InstallCostumeSkin(TextureMods& mods);
+// Suit body textures, decoded whenever the game dresses Superman in that suit.
+constexpr uint64_t kFilmSuitBodyKey = 0xD25F525A7A0BBE06ull;
+constexpr uint64_t kGoldenAgeBodyKey = 0xE4620603169D8112ull;
+// Decode counts, kept only while --sr_costume asks for another costume:
+// costume_override.cpp re-applies the costume when the film suit comes back.
+uint32_t FilmSuitDecodes();
+uint32_t GoldenAgeDecodes();
 }  // namespace superman_returns::graphics::texture_mods

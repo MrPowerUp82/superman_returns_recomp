@@ -36,6 +36,7 @@ TextureMods::TextureMods(ModConfig config) : config_(std::move(config)) {
 void TextureMods::SetRecipe(std::function<bool(uint64_t, Image&)> recipe) { recipe_ = std::move(recipe); }
 void TextureMods::SetWarn(std::function<void(const std::string&)> warn) { warn_ = std::move(warn); }
 void TextureMods::SetNote(std::function<void(const std::string&)> note) { note_ = std::move(note); }
+void TextureMods::SetObserver(std::function<void(uint64_t)> observer) { observer_ = std::move(observer); }
 
 void TextureMods::NoteOnce(uint64_t key, const char* source) {
   std::lock_guard lock(mutex_);
@@ -43,7 +44,7 @@ void TextureMods::NoteOnce(uint64_t key, const char* source) {
 }
 
 bool TextureMods::Active() const {
-  return !config_.dump_dir.empty() || !replace_keys_.empty() || bool(recipe_);
+  return !config_.dump_dir.empty() || !replace_keys_.empty() || bool(recipe_) || bool(observer_);
 }
 
 void TextureMods::WarnOnce(uint64_t key, const std::string& message) {
@@ -76,6 +77,7 @@ bool TextureMods::Apply(guest::LinearTexture& texture) {
   if (!Active() || !Plain2D(texture)) return false;
   hashes_.fetch_add(1, std::memory_order_relaxed);
   const uint64_t key = TextureKey(texture);
+  if (observer_) observer_(key);
   if (!config_.dump_dir.empty()) Dump(key, texture);
   const uint32_t width = texture.levels[0].width, height = texture.levels[0].height;
   if (replace_keys_.count(key)) {

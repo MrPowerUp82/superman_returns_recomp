@@ -28,6 +28,8 @@ class TextureMods {
   void SetWarn(std::function<void(const std::string&)> warn);
   // Once per replaced key: which key and whether a PNG or the recipe did it.
   void SetNote(std::function<void(const std::string&)> note);
+  // Sees the key of every plain 2D texture decoded (turns hashing on by itself).
+  void SetObserver(std::function<void(uint64_t key)> observer);
   uint64_t hashes_computed() const { return hashes_.load(std::memory_order_relaxed); }
 
  private:
@@ -39,6 +41,7 @@ class TextureMods {
   std::set<uint64_t> replace_keys_;
   std::function<bool(uint64_t, Image&)> recipe_;
   std::function<void(const std::string&)> warn_, note_;
+  std::function<void(uint64_t)> observer_;
   std::mutex mutex_;  // dump state, warnings; backends decode on several threads
   std::set<uint64_t> dumped_, warned_, noted_;
   bool dump_index_started_ = false;
