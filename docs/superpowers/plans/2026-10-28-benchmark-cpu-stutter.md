@@ -32,44 +32,48 @@
 **Files:** artefatos ignorados em `artifacts/benchmark-cpu-stutter/`; relatório final em `docs/benchmark-cpu-stutter-2026-10-28.md`.
 **Interfaces:** consumir exe/DLLs de `port/out/build/win-amd64-dist`, ferramentas de `artifacts/release/stage`, `game/`; produzir manifesto por rodada, log, JSON/CSV nativos e CSV de CPU por thread.
 
-- [ ] Criar branch `codex/benchmark-cpu-stutter` na árvore limpa atual para reaproveitar dependências/builds locais; registrar esta escolha no ledger.
-- [ ] Preservar exe/DLLs e suas dependências em instalação de referência; calcular SHA-256 e registrar bibliotecas e caches presentes.
-- [ ] Executar uma rodada fria dos caches locais controlados e três aquecidas, com `--sr_benchmark=true --sr_benchmark_exit=true`, em sequência; verificar GPU, argumentos, validade e duração.
-- [ ] Usar `tools/analysis/sample_thread_cpu.ps1` durante as rodadas, salvar intervalos com timestamps. Guardar ambiente/hardware/processos/alimentação disponíveis.
-- [ ] Resumir p50/p95/p99/máximo, lows, picos >33,3/50/100 ms por minuto e CPU nas mesmas janelas, sem descartar picos.
+- [x] Criar branch `codex/benchmark-cpu-stutter` na árvore limpa atual para reaproveitar dependências/builds locais; registrar esta escolha no ledger.
+- [x] Preservar exe/DLLs e suas dependências em instalação de referência; calcular SHA-256 e registrar bibliotecas e caches presentes.
+- [x] Executar uma rodada fria dos caches locais controlados e três aquecidas, com `--sr_benchmark=true --sr_benchmark_exit=true`, em sequência; verificar GPU, argumentos, validade e duração.
+- [x] Usar `tools/analysis/sample_thread_cpu.ps1` durante as rodadas, salvar intervalos com timestamps. Guardar ambiente/hardware/processos/alimentação disponíveis.
+- [x] Resumir p50/p95/p99/máximo, lows, picos >33,3/50/100 ms por minuto e CPU nas mesmas janelas, sem descartar picos.
 
 ### Task 2: Diagnóstico causal
 
 **Files:** leitura de `port/src/graphics/frame_timeline.h`, `port/src/native_renderer/native_renderer.cpp`, `pipeline_cache.cpp`, `guest_cpu_profile.cpp`, `port/src/title_benchmark.cpp`; artefatos na pasta da tarefa 1.
 **Interfaces:** consumir referência e resultados; produzir hipótese sustentada por picos, threads e regiões medidas.
 
-- [ ] Executar rodada diagnóstica com `SR_FRAME_TIMELINE` e perfis relevantes; aceitar overhead somente nesta rodada.
-- [ ] Correlacionar timestamps/fases/presents; identificar trabalho de CPU, waits e GPU sem somar tempos aninhados.
-- [ ] Investigar código e fonte oficial do Canary fixada por SHA apenas onde a hipótese exigir; REA somente para perguntas restantes sobre binário/runtime.
-- [ ] Se faltar visibilidade, adicionar a menor instrumentação desligável, com teste de associação/limites antes da implementação; repetir diagnóstico.
-- [ ] Registrar causa mais cara comprovada e escopo exato da correção. Se nenhuma causa for comprovada, ampliar medição em vez de alterar políticas por palpite.
+- [x] Executar rodada diagnóstica com `SR_FRAME_TIMELINE` e perfis relevantes; aceitar overhead somente nesta rodada.
+- [x] Correlacionar timestamps/fases/presents; identificar trabalho de CPU, waits e GPU sem somar tempos aninhados.
+- [x] Investigar código e fonte oficial do Canary fixada por SHA apenas onde a hipótese exigir; REA somente para perguntas restantes sobre binário/runtime.
+- [x] Se faltar visibilidade, adicionar a menor instrumentação desligável, com teste de associação/limites antes da implementação; repetir diagnóstico.
+- [x] Registrar causa mais cara comprovada e escopo exato da correção. Se nenhuma causa for comprovada, ampliar medição em vez de alterar políticas por palpite.
 
 ### Task 3: Correção e A/B
 
 **Files:** o hotspot exato é decidido pela tarefa 2; candidatos delimitados: `native_renderer.cpp`, `pipeline_cache.cpp/.h`, políticas locais e testes correspondentes em `tests/native/`; runtime compartilhado só com evidência de necessidade.
 **Interfaces:** consumir hipótese da tarefa 2; produzir variante executável isolada com fallback A/B quando viável e prova de validade da mudança.
 
-- [ ] Antes da alteração, atualizar o ledger com arquivos/funções, invariante e teste exatos. A seleção adaptativa é intencional: o desenho proíbe escolher a otimização antes da medição.
-- [ ] Escrever teste do comportamento/invariante que falha na implementação atual; executá-lo e registrar a falha esperada.
-- [ ] Implementar somente a correção necessária, sem alterar benchmark/qualidade/simulação para melhorar números.
-- [ ] Executar o teste e a suíte pertinente; compilar em saída separada e guardar hashes. Testar memória se tocada e smoke Vulkan se compartilhado.
-- [ ] Rodar três pares aquecidos intercalados e comparação fria equivalente; ampliar para cinco se inconclusivo; rejeitar regressões segundo a spec.
-- [ ] Conferir visualmente início/meio/fim em rodada separada, sem contaminar os tempos de aceitação. Manter/reverter a mudança conforme evidência.
+- [x] Antes da alteração, atualizar o ledger com arquivos/funções, invariante e teste exatos. A seleção adaptativa é intencional: o desenho proíbe escolher a otimização antes da medição.
+- [x] Escrever teste do comportamento/invariante que falha na implementação atual; executá-lo e registrar a falha esperada.
+- [x] Implementar somente a correção necessária, sem alterar benchmark/qualidade/simulação para melhorar números.
+- [x] Executar o teste e a suíte pertinente; compilar em saída separada e guardar hashes. Testar memória se tocada e smoke Vulkan se compartilhado.
+- [x] Rodar três pares aquecidos intercalados e comparação fria equivalente; ampliar para cinco se inconclusivo; rejeitar regressões segundo a spec.
+- [x] Conferir visualmente início/meio/fim em rodada separada, sem contaminar os tempos de aceitação. Manter/reverter a mudança conforme evidência.
 
 ### Task 4: Evidência e revisão final
 
 **Files:** `docs/benchmark-cpu-stutter-2026-10-28.md`, este plano, ledger ignorado `.superpowers/sdd/2026-10-28-benchmark-cpu-stutter/progress.md`.
 **Interfaces:** consumir artefatos de todas as rodadas; produzir relatório reproduzível e diff revisado.
 
-- [ ] Escrever resultados, causa, mudanças, hashes, testes e limitações; separar observação de inferência.
-- [ ] Revisão independente do diff e dos critérios de aceitação; corrigir achados importantes e repetir apenas verificações afetadas.
-- [ ] Confirmar diff limpo de erros de whitespace, testes relevantes e estado Git; registrar commits locais sem publicação.
+- [x] Escrever resultados, causa, mudanças, hashes, testes e limitações; separar observação de inferência.
+- [x] Revisão independente do diff e dos critérios de aceitação; corrigir achados importantes e repetir apenas verificações afetadas.
+- [x] Confirmar diff limpo de erros de whitespace, testes relevantes e estado Git; registrar commits locais sem publicação.
 
 ## Execução
 
 Execução sequencial nesta sessão: o usuário aprovou explicitamente o desenho e o início das medições. A execução local evita trabalhos concorrentes contaminando o benchmark; uma revisão independente ocorre ao final. O plano foi conferido contra todas as seções da spec. As tarefas 2/3 são adaptativas por exigência do diagnóstico, não autorizam reimplementar amplamente RenderWare.
+
+## Resultado da execução
+
+Concluída a otimização delimitada de alocação de buffers; relatório em docs/benchmark-cpu-stutter-2026-10-28.md. Os três pares atenderam às metas propostas, e um par adicional em primeiro plano também melhorou. Ainda existem travadas e uma diferença de desempenho dependente das condições de foco/sistema; sua causa não foi atribuída. Isso está registrado, sem alegar que todos os gargalos do jogo foram resolvidos. A série de aceitação permaneceu sem perfis/capturas; os testes visuais e diagnósticos foram separados. Não houve publicação.
