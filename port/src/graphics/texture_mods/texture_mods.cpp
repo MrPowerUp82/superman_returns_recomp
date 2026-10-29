@@ -11,12 +11,21 @@ std::string KeyText(uint64_t key) {
   std::snprintf(text, sizeof(text), "%016llX", static_cast<unsigned long long>(key));
   return text;
 }
+// Exactly 16 hex digits plus ".png". Compared on the wide name: a name the
+// ANSI code page cannot hold must not throw.
 bool ParseKey(const std::filesystem::path& file, uint64_t& key) {
-  const auto stem = file.stem().string();
-  if (stem.size() != 16 || file.extension() != ".png") return false;
-  char* end = nullptr;
-  key = std::strtoull(stem.c_str(), &end, 16);
-  return end == stem.c_str() + 16;
+  const std::wstring stem = file.stem().wstring();
+  if (stem.size() != 16 || file.extension().wstring() != L".png") return false;
+  key = 0;
+  for (const wchar_t c : stem) {
+    int digit;
+    if (c >= L'0' && c <= L'9') digit = c - L'0';
+    else if (c >= L'A' && c <= L'F') digit = c - L'A' + 10;
+    else if (c >= L'a' && c <= L'f') digit = c - L'a' + 10;
+    else return false;
+    key = key << 4 | uint64_t(digit);
+  }
+  return true;
 }
 bool Plain2D(const guest::LinearTexture& t) {
   return t.dimension == 1 && t.depth == 1 && !t.levels.empty();
@@ -25,11 +34,13 @@ bool Plain2D(const guest::LinearTexture& t) {
 
 TextureMods::TextureMods(ModConfig config) : config_(std::move(config)) {
   std::error_code error;
-  if (config_.replace && !config_.replace_dir.empty() && std::filesystem::is_directory(config_.replace_dir, error)) {
-    for (const auto& entry : std::filesystem::directory_iterator(config_.replace_dir, error)) {
-      uint64_t key = 0;
-      if (entry.is_regular_file(error) && ParseKey(entry.path(), key)) replace_keys_.insert(key);
-    }
+  if (!config_.replace || config_.replace_dir.empty() || !std::filesystem::is_directory(config_.replace_dir, error))
+    return;
+  // A scan error (permissions, a file removed meanwhile) ends the scan; it never throws.
+  std::filesystem::directory_iterator it(config_.replace_dir, error), end;
+  for (; !error && it != end; it.increment(error)) {
+    uint64_t key = 0;
+    if (it->is_regular_file(error) && ParseKey(it->path(), key)) replace_keys_.insert(key);
   }
 }
 
@@ -76,6 +87,32 @@ void TextureMods::Dump(uint64_t key, const guest::LinearTexture& texture) {
         << static_cast<int>(texture.format) << '\n';
 }
 
+// Read once per key: the decoded image, or null when the file is unusable
+// (warned once). The size is checked from the header before decoding.
+std::shared_ptr<const Image> TextureMods::Replacement(uint64_t key, uint32_t width, uint32_t height) {
+  {
+    std::lock_guard lock(mutex_);
+    if (const auto found = replacements_.find(key); found != replacements_.end()) return found->second;
+  }
+  const auto path = config_.replace_dir / (KeyText(key) + ".png");
+  std::shared_ptr<const Image> result;
+  uint32_t png_width = 0, png_height = 0;
+  if (!PngSize(path, png_width, png_height)) {
+    WarnOnce(key, "texture " + KeyText(key) + ".png could not be read; using the original");
+  } else if (png_width != width || png_height != height) {
+    WarnOnce(key, "texture " + KeyText(key) + ".png is " + std::to_string(png_width) + "x" +
+                      std::to_string(png_height) + ", the original is " + std::to_string(width) + "x" +
+                      std::to_string(height) + "; using the original");
+  } else if (auto image = std::make_shared<Image>(); ReadPng(path, *image) && image->width == width &&
+                                                      image->height == height) {
+    result = std::move(image);
+  } else {
+    WarnOnce(key, "texture " + KeyText(key) + ".png could not be read; using the original");
+  }
+  std::lock_guard lock(mutex_);
+  return replacements_.try_emplace(key, std::move(result)).first->second;
+}
+
 bool TextureMods::Apply(guest::LinearTexture& texture) {
   if (!Active() || !Plain2D(texture)) return false;
   hashes_.fetch_add(1, std::memory_order_relaxed);
@@ -84,15 +121,8 @@ bool TextureMods::Apply(guest::LinearTexture& texture) {
   if (!config_.dump_dir.empty()) Dump(key, texture);
   const uint32_t width = texture.levels[0].width, height = texture.levels[0].height;
   if (replace_keys_.count(key)) {
-    Image image;
-    if (!ReadPng(config_.replace_dir / (KeyText(key) + ".png"), image)) {
-      WarnOnce(key, "texture " + KeyText(key) + ".png could not be read; using the original");
-    } else if (image.width != width || image.height != height) {
-      WarnOnce(key, "texture " + KeyText(key) + ".png is " + std::to_string(image.width) + "x" +
-                        std::to_string(image.height) + ", the original is " + std::to_string(width) + "x" +
-                        std::to_string(height) + "; using the original");
-    } else {
-      ImageToTexture(image, texture);
+    if (const auto image = Replacement(key, width, height)) {
+      ImageToTexture(*image, texture);
       NoteOnce(key, "png");
       return true;
     }

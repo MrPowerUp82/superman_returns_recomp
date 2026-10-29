@@ -274,6 +274,20 @@ bool WritePng(const std::filesystem::path& path, const Image& image) {
   return bool(out.flush());
 }
 
+bool PngSize(const std::filesystem::path& path, uint32_t& width, uint32_t& height) {
+  std::ifstream in(path, std::ios::binary);
+  uint8_t header[24];
+  if (!in.read(reinterpret_cast<char*>(header), sizeof(header))) return false;
+  static constexpr uint8_t kSignature[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+  if (std::memcmp(header, kSignature, 8) != 0 || std::memcmp(header + 12, "IHDR", 4) != 0) return false;
+  const auto be32 = [&](int at) {
+    return uint32_t(header[at]) << 24 | uint32_t(header[at + 1]) << 16 | uint32_t(header[at + 2]) << 8 | header[at + 3];
+  };
+  width = be32(16);
+  height = be32(20);
+  return width && height;
+}
+
 bool ReadPng(const std::filesystem::path& path, Image& out) {
   std::ifstream in(path, std::ios::binary);
   if (!in) return false;

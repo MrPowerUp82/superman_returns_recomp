@@ -29,6 +29,8 @@ void ImageToTexture(const Image& image, guest::LinearTexture& inout);
 
 // Uncompressed PNG (stored deflate blocks).
 bool WritePng(const std::filesystem::path& path, const Image& image);
+// Width and height from the PNG header alone (no decode).
+bool PngSize(const std::filesystem::path& path, uint32_t& width, uint32_t& height);
 // Any PNG, forced to 4 channels.
 bool ReadPng(const std::filesystem::path& path, Image& out);
 

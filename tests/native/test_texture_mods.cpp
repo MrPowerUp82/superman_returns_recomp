@@ -100,6 +100,52 @@ SR_TEST(mods_replace_ignores_other_size_and_garbage) {
   std::filesystem::remove_all(dir, ignored);
 }
 
+SR_TEST(mods_scan_survives_unicode_and_odd_names) {
+  const auto dir = FreshDir("sr_mods_unicode");
+  std::filesystem::create_directories(dir);
+  auto t = Rgba8x8(9);
+  { std::ofstream(dir / std::filesystem::path(L"Superman_日本.png")) << "x"; }
+  { std::ofstream(dir / std::filesystem::path(L" 00000000000001F.png")) << "x"; }
+  SR_CHECK(WritePng(dir / KeyName(TextureKey(t)), Solid(8, 8, 200)));
+  int warnings = 0;
+  TextureMods mods(ModConfig{{}, dir, true});  // must not throw
+  mods.SetWarn([&](const std::string&) { ++warnings; });
+  SR_CHECK(mods.Apply(t));
+  SR_CHECK_EQ(warnings, 0);  // the odd names are ignored, not warned about
+  std::error_code ignored;
+  std::filesystem::remove_all(dir, ignored);
+}
+
+SR_TEST(mods_png_is_read_once_per_key) {
+  const auto dir = FreshDir("sr_mods_once");
+  std::filesystem::create_directories(dir);
+  auto t = Rgba8x8(9);
+  const auto png = dir / KeyName(TextureKey(t));
+  SR_CHECK(WritePng(png, Solid(8, 8, 200)));
+  TextureMods mods(ModConfig{{}, dir, true});
+  SR_CHECK(mods.Apply(t));
+  std::filesystem::remove(png);  // later decodes use the cached image
+  auto again = Rgba8x8(9);
+  SR_CHECK(mods.Apply(again));
+  SR_CHECK_EQ(again.data[0], 200u);
+  std::error_code ignored;
+  std::filesystem::remove_all(dir, ignored);
+}
+
+SR_TEST(mods_png_with_other_size_is_rejected_from_its_header) {
+  const auto dir = FreshDir("sr_mods_header");
+  std::filesystem::create_directories(dir);
+  auto t = Rgba8x8(9);
+  const auto png = dir / KeyName(TextureKey(t));
+  SR_CHECK(WritePng(png, Solid(64, 64, 200)));
+  Image size_only;
+  SR_CHECK(PngSize(png, size_only.width, size_only.height));
+  SR_CHECK_EQ(size_only.width, 64u);
+  SR_CHECK_EQ(size_only.height, 64u);
+  std::error_code ignored;
+  std::filesystem::remove_all(dir, ignored);
+}
+
 SR_TEST(mods_png_overrides_recipe) {
   const auto dir = FreshDir("sr_mods_priority");
   std::filesystem::create_directories(dir);

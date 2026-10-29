@@ -4,6 +4,8 @@
 #include "texture_image.h"
 #include <atomic>
 #include <functional>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <string>
@@ -39,6 +41,7 @@ class TextureMods {
   void Dump(uint64_t key, const guest::LinearTexture& texture);
   void WarnOnce(uint64_t key, const std::string& message);
   void NoteOnce(uint64_t key, const char* source);
+  std::shared_ptr<const Image> Replacement(uint64_t key, uint32_t width, uint32_t height);
   ModConfig config_;
   std::set<uint64_t> replace_keys_;
   std::function<bool(uint64_t, Image&)> recipe_;
@@ -47,6 +50,7 @@ class TextureMods {
   std::function<void(uint64_t)> observer_;
   std::mutex mutex_;  // dump state, warnings; backends decode on several threads
   std::set<uint64_t> dumped_, warned_, noted_;
+  std::map<uint64_t, std::shared_ptr<const Image>> replacements_;  // null = unusable file
   bool dump_index_started_ = false;
   std::atomic<uint64_t> hashes_{0};
 };
