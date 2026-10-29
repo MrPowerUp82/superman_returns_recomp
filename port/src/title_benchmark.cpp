@@ -29,6 +29,10 @@ REXCVAR_DEFINE_BOOL(sr_benchmark_headless, false, "Superman Returns",
                     "Benchmark without a visible window: the window is moved off-screen without "
                     "focus, the run closes after saving and prints its summary to stdout")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(sr_window_offscreen, false, "Superman Returns",
+                    "Development: move the game window off-screen and give the focus back once frames "
+                    "are presented (automated runs that should not disturb the desktop)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_DOUBLE(sr_benchmark_warmup_s, 5.0, "Superman Returns",
                       "Diagnostic: benchmark warm-up seconds after the title scene appears")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
@@ -140,13 +144,16 @@ bool Active() { return REXCVAR_GET(sr_benchmark); }
 
 void NoteStartup() {
 #if defined(_WIN32)
-  if (Active() && REXCVAR_GET(sr_benchmark_headless)) foreground_at_start = GetForegroundWindow();
+  if ((Active() && REXCVAR_GET(sr_benchmark_headless)) || REXCVAR_GET(sr_window_offscreen))
+    foreground_at_start = GetForegroundWindow();
 #endif
 }
 
 void NoteRendererFrame(bool scene_drawn) { scene_latch.Note(scene_drawn); }
 
 void OnGuestPresent() {
+  static std::atomic<bool> moved{false};
+  if (REXCVAR_GET(sr_window_offscreen) && !moved.exchange(true)) MoveWindowsOffscreen();
   if (!Active()) return;
   auto& s = GetState();
   bool exit_now = false;

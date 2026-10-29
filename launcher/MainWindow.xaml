@@ -40,6 +40,7 @@
       <TextBlock Text="Suavização da imagem"/><ComboBox x:Name="AaBox" AutomationProperties.Name="Suavização"/>
       <TextBlock Text="Filtro de texturas"/><ComboBox x:Name="FilterBox" AutomationProperties.Name="Filtro de texturas"/>
       <TextBlock Text="Limite de quadros"/><ComboBox x:Name="FpsBox" AutomationProperties.Name="Limite de FPS"/>
+      <TextBlock Text="Traje"/><ComboBox x:Name="CostumeBox" AutomationProperties.Name="Traje"/>
      </StackPanel>
     </UniformGrid>
     <TextBlock x:Name="FpsNote" Foreground="{StaticResource Muted}" TextWrapping="Wrap" FontSize="12" Margin="0,0,0,10"/>

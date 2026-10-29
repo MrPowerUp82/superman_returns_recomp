@@ -59,6 +59,7 @@ set(SUPERMANRETURNS_SOURCES
     src/title_benchmark.cpp
     src/title_benchmark_dialog.cpp
     src/title_benchmark_hooks.cpp
+    src/costume_override.cpp
     src/benchmark_input_driver.cpp
     src/xma_fixes.cpp
     src/sr_settings.cpp
@@ -237,6 +238,11 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
             ${SR_NATIVE_ROOT}/../graphics/guest/replay_trace.cpp
             ${SR_NATIVE_ROOT}/../graphics/guest/constant_snapshot.cpp
             ${SR_NATIVE_ROOT}/texture_decode.cpp
+            ${SR_NATIVE_ROOT}/../graphics/texture_mods/texture_image.cpp
+            ${SR_NATIVE_ROOT}/../graphics/texture_mods/texture_mods.cpp
+            ${SR_NATIVE_ROOT}/../graphics/texture_mods/texture_mods_runtime.cpp
+            ${SR_NATIVE_ROOT}/../graphics/texture_mods/costume_skin.cpp
+            ${SR_NATIVE_ROOT}/../graphics/texture_mods/kingdom_come.cpp
             ${SR_NATIVE_ROOT}/shader_registry.cpp
             ${SR_NATIVE_ROOT}/shader_translator.cpp
             ${SR_NATIVE_ROOT}/pipeline_cache.cpp
@@ -252,6 +258,7 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
         target_compile_definitions(sr_native PRIVATE SR_VULKAN_GAME=$<BOOL:${SR_VULKAN_GAME}>)
         target_include_directories(sr_native PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src/lsfg
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party
             ${SR_NATIVE_ROOT}
             ${SR_REXGPU_SOURCE_DIR}
             ${SR_REXGPU_SOURCE_DIR}/thirdparty/renderdoc

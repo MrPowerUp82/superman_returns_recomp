@@ -27,6 +27,10 @@ public sealed class LauncherSettings
     public string GraphicsApi { get; set; } = "d3d12";
     public bool UsesVulkan => GraphicsApi == "vulkan";
     public bool SkipIntro { get; set; }
+    // default (the game's choice), 2 (Golden Age, forced without unlocking) or
+    // kingdom_come (skin painted over the Superman Returns suit).
+    public string Costume { get; set; } = "default";
+    private static readonly string[] Costumes = { "default", "2", "kingdom_come" };
     public bool FrameGeneration { get; set; }
     public string FrameGenerationDll { get; set; } = "";
 
@@ -59,6 +63,7 @@ public sealed class LauncherSettings
                 case "input": s.InputMode = value; break;
                 case "renderer": s.Renderer = value; break;
                 case "graphics_api": s.GraphicsApi = value == "vulkan" ? "vulkan" : "d3d12"; break;
+                case "costume": s.Costume = Costumes.Contains(value) ? value : "default"; break;
                 case "skip_intro": if (bool.TryParse(value, out var si)) s.SkipIntro = si; break;
                 case "frame_generation": if (bool.TryParse(value, out var fg)) s.FrameGeneration = fg; break;
                 case "frame_generation_dll": s.FrameGenerationDll = value; break;
@@ -75,7 +80,7 @@ public sealed class LauncherSettings
             $"vsync={VSync.ToString().ToLowerInvariant()}", $"fps_limit={FpsLimit}", $"render_scale={RenderScale}",
             $"texture_filter={TextureFilter}", $"antialiasing={Antialiasing}", $"shadow_quality={ShadowQuality}",
             $"msaa={Msaa}", $"input={InputMode}", $"renderer={Renderer}", $"graphics_api={GraphicsApi}",
-            $"skip_intro={SkipIntro.ToString().ToLowerInvariant()}",
+            $"skip_intro={SkipIntro.ToString().ToLowerInvariant()}", $"costume={Costume}",
             $"frame_generation={FrameGeneration.ToString().ToLowerInvariant()}", $"frame_generation_dll={FrameGenerationDll}" };
         var temporary = path + ".tmp";
         File.WriteAllLines(temporary, lines, new UTF8Encoding(false));
@@ -129,6 +134,8 @@ public sealed class LauncherSettings
             result.Add("--sr_lsfg_mode=performance");
             if (!string.IsNullOrWhiteSpace(FrameGenerationDll)) result.Add("--sr_lsfg_dll=" + FrameGenerationDll.Trim());
         }
+        if (Costume == "2") result.Add("--sr_costume=2");
+        else if (Costume == "kingdom_come") result.Add("--sr_costume_skin=kingdom_come");
         if (benchmark) result.Add("--sr_benchmark=true");
         if (InputMode == "KeyboardMouse") { result.Add("--mnk_mode=true"); result.Add("--mnk_mouse=true"); }
         else { result.Add("--mnk_mode=false"); result.Add("--mnk_mouse=false"); }

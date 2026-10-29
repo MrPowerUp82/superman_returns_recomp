@@ -8,6 +8,7 @@
 #include "../../../native_renderer/native_renderer.h"
 #include "../../../native_renderer/hang_watchdog.h"
 #include "../../../title_benchmark.h"
+#include "../../texture_mods/texture_mods_runtime.h"
 #include <rex/ui/surface_win.h>
 #include <rex/logging.h>
 #include <algorithm>
@@ -55,7 +56,10 @@ struct Host {
     REXLOG_INFO("native Vulkan: {} precompiled shaders from {}",shaders->PrecompiledCount(),config.shaders.library.string());
     if(!shaders->LibraryDiagnostic().empty()) REXLOG_WARN("native Vulkan: pre-shader library unavailable: {}; compiling misses at runtime",shaders->LibraryDiagnostic());
     ShaderLookup lookup=[this](const guest::ShaderCapture& capture) {auto key=shaders->Request(capture.container,capture.vertex?shaders::ShaderStage::kVertex:shaders::ShaderStage::kPixel);return shaders->Poll(key);};
-    TextureDecoder decode=[](const guest::TextureCapture& capture,guest::LinearTexture& result,std::string& error){return guest::DecodeTextureLayout(capture.fetch,capture.memory,result,error);};
+    TextureDecoder decode=[](const guest::TextureCapture& capture,guest::LinearTexture& result,std::string& error){
+      if(!guest::DecodeTextureLayout(capture.fetch,capture.memory,result,error)) return false;
+      texture_mods::ApplyTextureMods(result);  // dump, PNG replacement, costume skins
+      return true;};
     game=std::make_unique<GameFrame>(context,gpu_mutex,std::move(lookup),std::move(decode));
     game->compilation_progress=[] {native::HangWatchdogBeat();};
     benchmark::SetGpuName(context.selected.name);

@@ -18,6 +18,8 @@
 #include "renderdoc_capture.h"
 #include "title_benchmark.h"
 
+namespace superman_returns::costume { void ApplyForcedCostume(PPCContext& ctx, uint8_t* base); }
+
 namespace {
 
 std::atomic<uint64_t> g_frames{0};
@@ -53,6 +55,7 @@ REX_HOOK_RAW(sub_82112050) {
   __imp__sub_82112050(ctx, base);
   superman_returns::native::OnFrameStatsSwap(base, device, front_buffer);
   superman_returns::benchmark::OnGuestPresent();
+  superman_returns::costume::ApplyForcedCostume(ctx, base);
 }
 
 rex::ui::FrameStats SampleGuestFrameStats() {

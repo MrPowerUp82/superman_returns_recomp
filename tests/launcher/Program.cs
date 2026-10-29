@@ -120,5 +120,23 @@ var xenosMessage = "";
 try { new LauncherSettings { GraphicsApi = "d3d12", Renderer = "xenos" }.CreateLaunch(AppContext.BaseDirectory, benchmark: true); }
 catch (InvalidOperationException error) { xenosMessage = error.Message; }
 Check(xenosMessage == "O benchmark precisa do renderizador Nativo (Direct3D 12 ou Vulkan).", "benchmark refuses the Xenos renderer");
+int Flags(IReadOnlyList<string> args, string prefix) => args.Count(a => a.StartsWith(prefix));
+var kingdom = new LauncherSettings { Costume = "kingdom_come" }.BuildArgumentList();
+Check(Flags(kingdom, "--sr_costume_skin=") == 1 && kingdom.Contains("--sr_costume_skin=kingdom_come") &&
+      Flags(kingdom, "--sr_costume=") == 0, "Kingdom Come sends only the skin (it paints the Superman Returns suit)");
+var golden = new LauncherSettings { Costume = "2" }.BuildArgumentList();
+Check(Flags(golden, "--sr_costume=") == 1 && golden.Contains("--sr_costume=2") && Flags(golden, "--sr_costume_skin=") == 0,
+      "Golden Age forces costume 2 once, without a skin");
+var gameDefault = new LauncherSettings().BuildArgumentList();
+Check(new LauncherSettings().Costume == "default" && Flags(gameDefault, "--sr_costume") == 0, "the game's own costume sends no costume flag");
+var benchKingdom = new LauncherSettings { Costume = "kingdom_come" }.BuildArgumentList(benchmark: true);
+Check(benchKingdom.Contains("--sr_costume_skin=kingdom_come"), "the benchmark keeps the costume choice");
+var costumePath = Path.Combine(fixture, "costume.ini");
+foreach (var costume in new[] { "kingdom_come", "2", "default" }) {
+    new LauncherSettings { Costume = costume }.Save(costumePath);
+    Check(LauncherSettings.Load(costumePath).Costume == costume, $"saved costume {costume} survives restart");
+}
+File.WriteAllText(costumePath, "costume=batman\n");
+Check(LauncherSettings.Load(costumePath).Costume == "default", "an unknown saved costume falls back to the game's choice");
 Console.WriteLine($"{failed} failed checks");
 return failed == 0 ? 0 : 1;

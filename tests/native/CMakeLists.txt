@@ -23,6 +23,7 @@ add_executable(sr_native_tests
     test_tracking_fast_view.cpp
     test_title_benchmark_policy.cpp
     test_mnk_bind_match.cpp
+    test_costume_override_policy.cpp
     test_cpu_bundle.cpp
     test_xdk_draw_submission.cpp
     test_backend_selection.cpp
@@ -124,6 +125,20 @@ endif()
 set(SR_XXHASH_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../../.tools/rexglue-sdk/win-amd64/include")
 if(WIN32 AND EXISTS "${SR_XXHASH_INCLUDE}/xxhash.h")
     target_sources(sr_native_tests PRIVATE test_xxh3_avx2.cpp xxh3_reference.cpp "${SR_NATIVE_DIR}/xxh3_avx2.cpp")
+    # Texture mods hash with XXH3 (inlined) and read PNG with the vendored stb_image.
+    target_sources(sr_native_tests PRIVATE test_texture_image.cpp test_texture_mods.cpp test_kingdom_come.cpp
+        "${SR_NATIVE_DIR}/../graphics/texture_mods/texture_image.cpp"
+        "${SR_NATIVE_DIR}/../graphics/texture_mods/texture_mods.cpp"
+        "${SR_NATIVE_DIR}/../graphics/texture_mods/kingdom_come.cpp")
+    set_source_files_properties("${SR_NATIVE_DIR}/../graphics/texture_mods/texture_image.cpp" PROPERTIES
+        INCLUDE_DIRECTORIES "${SR_XXHASH_INCLUDE};${CMAKE_CURRENT_SOURCE_DIR}/../../port/third_party")
+    # Paints costume skins over a texture dump, to look at the art without the game:
+    # sr_skin_preview <dump dir> <out dir>.
+    add_executable(sr_skin_preview skin_preview.cpp
+        "${SR_NATIVE_DIR}/../graphics/texture_mods/texture_image.cpp"
+        "${SR_NATIVE_DIR}/../graphics/texture_mods/texture_mods.cpp"
+        "${SR_NATIVE_DIR}/../graphics/texture_mods/kingdom_come.cpp")
+    target_include_directories(sr_skin_preview PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../port/src")
     set_source_files_properties("${SR_NATIVE_DIR}/xxh3_avx2.cpp" PROPERTIES
         COMPILE_OPTIONS "$<IF:$<CXX_COMPILER_ID:MSVC>,/arch:AVX2,-mavx2>")
     set_source_files_properties(xxh3_reference.cpp "${SR_NATIVE_DIR}/xxh3_avx2.cpp" PROPERTIES

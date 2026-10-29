@@ -17,12 +17,24 @@ if(SR_MEMORY_TRACKING_STOCK_CLIENT)
 else()
   target_sources(sr_memory_tracking_tests PRIVATE test_runtime_tracking.cpp test_runtime_io.cpp test_texture_upload.cpp test_texture_gpu.cpp ../native/test_texture_layout.cpp
     ../../port/src/native_renderer/texture_decode.cpp
+    ../../port/src/graphics/texture_mods/texture_image.cpp
+    ../../port/src/graphics/texture_mods/texture_mods.cpp
+    ../../port/src/graphics/texture_mods/texture_mods_runtime.cpp
+    ../../port/src/graphics/texture_mods/costume_skin.cpp
+    ../../port/src/graphics/texture_mods/kingdom_come.cpp
     ../../port/src/graphics/guest/texture_capture.cpp
     ../../port/src/graphics/guest/texture_layout.cpp
     ../../port/src/graphics/guest/captured_batch.cpp)
 endif()
 target_compile_features(sr_memory_tracking_tests PRIVATE cxx_std_23)
+# texture_decode.cpp applies texture mods (stb_image is vendored under port/third_party).
+target_include_directories(sr_memory_tracking_tests PRIVATE ../../port/third_party)
 target_link_libraries(sr_memory_tracking_tests PRIVATE rex::runtime)
+if(TARGET rex::xxhash)
+  target_link_libraries(sr_memory_tracking_tests PRIVATE rex::xxhash)
+elseif(TARGET xxhash)
+  target_link_libraries(sr_memory_tracking_tests PRIVATE xxhash)
+endif()
 if(WIN32)
   target_link_libraries(sr_memory_tracking_tests PRIVATE ws2_32 d3d12 dxgi)
 endif()

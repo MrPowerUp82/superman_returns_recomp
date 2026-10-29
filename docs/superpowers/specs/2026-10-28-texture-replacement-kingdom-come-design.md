@@ -79,3 +79,14 @@ O plano é repintar as texturas do Golden Age como Reino do Amanhã em tempo de 
 - Com a pasta de troca: prints no jogo, em D3D12 e Vulkan, do Golden Age virando Reino do Amanhã. Os outros dois trajes e o cenário sem mudança, comparando prints com e sem a pasta.
 - Benchmark com e sem a pasta de troca: sem diferença de FPS além da variação conhecida.
 - `--sr_costume` 0, 1 e 2 vestem os trajes certos; "default" não interfere; o save não ganha desbloqueios por causa da opção, se isso for separável.
+
+## Resultados (2026-10-29)
+
+- A skin acabou pintada sobre o traje do filme, a pedido do usuário. O escudo foi desenhado a partir da referência que ele enviou, e a arte foi aprovada num print do jogo em D3D12.
+- `--sr_costume=2` veste o Golden Age no gameplay com uma única escrita (`docs/kingdom-come-texture-map-2026-10-28.md`).
+- Benchmark headless, D3D12, 1280x720, três rodadas:
+  - sem a skin: 56,0 / 60,1 / 57,1 FPS (média 57,7);
+  - com a skin: 64,7 / 60,3 / 61,3 FPS (média 62,1).
+  - A diferença está dentro da variação conhecida (±4,5%): a skin não tem custo mensurável.
+- Vulkan com a skin: 45,9 FPS, e o log confirma as duas texturas trocadas pela receita. O resultado no Vulkan não foi conferido visualmente.
+- Bug corrigido no caminho: o D3D12 enviava a textura trocada com o formato comprimido original, o que virava ruído.
