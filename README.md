@@ -18,6 +18,7 @@ Marcos recentes:
 
 - 2026-10-05: backend Vulkan; correção da queda silenciosa para o Xenos quando o launcher mandava uma GPU em branco (o nativo nunca mais troca de backend sozinho).
 - 2026-10-27/28: limite interno de 30 Hz removido do padrão, correção da música que parava após a decolagem (último bloco do XMA), otimizações de CPU no D3D12 nativo, [benchmark embutido](#benchmark) e binds de `Shift`/`Ctrl`/`Alt` sozinhos no teclado.
+- 2026-10-29: [trajes](#trajes) (Golden Age sem desbloquear e a skin Reino do Amanhã) e [dump e troca de texturas](#texturas-dump-e-troca).
 
 Histórico e validações: [gameplay nativa](docs/native-gameplay-validation.md), [Vulkan](docs/vulkan-m3.md), [pistas de desempenho de 28/10](docs/perf-hunt-game-xenia-2026-10-28.md).
 
@@ -60,6 +61,31 @@ O botão **BENCHMARK** do launcher abre o jogo direto no sobrevoo da cidade da t
 - Medido em 28/10 num i5-13420H + Intel UHD, 1280x720, sem limite: Direct3D 12 com 55,1 / 57,9 / 53,0 FPS e Vulkan com 41,6 FPS.
 
 Detalhes no [design do benchmark](docs/superpowers/specs/2026-10-28-title-benchmark-design.md).
+
+### Trajes
+
+O campo **Traje** do launcher escolhe a roupa do Superman sem desbloquear nada e sem gravar no save:
+
+| Opção | Linha de comando | O que faz |
+| --- | --- | --- |
+| Padrão do jogo | (nada) | O traje que o jogo escolher. |
+| Golden Age | `--sr_costume=2` | Veste o Golden Age Superman, mesmo bloqueado. |
+| Reino do Amanhã | `--sr_costume_skin=kingdom_come` | Repinta o traje do filme como o Superman do Reino do Amanhã da CW: escudo vermelho com o S recortado em preto, sunga e botas vermelhas, cinto preto com fivela oval dourada. |
+
+- O Reino do Amanhã é uma receita no código que repinta, durante o jogo, as texturas do traje lidas do **seu** disco. Nenhuma imagem do jogo vem com o projeto.
+- A skin aparece quando o Superman está com o traje do filme. Com outro traje vestido no menu do jogo, o log avisa.
+- `--sr_costume` também aceita `1` (Pod Suit), que ainda não foi testado. O jogo volta ao traje do filme quando recria o Superman em cinemáticas e cargas de fase, e o traje escolhido é vestido de novo nessas horas.
+
+### Texturas (dump e troca)
+
+Funciona nos dois backends nativos (Direct3D 12 e Vulkan):
+
+- `--sr_texture_dump_dir=<pasta>` grava cada textura 2D distinta uma vez, como `<chave>.png`, e uma linha por textura em `index.csv` (`key,width,height,format`). A chave é um hash do conteúdo e do formato, a mesma em toda execução e nos dois backends.
+- PNGs com o nome `<chave>.png` na pasta `textures\` ao lado do executável (ou em `--sr_texture_replace_dir=<pasta>`) substituem a textura original. O PNG precisa ter o mesmo tamanho da original; senão, o log avisa e a original fica. Um PNG vence a skin para a mesma chave.
+- `--sr_texture_replace=false` desliga as trocas e as skins.
+- O mapa das texturas do Superman está em [docs/kingdom-come-texture-map-2026-10-28.md](docs/kingdom-come-texture-map-2026-10-28.md).
+- `tools/texture_mods/find_costume_textures.py <dump A> <dump B>` lista as texturas que só aparecem no segundo dump.
+- `sr_skin_preview <dump> <saída>` (em `tests/native`) aplica a skin aos PNGs de um dump, para ver a arte sem abrir o jogo.
 
 ### Desempenho
 
