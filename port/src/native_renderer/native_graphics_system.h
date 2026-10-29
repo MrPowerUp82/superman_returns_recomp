@@ -145,6 +145,10 @@ class D3D12NativeGraphicsSystem : public INativeGraphicsSystem {
 
   std::atomic<uint32_t> counter_{0};
   uint32_t interrupt_callback_ = 0, interrupt_callback_data_ = 0;
+  // Stall diagnostics (issue #10): interrupts delivered per source, dropped
+  // (no guest thread), and predicated PM4_INTERRUPTs skipped by the bin test.
+  std::atomic<uint64_t> interrupts_sent_[2]{}, interrupts_dropped_{0}, predicated_interrupts_skipped_{0};
+  void LogWaitStall(uint32_t poll, uint32_t value, uint32_t mask, uint32_t info, uint32_t ref, double seconds);
 
   std::atomic<bool> running_{false};
   rex::system::object_ref<rex::system::XHostThread> command_thread_;

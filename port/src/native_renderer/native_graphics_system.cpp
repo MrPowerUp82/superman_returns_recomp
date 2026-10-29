@@ -51,6 +51,7 @@
 #include "hang_watchdog.h"
 #include "idle_yield.h"
 #include "vblank_policy.h"
+#include "wait_escape_policy.h"
 #include "sdk_compat.h"
 #if SR_NATIVE_RENDERER_BUILD
 #include "native_renderer.h"
@@ -402,10 +403,41 @@ void D3D12NativeGraphicsSystem::WriteMmioRegister(uint32_t addr, uint32_t value)
   }
 }
 
+void D3D12NativeGraphicsSystem::LogWaitStall(uint32_t poll, uint32_t value, uint32_t mask, uint32_t info,
+                                              uint32_t ref, double seconds) {
+  const auto be32 = [&](uint32_t guest) {
+    uint32_t v;
+    std::memcpy(&v, memory_->TranslateVirtual<const uint8_t*>(guest), 4);
+    return __builtin_bswap32(v);
+  };
+  const uint32_t scratch = ReadRegister(gpu::XE_GPU_REG_SCRATCH_ADDR);
+  const auto scratch_word = [&](uint32_t offset) { return LoadMemory(scratch + offset + 2); };
+  // The game's present throttle (sub_82111EC8 / callback sub_82111E38 / vblank
+  // handler sub_820FDBA0) keeps its state in the D3D device *(*(0x82000948)):
+  // +15124 vblank count, +15128 count at the last release, +15132 vblanks left
+  // before the vblank handler releases the GPU, +15136 callbacks run.
+  const uint32_t holder = be32(0x82000948);
+  const uint32_t device = holder ? be32(holder) : 0;
+  REXLOG_WARN("native graphics: stall {:.1f} s ({} {:08X} value {:08X} mask {:08X} func {} ref {:08X}) | "
+              "interrupts vblank {} gpu {} dropped {} predicated-skipped {} | bin mask {:016X} select "
+              "{:016X} | scratch {:08X}: +0 {:08X} +4 {:08X} +16 {:08X} | device {:08X}: vblanks {} "
+              "released-at {} pending {} callbacks {} | vcounter {:08X}",
+              seconds, (info & 0x10) ? "mem" : "reg", poll, value, mask, info & 7, ref, interrupts_sent_[0].load(),
+              interrupts_sent_[1].load(), interrupts_dropped_.load(), predicated_interrupts_skipped_.load(),
+              bin_mask_, bin_select_, scratch, scratch_word(0), scratch_word(4), scratch_word(16), device,
+              device ? int32_t(be32(device + 15124)) : 0, device ? int32_t(be32(device + 15128)) : 0,
+              device ? int32_t(be32(device + 15132)) : 0, device ? int32_t(be32(device + 15136)) : 0,
+              ReadRegister(0x194C));
+}
+
 void D3D12NativeGraphicsSystem::DispatchInterrupt(uint32_t source, uint32_t cpu) {
   if (!interrupt_callback_) return;
   auto* thread = rex::system::XThread::GetCurrentThread();
-  if (!thread) return;
+  if (!thread) {
+    interrupts_dropped_.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  interrupts_sent_[source ? 1 : 0].fetch_add(1, std::memory_order_relaxed);
   thread->SetActiveCpu(cpu == 0xFFFFFFFF ? 2 : cpu);
   uint64_t args[] = {source, interrupt_callback_data_};
   function_dispatcher_->ExecuteInterrupt(thread->thread_state(), interrupt_callback_, args, 2);
@@ -681,6 +713,7 @@ bool D3D12NativeGraphicsSystem::ExecuteType3(Reader& reader, uint32_t packet) {
   };
   // Predicated packets (tiling bins); predicated swaps are never valid.
   if ((packet & 1) && (!(bin_select_ & bin_mask_) || opcode == xenos::PM4_XE_SWAP)) {
+    if (opcode == xenos::PM4_INTERRUPT) predicated_interrupts_skipped_.fetch_add(1, std::memory_order_relaxed);
     return finish();
   }
   switch (opcode) {
@@ -716,8 +749,11 @@ bool D3D12NativeGraphicsSystem::ExecuteType3(Reader& reader, uint32_t packet) {
       uint32_t info = reader.Read(), poll = reader.Read(), ref = reader.Read(),
                mask = reader.Read(), wait = reader.Read();
       bool is_memory = (info & 0x10) != 0;
+      const bool throttle =
+          IsPresentThrottleWait(info, poll, ref, mask, ReadRegister(gpu::XE_GPU_REG_SCRATCH_ADDR));
       auto start = std::chrono::steady_clock::now();
       bool reported = false;
+      double next_report = 0.0;
       for (;;) {
         uint32_t value;
         if (is_memory) {
@@ -729,11 +765,24 @@ bool D3D12NativeGraphicsSystem::ExecuteType3(Reader& reader, uint32_t packet) {
           value = ReadRegister(poll);
         }
         if (Compare(info, value & mask, ref) || !running_) break;
-        if (!reported && std::chrono::steady_clock::now() - start > std::chrono::seconds(2)) {
+        const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        if (throttle && ShouldEscapePresentThrottle(elapsed)) {
+          REXLOG_WARN("native graphics: present throttle wait {:08X} not released by the game after {:.1f} s; "
+                      "releasing it (issue #10)",
+                      poll, elapsed);
+          LogWaitStall(poll, value, mask, info, ref, elapsed);
+          StoreMemory(poll, 0);  // as the game's callback does, so its state stays consistent
+          break;
+        }
+        // Report at 2 s, then every 10 s while it lasts (issue #10: the game froze here).
+        const double waited = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        if (waited > (reported ? next_report : 2.0)) {
+          next_report = (reported ? next_report : 0.0) + 10.0;
           reported = true;
           REXLOG_WARN("native graphics: WAIT_REG_MEM {} {:08X} value {:08X} mask {:08X} func {} ref "
                       "{:08X} stalled > 2 s",
                       is_memory ? "mem" : "reg", poll, value, mask, info & 7, ref);
+          LogWaitStall(poll, value, mask, info, ref, waited);
         }
         // Block instead of spinning: register polls wait for a vblank or an
         // MMIO register write; memory polls (written by guest CPU threads)
@@ -745,6 +794,9 @@ bool D3D12NativeGraphicsSystem::ExecuteType3(Reader& reader, uint32_t packet) {
         }
         rex::thread::SyncMemory();
       }
+      if (reported)
+        REXLOG_WARN("native graphics: WAIT_REG_MEM {:08X} passed after {:.1f} s", poll,
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
       return finish();
     }
     case xenos::PM4_REG_RMW: {
