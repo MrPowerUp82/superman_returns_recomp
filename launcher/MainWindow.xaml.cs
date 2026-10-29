@@ -26,7 +26,7 @@ public partial class MainWindow : Window
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { loadWarning = "Não foi possível ler as preferências salvas. Usando os padrões."; }
         PopulateChoices();
         ApplySettingsToUi();
-        foreach (var box in new[] { RendererBox, ApiBox, ResolutionBox, DisplayModeBox, InputBox, GpuBox, RenderScaleBox, AaBox, FilterBox, FpsBox, ShadowBox, MsaaBox })
+        foreach (var box in new[] { RendererBox, ApiBox, ResolutionBox, DisplayModeBox, InputBox, GpuBox, RenderScaleBox, AaBox, FilterBox, FpsBox, CostumeBox, ShadowBox, MsaaBox })
             box.SelectionChanged += (_, _) => UpdateSummary();
         VSyncBox.Checked += (_, _) => UpdateSummary();
         SkipIntroBox.Checked += (_, _) => UpdateSummary();
@@ -50,6 +50,7 @@ public partial class MainWindow : Window
         SetChoices(ResolutionBox, new("960x540", "960 × 540 (PC fraco)"), new("1280x720", "1280 × 720"), new("1600x900", "1600 × 900"), new("1920x1080", "1920 × 1080"), new("2560x1440", "2560 × 1440"), new("3840x2160", "3840 × 2160"));
         SetChoices(DisplayModeBox, new("Fullscreen", "Tela cheia sem bordas"), new("Windowed", "Janela"));
         SetChoices(InputBox, new("KeyboardMouse", "Teclado e mouse"), new("Controller", "Controle Xbox / XInput"));
+        SetChoices(CostumeBox, new("default", "Padrão do jogo"), new("2", "Golden Age"), new("kingdom_come", "Reino do Amanhã"));
         SetChoices(RenderScaleBox, new("50", "50% — 360p (nativo D3D12)"), new("75", "75% — 540p (nativo D3D12)"), new("100", "100% — 720p original"), new("125", "125% — 900p"), new("150", "150% — 1080p"), new("200", "200% — 1440p"), new("300", "300% — 2160p"), new("400", "400% — 2880p"));
         SetChoices(AaBox, new("Off", "Desativado"), new("FXAA", "FXAA"));
         SetChoices(FilterBox, new("Original", "Original do jogo"), new("Anisotropic2x", "Anisotrópico 2×"), new("Anisotropic4x", "Anisotrópico 4×"), new("Anisotropic8x", "Anisotrópico 8×"), new("Anisotropic16x", "Anisotrópico 16×"));
@@ -63,7 +64,7 @@ public partial class MainWindow : Window
     {
         Select(RendererBox, _settings.Renderer); Select(ApiBox, _settings.GraphicsApi); SkipIntroBox.IsChecked = _settings.SkipIntro;
         Select(ResolutionBox, _settings.Resolution); Select(DisplayModeBox, _settings.DisplayMode);
-        Select(InputBox, _settings.InputMode); Select(RenderScaleBox, _settings.RenderScale);
+        Select(InputBox, _settings.InputMode); Select(CostumeBox, _settings.Costume); Select(RenderScaleBox, _settings.RenderScale);
         Select(AaBox, _settings.Antialiasing); Select(FilterBox, _settings.TextureFilter);
         Select(FpsBox, _settings.FpsLimit); Select(ShadowBox, _settings.ShadowQuality); Select(MsaaBox, _settings.Msaa);
         var adapters = GpuBox.Items.Cast<GpuAdapter>().ToArray();
@@ -79,7 +80,7 @@ public partial class MainWindow : Window
     {
         _settings.Renderer = Value(RendererBox); _settings.GraphicsApi = Value(ApiBox); _settings.SkipIntro = SkipIntroBox.IsChecked == true;
         _settings.Resolution = Value(ResolutionBox); _settings.DisplayMode = Value(DisplayModeBox);
-        _settings.InputMode = Value(InputBox); _settings.RenderScale = Value(RenderScaleBox);
+        _settings.InputMode = Value(InputBox); _settings.Costume = Value(CostumeBox); _settings.RenderScale = Value(RenderScaleBox);
         _settings.Antialiasing = Value(AaBox); _settings.TextureFilter = Value(FilterBox);
         _settings.FpsLimit = Value(FpsBox); _settings.ShadowQuality = Value(ShadowBox); _settings.Msaa = Value(MsaaBox);
         var gpu = (GpuAdapter)GpuBox.SelectedItem; _settings.Gpu = gpu.Name; _settings.GpuIndex = gpu.Index; _settings.GpuLuid = gpu.Luid;

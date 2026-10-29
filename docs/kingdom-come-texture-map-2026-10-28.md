@@ -1,4 +1,4 @@
-# Mapa de texturas do traje Golden Age (2026-10-28)
+# Mapa de texturas dos trajes do Superman (2026-10-28)
 
 Mapa das texturas do traje (`docs/superpowers/plans/2026-10-28-texture-replacement-kingdom-come.md`, Task 4). O Golden Age é o traje forçado por `--sr_costume=2`; a skin Reino do Amanhã acabou pintada sobre o traje do filme (seção abaixo). Nenhum PNG do jogo está no repositório: as chaves abaixo identificam a textura no jogo de quem o executa, e a Task 5 repinta esses pixels em código.
 
