@@ -25,6 +25,7 @@ class RayShadowExecution {
       if(pending.counter_recorded && shader_pixels && pending.requested[0]==1) {
         latest_.applied[0]=1; latest_.applied[1]=pending.requested[1];
         latest_.applied[2]=pending.requested[2]==1 && pending.character_built ? 1 : 0;
+        latest_.applied[3]=pending.requested[3]==1 ? 1 : 0;
       }
     }
     return true;

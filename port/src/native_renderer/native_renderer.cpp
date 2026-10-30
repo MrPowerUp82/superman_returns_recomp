@@ -7530,6 +7530,7 @@ bool Renderer::ConfigureRayShadowDraw(uint8_t* base,uint32_t dev,uint64_t vs,uin
   const bool high=graphics_frame_request_.requested[1]==2;
   rt_shadow_constants_.cone=high ? .01f : .003f;rt_shadow_constants_.samples=high ? 16 : 4;
   rt_shadow_constants_.mask=graphics_frame_request_.requested[2]==1 ? 3 : 1;
+  rt_shadow_constants_.padding[0]=graphics_frame_request_.requested[3]==1 ? 1 : 0; // g_SrRtReflectEnabled
   rt_shadow_variant_=&variant->second;
   return true;
 }
@@ -7582,6 +7583,8 @@ void Renderer::PublishGraphicsOptions() {
   report.features[1]=report.features[0];
   report.features[2]={shadow_ready,ray_tracing_capable_ && rt_shadow_wave_capable_,
       shadow_ready ? "Skinned casters count as characters" : "RT lighting shader is not ready"};
+  report.features[3]={shadow_ready,ray_tracing_capable_ && rt_shadow_wave_capable_,
+      shadow_ready ? "Occlusion only: reflected colors are not traced yet" : "RT lighting shader is not ready"};
   report.applied=executed.applied;
   const bool dlss_supported=dlss_ && dlss_->GetStatus().support==graphics::d3d12::DlssSupport::Supported;
   report.features[4]={false,dlss_supported,dlss_supported ?

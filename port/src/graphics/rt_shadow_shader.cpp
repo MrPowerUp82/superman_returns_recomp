@@ -64,7 +64,8 @@ cbuffer SrRtShadowDraw : register(b3, space4)
     float g_SrRtShadowCone;
     uint g_SrRtShadowSamples;
     uint g_SrRtShadowMask;
-    uint3 g_SrRtShadowPadding;
+    uint g_SrRtReflectEnabled;
+    uint2 g_SrRtShadowPadding;
 };
 
 float SrRtShadowOcclusion(float3 world, float original, float fade, float2 pixel)
@@ -121,6 +122,26 @@ float SrRtShadowOcclusion(float3 world, float original, float fade, float2 pixel
     return saturate(occlusion - fade);
 }
 
+// Occlusion only: the scene has no hit materials yet, so a hit darkens the
+// environment sample instead of supplying the reflected color.
+float SrRtEnvVisibility(float3 world, float3 direction)
+{
+    float length2 = dot(direction, direction);
+    [branch] if (g_SrRtReflectEnabled == 0 || !all(isfinite(world)) ||
+        !all(isfinite(direction)) || !isfinite(length2) || length2 < 1e-12)
+        return 1.0;
+    RayDesc ray;
+    ray.Origin = world;
+    ray.Direction = direction * rsqrt(length2);
+    ray.TMin = 0.25;
+    ray.TMax = 2000.0;
+    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH |
+             RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
+    query.TraceRayInline(g_SrRtShadowScene, RAY_FLAG_NONE, 1, ray);
+    while (query.Proceed()) {}
+    return query.CommittedStatus() == COMMITTED_NOTHING ? 1.0 : 0.25;
+}
+
 )hlsl";
 
 bool Unique(std::string_view source, std::string_view needle) {
@@ -133,6 +154,33 @@ bool AuditedInput(std::string_view inputs, std::string_view declaration) {
   if (!Unique(inputs, declaration)) return false;
   const auto end = inputs.find_first_not_of(" \t\n", inputs.find(declaration) + declaration.size());
   return end != std::string_view::npos && (inputs[end] == ',' || inputs[end] == ')');
+}
+// Multiplies the single env_map sample by the ray result, reading the world
+// direction cube() saved. Shaders without exactly one such sample stay unchanged.
+std::string PatchEnvironmentSample(std::string_view source) {
+  constexpr std::string_view kFetch =
+      " = tfetchCube(env_map_TextureCubeDescriptorIndex, env_map_SamplerDescriptorIndex, r";
+  std::string result(source);
+  const auto fetch = source.find(kFetch);
+  if (fetch == std::string_view::npos || !Unique(source, kFetch)) return result;
+  const auto line = source.rfind('\n', fetch);
+  if (line == std::string_view::npos) return result;
+  const auto target = source.substr(line + 1, fetch - line - 1);
+  const auto first = target.find_first_not_of(" \t");
+  if (first == std::string_view::npos || target[first] != 'r') return result;
+  const auto lhs = target.substr(first);
+  auto cursor = fetch + kFetch.size();
+  const auto digits = cursor;
+  while (cursor < source.size() && source[cursor] >= '0' && source[cursor] <= '9') ++cursor;
+  const auto coordinate = source.substr(digits, cursor - digits);
+  constexpr std::string_view kTail = ".xyz, cubeMapData).xyz;";
+  if (coordinate.empty() || source.substr(cursor, kTail.size()) != kTail) return result;
+  const auto end = cursor + kTail.size();
+  std::string call(source.find("\r\n") != std::string_view::npos ? "\r\n\t" : "\n\t");
+  call.append(lhs).append(" *= SrRtEnvVisibility(iTexCoord2.xyz, cubeMapData.cubeMapDirections[int(r");
+  call.append(coordinate).append(".z)].xyz);");
+  result.insert(end, call);
+  return result;
 }
 }  // namespace
 
@@ -173,12 +221,14 @@ bool SpecializeRtShadowShader(uint64_t hash, std::string_view source,
   if (block == std::string::npos || block < body)
     return reject("RT shadow atlas anchor is outside its audited p0 block");
 
-  const auto end = source.find(fade.anchor) + fade.anchor.size();
+  const auto patched = PatchEnvironmentSample(source);
+  const std::string_view patched_view(patched);
+  const auto end = patched_view.find(fade.anchor) + fade.anchor.size();
   std::string result(kPrefix);
-  result.append(source.substr(0, end));
+  result.append(patched_view.substr(0, end));
   result.append(source.find("\r\n") != std::string_view::npos ? "\r\n\t\t\t" : "\n\t\t\t");
   result.append(fade.call);
-  result.append(source.substr(end));
+  result.append(patched_view.substr(end));
   output = std::move(result);
   error.clear();
   return true;

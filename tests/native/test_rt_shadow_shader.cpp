@@ -82,6 +82,20 @@ SR_TEST(rt_shadow_family_uses_the_registers_of_its_own_fade_block) {
                                      "\t\t\tint aluAddress = a0;\n\t\t\tr5.x = saturate(-r6.x + r5.x);\n\t\t}\n\t}");
 }
 
+SR_TEST(rt_reflection_patches_only_a_single_environment_sample) {
+  const std::string fetch =
+      "\tr12.yzw = tfetchCube(env_map_TextureCubeDescriptorIndex, env_map_SamplerDescriptorIndex, r6.xyz, cubeMapData).xyz;\n";
+  auto source = kAuditedSource;
+  source.insert(source.find("\tr9.xyz"), fetch);
+  std::string output, error;
+  SR_CHECK(SpecializeRtShadowShader(kShadowPs, source, output, error));
+  SR_CHECK(output.find("r12.yzw *= SrRtEnvVisibility(iTexCoord2.xyz, cubeMapData.cubeMapDirections[int(r6.z)].xyz);") != std::string::npos);
+  auto twice = source;
+  twice.insert(twice.find("\tr9.xyz"), fetch);
+  SR_CHECK(SpecializeRtShadowShader(kShadowPs, twice, output, error));
+  SR_CHECK(output.find("*= SrRtEnvVisibility") == std::string::npos);
+}
+
 SR_TEST(rt_shadow_rejects_missing_or_ambiguous_anchors_without_partial_output) {
   ExpectRejected(kShadowPs, "");
   std::string missing = kAuditedSource;
