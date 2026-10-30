@@ -3151,7 +3151,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
                                            DXGI_FORMAT dsv_format,
                                            D3D12_INDEX_BUFFER_STRIP_CUT_VALUE strip_cut) {
   CpuTimer cpu_timer(cpu_timings.pipeline_ns);
-  const bool ray_variant=rt_shadow_draw_active_ && !rt_shadow_shader_.empty();
+  const bool ray_variant=rt_shadow_draw_active_ && rt_shadow_variant_;
   const bool coverage_variant=motion_coverage_draw_active_ && motion_coverage_shader_;
   const bool special_variant=ray_variant || coverage_variant;
   if(coverage_variant && REXCVAR_GET(sr_native_debug_motion_coverage_pso_failure)) return nullptr;
@@ -3273,7 +3273,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
   bool pending = shader_pending_;
   // ps_hash == 0: depth-only draw (the game binds no pixel shader).
   const auto* ps = coverage_variant ? motion_coverage_shader_ :
-      ray_variant ? &rt_shadow_shader_ : ps_hash ? LoadShader(ps_hash, false) : nullptr;
+      ray_variant ? rt_shadow_variant_ : ps_hash ? LoadShader(ps_hash, false) : nullptr;
   pending = pending || shader_pending_;
   if (!vs || (ps_hash && !ps)) {
     if (pending) pipelines_.erase(key);  // ask again once the translation finished
@@ -7424,12 +7424,18 @@ void Renderer::BeginRayShadows() {
   HarvestRayShadowExecution();
   graphics_frame_request_=graphics::SharedGraphicsOptions()->Snapshot();
   rt_shadow_built_=rt_shadow_attempted_=rt_shadow_draw_active_=rt_shadow_counter_recorded_=false;
-  if(ray_tracing_capable_ && rt_shadow_wave_capable_ && rt_shadow_shader_.empty()) {
-    if(ShaderTranslator::Get().FetchRtShadowVariant(0x8A6DD1D52752FAD6ull,rt_shadow_shader_)==TranslateState::kReady)
-      REXLOG_INFO("native RT shadow shader ready: {} bytes; original lighting family specialization",rt_shadow_shader_.size());
+  rt_shadow_character_built_=false;
+  // The primary family gates readiness; the others join as their variants finish.
+  if(ray_tracing_capable_ && rt_shadow_wave_capable_ && rt_shadow_shaders_.empty()) {
+    std::vector<uint8_t> dxil;
+    constexpr uint64_t kPrimary=0x8A6DD1D52752FAD6ull;
+    if(ShaderTranslator::Get().FetchRtShadowVariant(kPrimary,dxil)==TranslateState::kReady) {
+      REXLOG_INFO("native RT shadow shader ready: {} bytes; original lighting family specialization",dxil.size());
+      rt_shadow_shaders_.emplace(kPrimary,std::move(dxil));
+    }
   }
   rt_shadow_requested_=graphics_frame_request_.requested[0]==1 && ray_tracing_capable_ &&
-      rt_shadow_wave_capable_ && !rt_shadow_shader_.empty() && REXCVAR_GET(sr_native_pm4_mirror);
+      rt_shadow_wave_capable_ && !rt_shadow_shaders_.empty() && REXCVAR_GET(sr_native_pm4_mirror);
   if(!rt_shadow_requested_) return;
   auto buffer=[&](uint64_t bytes,D3D12_HEAP_TYPE type,D3D12_RESOURCE_STATES state,
                   D3D12_RESOURCE_FLAGS flags,ComPtr<ID3D12Resource>& resource) {
@@ -7474,12 +7480,26 @@ void Renderer::BuildRayShadowScene() {
     if(FAILED(hr)) {REXLOG_WARN("native RT shadows initialization failed: {}",scene->LastError());return;}
     rt_shadow_scene_=std::move(scene);
   }
-  const auto& last=ranges.back();
-  const RayTracingGeometry geometry{post_vertex_capture_->vertices(),0,last.offset/12+last.vertices,false,{}};
+  // One BLAS per class so the instance mask can exclude character casters.
+  std::vector<RayTracingGeometry> geometry;
+  const auto add_class=[&](bool character) {
+    RayTracingGeometry group{post_vertex_capture_->vertices()};
+    group.character=character;
+    for(const auto& range:ranges) {
+      if(graphics::IsCharacterShadowCaster(range.vs)!=character || !range.vertices) continue;
+      if(!group.vertex_count) {group.offset=range.offset;group.vertex_count=range.vertices;}
+      else group.more.push_back({range.offset,range.vertices});
+    }
+    if(group.vertex_count) geometry.push_back(std::move(group));
+  };
+  add_class(false);
+  add_class(true);
+  if(geometry.empty()) return;
   HRESULT hr=rt_shadow_scene_->BeginFrame(frame_index_);
-  if(SUCCEEDED(hr)) hr=rt_shadow_scene_->BuildScene(command_list_.Get(),{&geometry,1});
+  if(SUCCEEDED(hr)) hr=rt_shadow_scene_->BuildScene(command_list_.Get(),geometry);
   if(FAILED(hr)) {REXLOG_WARN("native RT shadows scene failed: {}",rt_shadow_scene_->LastError());return;}
   rt_shadow_built_=true;
+  rt_shadow_character_built_=geometry.back().character;
 }
 
 bool Renderer::ConfigureRayShadowDraw(uint8_t* base,uint32_t dev,uint64_t vs,uint64_t ps) {
@@ -7489,7 +7509,14 @@ bool Renderer::ConfigureRayShadowDraw(uint8_t* base,uint32_t dev,uint64_t vs,uin
      !(LoadReg(base,dev,rex::graphics::XE_GPU_REG_RB_COLOR_MASK)&7u)) return false;
   if(!rt_shadow_requested_ || !rt_shadow_built_ || !rt_shadow_scene_->AccelerationStructure() ||
      vs!=0x2C45BFFE76D77398ull || !graphics::IsRtShadowShader(ps) ||
-     rt_shadow_shader_.empty() || post_vertex_light_conflict_) return false;
+     post_vertex_light_conflict_) return false;
+  auto variant=rt_shadow_shaders_.find(ps);
+  if(variant==rt_shadow_shaders_.end()) {
+    std::vector<uint8_t> dxil;
+    if(ShaderTranslator::Get().FetchRtShadowVariant(ps,dxil)!=TranslateState::kReady) return false;
+    variant=rt_shadow_shaders_.emplace(ps,std::move(dxil)).first;
+    REXLOG_INFO("native RT shadow variant ready: ps={:016X} {} bytes",ps,variant->second.size());
+  }
   const auto& words=mirror_.FloatConstants(false);
   graphics::ShadowProjection projection;
   std::memcpy(projection.u.data(),words.data()+9*4,16);
@@ -7502,7 +7529,8 @@ bool Renderer::ConfigureRayShadowDraw(uint8_t* base,uint32_t dev,uint64_t vs,uin
   rt_shadow_constants_.enabled=1;rt_shadow_constants_.bias=.05f;rt_shadow_constants_.max_distance=10000;
   const bool high=graphics_frame_request_.requested[1]==2;
   rt_shadow_constants_.cone=high ? .01f : .003f;rt_shadow_constants_.samples=high ? 16 : 4;
-  rt_shadow_constants_.mask=3; // Logical character identity is still unknown.
+  rt_shadow_constants_.mask=graphics_frame_request_.requested[2]==1 ? 3 : 1;
+  rt_shadow_variant_=&variant->second;
   return true;
 }
 
@@ -7547,12 +7575,13 @@ void Renderer::PublishGraphicsOptions() {
   for(size_t i=0;i<4;++i)
     report.features[i]={false,ray_tracing_capable_,
         ray_tracing_capable_ ? "Scene geometry and lighting integration pending" : "DXR 1.1 is unavailable on this device"};
-  const bool shadow_ready=ray_tracing_capable_ && rt_shadow_wave_capable_ && !rt_shadow_shader_.empty() &&
+  const bool shadow_ready=ray_tracing_capable_ && rt_shadow_wave_capable_ && !rt_shadow_shaders_.empty() &&
       REXCVAR_GET(sr_native_pm4_mirror);
   report.features[0]={shadow_ready,ray_tracing_capable_ && rt_shadow_wave_capable_,
       shadow_ready ? "Some materials retain original shadows" : "RT lighting shader is not ready"};
   report.features[1]=report.features[0];
-  report.features[2]={false,ray_tracing_capable_,"Character caster ownership has not been identified"};
+  report.features[2]={shadow_ready,ray_tracing_capable_ && rt_shadow_wave_capable_,
+      shadow_ready ? "Skinned casters count as characters" : "RT lighting shader is not ready"};
   report.applied=executed.applied;
   const bool dlss_supported=dlss_ && dlss_->GetStatus().support==graphics::d3d12::DlssSupport::Supported;
   report.features[4]={false,dlss_supported,dlss_supported ?
@@ -7697,7 +7726,8 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
   const HRESULT submitted=queue_->Signal(fence_.Get(), next_fence_value_);
   frame_fence_values_[frame_index_] = next_fence_value_;
   if(SUCCEEDED(submitted)) rt_shadow_execution_.Submit(frame_index_,next_fence_value_,frame_count_+1,
-      graphics_frame_request_.request_revision,graphics_frame_request_.requested,rt_shadow_counter_recorded_);
+      graphics_frame_request_.request_revision,graphics_frame_request_.requested,rt_shadow_counter_recorded_,
+      rt_shadow_character_built_);
   ++next_fence_value_;
   HarvestRayShadowExecution();
   PublishGraphicsOptions();

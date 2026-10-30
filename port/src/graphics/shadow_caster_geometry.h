@@ -5,6 +5,11 @@ namespace superman_returns::graphics {
 inline bool IsOriginalShadowCaster(uint64_t shader) {
   return shader==0x57A00D4EB3BF4C31ull || shader==0xC7C0E381A3C9B79Eull;
 }
+// Heuristic: 57A applies a skin palette and C7C0 an object transform. Skinning
+// does not prove a character (see docs/rt-dlss-continuation-2026-10-26.md).
+inline bool IsCharacterShadowCaster(uint64_t shader) {
+  return shader==0x57A00D4EB3BF4C31ull;
+}
 struct ShadowCasterContract {
   ShadowProjection projection;
   std::array<std::array<float,4>,3> atlas{};

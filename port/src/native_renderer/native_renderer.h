@@ -575,7 +575,9 @@ class Renderer : public NativeFrontend {
   bool post_vertex_diagnostic_=false;
   graphics::GraphicsOptionsSnapshot graphics_frame_request_;
   graphics::RtShadowDrawConstants rt_shadow_constants_{};
-  std::vector<uint8_t> rt_shadow_shader_;
+  std::unordered_map<uint64_t,std::vector<uint8_t>> rt_shadow_shaders_;
+  const std::vector<uint8_t>* rt_shadow_variant_=nullptr;
+  bool rt_shadow_character_built_=false;
   std::unique_ptr<graphics::d3d12::RayTracingScene> rt_shadow_scene_;
   Microsoft::WRL::ComPtr<ID3D12Resource> rt_shadow_counter_[3],rt_shadow_counter_readback_[3],rt_shadow_zero_;
   D3D12_RESOURCE_STATES rt_shadow_counter_state_[3]{D3D12_RESOURCE_STATE_UNORDERED_ACCESS,

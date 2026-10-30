@@ -105,7 +105,8 @@ bool GraphicsOptions::PublishBackend(uint64_t epoch, const GraphicsBackendReport
   state_.failure = report.failure;
   bool unapplied=false;
   for(size_t row=0;row<kGraphicsOptionCount;++row) {
-    if(row==static_cast<size_t>(GraphicsOption::kShadowSoftness) && !state_.applied[0]) continue;
+    if((row==static_cast<size_t>(GraphicsOption::kShadowSoftness) ||
+        row==static_cast<size_t>(GraphicsOption::kCharacterShadows)) && !state_.applied[0]) continue;
     unapplied|=state_.applied[row]!=state_.requested[row];
   }
   if (!state_.pending() && unapplied && state_.failure.empty())
@@ -198,7 +199,7 @@ void GraphicsOptionsMenu::AdjustLocked(int direction) {
   const auto snapshot = options_->Snapshot();
   const auto row = state_.selected;
   const auto option = static_cast<GraphicsOption>(row);
-  if(option==GraphicsOption::kShadowSoftness && snapshot.applied[0]!=1) return;
+  if((option==GraphicsOption::kShadowSoftness || option==GraphicsOption::kCharacterShadows) && snapshot.applied[0]!=1) return;
   auto next = snapshot.requested[row] + (direction > 0 ? 1 : -1);
   if (direction < 0 && !(snapshot.features[row].implemented && snapshot.features[row].capable))
     next = 0;

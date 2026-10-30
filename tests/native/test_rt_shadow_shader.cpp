@@ -64,6 +64,24 @@ SR_TEST(rt_shadow_replaces_only_the_original_occlusion_inside_its_branch) {
   ExpectRejected(kShadowPs, output);  // never double-patch
 }
 
+SR_TEST(rt_shadow_family_uses_the_registers_of_its_own_fade_block) {
+  constexpr uint64_t kFamilyPs = 0x0D62162D76A532D1ull;
+  SR_CHECK(IsRtShadowShader(kFamilyPs));
+  std::string source = kAuditedSource;
+  source.replace(source.find("aluVectorSource = r0"), 20, "aluVectorSource = r2");
+  source.replace(source.find(kAnchor), kAnchor.size(), "r2.x = saturate(-r13.x + r2.x);");
+  std::string output, error;
+  SR_CHECK(SpecializeRtShadowShader(kFamilyPs, source, output, error));
+  SR_CHECK(output.find("r2.x = SrRtShadowOcclusion(iTexCoord2.xyz, r2.x, r13.x, iPos.xy);") != std::string::npos);
+  // A block whose guard names another register is not the audited emitter form.
+  auto mismatched = source;
+  mismatched.replace(mismatched.find("aluVectorSource = r2"), 20, "aluVectorSource = r3");
+  ExpectRejected(kFamilyPs, mismatched);
+  // Two fade blocks are ambiguous.
+  ExpectRejected(kFamilyPs, source + "\nif (p0)\n\t{\n\t\t{\n\t\t\tfloat4 aluVectorSource = r5;\n"
+                                     "\t\t\tint aluAddress = a0;\n\t\t\tr5.x = saturate(-r6.x + r5.x);\n\t\t}\n\t}");
+}
+
 SR_TEST(rt_shadow_rejects_missing_or_ambiguous_anchors_without_partial_output) {
   ExpectRejected(kShadowPs, "");
   std::string missing = kAuditedSource;
