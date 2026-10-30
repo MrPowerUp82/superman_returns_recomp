@@ -171,7 +171,7 @@ void GraphicsOptionsDialog::OnDraw(ImGuiIO& io) {
       const auto& support = options.features[row];
       const bool available = support.implemented && support.capable;
       const bool softness = option==GraphicsOption::kShadowSoftness;
-      const bool inactive = softness && !options.applied[0];
+      const bool inactive = (softness || option==GraphicsOption::kCharacterShadows || option==GraphicsOption::kRtReflections) && !options.applied[0];
       const bool selected = row==menu.selected;
       const float y=.36f+row*.0553f;
       const ImVec2 min=at(.02f,y-.0245f), max=at(.98f,y+.0245f);
@@ -211,8 +211,9 @@ void GraphicsOptionsDialog::OnDraw(ImGuiIO& io) {
     const auto& selected_support=options.features[menu.selected];
     std::string status;
     if(!selected_support.implemented || !selected_support.capable) status="Unavailable: "+selected_support.reason;
-    else if(static_cast<GraphicsOption>(menu.selected)==GraphicsOption::kShadowSoftness && !options.applied[0])
-      status="Turn on RT Shadows to change the softness.";
+    else if((menu.selected==size_t(GraphicsOption::kShadowSoftness) || menu.selected==size_t(GraphicsOption::kCharacterShadows) ||
+             menu.selected==size_t(GraphicsOption::kRtReflections)) && !options.applied[0])
+      status="Turn on RT Shadows to change this option.";
     if(!options.failure.empty()) status+=(status.empty() ? "" : "\n")+options.failure;
     if(!status.empty())
       draw->AddText(font,18*scale,at(.103f,.665f),IM_COL32(190,205,225,255),status.c_str(),nullptr,width*.8f);

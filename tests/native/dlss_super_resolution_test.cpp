@@ -24,6 +24,9 @@ int main() {
     CHECK(ValidateDlssFrame(f) == DlssError::None);
     f.motionIncludesCameraObjectsAndDeformation = false;
     CHECK(ValidateDlssFrame(f) == DlssError::UnverifiedTemporalInputs);
+    f.motionCameraOnlyAccepted = true; // Explicit choice, not a claim of full motion.
+    CHECK(ValidateDlssFrame(f) == DlssError::None);
+    f.motionCameraOnlyAccepted = false;
     f.motionIncludesCameraObjectsAndDeformation = true;
     f.depth = DlssDepth::Unknown;
     CHECK(ValidateDlssFrame(f) == DlssError::UnsupportedConventions);

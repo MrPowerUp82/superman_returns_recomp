@@ -26,3 +26,16 @@ SR_TEST(ray_shadow_newer_off_cannot_be_resurrected_by_late_old_completion) {
   SR_CHECK_EQ(state.Latest().frame,3u); SR_CHECK_EQ(state.Latest().revision,2u);
   SR_CHECK_EQ(state.Latest().applied[0],0);
 }
+
+SR_TEST(ray_shadow_character_row_needs_both_the_request_and_a_character_blas) {
+  const auto applied=[](int requested,bool built) {
+    superman_returns::graphics::RayShadowExecution execution;
+    superman_returns::graphics::GraphicsValues values{1,1,requested,0,0};
+    SR_CHECK(execution.Submit(0,1,1,1,values,true,built));
+    SR_CHECK(execution.Complete(0,1,10));
+    return execution.Latest().applied[2];
+  };
+  SR_CHECK_EQ(applied(1,true),1);
+  SR_CHECK_EQ(applied(1,false),0);
+  SR_CHECK_EQ(applied(0,true),0);
+}

@@ -34,7 +34,7 @@ DlssError ValidateDlssFrame(const DlssFrameContract& f) {
         f.outputWidth > 16384 || f.outputHeight > 16384)
         return DlssError::InvalidDimensions;
     if (!f.conventionsVerified || !f.colorBeforeHud || !f.rasterJitterApplied ||
-        !f.motionIncludesCameraObjectsAndDeformation)
+        (!f.motionIncludesCameraObjectsAndDeformation && !f.motionCameraOnlyAccepted))
         return DlssError::UnverifiedTemporalInputs;
     if ((f.depth != DlssDepth::Forward && f.depth != DlssDepth::Reversed) ||
         f.motion != DlssMotion::CurrentToPreviousPixels)
