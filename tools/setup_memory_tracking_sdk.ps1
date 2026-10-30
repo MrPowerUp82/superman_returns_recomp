@@ -62,7 +62,7 @@ function Read-SdkBlob([string]$Object) {
     return [Text.Encoding]::UTF8.GetString($bytes.ToArray()).Replace("`r`n", "`n")
   } finally { $bytes.Dispose(); $process.Dispose() }
 }
-function Get-CanonicalSdkContent {
+function Get-CanonicalSdkContent($SelectedPatches = $patches) {
   # Build a fresh temporary index from the pinned commit. The user's real
   # index (including assume-unchanged / skip-worktree) is never modified.
   $indexPath = [IO.Path]::GetTempFileName()
@@ -72,7 +72,7 @@ function Get-CanonicalSdkContent {
   try {
     $env:GIT_INDEX_FILE = $indexPath
     Invoke-SdkGit -Arguments @('read-tree','HEAD') | Out-Null
-    foreach ($patch in $patches) {
+    foreach ($patch in $SelectedPatches) {
       Invoke-SdkGit -Arguments @('apply','--cached',$patch.path) | Out-Null
       foreach ($key in $patch.paths) {
         $entry = Invoke-SdkGit -Arguments @('ls-files','--stage','--',$key)
@@ -140,20 +140,41 @@ foreach ($key in ((Invoke-SdkGit -Arguments @('diff','HEAD','--name-only','--no-
   }
 }
 $pending = @()
+$upgrades = @{}
 foreach ($patch in $patches) {
   $diff = (Invoke-SdkGit -Arguments (@('diff','HEAD','--binary','--no-ext-diff','--no-textconv','--no-color','--no-renames','--src-prefix=a/','--dst-prefix=b/','--unified=3','--abbrev=7','--ignore-submodules=all','--') + $patch.paths)).Replace("`r`n", "`n").TrimEnd()
   if ($diff -cne $patch.text) {
-    if ($diff) { throw "SDK has a partial patch or unknown local changes: $($patch.name); nothing overwritten" }
+    if ($diff) {
+      $previous = Join-Path $PSScriptRoot ('patches/rexglue/v0.10.0/previous/' + (Split-Path $patch.path -Leaf))
+      if (-not (Test-Path -LiteralPath $previous) -or
+          $diff -cne [IO.File]::ReadAllText($previous).Replace("`r`n", "`n").TrimEnd()) {
+        throw "SDK has a partial patch or unknown local changes: $($patch.name); nothing overwritten"
+      }
+      if ($VerifyOnly) { throw "SDK patch needs canonical upgrade: $($patch.name)" }
+      $upgrades[$patch.name] = $previous
+      $pending += $patch
+      continue
+    }
     if ($VerifyOnly) { throw "SDK patch missing: $($patch.name)" }
     Invoke-SdkGit -Arguments @('apply','--check',$patch.path) | Out-Null
     $pending += $patch
   }
 }
 $canonical = Get-CanonicalSdkContent
+$beforeCanonical = $null
+if ($upgrades.Count) {
+  $beforePatches = @($patches | ForEach-Object {
+    if ($upgrades.ContainsKey($_.name)) {
+      [pscustomobject]@{path=$upgrades[$_.name];paths=$_.paths}
+    } else { $_ }
+  })
+  $beforeCanonical = Get-CanonicalSdkContent $beforePatches
+}
 $expectedBefore = @{}
 foreach ($patch in $patches) {
   foreach ($key in $patch.paths) {
-    $expectedBefore[$key] = if ($pending -contains $patch) { $canonical.original[$key] } else { $canonical.patched[$key] }
+    $expectedBefore[$key] = if ($upgrades.ContainsKey($patch.name)) { $beforeCanonical.patched[$key] }
+      elseif ($pending -contains $patch) { $canonical.original[$key] } else { $canonical.patched[$key] }
   }
 }
 Assert-CanonicalSdkContent $expectedBefore
@@ -179,6 +200,9 @@ foreach ($file in $sharedFiles) {
 # All patches and shared sources passed preflight before any SDK input changes.
 if (-not $VerifyOnly) {
   foreach ($patch in $pending) {
+    if ($upgrades.ContainsKey($patch.name)) {
+      Invoke-SdkGit -Arguments @('apply','--reverse',$upgrades[$patch.name]) | Out-Null
+    }
     Invoke-SdkGit -Arguments @('apply',$patch.path) | Out-Null
   }
   foreach ($file in $copyFiles) {

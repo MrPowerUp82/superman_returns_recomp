@@ -1,5 +1,10 @@
 # Warworld -> Metropolis loading crash (2026-10-26)
 
+The October 30 crash **during the Mongul fight** has a different dump signature
+in the XMA audio path; allocations succeeded. See
+[Mongul XMA crash](mongul-xma-crash-2026-10-30.md). The transition fix below
+remains in place.
+
 The supplied `game.log` contains the same failure in two sessions:
 
 | API | Time | Failure |

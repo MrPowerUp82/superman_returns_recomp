@@ -11,4 +11,5 @@ add_custom_command(TARGET sr_xma_work_tests POST_BUILD
 enable_testing()
 add_test(NAME sr_xma_work COMMAND sr_xma_work_tests)
 add_test(NAME sr_xma_stall COMMAND sr_xma_work_tests --stall)
+add_test(NAME sr_xma_channel_switch COMMAND sr_xma_work_tests --channel-switch)
 set_tests_properties(sr_xma_work sr_xma_stall PROPERTIES TIMEOUT 15)

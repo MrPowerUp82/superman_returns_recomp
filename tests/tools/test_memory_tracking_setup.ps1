@@ -96,6 +96,31 @@ if ($HiddenIndexOnly) {
   Write-Output 'PASS installed hidden-index fixtures reject the exact content mismatch without rewriting any source or manifest'
   exit 0
 }
+$previousXma = Join-Path $root 'tools/patches/rexglue/v0.10.0/previous/0002-xma-drain-pending.patch'
+foreach ($hideEdit in @($false,$true)) {
+  $prior = New-Fixture ('previous-xma-' + $hideEdit)
+  Fixture-Git $prior @('apply',$patches[0]) | Out-Null
+  Fixture-Git $prior @('apply',$previousXma) | Out-Null
+  $xmaKey = 'src/audio/xma_context.cpp'
+  if ($hideEdit) {
+    Fixture-Git $prior @('add','--',$xmaKey) | Out-Null
+    Fixture-Git $prior @('update-index','--assume-unchanged','--',$xmaKey) | Out-Null
+    [IO.File]::AppendAllText((Join-Path $prior $xmaKey),"`n// unrecognized hidden edit`n")
+  }
+  $priorInputs = @($allPatchedPaths | ForEach-Object {Join-Path $prior $_}) +
+    @((Join-Path $prior '.sr-memory-tracking.json'))
+  $snapshot = Snapshot-Files $priorInputs
+  if ($hideEdit) {
+    Run-Setup $prior $false -FailurePattern 'Canonical SDK content mismatch'
+    Assert-Unchanged $snapshot
+  } else {
+    Run-Setup $prior $false -VerifyOnly -FailurePattern 'canonical upgrade'
+    Assert-Unchanged $snapshot
+    Run-Setup $prior $true
+    Run-Setup $prior $true -VerifyOnly
+    Assert-Manifest $prior
+  }
+}
 $fixture = Join-Path $fixtures 'sdk'
 & git clone --quiet --shared --no-hardlinks $source $fixture
 if ($LASTEXITCODE) { throw 'fixture clone failed' }

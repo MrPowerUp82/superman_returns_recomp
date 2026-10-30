@@ -12,7 +12,7 @@ index 8426798..82994c8 100644
  
    void Enable();
 diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
-index 11b83be..545f288 100644
+index 11b83be..f076024 100644
 --- a/src/audio/xma_context.cpp
 +++ b/src/audio/xma_context.cpp
 @@ -11,6 +11,7 @@
@@ -23,7 +23,7 @@ index 11b83be..545f288 100644
  
  #include <rex/audio/xma/context.h>
  #include <rex/audio/xma/decoder.h>
-@@ -108,35 +109,64 @@ bool XmaContext::Work() {
+@@ -108,35 +109,74 @@ bool XmaContext::Work() {
      return true;
    }
  
@@ -31,6 +31,16 @@ index 11b83be..545f288 100644
 +  // allocation before preparing the ring, including consume-only contexts.
 +  if (!data.output_buffer_block_count) {
 +    return true;
++  }
++
++  // The guest can reuse an enabled context with another channel layout while
++  // decoded PCM/carry still belongs to the old one. Do not reinterpret those
++  // blocks using the new format (stereo -> mono can underflow the PCM offset).
++  const uint32_t channels = 1u + data.is_stereo;
++  if ((av_context_ && av_context_->channels &&
++       av_context_->channels != static_cast<int>(channels)) ||
++      current_frame_remaining_subframes_ > 4u * channels) {
++    ResetDecoderState();
 +  }
 +
    memory::RingBuffer output_rb = PrepareOutputRingBuffer(&data);
@@ -97,3 +107,56 @@ index 11b83be..545f288 100644
        break;
      }
    }
+@@ -427,35 +467,25 @@ void XmaContext::Consume(memory::RingBuffer* output_rb, const XMA_CONTEXT_DATA*
+     return;
+   }
+ 
+-  if (loop_frame_output_limit_ > 0) {
+-    const uint8_t total_subframes = (kBytesPerFrameChannel / kOutputBytesPerBlock)
+-                                    << data->is_stereo;
+-    const uint8_t consumed = total_subframes - current_frame_remaining_subframes_;
+-    if (consumed >= loop_frame_output_limit_) {
+-      remaining_subframe_blocks_in_output_buffer_ -= data->output_buffer_padding;
+-      current_frame_remaining_subframes_ = 0;
+-      loop_frame_output_limit_ = 0;
+-      return;
+-    }
++  const uint32_t total_subframes = (kBytesPerFrameChannel / kOutputBytesPerBlock)
++                                      << data->is_stereo;
++  if (current_frame_remaining_subframes_ > total_subframes) {
++    ResetDecoderState();
++    return;
+   }
+-
+-  const uint8_t effective_sdc = std::max(static_cast<uint32_t>(1), data->subframe_decode_count);
+-  int8_t subframes_to_write = std::min(static_cast<int8_t>(current_frame_remaining_subframes_),
+-                                       static_cast<int8_t>(effective_sdc));
+-
+-  if (loop_frame_output_limit_ > 0) {
+-    const uint8_t total_subframes = (kBytesPerFrameChannel / kOutputBytesPerBlock)
+-                                    << data->is_stereo;
+-    const uint8_t consumed = total_subframes - current_frame_remaining_subframes_;
+-    const int8_t remaining_until_limit = static_cast<int8_t>(loop_frame_output_limit_ - consumed);
+-    if (subframes_to_write > remaining_until_limit) {
+-      subframes_to_write = remaining_until_limit;
+-    }
++  const uint32_t consumed = total_subframes - current_frame_remaining_subframes_;
++  if (loop_frame_output_limit_ && consumed >= loop_frame_output_limit_) {
++    remaining_subframe_blocks_in_output_buffer_ -= data->output_buffer_padding;
++    current_frame_remaining_subframes_ = 0;
++    loop_frame_output_limit_ = 0;
++    return;
+   }
+-
+-  const int8_t raw_frame_read_offset =
+-      ((kBytesPerFrameChannel / kOutputBytesPerBlock) << data->is_stereo) -
+-      current_frame_remaining_subframes_;
++  const uint32_t effective_sdc = std::max(static_cast<uint32_t>(1), data->subframe_decode_count);
++  uint32_t subframes_to_write = std::min(uint32_t(current_frame_remaining_subframes_), effective_sdc);
++  if (loop_frame_output_limit_)
++    subframes_to_write = std::min(subframes_to_write, uint32_t(loop_frame_output_limit_) - consumed);
++  // Both the source offset and length are bounded by this PCM frame.
++  const uint32_t raw_frame_read_offset = consumed;
+ 
+   output_rb->Write(raw_frame_.data() + (kOutputBytesPerBlock * raw_frame_read_offset),
+                    subframes_to_write * kOutputBytesPerBlock);

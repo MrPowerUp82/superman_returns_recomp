@@ -18,6 +18,13 @@ XMA_MEMBER(Limit,uint8_t,loop_frame_output_limit_);
 XMA_MEMBER(Budget,int32_t,remaining_subframe_blocks_in_output_buffer_);
 XMA_MEMBER(Memory,rex::memory::Memory*,memory_);
 XMA_MEMBER(Address,uint32_t,guest_ptr_);
+using PrepareFn=int(XmaContext::*)(int,bool);
+struct Prepare {using Type=PrepareFn;friend Type Unlock(Prepare);};
+template struct Key<Prepare,&XmaContext::PrepareDecoder>;
+using ConsumeFn=void(XmaContext::*)(rex::memory::RingBuffer*,const XMA_CONTEXT_DATA*);
+struct Consume {using Type=ConsumeFn;friend Type Unlock(Consume);};
+template struct Key<Consume,&XmaContext::Consume>;
+XMA_MEMBER(CarryValid,bool,carry_valid_);
 struct Fixture {
   rex::memory::Memory memory;XmaContext context;
   bool ready=false;
@@ -55,6 +62,30 @@ SR_TEST(xma_drains_pending_pcm_without_input_and_after_error4) {
     SR_CHECK(f.Work());SR_CHECK_EQ(f.context.*Unlock(Remaining{}),0u);
     SR_CHECK_EQ(f.Data().output_buffer_write_offset,blocks);f.CheckPcm(0,blocks);
     SR_CHECK(!f.context.is_enabled());SR_CHECK(!f.context.Work());
+  }
+}
+SR_TEST(xma_pending_counts_cannot_escape_the_raw_pcm_frame) {
+  for(bool stereo:{false,true}) for(uint8_t remaining:{uint8_t(9),uint8_t(127),uint8_t(128),uint8_t(255)}) {
+    Fixture f;if(!f.ready)return;auto data=f.Data();data.is_stereo=stereo;f.Store(data);
+    f.context.*Unlock(Remaining{})=remaining;
+    SR_CHECK(f.Work());SR_CHECK_EQ(f.context.*Unlock(Remaining{}),0u);
+    SR_CHECK_EQ(f.Data().output_buffer_write_offset,0u);
+  }
+}
+SR_TEST(xma_consume_rejects_incompatible_pending_count_before_accessing_output) {
+  Fixture f;if(!f.ready)return;auto data=f.Data();data.is_stereo=0;
+  f.context.*Unlock(Remaining{})=8;
+  (f.context.*Unlock(Consume{}))(nullptr,&data);
+  SR_CHECK_EQ(f.context.*Unlock(Remaining{}),0u);
+}
+SR_TEST(xma_unchanged_decoder_channels_preserve_valid_pending_pcm) {
+  for(bool stereo:{false,true}) {
+    Fixture f;if(!f.ready)return;
+    SR_CHECK_EQ(f.context.Setup(0,&f.memory,Fixture::guest),0);
+    SR_CHECK((f.context.*Unlock(Prepare{}))(2,stereo)>=0);
+    auto data=f.Data();data.is_stereo=stereo;f.Store(data);
+    const uint8_t blocks=stereo?8:4;f.context.*Unlock(Remaining{})=blocks;
+    SR_CHECK(f.Work());SR_CHECK_EQ(f.Data().output_buffer_write_offset,blocks);f.CheckPcm(0,blocks);
   }
 }
 SR_TEST(xma_capacity_budget_and_wrap_preserve_pending_pcm) {
@@ -142,7 +173,38 @@ int CheckStall() {
   SR_CHECK_EQ(f.context.*Unlock(Remaining{}),0u);SR_CHECK_EQ(f.Data().output_buffer_write_offset,0u);
   return sr_test::Failures()?1:0;
 }
+int CheckChannelSwitch() {
+  for(bool stereo:{false,true}) {
+    Fixture f;if(!f.ready)return 1;
+    SR_CHECK_EQ(f.context.Setup(0,&f.memory,Fixture::guest),0);
+    SR_CHECK((f.context.*Unlock(Prepare{}))(2,stereo)>=0);
+    auto data=f.Data();data.is_stereo=!stereo;f.Store(data);
+    f.context.*Unlock(Remaining{})=stereo?8:4;
+    f.context.*Unlock(CarryValid{})=true;
+    SR_CHECK(f.Work());
+    SR_CHECK_EQ(f.context.*Unlock(Remaining{}),0u);
+    SR_CHECK_EQ(f.Data().output_buffer_write_offset,0u);
+    SR_CHECK(! (f.context.*Unlock(CarryValid{})));
+    const auto* out=f.memory.TranslatePhysical<const uint8_t*>(Fixture::output);
+    for(size_t i=0;i<2048;++i) if(out[i]!=0xcc) {SR_CHECK(false);break;}
+    if(sr_test::Failures()) return 1; // Pre-fix mono->stereo fails without an AV.
+    // The invalidated decoder must reopen for the new format, then deliver
+    // fresh valid PCM rather than leaving the context permanently muted.
+    SR_CHECK_EQ((f.context.*Unlock(Prepare{}))(2,!stereo),1);
+    const uint8_t blocks=stereo?4:8;
+    auto& raw=f.context.*Unlock(Raw{});
+    for(uint8_t block=0;block<blocks;++block) std::fill_n(raw.data()+block*256,256,uint8_t(0x20+block));
+    f.context.*Unlock(Remaining{})=blocks;
+    // Match EnsureContextsValid in the mixer hook: the SDK clears this flag
+    // after an empty kick, so the caller must rearm it for subsequent output.
+    data=f.Data();data.output_buffer_valid=1;f.Store(data);
+    SR_CHECK(f.Work());SR_CHECK_EQ(f.Data().output_buffer_write_offset,blocks);f.CheckPcm(0,blocks);
+    if(sr_test::Failures()) return 1;
+  }
+  return 0;
+}
 int main(int argc,char** argv) {
+  if(argc==2 && std::string_view(argv[1])=="--channel-switch")return CheckChannelSwitch();
   if(argc==2 && std::string_view(argv[1])=="--stall")return CheckStall();
   return sr_test::RunAll();
 }
