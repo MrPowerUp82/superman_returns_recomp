@@ -48,6 +48,16 @@ Os componentes de input/sessão possuem testes de retenção de teclas, troca de
 contexto, leitura inválida, retorno à pausa e disponibilidade. A verificação
 visual e de input no EXE integrado é uma etapa de runtime separada.
 
+## Visual do painel (30/10/2026)
+
+O painel foi redesenhado com `ImDrawList` nas proporções da print de referência
+(moldura com abas, faixa de título, setas só na linha selecionada, BACK/B, PAUSED).
+O valor impresso continua sendo o aplicado pelo renderer, e linhas sem suporte
+ficam apagadas com o motivo abaixo. Para ver o painel no modo benchmark, que não
+tem pausa guest: `SR_BENCH_GRAPHICS_PANEL=<linha>` com `--sr_benchmark=true`.
+A fonte é Arial Bold Italic, não a do jogo. Isso não implementa Character Shadows,
+RT Reflections ou DLSS em gameplay; ver `rt-dlss-continuation-2026-10-26.md`.
+
 ## Validação de runtime e persistência
 
 `logs/bench_rt_menu_isolated_2410.log` e
