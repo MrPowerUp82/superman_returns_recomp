@@ -39,6 +39,8 @@ struct DlssFrameContract {
     bool colorBeforeHud = false;
     bool rasterJitterApplied = false;
     bool motionIncludesCameraObjectsAndDeformation = false;
+    // Explicit choice to accept ghosting: vectors cover the camera only.
+    bool motionCameraOnlyAccepted = false;
     DlssDepth depth = DlssDepth::Unknown;
     DlssMotion motion = DlssMotion::Unknown;
     bool hdr = false;

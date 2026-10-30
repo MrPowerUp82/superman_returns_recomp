@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <vector>
 
 namespace superman_returns::graphics::d3d12 {
 
@@ -15,12 +16,17 @@ struct RayTracingMaterial {
   bool valid = false;
 };
 
+struct RayTracingSpan {
+  uint64_t offset = 0;
+  uint32_t vertex_count = 0;
+};
 struct RayTracingGeometry {
   ID3D12Resource* vertices = nullptr;
   uint64_t offset = 0;
   uint32_t vertex_count = 0;  // Nonindexed world-space float3 triangle list, stride 12.
   bool character = false;
   RayTracingMaterial material{};
+  std::vector<RayTracingSpan> more{};  // Further spans of vertices in the same BLAS.
 };
 
 // Also useful to consumers needing explicit visibility queries. Layout matches HLSL.

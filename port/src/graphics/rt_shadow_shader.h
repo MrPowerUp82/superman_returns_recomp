@@ -19,7 +19,8 @@ struct RtShadowDrawConstants {
 };
 static_assert(sizeof(RtShadowDrawConstants) == 48);
 
-// Only PS 8A6D is audited, with canonical world position from paired VS 2C45.
+// PS 8A6D plus the PS whose translated source has the same p0 fade block, all
+// with canonical world position from paired VS 2C45. Only 8A6D has run on a GPU.
 bool IsRtShadowShader(uint64_t ps_hash);
 
 // On rejection output is cleared and error explains the failed audit.

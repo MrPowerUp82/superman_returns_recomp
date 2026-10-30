@@ -219,6 +219,11 @@ HRESULT RayTracingScene::AddTriangles(std::span<const RayTracingGeometry> geomet
               "Triangle count exceeds DXR BLAS primitive limit");
       Require(g.offset%4==0 && g.offset<=d.Width && uint64_t(g.vertex_count)*12<=d.Width-g.offset,
               "Vertex offset/count outside buffer or not float-aligned");
+      for (const auto& span:g.more) {
+        Require(span.vertex_count>=3 && span.vertex_count%3==0,"Span must be a nonempty triangle list");
+        Require(span.offset%4==0 && span.offset<=d.Width && uint64_t(span.vertex_count)*12<=d.Width-span.offset,
+                "Span offset/count outside buffer or not float-aligned");
+      }
       Require(g.vertices->GetGPUVirtualAddress()!=0,"Vertex buffer has no GPU address");
       D3D12_HEAP_PROPERTIES props{}; D3D12_HEAP_FLAGS heap_flags{};
       Check(g.vertices->GetHeapProperties(&props,&heap_flags),"Vertex heap query failed");
@@ -255,7 +260,7 @@ HRESULT RayTracingScene::BuildScene(ID3D12GraphicsCommandList* list) {
     auto list4=impl_->List4(list);
     const auto count=static_cast<uint32_t>(frame.geometry.size());
     struct Bottom {
-      D3D12_RAYTRACING_GEOMETRY_DESC geometry{};
+      std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> geometry;
       D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
       ComPtr<ID3D12Resource> result,scratch;
     };
@@ -267,14 +272,21 @@ HRESULT RayTracingScene::BuildScene(ID3D12GraphicsCommandList* list) {
     bool has_materials=false;
     for (uint32_t i=0;i<count;++i) {
       const auto& g=frame.geometry[i]; auto& b=bottoms[i];
-      b.geometry.Type=D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
-      b.geometry.Flags=D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
-      b.geometry.Triangles.VertexFormat=DXGI_FORMAT_R32G32B32_FLOAT;
-      b.geometry.Triangles.VertexCount=g.vertex_count;
-      b.geometry.Triangles.VertexBuffer={g.vertices->GetGPUVirtualAddress()+g.offset,12};
+      const auto add_span=[&](uint64_t offset,uint32_t vertex_count) {
+        auto& desc=b.geometry.emplace_back();
+        desc.Type=D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+        desc.Flags=D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;
+        desc.Triangles.VertexFormat=DXGI_FORMAT_R32G32B32_FLOAT;
+        desc.Triangles.VertexCount=vertex_count;
+        desc.Triangles.VertexBuffer={g.vertices->GetGPUVirtualAddress()+offset,12};
+      };
+      b.geometry.reserve(1+g.more.size());
+      add_span(g.offset,g.vertex_count);
+      for (const auto& span:g.more) add_span(span.offset,span.vertex_count);
       b.inputs.Type=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
       b.inputs.Flags=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
-      b.inputs.NumDescs=1; b.inputs.DescsLayout=D3D12_ELEMENTS_LAYOUT_ARRAY; b.inputs.pGeometryDescs=&b.geometry;
+      b.inputs.NumDescs=static_cast<UINT>(b.geometry.size()); b.inputs.DescsLayout=D3D12_ELEMENTS_LAYOUT_ARRAY;
+      b.inputs.pGeometryDescs=b.geometry.data();
       D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info{};
       impl_->device5->GetRaytracingAccelerationStructurePrebuildInfo(&b.inputs,&info);
       Require(info.ResultDataMaxSizeInBytes && info.ScratchDataSizeInBytes,"BLAS prebuild returned zero sizes",E_FAIL);
