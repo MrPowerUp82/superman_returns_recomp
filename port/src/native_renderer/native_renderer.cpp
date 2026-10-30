@@ -4864,8 +4864,8 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
   if(dlss_wanted_ && use_mirror && bound_rts_[0] && bound_ds_ && bound_rts_[0]->guest_format==12 &&
      !ScreenSpaceDraw(base,dev)) {
     half_pixel[0]+=dlss_jitter_.ndc_x;half_pixel[1]+=dlss_jitter_.ndc_y;
-    dlss_scene_ds_=bound_ds_;
     if(current_vs_hash_==graphics::CameraCandidateProbe::kViewProjectionShader) {
+      dlss_scene_ds_=bound_ds_;
       std::memcpy(dlss_view_projection_.data(),mirror_.FloatConstants(false).data(),sizeof(dlss_view_projection_));
       dlss_view_projection_valid_=true;
       // Xenos RB_DEPTHCONTROL z_func: 4 GREATER, 6 GEQUAL.
@@ -5316,12 +5316,6 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
   }();
   if (skip_ps && ps_hash == skip_ps) return false;
   if (benchmark::Active() && benchmark_cut_.ShouldSkip(ps_hash)) return false;
-  if(dlss_wanted_) {
-    // The first draw after the final scene filter: its target still holds the
-    // scene without HUD, and this draw has not rebound anything yet.
-    if(dlss_filter_seen_ && !dlss_recorded_ && ps_hash!=benchmark::kSceneFilterPs) RecordDlssFrame();
-    if(ps_hash==benchmark::kSceneFilterPs) dlss_filter_seen_=true;
-  }
   if (trace_state_ == 1) {
     uint32_t n = decl ? Load32(base, decl + 0x18) : 0;
     std::string els;
@@ -6632,7 +6626,7 @@ void Renderer::ExecDrawVertices(uint8_t* base, const WorkBatch& batch, const Wor
     submission.gpu_index32 = quads;
     RecordGeometrySubmission(base, &batch, &cmd, submission, surface_before);
   }
-  ++stats_.draws; ++trace_draws_; Breadcrumb();
+  ++stats_.draws; ++trace_draws_; CompleteGuestDraw();
   ++stats_.pass_draws[g_current_pass & 31];
 }
 
@@ -6700,7 +6694,7 @@ void Renderer::ExecDrawIndexedVertices(uint8_t* base, const WorkBatch& batch,
       submission.gpu_index32 = true;
       RecordGeometrySubmission(base, &batch, &cmd, submission, surface_before);
     }
-    ++stats_.draws; ++trace_draws_; Breadcrumb();
+    ++stats_.draws; ++trace_draws_; CompleteGuestDraw();
     ++stats_.pass_draws[g_current_pass & 31];
     return;
   }
@@ -6739,7 +6733,7 @@ void Renderer::ExecDrawIndexedVertices(uint8_t* base, const WorkBatch& batch,
     submission.gpu_index32 = cmd.index32;
     RecordGeometrySubmission(base, &batch, &cmd, submission, surface_before);
   }
-  ++stats_.draws; ++trace_draws_; Breadcrumb();
+  ++stats_.draws; ++trace_draws_; CompleteGuestDraw();
   ++stats_.pass_draws[g_current_pass & 31];
 }
 
@@ -6823,7 +6817,7 @@ void Renderer::ExecDrawInlineVertices(uint8_t* base, uint32_t prim, uint32_t dat
       submission.streams[0].stride = stride;
       RecordGeometrySubmission(base, nullptr, nullptr, submission, surface_before);
     }
-    ++stats_.draws; ++trace_draws_; Breadcrumb();
+    ++stats_.draws; ++trace_draws_; CompleteGuestDraw();
     ++stats_.pass_draws[g_current_pass & 31];
     return;
   }
@@ -6873,7 +6867,7 @@ void Renderer::ExecDrawInlineVertices(uint8_t* base, uint32_t prim, uint32_t dat
     submission.streams[0].stride = stride;
     RecordGeometrySubmission(base, nullptr, nullptr, submission, surface_before);
   }
-  ++stats_.draws; ++trace_draws_; Breadcrumb();
+  ++stats_.draws; ++trace_draws_; CompleteGuestDraw();
   ++stats_.pass_draws[g_current_pass & 31];
 }
 
@@ -7848,13 +7842,24 @@ bool Renderer::EnsureDlssResources(const HostSurface& scene) {
   return true;
 }
 
+void Renderer::CompleteGuestDraw() {
+  Breadcrumb();
+  // Capture after the scene filter actually draws, before resolves clear the
+  // bound targets and before HUD draws (which benchmarks intentionally omit).
+  if(dlss_wanted_ && !dlss_recorded_ && current_ps_hash_==benchmark::kSceneFilterPs && !SkipGpuDraw())
+    RecordDlssFrame();
+}
+
 void Renderer::BeginDlssFrame() {
-  dlss_wanted_=dlss_filter_seen_=dlss_recorded_=dlss_ready_=false;
+  if(!dlss_ready_) dlss_history_=false;
+  dlss_wanted_=dlss_recorded_=dlss_ready_=false;
   dlss_scene_ds_=nullptr;dlss_view_projection_valid_=false;
   if(!dlss_active_ || !dlss_) return;
   for(auto& slot:dlss_slots_) {
     if(!slot.ticket || !slot.submitted) continue;
     const auto confirmed=dlss_->ConfirmExecution(slot.ticket,fence_.Get(),slot.fence_value);
+    if(confirmed && ++dlss_completed_frames_==1)
+      REXLOG_INFO("native DLSS GPU execution confirmed: ticket={} fence={}",slot.ticket,slot.fence_value);
     if(confirmed.error!=graphics::d3d12::DlssError::GpuPending) {slot.ticket=0;slot.submitted=false;}
   }
   const bool requested=graphics_frame_request_.requested[4]==1 && !dlss_failed_ && REXCVAR_GET(sr_native_pm4_mirror);
@@ -7875,6 +7880,10 @@ void Renderer::RecordDlssFrame() {
      scene_desc.Width!=dlss_render_width_ || scene_desc.Height!=dlss_render_height_ ||
      depth_desc.Width!=dlss_render_width_ || depth_desc.Height!=dlss_render_height_ ||
      !graphics::InvertProjection(dlss_view_projection_,inverse) || !EnsureDlssResources(*scene)) {
+    if(++dlss_rejected_frames_==1 || dlss_rejected_frames_%120==0)
+      REXLOG_INFO("native DLSS inputs rejected: scene={}x{} depth={}x{} expected={}x{} camera={} samples={}/{}",
+          scene_desc.Width,scene_desc.Height,depth_desc.Width,depth_desc.Height,dlss_render_width_,dlss_render_height_,
+          dlss_view_projection_valid_,scene?scene->samples:0,depth?depth->samples:0);
     dlss_history_=false;
     return;
   }
@@ -7940,11 +7949,17 @@ void Renderer::RecordDlssFrame() {
     return;
   }
   slot.ticket=result.ticket;slot.submitted=false;
+  if(++dlss_evaluated_frames_==1)
+    REXLOG_INFO("native DLSS evaluation recorded: {}x{} -> {}x{} ticket={}",
+        frame.renderWidth,frame.renderHeight,frame.outputWidth,frame.outputHeight,result.ticket);
   dlss_previous_view_projection_=dlss_view_projection_;
   dlss_history_=true;dlss_ready_=true;
 }
 
 void Renderer::PublishGraphicsOptions() {
+  if(dlss_evaluated_frames_ && frame_count_%120==0)
+    REXLOG_INFO("native DLSS frames: evaluated={} completed={} composited={} rejected={} applied={}",
+        dlss_evaluated_frames_,dlss_completed_frames_,dlss_composited_frames_,dlss_rejected_frames_,uint32_t(dlss_->GetStatus().applied));
   auto options=graphics::SharedGraphicsOptions();
   const auto request=options->Snapshot();
   graphics::GraphicsBackendReport report;
@@ -7984,7 +7999,6 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
   }
   EndMotionCapture();
   RecordRayShadowCounter();
-  if(dlss_wanted_ && dlss_filter_seen_ && !dlss_recorded_) RecordDlssFrame();
   // Blit the resolved front buffer into the output target.
   auto latest = resolve_latest_.find(front_buffer_address);
   auto it = latest != resolve_latest_.end() ? resolve_textures_.find(latest->second)
@@ -8013,11 +8027,14 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
     ID3D12DescriptorHeap* heaps[] = {srv_heap_.Get(), sampler_heap_.Get()};
     command_list_->SetDescriptorHeaps(2, heaps);
     const bool dlss_composite=dlss_ready_;
+    if(dlss_composite && ++dlss_composited_frames_==1) REXLOG_INFO("native DLSS output composited");
     command_list_->SetGraphicsRootSignature(dlss_composite ? dlss_composite_root_.Get() : blit_root_signature_.Get());
     command_list_->SetGraphicsRootDescriptorTable(
         0, provider_->OffsetViewDescriptor(srv_heap_->GetGPUDescriptorHandleForHeapStart(),
                                            srv_index));
     if(dlss_composite) {
+      if(!REXCVAR_GET(sr_native_dump_dir).empty() && dlss_composited_frames_==1)
+        REXLOG_INFO("native DLSS presented resolve: address={:08X}",front_buffer_address);
       auto& slot=dlss_slots_[frame_index_];
       Transition(slot.color.Get(),slot.color_state,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
       Transition(slot.output.Get(),slot.output_state,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
@@ -8678,6 +8695,11 @@ void Renderer::DumpFrameResources(const std::string& prefix, bool surfaces_only,
   }
   if (!surfaces_only && !output_only && ssao_ao_) {
     items.push_back({"ssao_ao", ssao_ao_.Get(), &ssao_ao_state_});
+  }
+  if(!surfaces_only && dlss_ready_) {
+    auto& slot=dlss_slots_[frame_index_];
+    if(slot.color) items.push_back({"dlss_scene",slot.color.Get(),&slot.color_state});
+    if(slot.output) items.push_back({"dlss_upscaled",slot.output.Get(),&slot.output_state});
   }
   if (REXCVAR_GET(sr_native_debug_texture_format) >= 0 && !surfaces_only) {
     for (auto& [key, te] : textures_) {

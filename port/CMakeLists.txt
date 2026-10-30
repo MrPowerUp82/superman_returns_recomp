@@ -197,9 +197,18 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
         # An OBJECT library, not a static one: the hook objects only override
         # weak recompiled functions, so nothing would pull them from an archive.
         set(SR_NATIVE_ROOT src/native_renderer)
-        option(SR_DLSS "Build optional official NVIDIA NGX DLSS Super Resolution adapter" OFF)
         set(SR_DLSS_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../.tools/dlss-v3.7.20" CACHE PATH
             "Pinned official NVIDIA NGX SDK (tools/setup_dlss.ps1)")
+        set(sr_dlss_default ON)
+        foreach(sr_ngx_file IN ITEMS include/nvsdk_ngx.h include/nvsdk_ngx_defs.h
+                include/nvsdk_ngx_helpers.h include/nvsdk_ngx_params.h
+                lib/Windows_x86_64/x86_64/nvsdk_ngx_d.lib
+                lib/Windows_x86_64/rel/nvngx_dlss.dll LICENSE.txt dlss-sdk-manifest.json)
+            if(NOT EXISTS "${SR_DLSS_SDK_DIR}/${sr_ngx_file}")
+                set(sr_dlss_default OFF)
+            endif()
+        endforeach()
+        option(SR_DLSS "Build optional official NVIDIA NGX DLSS Super Resolution adapter" ${sr_dlss_default})
         add_library(sr_native OBJECT
             ${SR_NATIVE_ROOT}/native_bridge.cpp
             ${SR_NATIVE_ROOT}/native_hooks.cpp

@@ -1,5 +1,10 @@
 # RT sem validação em GPU — 30/10/2026
 
+Atualização: este registro descreve a implementação inicial. A integração DLSS
+foi posteriormente corrigida e testada na RTX 2060, com avaliação NGX, fence,
+composição e leitura da imagem. Ver [validação DLSS em GPU](dlss-gpu-validation-2026-10-30.md).
+Isso não substitui a validação visual de RT nem implementa movimento de objetos.
+
 Branch `feat/rt-dlss-untested`, escrita em um notebook só com Intel UHD, por
 decisão do usuário. **Nada aqui executou em GPU com DXR.** O que foi verificado:
 compilação do jogo, testes nativos e DXC dos 14 shaders especializados (`ps_6_5`).

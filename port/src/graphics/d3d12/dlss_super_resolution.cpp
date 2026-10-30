@@ -303,7 +303,9 @@ DlssResult DlssSuperResolution::Evaluate(const DlssEvaluation& e) {
     p.status.pendingTicket = ++p.nextTicket;
     p.unsubmittedTicket = p.status.pendingTicket;
     p.unsubmittedGeneration = p.generation;
-    p.status.applied = DlssApplied::PendingGpu;
+    // A newer recording does not undo an already confirmed frame in this
+    // generation. Otherwise continuous rendering reports Pending forever.
+    if(p.status.applied!=DlssApplied::Quality) p.status.applied=DlssApplied::PendingGpu;
     return p.Result(DlssError::None, result, p.status.pendingTicket);
 #endif
 }

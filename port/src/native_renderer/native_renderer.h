@@ -587,10 +587,11 @@ class Renderer : public NativeFrontend {
   DlssSlot dlss_slots_[3];
   Microsoft::WRL::ComPtr<ID3D12RootSignature> dlss_motion_root_,dlss_composite_root_;
   Microsoft::WRL::ComPtr<ID3D12PipelineState> dlss_motion_pipeline_,dlss_composite_pipeline_;
-  bool dlss_active_=false,dlss_failed_=false,dlss_wanted_=false,dlss_filter_seen_=false,dlss_recorded_=false;
+  bool dlss_active_=false,dlss_failed_=false,dlss_wanted_=false,dlss_recorded_=false;
   bool dlss_ready_=false,dlss_history_=false,dlss_view_projection_valid_=false,dlss_depth_reversed_=false;
   uint32_t dlss_render_width_=0,dlss_render_height_=0;
   uint64_t dlss_jitter_index_=0;
+  uint64_t dlss_evaluated_frames_=0,dlss_completed_frames_=0,dlss_composited_frames_=0,dlss_rejected_frames_=0;
   HostSurface* dlss_scene_ds_=nullptr;
   graphics::SceneRasterJitter dlss_jitter_{};
   graphics::Matrix4 dlss_view_projection_{},dlss_previous_view_projection_{};
@@ -930,6 +931,7 @@ class Renderer : public NativeFrontend {
   } crumbs_[4096];
   uint32_t crumb_prim_ = 0, crumb_count_ = 0;
   void Breadcrumb(const char* what = "draw");
+  void CompleteGuestDraw();
   void ReportHang();
   // Float constant buffers of the previous draw, reused while the mirror's
   // constants are unchanged (valid within one frame's upload ring).

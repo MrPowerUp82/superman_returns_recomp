@@ -49,6 +49,6 @@ void LogDeviceCapabilities(ID3D12Device* device) {
   REXLOG_INFO("native D3D12 capabilities: options5_hr={:08X} raytracing_tier={} device5_hr={:08X} shader_model={}.{} shader_hr={:08X} shader_query_ceiling=6.9",
       uint32_t(options_hr),SUCCEEDED(options_hr)?uint32_t(options.RaytracingTier):0,
       uint32_t(device5_hr),model>>4,model&15,uint32_t(shader_hr));
-  REXLOG_INFO("native feature integration: rt_shadows=absent rt_reflections=absent dlss=absent dlss_support=not_queried");
+  REXLOG_INFO("native feature integration: RT/DLSS availability will be reported by the renderer after initialization");
 }
 }

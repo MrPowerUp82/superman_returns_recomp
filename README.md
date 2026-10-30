@@ -151,6 +151,12 @@ reiniciar. Nos ensaios, o ganho mais claro foi remover pausas longas em Compare;
 o FPS normal variou entre pares. [Pesquisa e benchmarks de CPU](docs/cpu-web-bench-2026-10-30.md).
 Para repetir A/B sequencial sem instrumentação: `python tools/bench/cpu_web_sweep.py --suite arm --blocks 3 --cpu-profile 0`.
 
+DLSS Quality funciona no renderer nativo **D3D12**, com SDK oficial instalado e
+GPU RTX compatível. O build detecta o SDK local; `SR_DLSS=OFF` permite desabilitar
+o suporte. Ative NVIDIA DLSS no menu ou use `--sr_dlss=quality`. Há movimento
+apenas de câmera, portanto objetos em movimento ainda podem deixar rastros.
+[Correção e validação na RTX 2060](docs/dlss-gpu-validation-2026-10-30.md).
+
 No renderer nativo, num i5-13420H + Intel UHD, o quadro é limitado pela GPU integrada: a cena principal ocupa ~72% do tempo de GPU. O trabalho de CPU do worker D3D12 fica em ~13 ms por quadro. Números atuais na seção [Benchmark](#benchmark); análise em [pistas de desempenho de 28/10](docs/perf-hunt-game-xenia-2026-10-28.md).
 
 As medições abaixo são históricas e registram explicitamente os limites usados. Medido no fechamento do ciclo 3 em 2026-10-06 no mesmo i5-13420H + Intel UHD, com `tools\bench\bench_api.ps1` (New Game, 20 s parado e 20 s andando, janela 1280x720, limite de 30 FPS; o script só mede depois de ver o HUD do jogo na tela):
