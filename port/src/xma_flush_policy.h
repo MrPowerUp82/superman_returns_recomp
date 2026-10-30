@@ -62,6 +62,8 @@ inline const char* XmaFlushDecisionName(XmaFlushDecision decision) {
 // Determines if input is exhausted. ReXGlue only swaps buffers at packet boundaries;
 // if the decoder hits end-of-packets (error_status == 4) or read_offset traverses all
 // packet bits of the active buffer without a valid alternate buffer, the input is exhausted.
+inline constexpr uint32_t kXmaBitsPerPacket = 2048u * 8u;  // 2048 bytes per packet.
+
 inline bool IsXmaInputExhausted(bool in0_valid, bool in1_valid, uint32_t current_buffer,
                                uint32_t in0_packet_count, uint32_t in1_packet_count,
                                uint32_t read_offset_bits, uint32_t error_status) {
@@ -69,7 +71,7 @@ inline bool IsXmaInputExhausted(bool in0_valid, bool in1_valid, uint32_t current
   const bool other_valid = (current_buffer == 0) ? in1_valid : in0_valid;
   if (error_status == 4 && !other_valid) return true;
   const uint32_t cur_packets = (current_buffer == 0) ? in0_packet_count : in1_packet_count;
-  const uint32_t cur_capacity_bits = cur_packets * 2048; // 2048 bits per packet
+  const uint32_t cur_capacity_bits = cur_packets * kXmaBitsPerPacket;
   if (cur_capacity_bits > 0 && read_offset_bits >= cur_capacity_bits && !other_valid) return true;
   return false;
 }

@@ -55,6 +55,8 @@ using rex::audio::XMA_CONTEXT_DATA;
 using rex::audio::XmaContext;
 using rex::audio::XmaDecoder;
 
+static_assert(superman_returns::kXmaBitsPerPacket == XmaContext::kBitsPerPacket);
+
 // The decoder's carry state is private. These keys name the members through
 // explicit instantiation, which the language allows to ignore access control;
 // a changed SDK layout fails to compile instead of corrupting memory.
@@ -390,6 +392,8 @@ void XmaKickStarvedContext(PPCRegister& r26, PPCRegister& r31) {
   const uint32_t remaining = IsValidGuestPtr(sound) ? Load32(base, sound + 36) : 0;
   if (superman_returns::IsFinalXmaRequest(remaining, g_mixer_call.requested)) {
     if (TryFlushFinalBlock(base, xma_context, stream)) {
+      // The first export returned zero in r3; restore the context argument.
+      call_ctx.r3.u64 = xma_context;
       __imp__XMAEnableContext(call_ctx, base);
       const ContextState after_flush = ReadState(base, xma_context);
       if (after_flush.dword0 != before.dword0 || after_flush.dword2 != before.dword2) {

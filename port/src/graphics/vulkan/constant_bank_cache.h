@@ -1,5 +1,6 @@
 #pragma once
 #include "../guest/render_packet.h"
+#include "../guest/shader_constant_cache.h"
 #include <array>
 #include <cstring>
 namespace superman_returns::graphics::vulkan {
@@ -8,10 +9,11 @@ class ConstantBankCache {
 public:
   struct Reuse {bool vs=false,ps=false;uint32_t vs_offset=0,ps_offset=0;};
   void Reset() {chunk_=nullptr;serial_=0;}
-  template<class Constants> Reuse Find(uint64_t serial,const void* chunk,const Constants& value) const {
+  template<class Constants> Reuse Find(uint64_t serial,const void* chunk,const Constants& value,
+                                      const guest::ShaderConstantUsage& vs={},const guest::ShaderConstantUsage& ps={}) const {
     if(!chunk || chunk!=chunk_ || !serial || serial!=serial_) return {};
-    return {std::memcmp(vs_.data(),value.vs.data(),sizeof(vs_))==0,
-            std::memcmp(ps_.data(),value.ps.data(),sizeof(ps_))==0,vs_offset_,ps_offset_};
+    return {guest::EqualShaderConstants(vs_,std::span<const uint32_t,1024>(value.vs.data(),1024),vs),
+            guest::EqualShaderConstants(ps_,std::span<const uint32_t,1024>(value.ps.data(),1024),ps),vs_offset_,ps_offset_};
   }
   template<class Constants> void Commit(uint64_t serial,const void* chunk,uint32_t offset,const Constants& value,Reuse reuse) {
     if(chunk!=chunk_ || serial!=serial_) reuse={};

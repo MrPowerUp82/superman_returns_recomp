@@ -4,7 +4,45 @@
 #include <algorithm>
 #include <cstring>
 #include <numeric>
+#include <cstdlib>
 namespace superman_returns::graphics::vulkan {
+// Process-wide baseline budget includes snapshots retained by external leases.
+// Snapshot metadata and bytes are charged together; budget failure is a full upload.
+namespace {std::atomic<size_t> texture_snapshot_bytes{0};}
+struct TextureUploadSnapshot {
+  TextureUploadPlan plan;size_t charge=0;
+  ~TextureUploadSnapshot() {texture_snapshot_bytes.fetch_sub(charge);}
+};
+namespace {
+bool TextureUpdatesEnabled() {
+  static const bool enabled=[] {const char* v=std::getenv("SR_NATIVE_TEXTURE_UPDATES");return v && std::strcmp(v,"1")==0;}();return enabled;
+}
+bool SameUploadLayout(const TextureUploadPlan& a,const TextureUploadPlan& b) {
+  if(a.format!=b.format || a.image_type!=b.image_type || a.view_type!=b.view_type || a.flags!=b.flags ||
+     a.extent.width!=b.extent.width || a.extent.height!=b.extent.height || a.extent.depth!=b.extent.depth ||
+     a.layers!=b.layers || a.mips!=b.mips || a.swizzle.r!=b.swizzle.r || a.swizzle.g!=b.swizzle.g ||
+     a.swizzle.b!=b.swizzle.b || a.swizzle.a!=b.swizzle.a || a.bytes.size()!=b.bytes.size() || a.regions.size()!=b.regions.size()) return false;
+  for(size_t i=0;i<a.regions.size();++i) {
+    const auto& x=a.regions[i];const auto& y=b.regions[i];
+    if(x.bufferOffset!=y.bufferOffset || x.bufferRowLength!=y.bufferRowLength || x.bufferImageHeight!=y.bufferImageHeight ||
+       x.imageSubresource.aspectMask!=y.imageSubresource.aspectMask || x.imageSubresource.mipLevel!=y.imageSubresource.mipLevel ||
+       x.imageSubresource.baseArrayLayer!=y.imageSubresource.baseArrayLayer || x.imageSubresource.layerCount!=y.imageSubresource.layerCount ||
+       x.imageOffset.x!=y.imageOffset.x || x.imageOffset.y!=y.imageOffset.y || x.imageOffset.z!=y.imageOffset.z ||
+       x.imageExtent.width!=y.imageExtent.width || x.imageExtent.height!=y.imageExtent.height || x.imageExtent.depth!=y.imageExtent.depth) return false;
+  }
+  return true;
+}
+void SaveUploadSnapshot(TextureResource& gpu,TextureUploadPlan&& plan) {
+  gpu.upload_snapshot.reset();
+  const size_t charge=sizeof(TextureUploadSnapshot)+plan.bytes.capacity()+plan.regions.capacity()*sizeof(VkBufferImageCopy);
+  constexpr size_t per_resource=8ull*1024*1024,budget=64ull*1024*1024;
+  if(charge>per_resource) return;
+  auto snapshot=std::make_shared<TextureUploadSnapshot>();
+  size_t used=texture_snapshot_bytes.load();
+  do {if(used>budget-charge) return;} while(!texture_snapshot_bytes.compare_exchange_weak(used,used+charge));
+  snapshot->charge=charge;snapshot->plan=std::move(plan);gpu.upload_snapshot=std::move(snapshot);
+}
+}
 void SubmissionResources::Keep(uint64_t serial,std::shared_ptr<void> resource) {
   if(!resource) return;
   auto found=pending_.find(serial);
@@ -278,12 +316,23 @@ bool ResourceStore::UploadBufferImpl(guest::ResourceId id,std::span<const std::b
   c_.f.vkCmdPipelineBarrier(command_,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_VERTEX_SHADER_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,0,0,nullptr,1,&barrier,0,nullptr);
   submissions_.Hold(serial_,upload);submissions_.Hold(serial_,gpu);buffers_[id]=std::move(gpu);e={};return true;
 }
+bool ResourceStore::AliasUploadedTexture(guest::ResourceId id,const std::shared_ptr<TextureResource>& texture,Error& e) {
+  if(!Ready(e)) return false;
+  if(!id || !texture || texture->context!=&c_ || !texture->handle || !texture->view || texture->state || texture->image_owner)
+    return Fail(e,"Alias uploaded texture","Expected an immutable upload in this context");
+  auto found=textures_.find(id);
+  if(found!=textures_.end() && found->second->version>texture->version) return Fail(e,"Alias uploaded texture","Stale texture version");
+  submissions_.Hold(serial_,texture);textures_[id]=texture;e={};return true;
+}
 bool ResourceStore::UploadTexture(guest::ResourceId id,const guest::LinearTexture& texture,uint64_t version,Error& e) {
   if(!Ready(e)) return false;
   if(!id) return Fail(e,"Upload texture","Missing resource ID");
   auto found=textures_.find(id);
   if(found!=textures_.end() && found->second->version==version) {submissions_.Hold(serial_,found->second);e={};return true;}
   if(found!=textures_.end() && version<found->second->version) return Fail(e,"Upload texture","Stale texture version");
+  // Keep the bounded budget for textures that actually change, rather than
+  // retaining a baseline for every immutable startup asset.
+  const bool retain_update_snapshot=TextureUpdatesEnabled() && found!=textures_.end();
   TextureUploadPlan plan;
   if(!PlanTextureUpload(texture,c_.properties.limits.optimalBufferCopyOffsetAlignment,plan,e)) return false;
   VkFormatProperties format{};c_.f.vkGetPhysicalDeviceFormatProperties(c_.physical,plan.format,&format);
@@ -293,29 +342,66 @@ bool ResourceStore::UploadTexture(guest::ResourceId id,const guest::LinearTextur
   if(!Check(c_.f.vkGetPhysicalDeviceImageFormatProperties(c_.physical,plan.format,plan.image_type,VK_IMAGE_TILING_OPTIMAL,usage,plan.flags,&image_caps),"Texture image support",e)) return false;
   if(plan.extent.width>image_caps.maxExtent.width || plan.extent.height>image_caps.maxExtent.height || plan.extent.depth>image_caps.maxExtent.depth || plan.mips>image_caps.maxMipLevels || plan.layers>image_caps.maxArrayLayers)
     return Fail(e,"Texture image limits","Texture exceeds format dimensions");
+  // Test map-only ownership BEFORE taking any local shared_ptr. A descriptor lease,
+  // alias, image-owner chain or caller reference must force immutable replacement.
+  const bool reuse=TextureUpdatesEnabled() && found!=textures_.end() && found->second.use_count()==1 &&
+    found->second->held_serial<=completed_ && !found->second->state && !found->second->image_owner &&
+    found->second->usage==usage && found->second->upload_snapshot &&
+    SameUploadLayout(found->second->upload_snapshot->plan,plan);
+  std::vector<VkBufferImageCopy> regions;std::vector<uint8_t> staged;
+  uint64_t bytes_uploaded=0,skipped=0;
+  const auto f=MapFormat(texture.format);
+  const VkDeviceSize copy_alignment=std::lcm(std::max<VkDeviceSize>(c_.properties.limits.optimalBufferCopyOffsetAlignment,4),VkDeviceSize(f.bytes));
+  for(const auto& region:plan.regions) {
+    const size_t size=size_t((uint64_t(region.imageExtent.width)+f.block-1)/f.block)*
+      ((uint64_t(region.imageExtent.height)+f.block-1)/f.block)*f.bytes*region.imageExtent.depth;
+    if(reuse && !std::memcmp(plan.bytes.data()+region.bufferOffset,
+        found->second->upload_snapshot->plan.bytes.data()+region.bufferOffset,size)) {++skipped;continue;}
+    auto copy=region;
+    if(reuse) {
+      copy.bufferOffset=(staged.size()+copy_alignment-1)/copy_alignment*copy_alignment;
+      staged.resize(size_t(copy.bufferOffset)+size);
+      std::memcpy(staged.data()+copy.bufferOffset,plan.bytes.data()+region.bufferOffset,size);
+    }
+    regions.push_back(copy);bytes_uploaded+=size;
+  }
   auto staging_alignment=std::lcm<VkDeviceSize>(std::max<VkDeviceSize>(16,c_.properties.limits.optimalBufferCopyOffsetAlignment),std::max<VkDeviceSize>(1,c_.properties.limits.nonCoherentAtomSize));
-  auto upload=Suballocate(staging_,plan.bytes.size(),staging_alignment,e);
-  if(!upload || !Write(upload,std::as_bytes(std::span(plan.bytes)),e)) return false;
-  for(auto& region:plan.regions) region.bufferOffset+=upload->offset;
-  auto gpu=std::make_shared<TextureResource>();gpu->context=&c_;gpu->format=plan.format;gpu->extent=plan.extent;gpu->layers=plan.layers;gpu->mips=plan.mips;gpu->view_type=plan.view_type;gpu->version=version;
-  VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};ci.flags=plan.flags;ci.imageType=plan.image_type;ci.format=plan.format;ci.extent=plan.extent;ci.mipLevels=plan.mips;ci.arrayLayers=plan.layers;ci.samples=VK_SAMPLE_COUNT_1_BIT;ci.tiling=VK_IMAGE_TILING_OPTIMAL;ci.usage=usage;ci.sharingMode=VK_SHARING_MODE_EXCLUSIVE;ci.initialLayout=VK_IMAGE_LAYOUT_UNDEFINED;
-  if(!Check(c_.f.vkCreateImage(c_.device,&ci,nullptr,&gpu->handle),"Create texture image",e)) return false;
-  VkMemoryRequirements mr{};c_.f.vkGetImageMemoryRequirements(c_.device,gpu->handle,&mr);
-  auto type=MemoryType(c_,mr.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-  if(!type) return Fail(e,"Texture memory","Device-local memory unavailable");
-  VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};alloc.allocationSize=mr.size;alloc.memoryTypeIndex=*type;
-  if(!Check(c_.f.vkAllocateMemory(c_.device,&alloc,nullptr,&gpu->memory),"Allocate texture",e) || !Check(c_.f.vkBindImageMemory(c_.device,gpu->handle,gpu->memory,0),"Bind texture",e)) return false;
-  gpu->allocation=mr.size;++LiveMemory().images;LiveMemory().image_bytes+=int64_t(mr.size);
-  VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};view.image=gpu->handle;view.viewType=plan.view_type;view.format=plan.format;view.components=plan.swizzle;
-  view.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,plan.mips,0,plan.view_type==VK_IMAGE_VIEW_TYPE_CUBE?6u:1u};
-  if(!Check(c_.f.vkCreateImageView(c_.device,&view,nullptr,&gpu->view),"Create texture view",e)) return false;
-  VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};barrier.srcQueueFamilyIndex=barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;barrier.image=gpu->handle;barrier.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,plan.mips,0,plan.layers};barrier.oldLayout=VK_IMAGE_LAYOUT_UNDEFINED;barrier.newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;barrier.dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;
-  auto command=upload_?upload_:command_;
-  c_.f.vkCmdPipelineBarrier(command,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,0,nullptr,1,&barrier);
-  c_.f.vkCmdCopyBufferToImage(command,upload->handle,gpu->handle,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,uint32_t(plan.regions.size()),plan.regions.data());
-  barrier.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;barrier.newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_SHADER_READ_BIT;
-  if(upload_) texture_barriers_.push_back(barrier);
-  else c_.f.vkCmdPipelineBarrier(command_,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_VERTEX_SHADER_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,0,0,nullptr,0,nullptr,1,&barrier);
+  std::shared_ptr<BufferResource> upload;
+  if(!regions.empty()) {
+    const auto bytes=reuse?std::span<const uint8_t>(staged):std::span<const uint8_t>(plan.bytes);
+    upload=Suballocate(staging_,bytes.size(),staging_alignment,e);
+    if(!upload || !Write(upload,std::as_bytes(bytes),e)) return false;
+    for(auto& region:regions) region.bufferOffset+=upload->offset;
+  }
+  auto gpu=reuse?found->second:std::make_shared<TextureResource>();
+  if(!reuse) {
+    gpu->context=&c_;gpu->format=plan.format;gpu->extent=plan.extent;gpu->layers=plan.layers;gpu->mips=plan.mips;gpu->view_type=plan.view_type;gpu->usage=usage;
+    VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};ci.flags=plan.flags;ci.imageType=plan.image_type;ci.format=plan.format;ci.extent=plan.extent;ci.mipLevels=plan.mips;ci.arrayLayers=plan.layers;ci.samples=VK_SAMPLE_COUNT_1_BIT;ci.tiling=VK_IMAGE_TILING_OPTIMAL;ci.usage=usage;ci.sharingMode=VK_SHARING_MODE_EXCLUSIVE;ci.initialLayout=VK_IMAGE_LAYOUT_UNDEFINED;
+    if(!Check(c_.f.vkCreateImage(c_.device,&ci,nullptr,&gpu->handle),"Create texture image",e)) return false;
+    VkMemoryRequirements mr{};c_.f.vkGetImageMemoryRequirements(c_.device,gpu->handle,&mr);
+    auto type=MemoryType(c_,mr.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if(!type) return Fail(e,"Texture memory","Device-local memory unavailable");
+    VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};alloc.allocationSize=mr.size;alloc.memoryTypeIndex=*type;
+    if(!Check(c_.f.vkAllocateMemory(c_.device,&alloc,nullptr,&gpu->memory),"Allocate texture",e) || !Check(c_.f.vkBindImageMemory(c_.device,gpu->handle,gpu->memory,0),"Bind texture",e)) return false;
+    gpu->allocation=mr.size;++LiveMemory().images;LiveMemory().image_bytes+=int64_t(mr.size);
+    VkImageViewCreateInfo view{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};view.image=gpu->handle;view.viewType=plan.view_type;view.format=plan.format;view.components=plan.swizzle;
+    view.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,plan.mips,0,plan.view_type==VK_IMAGE_VIEW_TYPE_CUBE?6u:1u};
+    if(!Check(c_.f.vkCreateImageView(c_.device,&view,nullptr,&gpu->view),"Create texture view",e)) return false;
+  }
+  if(upload) {
+    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};barrier.srcQueueFamilyIndex=barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;barrier.image=gpu->handle;barrier.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,plan.mips,0,plan.layers};barrier.oldLayout=reuse?VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:VK_IMAGE_LAYOUT_UNDEFINED;barrier.newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;barrier.srcAccessMask=reuse?VK_ACCESS_SHADER_READ_BIT:0;barrier.dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;
+    auto command=upload_?upload_:command_;
+    c_.f.vkCmdPipelineBarrier(command,reuse?VK_PIPELINE_STAGE_ALL_COMMANDS_BIT:VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,0,nullptr,1,&barrier);
+    c_.f.vkCmdCopyBufferToImage(command,upload->handle,gpu->handle,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,uint32_t(regions.size()),regions.data());
+    barrier.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;barrier.newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_SHADER_READ_BIT;
+    if(upload_) texture_barriers_.push_back(barrier);
+    else c_.f.vkCmdPipelineBarrier(command_,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_VERTEX_SHADER_BIT|VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,0,0,nullptr,0,nullptr,1,&barrier);
+  }
+  gpu->version=version;
+  if(retain_update_snapshot) SaveUploadSnapshot(*gpu,std::move(plan));
+  ++texture_update_stats_.uploads;texture_update_stats_.upload_bytes+=bytes_uploaded;
+  texture_update_stats_.mips_uploaded+=regions.size();texture_update_stats_.mips_skipped+=skipped;
+  texture_update_stats_.resource_reuses+=reuse?1:0;
   submissions_.Hold(serial_,upload);submissions_.Hold(serial_,gpu);textures_[id]=std::move(gpu);e={};return true;
 }
 std::shared_ptr<TextureResource> ResourceStore::ResolveTexture(guest::ResourceId id,VkFormat format,VkExtent3D extent,uint32_t mips,uint32_t layers,bool cube,ImageState& state,Error& e,VkImageUsageFlags additional_usage) {

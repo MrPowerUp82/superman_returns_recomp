@@ -22,6 +22,20 @@ SR_TEST(constant_bank_cache_requires_exact_bytes_submission_and_chunk) {
   r=cache.Find(2,&chunk2,v);SR_CHECK(r.vs && r.ps);
   r=cache.Find(2,&chunk1,v);SR_CHECK(!r.vs && !r.ps);
 }
+SR_TEST(constant_bank_mask_keeps_the_retained_upload_baseline_when_usage_expands) {
+  ConstantBankCache cache;guest::ConstantSnapshot values;int chunk;
+  guest::ShaderConstantUsage empty,first,second,dynamic;empty.known=first.known=second.known=dynamic.known=true;
+  first.mask[0]=1;second.mask[0]=2;dynamic.dynamic=true;
+  cache.Commit(1,&chunk,0,values,{});
+  values.ps[4]=42;
+  auto reused=cache.Find(1,&chunk,values,empty,first);SR_CHECK(reused.vs && reused.ps);
+  cache.Commit(1,&chunk,12288,values,reused);
+  auto expanded=cache.Find(1,&chunk,values,empty,second);SR_CHECK(expanded.vs && !expanded.ps);
+  SR_CHECK(!cache.Find(1,&chunk,values,empty,dynamic).ps);
+  SR_CHECK(!cache.Find(1,&chunk,values).ps);
+  SR_CHECK(!cache.Find(2,&chunk,values,empty,first).ps);
+  cache.Reset();SR_CHECK(!cache.Find(1,&chunk,values,empty,first).ps);
+}
 namespace {
 // The 12 KiB constant block of one draw (vs, ps, shared), as MapTransient hands it out.
 struct Block {

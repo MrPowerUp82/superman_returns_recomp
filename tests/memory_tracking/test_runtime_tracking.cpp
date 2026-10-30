@@ -66,6 +66,34 @@ SR_TEST(runtime_guest_aliases_and_raw_physical_store_invalidate) {
   }
 }
 
+SR_TEST(runtime_fast_texture_proof_observes_writes_to_base_and_mip_aliases) {
+  for (const auto alias : {0u, 0xA4000000u, 0xC4000000u, 0xE3fff000u}) {
+    Fixture f;
+    if (!f.session) return;
+    f.api->stop(f.session); f.session = 0;
+    SR_CHECK(f.Allocate());
+    auto* base = f.memory.TranslatePhysical<volatile uint8_t*>(0x04000000);
+    auto* mip = alias ? f.memory.TranslateVirtual<volatile uint8_t*>(alias + 0x2000)
+                     : f.memory.TranslatePhysical<volatile uint8_t*>(0x04002000);
+    *base = 7; *mip = 9;
+    superman_returns::native::ResourceWriteTracker tracker;
+    SR_CHECK(tracker.Start(f.memory));
+    const std::array ranges{RexTrackingRange{0x04000000, 4096}, RexTrackingRange{0x04002000, 4096}};
+    superman_returns::native::TextureUploadProof proof;
+    proof.watch = tracker.Watch(ranges);
+    proof.resource_version = 1;
+    proof.domain = tracker.FastDomain();
+    proof.stamps.resize(ranges.size());
+    SR_CHECK(proof.domain != 0);
+    SR_CHECK(tracker.Sample(proof.watch, proof.stamps));
+    SR_CHECK(tracker.CanReuseTextureFast(proof, ranges, 1));
+    *mip = 23;
+    SR_CHECK(!tracker.CanReuseTextureFast(proof, ranges, 1));
+    tracker.Stop();
+    SR_CHECK(!tracker.CanReuseTextureFast(proof, ranges, 1));
+  }
+}
+
 SR_TEST(runtime_optional_client_negotiates_and_releases_watches) {
   Fixture f;
   if (!f.session) return;
@@ -191,6 +219,32 @@ SR_TEST(runtime_unwatch_restores_only_owned_pages) {
   SR_CHECK_EQ(after.active_watches, 0u);
   RexTrackingStamp stamp{};
   SR_CHECK(f.api->sample(f.session, watch, &stamp, 1) != RexTrackingStatus::Ok);
+}
+
+SR_TEST(runtime_arm_clips_mid_region_range_and_restores_owned_alias_pages) {
+  for(const auto alias:{0u,0xA4000000u,0xC4000000u,0xE3fff000u}) {
+    Fixture f;
+    if(!f.session) return;
+    SR_CHECK(f.Allocate());
+    auto* data=alias?f.memory.TranslateVirtual<uint8_t*>(alias):f.memory.TranslatePhysical<uint8_t*>(0x04000000);
+    const RexTrackingRange range{0x04001001,8190};
+    RexTrackingWatch watch=0;
+    SR_CHECK(f.api->watch(f.session,&range,1,&watch)==RexTrackingStatus::Ok);
+    SR_CHECK(watch!=0);
+    auto protection=[](void* address) {MEMORY_BASIC_INFORMATION m{};
+      SR_CHECK(VirtualQuery(address,&m,sizeof(m))!=0);return m.Protect;};
+    SR_CHECK_EQ(protection(data),DWORD(PAGE_READWRITE));
+    SR_CHECK_EQ(protection(data+4096),DWORD(PAGE_READONLY));
+    SR_CHECK_EQ(protection(data+8192),DWORD(PAGE_READONLY));
+    SR_CHECK_EQ(protection(data+12288),DWORD(PAGE_READWRITE));
+    auto before=f.Sample(watch);SR_CHECK(before.coverage==RexTrackingCoverage::Complete);
+    *reinterpret_cast<volatile uint8_t*>(data+8192)=42;
+    auto after=f.Sample(watch);SR_CHECK(after.coverage!=RexTrackingCoverage::Complete);
+    SR_CHECK(after.invalidation_epoch>before.invalidation_epoch);
+    f.api->unwatch(f.session,watch);
+    SR_CHECK_EQ(protection(data+4096),DWORD(PAGE_READWRITE));
+    SR_CHECK_EQ(protection(data+8192),DWORD(PAGE_READWRITE));
+  }
 }
 
 SR_TEST(runtime_gpu_writeback_alias_is_also_observed) {

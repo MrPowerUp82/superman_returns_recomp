@@ -4,6 +4,12 @@
 #   ctest --test-dir build/tests-native --output-on-failure
 cmake_minimum_required(VERSION 3.20)
 project(sr_native_tests CXX)
+if(WIN32)
+  add_executable(sr_d3d12_texture_updates_gpu main.cpp test_d3d12_texture_updates_gpu.cpp)
+  target_compile_features(sr_d3d12_texture_updates_gpu PRIVATE cxx_std_20)
+  target_link_libraries(sr_d3d12_texture_updates_gpu PRIVATE d3d12 dxgi)
+  option(SR_NATIVE_GPU_TESTS "Register hardware-dependent native GPU tests" OFF)
+endif()
 find_package(Threads REQUIRED)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -109,6 +115,11 @@ add_executable(sr_native_tests
     test_index_endian.cpp
     test_post_effects.cpp
     test_shader_library.cpp
+    test_texture_binding_policy.cpp
+    test_shader_texture_usage.cpp
+    test_texture_storage_identity.cpp
+    test_d3d12_texture_updates.cpp
+    test_shader_constant_usage.cpp
     "${SR_NATIVE_DIR}/pm4_mirror.cpp"
 )
 target_include_directories(sr_native_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${SR_NATIVE_DIR}")
@@ -149,12 +160,23 @@ else()
 endif()
 
 enable_testing()
+if(WIN32 AND SR_NATIVE_GPU_TESTS)
+  add_test(NAME sr_d3d12_texture_updates_gpu COMMAND sr_d3d12_texture_updates_gpu)
+  set_tests_properties(sr_d3d12_texture_updates_gpu PROPERTIES TIMEOUT 60)
+endif()
 add_executable(sr_dlss_contract_tests dlss_super_resolution_test.cpp
     "${SR_NATIVE_DIR}/../graphics/d3d12/dlss_super_resolution.cpp")
 target_compile_definitions(sr_dlss_contract_tests PRIVATE SR_HAS_DLSS=0)
 add_test(NAME sr_dlss_contract_tests COMMAND sr_dlss_contract_tests)
 add_test(NAME sr_native_tests COMMAND sr_native_tests)
 set_tests_properties(sr_native_tests PROPERTIES TIMEOUT 30)
+# Exercise the current XMA hook body with ABI boundary shims, without the SDK.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND AND CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+  add_test(NAME sr_xma_hook_tests COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_xma_hook.py")
+  set_tests_properties(sr_xma_hook_tests PROPERTIES
+      ENVIRONMENT "CXX=${CMAKE_CXX_COMPILER}" TIMEOUT 75)
+endif()
 if(WIN32)
   add_executable(sr_buffer_heap_pool_tests test_d3d12_buffer_heap_pool.cpp)
   target_include_directories(sr_buffer_heap_pool_tests PRIVATE "${SR_NATIVE_DIR}")

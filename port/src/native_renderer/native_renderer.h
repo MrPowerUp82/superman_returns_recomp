@@ -30,9 +30,11 @@
 #include "../graphics/guest/capture_batch_pool.h"
 #include "buffer_content.h"
 #include "shared_constants_cache.h"
+#include "../graphics/guest/shader_constant_cache.h"
 #include "descriptor_recycling.h"
 #include "buffer_srv_cache.h"
 #include "d3d12_buffer_heap_pool.h"
+#include "d3d12_texture_updates.h"
 #include "cpu_bundle.h"
 #include "resolve_identity.h"
 #include "resource_write_tracking.h"
@@ -209,6 +211,9 @@ class Renderer : public NativeFrontend {
     uint64_t a2c_draws[32] = {}, alpha_test_draws[32] = {};
     uint64_t textures_created = 0;
     uint64_t textures_reloaded = 0;
+    uint64_t texture_masked_draws = 0, texture_slots_skipped = 0;
+    uint64_t texture_storage_reuses = 0;
+    uint64_t vs_constant_mask_reuses = 0, ps_constant_mask_reuses = 0;
     uint64_t edram_alias_clears = 0;
     uint64_t buffer_partial_uploads = 0;
     uint64_t gpu_wait_us = 0;
@@ -468,7 +473,9 @@ class Renderer : public NativeFrontend {
                               TextureLookupMetadata& metadata);
   uint32_t GetSamplerIndex(const uint32_t fetch[6], bool force_linear = false,
                            float lod_bias = 0.0f);
-  bool UploadConstants(uint8_t* base, uint32_t dev);
+  bool UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mask,
+                       const graphics::guest::ShaderConstantUsage& vs_usage,
+                       const graphics::guest::ShaderConstantUsage& ps_usage);
   void ApplyFixedFunctionState(uint8_t* base, uint32_t dev);
   bool ScreenSpaceDraw(uint8_t* base, uint32_t dev);
   bool AlphaTestToCoverage(uint8_t* base, uint32_t dev);
@@ -787,12 +794,25 @@ class Renderer : public NativeFrontend {
   uint64_t tracking_mismatches_=0, tracking_races_=0, tracking_candidates_=0;
   uint64_t tracking_report_frame_=0, tracking_query_ns_=0;
   uint64_t tracking_skipped_checks_=0, tracking_skipped_bytes_=0;
+  uint64_t tracking_fast_reuses_=0;
+  uint64_t tracking_unpublished_queries_skipped_=0;
   uint64_t tracking_unknown_=0, tracking_invalidated_=0, tracking_active_=0, tracking_unchanged_lost_=0;
+  std::shared_ptr<D3DTextureSnapshotBudget> texture_snapshot_budget_=std::make_shared<D3DTextureSnapshotBudget>();
+  // Immutable SRV identity -> last covering submission, including SlotCache hits.
+  struct TextureUse { uint64_t fence=0,frame=0; };
+  std::unordered_map<uint32_t,TextureUse> texture_use_fences_;
+  std::vector<std::pair<Microsoft::WRL::ComPtr<ID3D12Resource>,uint32_t>> pending_texture_retirements_;
+  void RetireTexture(Microsoft::WRL::ComPtr<ID3D12Resource> resource,uint32_t srv);
+  uint64_t texture_upload_bytes_=0, texture_resource_reuses_=0, texture_mips_skipped_=0;
   struct TextureEntry {
     Microsoft::WRL::ComPtr<ID3D12Resource> resource;
     uint32_t srv_index = 0;
     std::unique_ptr<TextureTrackingEntry> tracking;
     uint64_t resource_version=0;
+    std::unique_ptr<D3DTextureSnapshot> update_snapshot;
+    DXGI_FORMAT update_view_format=DXGI_FORMAT_UNKNOWN;
+    uint32_t update_component_mapping=0;
+    D3D12_SRV_DIMENSION update_view_dimension=D3D12_SRV_DIMENSION_UNKNOWN;
     std::array<uint32_t,6> descriptor{};
     // Content validation: all decoder source ranges and their combined hash. Dynamic
     // textures (fog tables, CPU-written lookup tables) are rewritten in place.
@@ -890,6 +910,7 @@ class Renderer : public NativeFrontend {
   // constants are unchanged (valid within one frame's upload ring).
   uint64_t cb_vs_version_ = 0, cb_ps_version_ = 0;
   D3D12_GPU_VIRTUAL_ADDRESS cb_vs_gpu_ = 0, cb_ps_gpu_ = 0;
+  graphics::guest::VersionedShaderConstantCache cb_vs_cache_, cb_ps_cache_;
   SharedConstantsCache shared_constants_cache_;
   // Per fetch slot: a few recent fetch constants and their SRV indices this
   // frame. Games often alternate A->B->A in the same slot; a one-entry cache

@@ -1,6 +1,7 @@
 #include "game_renderer.h"
 #include "resolve.h"
 #include "../guest/primitive_expansion.h"
+#include "../guest/shader_constant_policy.h"
 #include <algorithm>
 #include <bit>
 #include <cstdlib>
@@ -60,6 +61,9 @@ std::shared_ptr<TextureResource> GameRenderer::SelectFrontbuffer(const guest::Sw
 }
 bool GameRenderer::BeginSubmission(VkCommandBuffer command,uint64_t serial,Error& e,VkCommandBuffer upload) {
   constant_bank_cache_.Reset();ui_cut_.BeginFrame();
+  if(texture_storage_.size()>2048) for(auto it=texture_storage_.begin();it!=texture_storage_.end();) {
+    if(it->second.image.expired() || it->second.capture.expired()) it=texture_storage_.erase(it);else ++it;
+  }
   open_pass_.reset();bound_pipeline_=VK_NULL_HANDLE;bound_global_set_=VK_NULL_HANDLE;shadow_.Invalidate();
   if(!resources_.BeginSubmission(command,serial,e,upload) || !targets_.BeginSubmission(command,serial,e)) return false;
   command_=command;serial_=serial;merge_passes_=upload!=VK_NULL_HANDLE;recording_.store(command,std::memory_order_relaxed);
@@ -241,8 +245,24 @@ bool GameRenderer::Draw(const guest::DrawPacket& draw,VkCommandBuffer command,Er
     }
     const auto& capture=draw.textures[slot];if(!capture) return Fail(e,"Bound texture needs a captured upload or resolved image");
     if(current && current->version==capture->version) continue;
+    const bool share_storage=guest::TextureStorageReuseEnabled(guest::TextureStorageBackend::kVulkan);
+    const auto storage_fetch=guest::TextureStorageFetch(draw.texture_fetch[slot]);
+    if(share_storage) {
+      auto found=texture_storage_.find(storage_fetch);
+      auto shared=found==texture_storage_.end()?std::shared_ptr<TextureResource>{}:found->second.image.lock();
+      // Serial numbers alone are not proof that two independently captured
+      // snapshots contain the same bytes. The frontend shares the snapshot too.
+      if(shared && shared->version==capture->version && found->second.capture.lock()==capture) {
+        if(!resources_.AliasUploadedTexture(id,shared,e)) return false;
+        ++stats_.texture_storage_reuses;if(profiling_) ++profile_.texture_storage_reuses;
+        continue;
+      }
+    }
     guest::LinearTexture texture;std::string reason;if(!decoder_ || !decoder_(*capture,texture,reason)) {e={"Game texture",VK_ERROR_FORMAT_NOT_SUPPORTED,reason.empty()?"Captured texture decoder unavailable":reason};return false;}
     if(!resources_.UploadTexture(id,texture,capture->version,e)) return false;
+    if(share_storage) {
+      texture_storage_[storage_fetch]={*resources_.FindTexture(id),capture};
+    }
     if(profiling_) {++profile_.texture_uploads;profile_.texture_bytes+=texture.data.size();}
   }
   lap(RecordProfile::kTextures);
@@ -252,8 +272,14 @@ bool GameRenderer::Draw(const guest::DrawPacket& draw,VkCommandBuffer command,Er
     lap(RecordProfile::kBindings);lap(RecordProfile::kDescriptors);
   } else {
     TransientSlice constants;if(!resources_.MapTransient(sizeof(guest::ConstantSnapshot),constants,e)) return false;
-    auto reused=constant_bank_cache_enabled_ && constants.offset<=UINT32_MAX
-        ?constant_bank_cache_.Find(serial_,constants.chunk.get(),draw.constants):ConstantBankCache::Reuse{};
+    ConstantBankCache::Reuse reused;
+    if(constant_bank_cache_enabled_ && constants.offset<=UINT32_MAX) {
+      const bool filter_constants=guest::ShaderConstantMaskEnabled();
+      const auto vs_usage=guest::ConstantUsageForShaders(draw.vertex_shader.get(),draw.pixel_shader.get(),true,true,filter_constants);
+      const auto ps_usage=guest::ConstantUsageForShaders(draw.vertex_shader.get(),draw.pixel_shader.get(),false,true,filter_constants);
+      reused=constant_bank_cache_.Find(serial_,constants.chunk.get(),draw.constants,vs_usage,ps_usage);
+    }
+    if(profiling_) {profile_.vs_constant_reuses+=reused.vs;profile_.ps_constant_reuses+=reused.ps;}
     DrawBindings bindings;if(!BuildBindings(draw,constants.data,bindings,e,(reused.vs?0u:1u)|(reused.ps?0u:2u))) return false;
     lap(RecordProfile::kBindings);
     if(!descriptors_.Prepare(bindings,draw.texture_fetch,resources_,serial_,constants,descriptors,e)) return false;

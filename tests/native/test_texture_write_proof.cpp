@@ -1,8 +1,133 @@
 #include "test_main.h"
 #include "texture_write_proof.h"
 #include <array>
+#if defined(_WIN32)
+#include "../../tools/rexglue-write-tracking/src/arm_windows_regions.h"
+
+namespace {
+constexpr uintptr_t TestView=0x100000000ull;
+constexpr size_t TestPage=4096;
+MEMORY_BASIC_INFORMATION TestMapping(size_t page,size_t pages,DWORD protection) {
+  MEMORY_BASIC_INFORMATION m{};
+  m.BaseAddress=reinterpret_cast<void*>(TestView+page*TestPage);
+  m.AllocationBase=reinterpret_cast<void*>(TestView);
+  m.RegionSize=pages*TestPage;m.State=MEM_COMMIT;m.Type=MEM_MAPPED;m.Protect=protection;
+  return m;
+}
+}
+SR_TEST(region_arm_batches_queries_and_protects_only_watched_pages) {
+  std::array<uint8_t,16> owned{};unsigned queries=0,protects=0;
+  SR_CHECK(sr::tracking::ArmWindowsRegions(reinterpret_cast<uint8_t*>(TestView),owned,3,7,
+      [&](auto,auto& m) {++queries;m=TestMapping(0,16,PAGE_READWRITE);return true;},
+      [&](auto* address,size_t length) {++protects;SR_CHECK_EQ(uintptr_t(address),TestView+3*TestPage);
+        SR_CHECK_EQ(length,5*TestPage);return true;}));
+  SR_CHECK_EQ(queries,1u);SR_CHECK_EQ(protects,1u);
+  for(size_t i=0;i<owned.size();++i) SR_CHECK_EQ(owned[i],uint8_t(i>=3 && i<=7));
+}
+SR_TEST(region_arm_preserves_guards_and_short_alias_boundaries) {
+  std::array<uint8_t,6> owned{1,0,0,0,0,0};unsigned queries=0,protects=0;
+  auto query=[&](auto* address,auto& m) {++queries;size_t page=(uintptr_t(address)-TestView)/TestPage;
+    m=TestMapping(page,2,page==0?PAGE_READONLY:page==2?PAGE_NOACCESS:PAGE_READWRITE);return true;};
+  SR_CHECK(sr::tracking::ArmWindowsRegions(reinterpret_cast<uint8_t*>(TestView),owned,0,15,query,
+      [&](auto* address,size_t length) {++protects;SR_CHECK_EQ(uintptr_t(address),TestView+4*TestPage);
+        SR_CHECK_EQ(length,2*TestPage);return true;}));
+  SR_CHECK_EQ(queries,3u);SR_CHECK_EQ(protects,1u);
+  SR_CHECK((owned==std::array<uint8_t,6>{1,0,0,0,1,1}));
+  SR_CHECK(sr::tracking::ArmWindowsRegions(reinterpret_cast<uint8_t*>(TestView),owned,6,15,query,
+      [&](auto*,size_t) {++protects;return false;}));
+  SR_CHECK_EQ(queries,3u);SR_CHECK_EQ(protects,1u);
+  std::array<uint8_t,2> clipped{};
+  SR_CHECK(sr::tracking::ArmWindowsRegions(reinterpret_cast<uint8_t*>(TestView),clipped,0,15,
+      [](auto,auto& m) {m=TestMapping(0,16,PAGE_READWRITE);return true;},
+      [](auto* address,size_t length) {SR_CHECK_EQ(uintptr_t(address),TestView);
+        SR_CHECK_EQ(length,2*TestPage);return true;}));
+  SR_CHECK((clipped==std::array<uint8_t,2>{1,1}));
+}
+SR_TEST(region_arm_fails_closed_on_bad_mappings_or_failed_protect) {
+  for(unsigned failure=0;failure<14;++failure) {
+    std::array<uint8_t,4> owned{};unsigned protects=0;
+    SR_CHECK(!sr::tracking::ArmWindowsRegions(reinterpret_cast<uint8_t*>(TestView),owned,0,3,
+        [&](auto,auto& m) {m=TestMapping(0,4,PAGE_READWRITE);
+          if(failure==0) return false;
+          if(failure==1) m.State=MEM_RESERVE;
+          if(failure==2) m.Type=MEM_PRIVATE;
+          if(failure==3) m.AllocationBase=nullptr;
+          if(failure==4) m.Protect=PAGE_EXECUTE_READWRITE;
+          if(failure==5) m.RegionSize=0;
+          if(failure==6) m.RegionSize=SIZE_MAX;
+          if(failure==7) m.Protect=PAGE_READWRITE|PAGE_GUARD;
+          if(failure==8) m.Protect=PAGE_WRITECOPY;
+          if(failure==9) m.Protect=PAGE_READWRITE|PAGE_NOCACHE;
+          if(failure==10) m.BaseAddress=reinterpret_cast<void*>(TestView+1);
+          if(failure==11) {m.BaseAddress=reinterpret_cast<void*>(TestView-TestPage);m.RegionSize=TestPage;}
+          if(failure==12) m.RegionSize=TestPage/2;
+          return true;},[&](auto*,size_t) {++protects;return false;}));
+    SR_CHECK((owned==std::array<uint8_t,4>{}));SR_CHECK_EQ(protects,failure==13?1u:0u);
+  }
+}
+SR_TEST(region_arm_retains_partial_ownership_for_failure_cleanup) {
+  for(bool fail_protect:{false,true}) {
+    std::array<uint8_t,4> owned{};unsigned queries=0,protects=0;
+    SR_CHECK(!sr::tracking::ArmWindowsRegions(reinterpret_cast<uint8_t*>(TestView),owned,0,3,
+        [&](auto,auto& m) {if(++queries==2 && !fail_protect) return false;
+          m=TestMapping(queries==1?0:2,2,PAGE_READWRITE);return true;},
+        [&](auto*,size_t) {return ++protects==1;}));
+    SR_CHECK((owned==std::array<uint8_t,4>{1,1,0,0}));SR_CHECK_EQ(queries,2u);
+    SR_CHECK_EQ(protects,fail_protect?2u:1u);
+  }
+}
+#endif
 
 using namespace superman_returns::native;
+
+SR_TEST(texture_query_admission_never_samples_an_unpublished_upload) {
+  TextureUploadProof proof;
+  unsigned calls=0;
+  auto query=[&] {++calls;return true;};
+  SR_CHECK(!QueryPublishedTexture(proof,7,query));SR_CHECK_EQ(calls,0u);
+  proof.watch=1;proof.resource_version=7;
+  SR_CHECK(!QueryPublishedTexture(proof,7,query));SR_CHECK_EQ(calls,0u);
+  proof.stamps={{1,2,3,0,RexTrackingCoverage::Complete}};
+  SR_CHECK(!QueryPublishedTexture(proof,0,query));SR_CHECK(!QueryPublishedTexture(proof,8,query));
+  SR_CHECK_EQ(calls,0u);
+  SR_CHECK(QueryPublishedTexture(proof,7,query));SR_CHECK_EQ(calls,1u);
+  proof.stamps[0].coverage=RexTrackingCoverage::Invalidated;
+  SR_CHECK(!QueryPublishedTexture(proof,7,query));SR_CHECK_EQ(calls,1u);
+  proof.stamps[0].coverage=RexTrackingCoverage::Complete;proof.stamps[0].active_writers=1;
+  SR_CHECK(!QueryPublishedTexture(proof,7,query));SR_CHECK_EQ(calls,1u);
+}
+
+SR_TEST(texture_query_admission_checks_all_stamps_and_preserves_fresh_validation) {
+  TextureUploadProof good{1,{{1,2,0,0,RexTrackingCoverage::Complete},
+                             {3,4,5,0,RexTrackingCoverage::Complete}},7,0};
+  unsigned calls=0;
+  auto query=[&] {++calls;return true;};
+  auto changed=good;changed.watch=0;
+  SR_CHECK(!QueryPublishedTexture(changed,7,query));
+  changed=good;changed.resource_version=0;
+  SR_CHECK(!QueryPublishedTexture(changed,7,query));
+  changed=good;changed.stamps[1].allocation_generation=0;
+  SR_CHECK(!QueryPublishedTexture(changed,7,query));
+  changed=good;changed.stamps[1].coverage_generation=0;
+  SR_CHECK(!QueryPublishedTexture(changed,7,query));
+  changed=good;changed.stamps[1].coverage=RexTrackingCoverage::Unknown;
+  SR_CHECK(!QueryPublishedTexture(changed,7,query));
+  changed=good;changed.stamps[1].active_writers=1;
+  SR_CHECK(!QueryPublishedTexture(changed,7,query));
+  SR_CHECK_EQ(calls,0u);
+  // Domain zero is supported by runtimes without the optional fast view.
+  SR_CHECK(QueryPublishedTexture(good,7,query));SR_CHECK_EQ(calls,1u);
+  SR_CHECK(!QueryPublishedTexture(good,7,[&] {++calls;return false;}));
+  SR_CHECK_EQ(calls,2u);
+  for(unsigned field=0;field<4;++field) {
+    auto fresh=good.stamps;
+    if(field==0) ++fresh[1].invalidation_epoch;
+    if(field==1) ++fresh[1].allocation_generation;
+    if(field==2) ++fresh[1].coverage_generation;
+    if(field==3) fresh[1].active_writers=1;
+    SR_CHECK(!QueryPublishedTexture(good,7,[&] {return CanReuseTexture(good,fresh,7);}));
+  }
+}
 
 SR_TEST(tracking_missing_or_changed_stamp_rejects_proof) {
   const std::array original{RexTrackingStamp{7, 8, 9, 0, RexTrackingCoverage::Complete}};

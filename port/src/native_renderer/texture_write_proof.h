@@ -61,11 +61,19 @@ struct TextureUploadProof {
   RexTrackingWatch watch=0;
   std::vector<RexTrackingStamp> stamps;
   uint64_t resource_version=0;
+  uint64_t domain=0;  // Optional fast-view domain, captured before reading bytes.
 };
 inline bool CanReuseTexture(const TextureUploadProof& proof,std::span<const RexTrackingStamp> current,
                             uint64_t live_resource_version) {
   return proof.watch && proof.resource_version && proof.resource_version==live_resource_version &&
       SameCoveredContent(proof.stamps,current);
+}
+// An unpublished or uncovered baseline cannot be repaired by a fresh query.
+// Admission is not reuse: query must still validate the current memory state.
+template<class Query>
+inline bool QueryPublishedTexture(const TextureUploadProof& proof,uint64_t live_resource_version,
+                                  Query&& query) {
+  return CanReuseTexture(proof,proof.stamps,live_resource_version) && query();
 }
 inline bool LegacyTextureValidationRequired(uint32_t base_size,bool watches,bool written,
                                             uint64_t frame,uint64_t hashed_frame) {

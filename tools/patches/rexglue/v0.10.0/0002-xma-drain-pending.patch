@@ -1,0 +1,99 @@
+diff --git a/include/rex/audio/xma/context.h b/include/rex/audio/xma/context.h
+index 8426798..82994c8 100644
+--- a/include/rex/audio/xma/context.h
++++ b/include/rex/audio/xma/context.h
+@@ -205,6 +205,8 @@ class XmaContext {
+   ~XmaContext();
+ 
+   int Setup(uint32_t id, memory::Memory* memory, uint32_t guest_ptr);
++  // Synchronous kick: drain decoded PCM while space permits, including after
++  // input exhaustion. Yield unchanged decode state without spinning.
+   bool Work();
+ 
+   void Enable();
+diff --git a/src/audio/xma_context.cpp b/src/audio/xma_context.cpp
+index 11b83be..545f288 100644
+--- a/src/audio/xma_context.cpp
++++ b/src/audio/xma_context.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include <algorithm>
+ #include <cstring>
++#include <tuple>
+ 
+ #include <rex/audio/xma/context.h>
+ #include <rex/audio/xma/decoder.h>
+@@ -108,35 +109,64 @@ bool XmaContext::Work() {
+     return true;
+   }
+ 
++  // RingBuffer offsets are reduced modulo capacity. Reject an empty output
++  // allocation before preparing the ring, including consume-only contexts.
++  if (!data.output_buffer_block_count) {
++    return true;
++  }
++
+   memory::RingBuffer output_rb = PrepareOutputRingBuffer(&data);
+ 
+-  // Consume-only context: no input, just drain remaining subframes.
++  // Admission is in 256-byte output blocks, including stereo and headroom.
++  const uint32_t effective_sdc = std::max(static_cast<uint32_t>(1), data.subframe_decode_count);
++  const int32_t minimum_subframe_decode_count =
++      static_cast<int32_t>(effective_sdc) + data.output_buffer_padding;
++
++  // Consume-only context: no input, just drain remaining subframes. Apply the
++  // same capacity check as decoding; Consume assumes its write will fit.
+   if (data.IsConsumeOnlyContext()) {
+     if (current_frame_remaining_subframes_ == 0) {
+       return true;
+     }
+-    Consume(&output_rb, &data);
++    while (current_frame_remaining_subframes_ &&
++           remaining_subframe_blocks_in_output_buffer_ >= minimum_subframe_decode_count) {
++      Consume(&output_rb, &data);
++    }
+     data.output_buffer_write_offset = output_rb.write_offset() / kOutputBytesPerBlock;
+     StoreContextMerged(data, initial_data, context_ptr);
+     return true;
+   }
+ 
+-  // Minimum free blocks needed before attempting a decode.
+-  // Use subframe_decode_count (clamped to 1) instead of full frame size.
+-  const uint32_t effective_sdc = std::max(static_cast<uint32_t>(1), data.subframe_decode_count);
+-  const int32_t minimum_subframe_decode_count =
+-      static_cast<int32_t>(effective_sdc) + data.output_buffer_padding;
+-
+   if (minimum_subframe_decode_count > remaining_subframe_blocks_in_output_buffer_) {
+     StoreContextMerged(data, initial_data, context_ptr);
+     return true;
+   }
+ 
++  // Offset equality alone is not a stall: a buffer switch or a loop can keep
++  // the same numerical offset. Padding/loop truncation may make progress with
++  // no PCM write, and a full-ring write can wrap to the original offset.
++  const auto progress = [&] {
++    return std::make_tuple(
++        uint32_t(data.input_buffer_read_offset), uint32_t(data.current_buffer),
++        uint32_t(data.input_buffer_0_valid), uint32_t(data.input_buffer_1_valid),
++        uint32_t(data.loop_count), uint32_t(data.error_status),
++        current_frame_remaining_subframes_, remaining_subframe_blocks_in_output_buffer_,
++        output_rb.write_offset(), carry_valid_, pending_output_limit_, pending_start_skip_,
++        loop_frame_output_limit_, loop_start_skip_pending_);
++  };
+   while (remaining_subframe_blocks_in_output_buffer_ >= minimum_subframe_decode_count) {
++    const auto before = progress();
+     Decode(&data);
+     Consume(&output_rb, &data);
+ 
+-    if (!data.IsAnyInputBufferValid() || data.error_status == 4) {
++    // Consume delivers at most subframe_decode_count blocks per pass. Work
++    // clears enabled on entry, so polling cannot deliver the pending remainder.
++    // Keep the first Decode attempt on a kick even if an old error4 is set.
++    if ((!data.IsAnyInputBufferValid() || data.error_status == 4) &&
++        !current_frame_remaining_subframes_) {
++      break;
++    }
++    if (progress() == before) {
+       break;
+     }
+   }

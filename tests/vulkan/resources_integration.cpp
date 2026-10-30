@@ -11,12 +11,17 @@
 #include "composition.h"
 #include "triangle.h"
 #include "platform/win32_surface.h"
+#include "../guest/texture_binding_policy.h"
+#include "../../native_renderer/pm4_mirror.h"
+#include "../../native_renderer/game_profile.h"
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
 #include <fstream>
 #include <chrono>
 #include <thread>
+#include <bit>
+#include <cstdlib>
 using namespace superman_returns::graphics::vulkan;
 namespace guest=superman_returns::graphics::guest;
 namespace shaders=superman_returns::graphics::shaders;
@@ -82,6 +87,124 @@ public:
     std::vector<uint8_t> bytes(4096);std::memcpy(bytes.data(),mapped,bytes.size());c.f.vkUnmapMemory(c.device,memory);return bytes;
   }
 };
+// Each phase submits and waits a real fence; no descriptor/external owners survive
+// the positive reuse phase. Copy every mip and restore the upload store's layout.
+void CheckTextureUpdates(Context& c,bool separated=false) {
+  const char* flag=std::getenv("SR_NATIVE_TEXTURE_UPDATES");const bool enabled=flag && std::string(flag)=="1";
+  Error e;ResourceStore store(c);
+  auto expect=[](bool ok,const char* message) {if(!ok) throw std::runtime_error(message);};
+  guest::LinearTexture t;t.width=t.height=4;t.mip_levels=3;t.format=guest::LinearFormat::kRGBA8Unorm;
+  for(uint32_t mip=0;mip<3;++mip) {uint32_t w=4>>mip;t.levels.push_back({w,w,w*4,w,t.data.size()});t.data.insert(t.data.end(),w*w*4,uint8_t(30+mip));}
+  auto copy=[&](UploadFixture& f,const TextureResource& image,size_t offset) {
+    VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;b.image=image.handle;b.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,image.mips,0,1};
+    b.oldLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;b.newLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;b.srcAccessMask=VK_ACCESS_MEMORY_WRITE_BIT;b.dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT;
+    c.f.vkCmdPipelineBarrier(f.command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,0,nullptr,1,&b);
+    std::vector<VkBufferImageCopy> regions;
+    for(uint32_t mip=0;mip<image.mips;++mip) {VkBufferImageCopy r{};r.bufferOffset=offset;r.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,mip,0,1};r.imageExtent={image.extent.width>>mip,image.extent.height>>mip,1};offset+=r.imageExtent.width*r.imageExtent.height*4;regions.push_back(r);}
+    c.f.vkCmdCopyImageToBuffer(f.command,image.handle,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,f.readback,uint32_t(regions.size()),regions.data());
+    b.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;b.newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;b.srcAccessMask=VK_ACCESS_TRANSFER_READ_BIT;b.dstAccessMask=VK_ACCESS_SHADER_READ_BIT;
+    c.f.vkCmdPipelineBarrier(f.command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,nullptr,0,nullptr,1,&b);
+  };
+  auto pixels=[&](const std::vector<uint8_t>& bytes,size_t offset,const std::vector<uint8_t>& wanted) {expect(!std::memcmp(bytes.data()+offset,wanted.data(),wanted.size()),"texture update GPU mip pixels mismatch");};
+  VkImage previous{};
+  // Pending versions are immutable, including on the hoisted upload command.
+  {
+    UploadFixture f(c);Require(store.BeginSubmission(f.command,1,e,separated?f.BeginUploads():VK_NULL_HANDLE),e);
+    Require(store.UploadTexture(812,t,1,e),e);auto old=store.Texture(812,e);const auto original=t.data;
+    expect(!old->upload_snapshot,"immutable first upload consumed the snapshot budget");
+    t.data[64]=99;Require(store.UploadTexture(812,t,2,e),e);const auto& now=*store.FindTexture(812);
+    expect(old->handle!=now->handle,"pending version overwritten");previous=now->handle;
+    expect(bool(now->upload_snapshot)==enabled,"changed texture snapshot admission mismatch");
+    store.FinishUploads();copy(f,*old,0);copy(f,*now,256);auto bytes=f.Finish();pixels(bytes,0,original);pixels(bytes,256,t.data);store.Retire(1);
+  }
+  store.TakeTextureUpdateStats();
+  // RED baseline: the old implementation always allocates here, despite retirement.
+  {
+    UploadFixture f(c);Require(store.BeginSubmission(f.command,2,e,separated?f.BeginUploads():VK_NULL_HANDLE),e);
+    t.data[65]=100;Require(store.UploadTexture(812,t,3,e),e);
+    expect(((*store.FindTexture(812))->handle==previous)==enabled,"retired map-only texture must reuse its image when enabled");
+    const auto stats=store.TakeTextureUpdateStats();
+    expect(stats.uploads==1 && stats.resource_reuses==(enabled?1u:0u) && stats.mips_skipped==(enabled?2u:0u) &&
+      stats.mips_uploaded==(enabled?1u:3u) && stats.upload_bytes==(enabled?16u:84u),"selective mip upload counters mismatch");
+    previous=(*store.FindTexture(812))->handle;store.FinishUploads();copy(f,**store.FindTexture(812),0);pixels(f.Finish(),0,t.data);store.Retire(2);
+  }
+  // External leases prevent mutation even after the submission fence retires.
+  auto lease=*store.FindTexture(812);const auto leased_bytes=t.data;
+  {
+    UploadFixture f(c);Require(store.BeginSubmission(f.command,3,e,separated?f.BeginUploads():VK_NULL_HANDLE),e);
+    t.data[66]=101;Require(store.UploadTexture(812,t,4,e),e);expect((*store.FindTexture(812))->handle!=lease->handle,"external owner overwritten");
+    store.FinishUploads();copy(f,*lease,0);copy(f,**store.FindTexture(812),256);auto bytes=f.Finish();pixels(bytes,0,leased_bytes);pixels(bytes,256,t.data);store.Retire(3);
+  }
+  lease.reset();
+  {UploadFixture f(c);Require(store.BeginSubmission(f.command,4,e),e);Require(store.AliasUploadedTexture(813,*store.FindTexture(812),e),e);f.Finish();store.Retire(4);}
+  {
+    UploadFixture f(c);Require(store.BeginSubmission(f.command,5,e,separated?f.BeginUploads():VK_NULL_HANDLE),e);auto original=t.data;auto alias=*store.FindTexture(813);
+    t.data[67]=102;Require(store.UploadTexture(812,t,5,e),e);expect((*store.FindTexture(812))->handle!=alias->handle,"aliased image overwritten");
+    store.FinishUploads();copy(f,*alias,0);copy(f,**store.FindTexture(812),256);auto bytes=f.Finish();pixels(bytes,0,original);pixels(bytes,256,t.data);store.Retire(5);
+  }
+  // View mapping and mip layout changes must allocate; same version keeps its pixels.
+  {
+    UploadFixture f(c);Require(store.BeginSubmission(f.command,6,e,separated?f.BeginUploads():VK_NULL_HANDLE),e);previous=(*store.FindTexture(812))->handle;
+    t.swizzle={2,1,0,3};Require(store.UploadTexture(812,t,6,e),e);expect((*store.FindTexture(812))->handle!=previous,"view mapping change reused image");
+    auto original=t.data;t.data[0]=222;previous=(*store.FindTexture(812))->handle;
+    store.TakeTextureUpdateStats();
+    Require(store.UploadTexture(812,t,6,e),e);expect((*store.FindTexture(812))->handle==previous,"same version replaced image");
+    const auto same=store.TakeTextureUpdateStats();
+    expect(!same.uploads && !same.upload_bytes && !same.mips_uploaded && !same.mips_skipped && !same.resource_reuses,"same-version upload must leave every texture update counter zero");
+    expect(!store.UploadTexture(812,t,5,e),"stale texture version accepted");store.FinishUploads();copy(f,**store.FindTexture(812),0);pixels(f.Finish(),0,original);store.Retire(6);t.data=original;
+  }
+  {
+    UploadFixture f(c);Require(store.BeginSubmission(f.command,7,e,separated?f.BeginUploads():VK_NULL_HANDLE),e);previous=(*store.FindTexture(812))->handle;
+    t.mip_levels=2;t.levels.resize(2);t.data.resize(80);Require(store.UploadTexture(812,t,7,e),e);expect((*store.FindTexture(812))->handle!=previous,"mip layout change reused image");
+    store.FinishUploads();copy(f,**store.FindTexture(812),0);pixels(f.Finish(),0,t.data);store.Retire(7);
+  }
+  {
+    store.TakeTextureUpdateStats();UploadFixture f(c);Require(store.BeginSubmission(f.command,8,e,separated?f.BeginUploads():VK_NULL_HANDLE),e);previous=(*store.FindTexture(812))->handle;
+    Require(store.UploadTexture(812,t,8,e),e);const auto stats=store.TakeTextureUpdateStats();
+    expect(stats.resource_reuses==(enabled?1u:0u) && stats.mips_skipped==(enabled?2u:0u) && stats.upload_bytes==(enabled?0u:80u),"identical bytes with a new version must skip all mip uploads");
+    expect(((*store.FindTexture(812))->handle==previous)==enabled,"identical new version reuse mismatch");
+    store.FinishUploads();copy(f,**store.FindTexture(812),0);pixels(f.Finish(),0,t.data);store.Retire(8);
+  }
+  // Invalid plans cannot mutate the image, advance its version, or count an upload.
+  {
+    store.TakeTextureUpdateStats();UploadFixture f(c);Require(store.BeginSubmission(f.command,9,e,separated?f.BeginUploads():VK_NULL_HANDLE),e);
+    previous=(*store.FindTexture(812))->handle;auto invalid=t;invalid.format=static_cast<guest::LinearFormat>(0x7fffffff);
+    expect(!store.UploadTexture(812,invalid,9,e),"unknown format accepted");
+    invalid=t;invalid.data.pop_back();expect(!store.UploadTexture(812,invalid,9,e),"truncated subresource accepted");
+    const auto stats=store.TakeTextureUpdateStats();
+    expect((*store.FindTexture(812))->handle==previous && (*store.FindTexture(812))->version==8 &&
+      !stats.uploads && !stats.upload_bytes && !stats.mips_uploaded && !stats.mips_skipped && !stats.resource_reuses,"invalid upload changed texture or counters");
+    store.FinishUploads();copy(f,**store.FindTexture(812),0);pixels(f.Finish(),0,t.data);store.Retire(9);
+  }
+  // Eight MiB of pixels plus snapshot metadata exceeds the per-resource cap.
+  // Even with a completed fence and exclusive map ownership, both versions must
+  // upload in full into distinct allocations because no exact baseline exists.
+  guest::LinearTexture large;large.width=2048;large.height=1024;large.format=guest::LinearFormat::kRGBA8Unorm;
+  large.levels={{large.width,large.height,large.width*4,large.height,0}};
+  large.data.assign(size_t(large.width)*large.height*4,41);
+  for(uint64_t serial=10;serial<=11;++serial) {
+    store.TakeTextureUpdateStats();UploadFixture f(c);Require(store.BeginSubmission(f.command,serial,e,separated?f.BeginUploads():VK_NULL_HANDLE),e);
+    if(serial==11) large.data[0]=77;
+    Require(store.UploadTexture(814,large,serial,e),e);const auto& image=*store.FindTexture(814);
+    expect(!image->upload_snapshot,"oversized upload retained an unbounded snapshot");
+    if(serial==11) expect(image->handle!=previous,"missing snapshot allowed in-place reuse");
+    previous=image->handle;const auto stats=store.TakeTextureUpdateStats();
+    expect(stats.uploads==1 && stats.upload_bytes==large.data.size() && stats.mips_uploaded==1 &&
+      !stats.mips_skipped && !stats.resource_reuses,"missing snapshot did not take the complete upload fallback");
+    store.FinishUploads();
+    VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;b.image=image->handle;b.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+    b.oldLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;b.newLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;b.srcAccessMask=VK_ACCESS_MEMORY_WRITE_BIT;b.dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT;
+    c.f.vkCmdPipelineBarrier(f.command,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,0,nullptr,1,&b);
+    std::array<VkBufferImageCopy,2> ends{};
+    for(uint32_t i=0;i<2;++i) {ends[i].bufferOffset=i*4;ends[i].imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};ends[i].imageExtent={1,1,1};}
+    ends[1].imageOffset={int32_t(large.width-1),int32_t(large.height-1),0};
+    c.f.vkCmdCopyImageToBuffer(f.command,image->handle,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,f.readback,2,ends.data());
+    b.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;b.newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;b.srcAccessMask=VK_ACCESS_TRANSFER_READ_BIT;b.dstAccessMask=VK_ACCESS_SHADER_READ_BIT;
+    c.f.vkCmdPipelineBarrier(f.command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,nullptr,0,nullptr,1,&b);
+    auto bytes=f.Finish();expect(!std::memcmp(bytes.data(),large.data.data(),4) && !std::memcmp(bytes.data()+4,large.data.data()+large.data.size()-4,4),"snapshot fallback GPU endpoint pixels mismatch");store.Retire(serial);
+  }
+  std::cout<<"Texture updates enabled="<<enabled<<" separated="<<separated<<" immutable versions, retired reuse, mip pixels, leases, aliases, layout guards and snapshot fallback passed\n";
+}
 void BenchmarkMappedBindings(Context& c) {
   Error e;UploadFixture fixture(c);ResourceStore store(c);
   Require(store.BeginSubmission(fixture.command,1,e),e);
@@ -300,7 +423,7 @@ void CheckEdramAlias(Context& c,bool defaults=false) {
   for(uint32_t pixel=0;pixel<256;++pixel) {uint8_t expected[]{255,128,64,255};if(std::memcmp(bytes.data()+pixel*4,expected,4)) throw std::runtime_error("EDRAM alias failed bit-encoding round trip");}
   std::cout<<"Production EDRAM RGBA8/7e3 reinterpretation round trip passed\n";
 }
-void CheckResolvedDraw(Context& c) {
+void CheckResolvedDraw(Context& c,bool mask_check=false) {
   Error e;UploadFixture fixture(c);
   auto vertex=std::make_shared<shaders::CompiledShader>(),pixel=std::make_shared<shaders::CompiledShader>();pixel->stage=shaders::ShaderStage::kPixel;
   Require(ReadSpirv(std::filesystem::path(SR_TARGET_SHADER_DIR)/"vs.spv",vertex->words,e),e);Require(ReadSpirv(std::filesystem::path(SR_TARGET_SHADER_DIR)/"resolve_sample.spv",pixel->words,e),e);
@@ -318,13 +441,204 @@ void CheckResolvedDraw(Context& c) {
   auto vs=std::make_shared<guest::ShaderCapture>(),ps=std::make_shared<guest::ShaderCapture>();vs->vertex=true;draw.vertex_shader=vs;draw.pixel_shader=ps;
   draw.texture_fetch[7]=resolve.destination_fetch;draw.texture_fetch[7][3]=(2u|(1u<<3)|(0u<<6)|(3u<<9))<<1;
   // No guest CPU texture capture exists: this fetch must use the GPU resolve.
-  Require(renderer.Record(guest::RenderPacket(draw),fixture.command,e),e);
-  auto image=renderer.Targets().Get(renderer.Targets().Acquire(target,e),e);Require(bool(image),e);
-  Require(renderer.Images().Transition(fixture.command,image->image,{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1},ImageUsage::TransferSource(),e),e);
-  VkBufferImageCopy copy{};copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.imageExtent={16,16,1};c.f.vkCmdCopyImageToBuffer(fixture.command,image->image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,fixture.readback,1,&copy);
+  // Four frozen draws compare filtering off/on, then reintroduce a previously
+  // omitted slot after the resolve changes. Read every result after a fence.
+  for(uint32_t sample=0;sample<(mask_check?4u:1u);++sample) {
+    if(mask_check) {
+      if(sample==2) {
+        clear.color={0,1,0,1};
+        Require(renderer.Record(guest::RenderPacket(clear),fixture.command,e),e);
+        resolve.command_serial=10;
+        Require(renderer.Record(guest::RenderPacket(resolve),fixture.command,e),e);
+      }
+      guest::WorkBatch batch;batch.bytes.resize(0x4000,0);batch.ranges={{0x10000,0x4000,0}};
+      const uint32_t fetch_offset=superman_returns::native::profile::kDevice.fetch_constants;
+      for(uint32_t slot:{0u,7u}) for(uint32_t word=0;word<6;++word)
+        for(uint32_t byte=0;byte<4;++byte)
+          batch.bytes[fetch_offset+slot*24+word*4+byte]=uint8_t(draw.texture_fetch[7][word]>>(24-byte*8));
+      vs->texture_usage={0,true};ps->texture_usage={1u<<7,true};
+      guest::WorkCmd cmd;cmd.op=guest::Op::kDraw;cmd.u[0]=4;cmd.u[2]=3;
+      cmd.device=0x10000;cmd.range_count=1;
+      // Sample 2 changes the shader's usage as well as the resolve: slot 0 is
+      // required again, and must see the new GPU bytes rather than a stale view.
+      if(sample==2) ps->texture_usage.mask|=1u;
+      cmd.texture_mask=guest::TextureMaskForShaders(vs.get(),ps.get(),true,sample!=0);
+      superman_returns::native::Pm4Mirror mirror;guest::RenderPacket decoded;std::string error;
+      if(!guest::ReplayCapturedRenderPacket(batch,cmd,mirror,decoded,error)) throw std::runtime_error(error);
+      draw.texture_fetch=guest::GetDraw(decoded)->texture_fetch;
+      if((sample==1 || sample==3) && draw.texture_fetch[0][0]) throw std::runtime_error("Unused slot survived captured replay mask");
+      if(sample==2 && !(draw.texture_fetch[0][0]&2)) throw std::runtime_error("Used slot was not reactivated");
+    }
+    draw.command_serial=sample+20;
+    if(mask_check) std::cout<<"texture-mask sample="<<sample<<" slot0="<<std::hex<<draw.texture_fetch[0][0]<<","<<draw.texture_fetch[0][1]<<" slot7="<<draw.texture_fetch[7][0]<<","<<draw.texture_fetch[7][1]<<std::dec<<'\n';
+    Require(renderer.Record(guest::RenderPacket(draw),fixture.command,e),e);
+    auto image=renderer.Targets().Get(renderer.Targets().Acquire(target,e),e);Require(bool(image),e);
+    Require(renderer.Images().Transition(fixture.command,image->image,{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1},ImageUsage::TransferSource(),e),e);
+    VkBufferImageCopy copy{};copy.bufferOffset=sample*1024;copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.imageExtent={16,16,1};c.f.vkCmdCopyImageToBuffer(fixture.command,image->image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,fixture.readback,1,&copy);
+  }
   auto bytes=fixture.Finish();renderer.Retire(1);
-  for(uint32_t pixel=0;pixel<256;++pixel) {uint8_t expected[]{0,0,255,255};if(std::memcmp(bytes.data()+pixel*4,expected,4)) throw std::runtime_error("Resolved texture fetch/swizzle draw mismatch");}
+  for(uint32_t sample=0;sample<(mask_check?4u:1u);++sample)
+    for(uint32_t pixel=0;pixel<256;++pixel) {uint8_t expected[]{0,uint8_t(sample>=2?255:0),uint8_t(sample<2?255:0),255};if(std::memcmp(bytes.data()+sample*1024+pixel*4,expected,4)) throw std::runtime_error("Resolved texture fetch/swizzle draw mismatch");}
+  if(mask_check && std::memcmp(bytes.data(),bytes.data()+1024,1024)) throw std::runtime_error("Frozen masked/unmasked images differ");
+  if(mask_check) std::cout<<"Frozen masked/unmasked pixels match; reactivated slot observes updated resolve\n";
   std::cout<<"GameRenderer samples GPU resolve at guest slot7 with a different fetch swizzle and no CPU upload\n";
+}
+// Keep every draw/copy in one submission, so comparisons must use the bytes
+// actually uploaded, even when a shader previously omitted a changed register.
+// A/B controls are inherited at process launch; never toggle them in this test.
+void CheckConstantMask(Context& c) {
+  constexpr uint32_t width=16,height=8,samples=7;
+  constexpr VkDeviceSize image_bytes=width*height*4;
+  static_assert(samples*image_bytes<4096,"Constant-mask copies must fit UploadFixture");
+  const char* cache_env=std::getenv("SR_VULKAN_CONSTANT_BANK_CACHE");
+  const bool cache=cache_env && cache_env[0] && cache_env[0]!='0';
+  const bool mask=guest::ShaderConstantMaskEnabled();
+  Error e;UploadFixture fixture(c);
+  auto vertex=std::make_shared<shaders::CompiledShader>();
+  Require(ReadSpirv(std::filesystem::path(SR_TARGET_SHADER_DIR)/"vs.spv",vertex->words,e),e);
+  const std::array<const char*,3> entries{"PS0","PS1","PSDynamic"};
+  std::array<std::shared_ptr<shaders::CompiledShader>,3> pixels;
+  auto vs=std::make_shared<guest::ShaderCapture>();vs->vertex=true;vs->hash=0xc000;
+  vs->constant_usage.known=true; // Known empty: fullscreen VS reads no constants.
+  std::array<std::shared_ptr<guest::ShaderCapture>,3> ps;
+  for(uint32_t i=0;i<ps.size();++i) {
+    pixels[i]=std::make_shared<shaders::CompiledShader>();pixels[i]->stage=shaders::ShaderStage::kPixel;
+    Require(ReadSpirv(std::filesystem::path(SR_TARGET_SHADER_DIR)/(std::string("constant_mask_")+entries[i]+".spv"),pixels[i]->words,e),e);
+    ps[i]=std::make_shared<guest::ShaderCapture>();ps[i]->hash=0xc001+i;
+    ps[i]->constant_usage.known=true;
+    if(i<2) ps[i]->constant_usage.mask[0]=uint64_t{1}<<i;
+    else {ps[i]->constant_usage.mask.fill(UINT64_MAX);ps[i]->constant_usage.dynamic=true;}
+  }
+  GameRenderer renderer(c,[&](const guest::ShaderCapture& capture)->shaders::ShaderResult {
+    if(capture.vertex && capture.hash==vs->hash) return {shaders::ShaderPoll::ready,vertex,{}};
+    // Stage alone is insufficient: each distinct capture must select its own
+    // host-compiled artifact, including when returning to PS0 after PS1/dynamic.
+    for(uint32_t i=0;i<ps.size();++i)
+      if(!capture.vertex && capture.hash==ps[i]->hash) return {shaders::ShaderPoll::ready,pixels[i],{}};
+    throw std::runtime_error("Unknown constant-mask shader capture");
+  });
+  renderer.EnableProfile(true);Require(renderer.Initialize({},e,false),e);
+  Require(renderer.BeginSubmission(fixture.command,1,e),e);
+  guest::DrawPacket draw;draw.colors[0]={2982,false,{width,height,32,0,0,1}};
+  draw.registers[0x104]=15;draw.registers[0x201]=1|(1<<16);draw.count=3;
+  draw.vertex_shader=vs;draw.pixel_shader=ps[0];
+  guest::FloatConstantBank vs_words{},ps_words{};
+  auto write=[](guest::FloatConstantBank& bank,uint32_t reg,std::array<float,4> value) {
+    for(uint32_t component=0;component<4;++component) bank[reg*4+component]=std::bit_cast<uint32_t>(value[component]);
+  };
+  write(ps_words,0,{1,0,0,1});write(ps_words,1,{0,0,1,1});
+  for(uint32_t sample=0;sample<samples;++sample) {
+    switch(sample) {
+    case 0: break; // PS0: red c0, blue c1.
+    case 1: write(ps_words,1,{0,1,0,1});break; // Unused c1 changes: still red.
+    case 2: draw.pixel_shader=ps[1];break; // Must observe green, not uploaded blue.
+    case 3: draw.pixel_shader=ps[0];write(ps_words,0,{0,0,1,1});break;
+    case 4: draw.pixel_shader=ps[2];write(ps_words,2,{1,0,0,0});break;
+    case 5: write(ps_words,1,{1,1,0,1});break; // Dynamic c[1] must observe yellow.
+    case 6:
+      draw.pixel_shader=ps[0];
+      write(vs_words,255,{1,2,3,4});write(ps_words,255,{4,3,2,1});break;
+    }
+    // Publish complete sanitized banks, just like captured production packets.
+    // Do not pre-mask/zero unused registers: the renderer owns that decision.
+    guest::ConstantSnapshot sanitized;std::string error;
+    if(!guest::CaptureFloatConstants(vs_words,false,sanitized.vs,error) ||
+       !guest::CaptureFloatConstants(ps_words,false,sanitized.ps,error)) throw std::runtime_error(error);
+    draw.constants=sanitized;draw.command_serial=sample+1;
+    Require(renderer.Record(guest::RenderPacket(draw),fixture.command,e),e);
+    auto image=renderer.Targets().Get(renderer.Targets().Acquire(draw.colors[0],e),e);Require(bool(image),e);
+    Require(renderer.Images().Transition(fixture.command,image->image,{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1},ImageUsage::TransferSource(),e),e);
+    VkBufferImageCopy copy{};copy.bufferOffset=sample*image_bytes;
+    copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.imageExtent={width,height,1};
+    c.f.vkCmdCopyImageToBuffer(fixture.command,image->image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,fixture.readback,1,&copy);
+  }
+  renderer.FinishSubmission();auto bytes=fixture.Finish();
+  const auto profile=renderer.TakeProfile();renderer.Retire(1);
+  const std::array<std::array<uint8_t,4>,samples> expected{{
+    {255,0,0,255},{255,0,0,255},{0,255,0,255},{0,0,255,255},
+    {0,255,0,255},{255,255,0,255},{0,0,255,255}}};
+  for(uint32_t sample=0;sample<samples;++sample) for(uint32_t pixel=0;pixel<width*height;++pixel)
+    if(std::memcmp(bytes.data()+sample*image_bytes+pixel*4,expected[sample].data(),4))
+      throw std::runtime_error("Constant-mask pixel mismatch: sample="+std::to_string(sample)+", pixel="+std::to_string(pixel));
+  std::cout<<"constant-mask cache="<<cache<<" mask="<<mask<<" draws="<<profile.draws
+           <<" vs_constant_reuses="<<profile.vs_constant_reuses<<" ps_constant_reuses="<<profile.ps_constant_reuses
+           <<" readback_bytes="<<samples*image_bytes<<'\n';
+  if(renderer.Stats().draws!=samples || renderer.Stats().failed || renderer.Stats().pending || profile.draws!=samples)
+    throw std::runtime_error("Constant-mask fixture did not record all seven draws");
+  // Seven 12-KiB slices fit the production 8-MiB transient chunk. Whole-bank
+  // comparison reuses VS five times and PS once; masks save two more uploads.
+  const uint64_t expected_vs=cache?(mask?6:5):0,expected_ps=cache?(mask?2:1):0;
+  if(profile.vs_constant_reuses!=expected_vs || profile.ps_constant_reuses!=expected_ps)
+    throw std::runtime_error("Constant-mask bank reuse count mismatch: expected VS="+std::to_string(expected_vs)+", PS="+std::to_string(expected_ps));
+  std::cout<<"Seven production per-draw constant-bank readbacks passed (red/red/green/blue/green/yellow/blue)\n";
+}
+// Real point/linear samplers must remain distinct while an immutable image/view
+// is shared. Record two content versions before submitting either to the GPU.
+void CheckTextureStorageReuse(Context& c,bool global=false,bool merged=false) {
+  Error e;UploadFixture fixture(c);uint32_t decodes=0;
+  auto vertex=std::make_shared<shaders::CompiledShader>(),pixel=std::make_shared<shaders::CompiledShader>();pixel->stage=shaders::ShaderStage::kPixel;
+  Require(ReadSpirv(std::filesystem::path(SR_TARGET_SHADER_DIR)/"vs.spv",vertex->words,e),e);
+  if(global) {
+#ifdef SR_GLOBAL_SHADER_DIR
+    Require(ReadSpirv(std::filesystem::path(SR_GLOBAL_SHADER_DIR)/"texture_storage_ps.spv",pixel->words,e),e);
+    vertex->abi=pixel->abi=shaders::ShaderAbi::kGlobal;
+#else
+    throw std::runtime_error("Global storage fixture needs the global test executable");
+#endif
+  } else Require(ReadSpirv(std::filesystem::path(SR_TARGET_SHADER_DIR)/"resolve_sample.spv",pixel->words,e),e);
+  GameRenderer renderer(c,[&](const guest::ShaderCapture& s){return shaders::ShaderResult{shaders::ShaderPoll::ready,s.vertex?vertex:pixel,{}};},
+      [&](const guest::TextureCapture& capture,guest::LinearTexture& t,std::string&) {
+        ++decodes;t.width=t.height=2;t.format=guest::LinearFormat::kRGBA8Unorm;
+        t.levels={{2,2,8,2,0}};
+        if(capture.version==1) t.data={255,0,0,255,0,0,255,255,255,0,0,255,0,0,255,255};
+        else t.data={0,255,0,255,0,255,0,255,0,255,0,255,0,255,0,255};
+        return true;
+      });
+  Require(renderer.Initialize({},e,global),e);Require(renderer.BeginSubmission(fixture.command,1,e,merged?fixture.BeginUploads():VK_NULL_HANDLE),e);
+  guest::SurfaceDesc target{1982,false,{16,16,32,0,0,1}};
+  guest::DrawPacket draw;draw.colors[0]=target;draw.registers[0x104]=15;draw.registers[0x201]=1|(1<<16);draw.count=3;
+  auto vs=std::make_shared<guest::ShaderCapture>(),ps=std::make_shared<guest::ShaderCapture>();vs->vertex=true;draw.vertex_shader=vs;draw.pixel_shader=ps;
+  const std::array<uint32_t,6> point{2,0x100006,1u|(1u<<13),0x688,0,1u<<9};
+  auto linear=point;linear[3]|=(1u<<19)|(1u<<21);
+  if(TextureResourceId(point)==TextureResourceId(linear)) throw std::runtime_error("Sampler variants lost binding identity");
+  auto first=std::make_shared<guest::TextureCapture>();first->fetch=point;first->version=1;
+  auto second=std::make_shared<guest::TextureCapture>(*first);second->version=2;
+  std::array<std::shared_ptr<TextureResource>,4> resources;
+  const bool sharing=guest::TextureStorageReuseEnabled(guest::TextureStorageBackend::kVulkan);
+  for(uint32_t sample=0;sample<4;++sample) {
+    draw.command_serial=sample+1;draw.texture_fetch[7]=(sample==0 || sample==3)?point:linear;
+    draw.textures[7]=sample<2?first:second;
+    Require(renderer.Record(guest::RenderPacket(draw),fixture.command,e),e);
+    resources[sample]=renderer.Resources().Texture(TextureResourceId(draw.texture_fetch[7]),e);Require(bool(resources[sample]),e);
+    auto image=renderer.Targets().Get(renderer.Targets().Acquire(target,e),e);Require(bool(image),e);
+    Require(renderer.Images().Transition(fixture.command,image->image,{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1},ImageUsage::TransferSource(),e),e);
+    VkBufferImageCopy copy{};copy.bufferOffset=sample*1024;copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.imageExtent={16,16,1};
+    c.f.vkCmdCopyImageToBuffer(fixture.command,image->image,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,fixture.readback,1,&copy);
+  }
+  if((resources[0]==resources[1])!=sharing || (resources[2]==resources[3])!=sharing || resources[0]==resources[2] ||
+      decodes!=(sharing?2u:4u) || renderer.Stats().texture_storage_reuses!=(sharing?2u:0u))
+    throw std::runtime_error("Storage sharing/version/decode count mismatch");
+  // A different immutable snapshot with the same serial is not sufficient
+  // evidence of equal bytes. Only the actual shared snapshot permits aliasing.
+  auto independent=std::make_shared<guest::TextureCapture>(*second);
+  auto clamp_variant=point;clamp_variant[0]|=1u<<10;
+  draw.texture_fetch[7]=clamp_variant;draw.textures[7]=independent;draw.command_serial=5;
+  Require(renderer.Record(guest::RenderPacket(draw),fixture.command,e),e);
+  auto separate=renderer.Resources().Texture(TextureResourceId(clamp_variant),e);Require(bool(separate),e);
+  if(separate==resources[2] || decodes!=(sharing?3u:5u)) throw std::runtime_error("Independent snapshots aliased by serial alone");
+  // Reject stale versions and GPU-authoritative resolve images even if a caller
+  // accidentally tries to feed one into the CPU-upload alias API.
+  if(renderer.Resources().AliasUploadedTexture(TextureResourceId(linear),resources[0],e)) throw std::runtime_error("Stale alias accepted");
+  auto resolved=renderer.Resources().ResolveTexture(1983,VK_FORMAT_R8G8B8A8_UNORM,{2,2,1},1,1,false,renderer.Images(),e);Require(bool(resolved),e);
+  if(renderer.Resources().AliasUploadedTexture(1984,resolved,e)) throw std::runtime_error("Resolve accepted as CPU upload alias");
+  std::weak_ptr<TextureResource> pending=resources[0];for(auto& r:resources) r.reset();
+  if(pending.expired()) throw std::runtime_error("Pending upload freed before fence");
+  renderer.FinishSubmission();auto bytes=fixture.Finish();renderer.Retire(1);
+  const int expected[4][4]={{0,0,255,255},{128,0,128,255},{0,255,0,255},{0,255,0,255}};
+  for(uint32_t sample=0;sample<4;++sample) for(uint32_t pixel=0;pixel<256;++pixel) for(uint32_t channel=0;channel<4;++channel)
+    if(std::abs(int(bytes[sample*1024+pixel*4+channel])-expected[sample][channel])>1)
+      throw std::runtime_error("Shared texture sampler/content readback mismatch sample="+std::to_string(sample)+" channel="+std::to_string(channel)+" actual="+std::to_string(bytes[sample*1024+pixel*4+channel]));
+  std::cout<<"Texture storage sharing="<<sharing<<" global="<<global<<" merged="<<merged<<" decodes="<<decodes<<"; point/linear pixels, new content, independent snapshots and pending lifetime passed\n";
 }
 void CheckComposition(Context& c) {
   Error e;UploadFixture fixture(c);ImageState state(c.f);TargetStore targets(c,state);ResourceStore resources(c);FrontbufferCompositor compositor(c);
@@ -567,6 +881,8 @@ int main(int argc,char** argv) {
     const char* extensions[]{VK_KHR_SURFACE_EXTENSION_NAME,VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
     Require(c.CreateInstance(extensions,true,e),e);Require(window.Open(64,64,e,false),e);
     auto surface=window.CreateSurface(c,e);Require(bool(surface),e);Require(c.OpenDevice(surface,"",e),e);
+    if(argc==2 && std::string(argv[1])=="--texture-updates") {CheckTextureUpdates(c);return c.validation_errors.load()?1:0;}
+    if(argc==2 && std::string(argv[1])=="--texture-updates-separated") {CheckTextureUpdates(c,true);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--targets") {CheckTargetClears(c);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--pipeline-cache") {CheckPipelineCheckpoint(c);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--target-draws") {CheckTargetDraws(c);return c.validation_errors.load()?1:0;}
@@ -577,6 +893,10 @@ int main(int argc,char** argv) {
     if(argc==2 && std::string(argv[1])=="--edram-alias") {CheckEdramAlias(c);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--alias-defaults") {CheckEdramAlias(c,true);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--resolve-sample") {CheckResolvedDraw(c);return c.validation_errors.load()?1:0;}
+    if(argc==2 && std::string(argv[1])=="--texture-mask") {CheckResolvedDraw(c,true);return c.validation_errors.load()?1:0;}
+    if(argc==2 && std::string(argv[1])=="--constant-mask") {CheckConstantMask(c);return c.validation_errors.load()?1:0;}
+    if(argc==2 && std::string(argv[1])=="--texture-storage") {CheckTextureStorageReuse(c);return c.validation_errors.load()?1:0;}
+    if(argc==2 && std::string(argv[1])=="--texture-storage-merged") {CheckTextureStorageReuse(c,false,true);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--game-frame") {CheckGameFrame(c);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--game-frame-async") {CheckGameFrameAsync(c);return c.validation_errors.load()?1:0;}
     if(argc==2 && std::string(argv[1])=="--immediate") {CheckImmediate(c);return c.validation_errors.load()?1:0;}

@@ -833,6 +833,38 @@ SR_TEST(replayed_draw_keeps_latest_capture_and_pm4_constants_after_batch_reuse) 
   SR_CHECK_EQ(draw.memory.Read(0x1000, 4)[1], 2);
 }
 
+SR_TEST(replay_texture_mask_omits_unused_fetches_and_reactivates_without_stale_state) {
+  WorkBatch batch;
+  batch.bytes.resize(0x4000, 0);
+  batch.ranges.push_back({0x10000, 0x4000, 0});
+  const auto offset = superman_returns::native::profile::kDevice.fetch_constants;
+  for (uint32_t slot : {0u, 2u, 31u}) {
+    const uint32_t value = 0x100006u + slot * 4096;
+    batch.bytes[offset + slot * 24 + 3] = 2;
+    for (uint32_t byte = 0; byte < 4; ++byte)
+      batch.bytes[offset + slot * 24 + 4 + byte] = uint8_t(value >> (24 - 8 * byte));
+  }
+  WorkCmd cmd;
+  cmd.op = Op::kDraw; cmd.u[0] = 4; cmd.u[2] = 3;
+  cmd.device = 0x10000; cmd.range_count = 1;
+  cmd.texture_mask = (1u << 2) | (1u << 31);
+  superman_returns::native::Pm4Mirror mirror;
+  RenderPacket filtered, restored;
+  std::string error;
+  SR_CHECK(ReplayCapturedRenderPacket(batch, cmd, mirror, filtered, error));
+  const auto* first = GetDraw(filtered);
+  SR_CHECK(first != nullptr);
+  if (!first) return;
+  SR_CHECK_EQ(first->texture_fetch[0][0], 0u);
+  SR_CHECK_EQ(first->texture_fetch[0][1], 0u);
+  SR_CHECK_EQ(first->texture_fetch[2][1], 0x102006u);
+  SR_CHECK_EQ(first->texture_fetch[31][1], 0x11f006u);
+  cmd.texture_mask = UINT32_MAX;
+  SR_CHECK(ReplayCapturedRenderPacket(batch, cmd, mirror, restored, error));
+  SR_CHECK_EQ(GetDraw(restored)->texture_fetch[0][1], 0x100006u);
+  SR_CHECK_EQ(first->texture_fetch[0][1], 0u); // pending packet remains immutable
+}
+
 SR_TEST(decode_captured_packet_reads_contiguous_device_block_and_merges_mirror_bools_loops) {
   WorkBatch batch;
   WorkCmd cmd;

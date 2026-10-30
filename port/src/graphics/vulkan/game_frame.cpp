@@ -239,13 +239,18 @@ bool GameFrame::RecordFrame(std::vector<guest::RenderPacket>& packets_,const gue
     t.shaders_us+=us(started,shaders_ready);t.fence_us+=us(shaders_ready,fence_ready);t.record_us+=us(record_started,submit_started);
     t.queue_us+=us(submit_started,queue_ready);t.tail_us+=us(queue_ready,finished);last_swap_=finished;
     if(t.frames==120) {
-      auto p=renderer_.TakeProfile();auto cache=renderer_.TakeDescriptorStats();auto bindings=renderer_.TakeBindingStats();auto avg=[&](uint64_t v) {return std::to_string(v/1000/t.frames)+"."+std::to_string(v/100/t.frames%10);};
+      auto p=renderer_.TakeProfile();auto cache=renderer_.TakeDescriptorStats();auto bindings=renderer_.TakeBindingStats();
+      auto texture_updates=renderer_.Resources().TakeTextureUpdateStats();
+      auto avg=[&](uint64_t v) {return std::to_string(v/1000/t.frames)+"."+std::to_string(v/100/t.frames%10);};
       auto avg_ns=[&](uint64_t v) {return std::to_string(v/1000000/t.frames)+"."+std::to_string(v/100000/t.frames%10);};
       c_.Log("Vulkan profile (ms/frame over 120): interval="+avg(t.interval_us)+" shaders="+avg(t.shaders_us)+" fence="+avg(t.fence_us)+" record="+avg(t.record_us)+" queue="+avg(t.queue_us)+" tail="+avg(t.tail_us)
         +" | uploads="+avg_ns(p.ns[RecordProfile::kUploads])+" targets="+avg_ns(p.ns[RecordProfile::kTargets])+" textures="+avg_ns(p.ns[RecordProfile::kTextures])+" bindings="+avg_ns(p.ns[RecordProfile::kBindings])
         +" descriptors="+avg_ns(p.ns[RecordProfile::kDescriptors])+" pipeline="+avg_ns(p.ns[RecordProfile::kPipeline])+" commands="+avg_ns(p.ns[RecordProfile::kCommands])+" resolves="+avg_ns(p.ns[RecordProfile::kResolves])+" clears="+avg_ns(p.ns[RecordProfile::kClears])
         +" | draws="+std::to_string(p.draws/t.frames)+" packets="+std::to_string(t.packets/t.frames)+" buffer_uploads="+std::to_string(p.buffer_uploads/t.frames)+" buffer_kb="+std::to_string(p.buffer_bytes/1024/t.frames)
-        +" texture_uploads="+std::to_string(p.texture_uploads/t.frames)+" texture_kb="+std::to_string(p.texture_bytes/1024/t.frames)
+        +" texture_uploads="+std::to_string(p.texture_uploads/t.frames)+" texture_kb="+std::to_string(p.texture_bytes/1024/t.frames)+" texture_storage_reuses="+std::to_string(p.texture_storage_reuses/t.frames)+" texture_storage_reuses_total="+std::to_string(renderer_.Stats().texture_storage_reuses)
+        +" vs_constant_reuses="+std::to_string(p.vs_constant_reuses/t.frames)+" ps_constant_reuses="+std::to_string(p.ps_constant_reuses/t.frames)
+        +" | texture_updates_window uploads="+std::to_string(texture_updates.uploads)+" bytes="+std::to_string(texture_updates.upload_bytes)
+        +" mips_uploaded="+std::to_string(texture_updates.mips_uploaded)+" mips_skipped="+std::to_string(texture_updates.mips_skipped)+" resource_reuses="+std::to_string(texture_updates.resource_reuses)
         +" | descriptor_cache hits="+std::to_string(cache.hits/t.frames)+" misses="+std::to_string(cache.misses/t.frames)+" evicted="+std::to_string(cache.evicted/t.frames)+" entries="+std::to_string(cache.entries)
         +" | global_bindings pages="+std::to_string(bindings.pages/t.frames)+" acquires="+std::to_string(bindings.resource_acquires/t.frames)+" allocations="+std::to_string(bindings.transient_allocations/t.frames)
         +" layout_ms="+avg_ns(bindings.ns[GlobalBindingStats::kLayout])+" streams_ms="+avg_ns(bindings.ns[GlobalBindingStats::kStreams])+" page_ms="+avg_ns(bindings.ns[GlobalBindingStats::kPage])

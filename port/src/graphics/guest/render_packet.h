@@ -59,6 +59,7 @@ struct DrawPacket {
   // Keep their exact bits; the other 1,020 mirrored registers are not read.
   std::array<uint32_t, 4> polygon_offset_registers{};
   std::array<std::array<uint32_t, 6>, 32> texture_fetch{};
+  uint32_t texture_mask = UINT32_MAX;
   std::array<SurfaceDesc, 4> colors{};
   SurfaceDesc depth;
   ResourceId shader_a = 0, shader_b = 0;

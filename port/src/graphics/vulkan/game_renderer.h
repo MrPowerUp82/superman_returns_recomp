@@ -5,6 +5,7 @@
 #include "constant_bank_cache.h"
 #include "global_draw_bindings.h"
 #include "../guest/texture_capture.h"
+#include "../guest/texture_storage_identity.h"
 #include "../../title_benchmark_policy.h"
 #include <functional>
 #include <atomic>
@@ -13,11 +14,12 @@ namespace superman_returns::graphics::vulkan {
 using ShaderLookup=std::function<shaders::ShaderResult(const guest::ShaderCapture&)>;
 using TextureDecoder=std::function<bool(const guest::TextureCapture&,guest::LinearTexture&,std::string&)>;
 // alias_violations: draws that found alias work on an already open pass (SR_VULKAN_CHECK_ALIASES=1 only).
-struct GameRenderStats {uint64_t draws=0,pending=0,failed=0,clears=0,alias_violations=0;};
+struct GameRenderStats {uint64_t draws=0,pending=0,failed=0,clears=0,alias_violations=0,texture_storage_reuses=0;};
 // SR_VULKAN_PROFILE=1: CPU time of each recording phase, summed until read.
 struct RecordProfile {
   enum Phase {kUploads,kTargets,kTextures,kBindings,kDescriptors,kPipeline,kCommands,kResolves,kClears,kCount};
-  std::array<uint64_t,kCount> ns{};uint64_t draws=0,texture_uploads=0,texture_bytes=0,buffer_uploads=0,buffer_bytes=0;
+  std::array<uint64_t,kCount> ns{};uint64_t draws=0,texture_uploads=0,texture_bytes=0,buffer_uploads=0,buffer_bytes=0,texture_storage_reuses=0;
+  uint64_t vs_constant_reuses=0,ps_constant_reuses=0;
 };
 class GameRenderer {
 public:
@@ -81,6 +83,13 @@ private:
   // its image, so the recorded owner pointer cannot be reused while it lives.
   struct ResolveView {const TextureResource* owner=nullptr;VkComponentMapping mapping{};};
   std::map<guest::ResourceId,ResolveView> resolve_views_;
+  // Weak index: bindings/submissions own immutable versions. A new capture
+  // cannot overwrite images sampled by earlier queued draws.
+  struct TextureStorage {
+    std::weak_ptr<TextureResource> image;
+    std::weak_ptr<const guest::TextureCapture> capture;
+  };
+  std::map<std::array<uint32_t,6>,TextureStorage> texture_storage_;
   uint64_t resolve_generation_=0;
   VkCommandBuffer command_=VK_NULL_HANDLE;uint64_t serial_=0;bool dummies_=false;
   superman_returns::benchmark::UiCut ui_cut_;std::function<void(bool)> ui_cut_report_;

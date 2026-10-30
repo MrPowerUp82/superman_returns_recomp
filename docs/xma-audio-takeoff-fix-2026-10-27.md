@@ -1,6 +1,15 @@
 # Superman Returns Recomp — XMA Final Block Flush & Takeoff Audio Fix
 
+**Atualização 30/10:** o runtime agora drena os blocos PCM pendentes antes de
+encerrar por falta de input/erro 4, com teste real de Work/Consume. O flush do
+carry continua necessário. [Evidências e limites](xma-pending-drain-2026-10-30.md).
+
 **Data:** 27 de Outubro de 2026  
+**Atualização 29/10:** a auditoria encontrou e corrigiu dois defeitos restantes
+no flush (capacidade de pacotes em bits e argumento do segundo kick). Os testes
+XDK citados abaixo verificam draws, não áudio; não comprovam continuidade da
+música após decolar. Veja [correções e validação atuais](reference-optimizations-2026-10-29.md).
+
 **Status:** Implementado e validado em build Release, testes nativos (518/518 PASS) e oracle diferencial XDK (2.048/2.048 PASS)  
 **Arquivos modificados:**
 - [`port/src/xma_fixes.cpp`](file:///C:/Users/Gusta/Documents/outros-projetos/superman_returns_recomp/port/src/xma_fixes.cpp)

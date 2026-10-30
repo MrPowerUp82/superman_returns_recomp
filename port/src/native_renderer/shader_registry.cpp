@@ -46,6 +46,7 @@
 #include "shader_container.h"
 #include "shader_library.h"
 #include "shader_translator.h"
+#include "../graphics/guest/shader_constant_cache.h"
 #include "../graphics/rt_shadow_shader.h"
 #include "../graphics/pixel_coverage_shader.h"
 
@@ -155,6 +156,8 @@ bool TryHashContainer(uint8_t* base, uint32_t container, GuestShaderInfo& info) 
   capture->vertex = info.is_vertex;
   capture->dynamic_vertex_fetch = info.dynamic_vertex_fetch;
   capture->container.assign(base + container, base + container + header.total_size());
+  capture->texture_usage = graphics::guest::AnalyzeShaderTextureUsage(capture->container);
+  if(graphics::guest::ShaderConstantMaskEnabled()) capture->constant_usage = graphics::guest::AnalyzeShaderConstantUsage(capture->container);
   info.capture = std::move(capture);
   return true;
 }
@@ -180,6 +183,8 @@ bool IdentifyAt(uint8_t* base, uint32_t container, GuestShaderInfo& info) {
   capture->vertex = info.is_vertex;
   capture->dynamic_vertex_fetch = info.dynamic_vertex_fetch;
   capture->container = s->container;
+  capture->texture_usage = graphics::guest::AnalyzeShaderTextureUsage(capture->container);
+  if(graphics::guest::ShaderConstantMaskEnabled()) capture->constant_usage = graphics::guest::AnalyzeShaderConstantUsage(capture->container);
   info.capture = std::move(capture);
   return true;
 }
@@ -207,6 +212,8 @@ uint32_t ResolveInline(uint8_t* base, uint32_t obj, bool vertex, GuestShaderInfo
         capture->vertex = s->vertex;
         capture->dynamic_vertex_fetch = s->dynamic_vertex_fetch;
         capture->container = s->container;
+        capture->texture_usage = graphics::guest::AnalyzeShaderTextureUsage(capture->container);
+        if(graphics::guest::ShaderConstantMaskEnabled()) capture->constant_usage = graphics::guest::AnalyzeShaderConstantUsage(capture->container);
         candidate.capture = std::move(capture);
         found = true;
       }

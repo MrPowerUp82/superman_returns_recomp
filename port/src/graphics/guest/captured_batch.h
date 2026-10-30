@@ -67,6 +67,7 @@ struct WorkCmd {
   uint32_t device =
       0; // Captured device identity, independent of current guest globals.
   std::shared_ptr<const ShaderCapture> vertex_shader, pixel_shader;
+  uint32_t texture_mask = UINT32_MAX; // Unknown/diagnostic captures retain every slot.
   std::array<std::shared_ptr<const TextureCapture>, 32> textures;
   std::vector<std::pair<uint32_t, std::string>> texture_errors;
   uint64_t command_serial = 0;

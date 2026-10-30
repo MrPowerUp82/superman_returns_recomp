@@ -58,7 +58,10 @@ struct TransientSlice {
   VkDeviceSize offset=0,size=0;
   std::byte* data=nullptr;
 };
+struct TextureUploadSnapshot;
 struct TextureResource {
+  // Exact CPU baseline for experimental retired-image updates; never owns a GPU image.
+  std::shared_ptr<TextureUploadSnapshot> upload_snapshot;
   Context* context=nullptr;
   ImageState* state=nullptr;
   // Optional lifetime for state attached to standalone presentation snapshots.
@@ -83,9 +86,13 @@ class ResourceStore {
 public:
   explicit ResourceStore(Context& c):c_(c) {buffers_.reserve(4096);textures_.reserve(4096);}
   ~ResourceStore();
+  // Successful new versions; bytes exclude staging padding. Mip counts are mip/layer
+  // regions (volume slices count separately); same-version hits do not increment.
+  struct TextureUpdateStats {uint64_t uploads=0,upload_bytes=0,mips_uploaded=0,mips_skipped=0,resource_reuses=0;};
+  TextureUpdateStats TakeTextureUpdateStats() {auto out=texture_update_stats_;texture_update_stats_={};return out;}
   // With a separate upload command buffer (submitted before the main one),
   // buffer/texture uploads record there and share one barrier written by
-  // FinishUploads. Every upload creates a new version, so hoisting is safe.
+  // FinishUploads. Updates only reuse exclusively owned, retired images, so hoisting is safe.
   bool BeginSubmission(VkCommandBuffer,uint64_t serial,Error&,VkCommandBuffer upload=VK_NULL_HANDLE);
   void FinishUploads();
   void Retire(uint64_t completed_serial);
@@ -100,6 +107,9 @@ public:
   // Reuse device allocations only after submissions and descriptor leases release them.
   bool UploadDynamicBuffer(guest::ResourceId,std::span<const std::byte>,uint64_t version,Error&);
   bool UploadTexture(guest::ResourceId,const guest::LinearTexture&,uint64_t version,Error&);
+  // Bind the same immutable CPU-uploaded image/view under another fetch ID.
+  // Ownership is retained by both the binding and the recording submission.
+  bool AliasUploadedTexture(guest::ResourceId,const std::shared_ptr<TextureResource>&,Error&);
   // Tracked resolve images remain GPU-authoritative and preserve partial writes.
   // The supplied ImageState must outlive this store and descriptor leases.
   std::shared_ptr<TextureResource> ResolveTexture(guest::ResourceId,VkFormat,VkExtent3D,uint32_t mips,uint32_t layers,bool cube,ImageState&,Error&,VkImageUsageFlags additional_usage=0);
@@ -135,6 +145,7 @@ private:
   bool Place(Arena&,VkDeviceSize size,VkDeviceSize alignment,Placement&,Error&);
   std::shared_ptr<BufferResource> Suballocate(Arena&,VkDeviceSize size,VkDeviceSize alignment,Error&);
   VkDeviceSize TransientAlignment() const;
+  TextureUpdateStats texture_update_stats_;
   Context& c_;
   VkCommandBuffer command_=VK_NULL_HANDLE,upload_=VK_NULL_HANDLE;
   bool upload_barrier_=false;std::vector<VkImageMemoryBarrier> texture_barriers_;VkDeviceSize submission_bytes_=0;

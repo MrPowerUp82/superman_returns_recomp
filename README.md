@@ -111,6 +111,46 @@ por hash continua. `set SR_MEMORY_TRACKING_SDK=OFF` permite compilar com o runti
 original. Detalhes e validação em
 [CPU e desbloqueio de FPS](docs/cpu-optimization-unlock-fps-2026-10-27.md).
 
+Em 29/10, o D3D12 passou a verificar texturas intactas pelas épocas das páginas
+sem consultar os locks do runtime quando a prova do upload continua válida.
+Também foram corrigidos o tamanho do pacote em bits e o argumento do segundo
+kick no flush XMA. Build, testes e limites da comparação de desempenho estão no
+[relatório das otimizações das referências](docs/reference-optimizations-2026-10-29.md).
+
+O renderer também evita preparar slots de textura não usados pelos shaders,
+com fallback completo para shaders desconhecidos. A opção
+`--sr_native_used_texture_mask=false` restaura o caminho anterior após reiniciar.
+Testes e medições em [máscara de texturas usadas](docs/used-texture-mask-2026-10-29.md).
+
+Texturas que diferem apenas em filtros, clamp ou LOD bias também compartilham
+armazenamento no D3D12, preservando seus samplers e versões de conteúdo.
+No Vulkan, esse compartilhamento é experimental e fica desligado por padrão
+após regressão nos ensaios desta máquina. `SR_NATIVE_TEXTURE_STORAGE_REUSE=0`
+desliga nas duas APIs; `=1` força nas duas. Defina a variável antes de iniciar.
+Testes e limites em [compartilhamento de texturas](docs/texture-storage-reuse-2026-10-29.md).
+
+O reaproveitamento de bancos por constantes usadas pelo shader está
+**experimental e desligado por padrão**: eliminou escritas, mas piorou os dois
+pares D3D12 medidos. Pode ser testado com `SR_NATIVE_USED_CONSTANT_MASK=1`;
+no Vulkan portável depende também de `SR_VULKAN_CONSTANT_BANK_CACHE=1`.
+[Validação e medições](docs/used-constant-mask-2026-10-29.md).
+
+O runtime do build padrão também drena o PCM XMA já decodificado quando a
+entrada acaba, respeitando espaço/padding e retornando se não houver progresso.
+[Correção e testes de drenagem XMA](docs/xma-pending-drain-2026-10-30.md).
+
+A última etapa, atualizações seletivas de texturas, está implementada nas duas
+APIs e é experimental (`SR_NATIVE_TEXTURE_UPDATES=1`, padrão desligado).
+Ela reaproveita recursos compatíveis após concluir seu uso e preserva versões
+pendentes; o decode continua completo. [Implementação e testes](docs/texture-updates-2026-10-30.md).
+
+No Windows, o monitor de memória agrupa consultas e proteção por regiões,
+preservando os limites observados e os direitos de cada alias. Esse caminho
+fica ligado por padrão; `SR_TRACKING_BATCH_ARM=0` restaura o legado após
+reiniciar. Nos ensaios, o ganho mais claro foi remover pausas longas em Compare;
+o FPS normal variou entre pares. [Pesquisa e benchmarks de CPU](docs/cpu-web-bench-2026-10-30.md).
+Para repetir A/B sequencial sem instrumentação: `python tools/bench/cpu_web_sweep.py --suite arm --blocks 3 --cpu-profile 0`.
+
 No renderer nativo, num i5-13420H + Intel UHD, o quadro é limitado pela GPU integrada: a cena principal ocupa ~72% do tempo de GPU. O trabalho de CPU do worker D3D12 fica em ~13 ms por quadro. Números atuais na seção [Benchmark](#benchmark); análise em [pistas de desempenho de 28/10](docs/perf-hunt-game-xenia-2026-10-28.md).
 
 As medições abaixo são históricas e registram explicitamente os limites usados. Medido no fechamento do ciclo 3 em 2026-10-06 no mesmo i5-13420H + Intel UHD, com `tools\bench\bench_api.ps1` (New Game, 20 s parado e 20 s andando, janela 1280x720, limite de 30 FPS; o script só mede depois de ver o HUD do jogo na tela):

@@ -158,7 +158,11 @@ void DeviceState(DrawPacket &d, uint32_t device,const State &mirror) {
   d.shader_b = U32(d.memory, Address(device, layout.shader_b));
   const auto fetch_address=Address(device,layout.fetch_constants);
   const auto fetch_bytes=d.memory.ReadUnambiguous(fetch_address,32*24);
-  for (uint32_t slot = 0; slot < 32; ++slot)
+  for (uint32_t slot = 0; slot < 32; ++slot) {
+    if (!(d.texture_mask & (1u << slot))) {
+      d.texture_fetch[slot] = {};
+      continue;
+    }
     for (uint32_t i = 0; i < 6; ++i) {
       uint32_t reg = native::Pm4Mirror::kFetchConstantBase + slot * 6 + i;
       d.texture_fetch[slot][i] =
@@ -167,6 +171,7 @@ void DeviceState(DrawPacket &d, uint32_t device,const State &mirror) {
               : (fetch_bytes.empty()?U32(d.memory, Address(fetch_address,slot*24+i*4)):
                  CapturedWord(fetch_bytes,slot*24+i*4));
     }
+  }
   d.has_device_state = true;
 }
 } // namespace
@@ -289,6 +294,7 @@ bool DecodeCapturedPacket(const WorkBatch &batch, const WorkCmd &cmd,
       // the reference renderer: the owned container determines the stage.
       for(auto& shader:{cmd.vertex_shader,cmd.pixel_shader}) if(shader) (shader->vertex?d.vertex_shader:d.pixel_shader)=shader;
       d.textures = cmd.textures;
+      d.texture_mask = cmd.texture_mask;
       d.texture_errors = cmd.texture_errors;
       d.command_serial = cmd.command_serial;
       d.tiling_active = cmd.tiling_active;

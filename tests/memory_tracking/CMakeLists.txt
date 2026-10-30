@@ -25,6 +25,15 @@ else()
     ../../port/src/graphics/guest/texture_capture.cpp
     ../../port/src/graphics/guest/texture_layout.cpp
     ../../port/src/graphics/guest/captured_batch.cpp)
+  # The Xenos plugin hides its Shader symbols. Compile the unmodified decoder
+  # as an independent reference only when building against SDK sources.
+  if(EXISTS "${REXSDK_DIR}/src/graphics/pipeline/shader/translator.cpp")
+    target_sources(sr_memory_tracking_tests PRIVATE test_shader_constant_analysis.cpp
+      "${REXSDK_DIR}/src/graphics/pipeline/shader/shader.cpp"
+      "${REXSDK_DIR}/src/graphics/pipeline/shader/translator.cpp"
+      "${REXSDK_DIR}/src/graphics/pipeline/shader/translator_disasm.cpp"
+      "${REXSDK_DIR}/src/graphics/format/ucode.cpp")
+  endif()
 endif()
 target_compile_features(sr_memory_tracking_tests PRIVATE cxx_std_23)
 # texture_decode.cpp applies texture mods (stb_image is vendored under port/third_party).

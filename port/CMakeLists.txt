@@ -32,6 +32,7 @@ if(SR_MEMORY_TRACKING_SDK)
     endif()
     enable_testing()
     add_subdirectory(../tests/memory_tracking memory-tracking-tests)
+    add_subdirectory(../tests/xma xma-tests)
 endif()
 
 option(SR_VULKAN_FOUNDATION "Build standalone Vulkan foundation smoke test" OFF)

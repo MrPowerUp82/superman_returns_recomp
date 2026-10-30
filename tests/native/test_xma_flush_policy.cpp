@@ -70,10 +70,33 @@ SR_TEST(xma_input_exhausted_on_error_status_4_with_single_buffer) {
 }
 
 SR_TEST(xma_input_exhausted_when_read_offset_reaches_capacity) {
-  SR_CHECK(IsXmaInputExhausted(true, false, 0, 2, 0, 4096, 0));
-  SR_CHECK(IsXmaInputExhausted(true, false, 0, 2, 0, 5000, 0));
-  SR_CHECK(!IsXmaInputExhausted(true, false, 0, 2, 0, 2048, 0));
-  SR_CHECK(!IsXmaInputExhausted(true, true, 0, 2, 2, 4096, 0));
+  // Two packets of 2048 bytes occupy 32768 bits, not 4096 bits.
+  for (uint32_t current : {0u, 1u}) {
+    for (uint32_t offset : {4096u, 5000u, 32767u}) {
+      SR_CHECK(!IsXmaInputExhausted(current == 0, current == 1, current,
+                                   2, 2, offset, 0));
+    }
+    SR_CHECK(IsXmaInputExhausted(current == 0, current == 1, current,
+                               2, 2, 32768, 0));
+    SR_CHECK(IsXmaInputExhausted(current == 0, current == 1, current,
+                               2, 2, 32769, 0));
+    SR_CHECK(!IsXmaInputExhausted(true, true, current, 2, 2, 32768, 0));
+  }
+}
+
+SR_TEST(xma_input_capacity_uses_the_active_buffer_packet_count) {
+  SR_CHECK(!IsXmaInputExhausted(true, false, 0, 1, 2, 16383, 0));
+  SR_CHECK(IsXmaInputExhausted(true, false, 0, 1, 2, 16384, 0));
+  SR_CHECK(!IsXmaInputExhausted(false, true, 1, 1, 2, 16384, 0));
+  SR_CHECK(IsXmaInputExhausted(false, true, 1, 1, 2, 32768, 0));
+}
+
+SR_TEST(xma_final_flush_waits_until_all_packet_bits_are_consumed) {
+  XmaFlushInputs in = EndOfStream();
+  in.input_exhausted = IsXmaInputExhausted(true, false, 0, 2, 0, 4096, 0);
+  SR_CHECK(DecideXmaFinalFlush(in) == XmaFlushDecision::InputPending);
+  in.input_exhausted = IsXmaInputExhausted(true, false, 0, 2, 0, 32768, 0);
+  SR_CHECK(DecideXmaFinalFlush(in) == XmaFlushDecision::Flush);
 }
 
 SR_TEST(xma_final_request_takes_everything_the_segment_has_left) {

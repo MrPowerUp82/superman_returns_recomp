@@ -67,6 +67,9 @@
 #include "game_profile.h"
 #include "index_endian.h"
 #include "../graphics/guest/constant_snapshot.h"
+#include "../graphics/guest/texture_binding_policy.h"
+#include "../graphics/guest/texture_storage_identity.h"
+#include "../graphics/guest/shader_constant_policy.h"
 #include "../graphics/readback_rows.h"
 #include "../graphics/motion_depth_boundary.h"
 #include "../graphics/scene_color_vertex_input.h"
@@ -86,6 +89,9 @@
 #include "vertex_signature.h"
 #include "texture_decode.h"
 #include "texture_binding.h"
+
+REXCVAR_DECLARE(std::string,sr_native_preshaders_path);
+REXCVAR_DECLARE(std::string,sr_native_shader_tools_dir);
 
 REXCVAR_DEFINE_INT32(sr_native_debug_spin_us, 0, "Superman Returns Native",
                      "Debug: busy-wait this many microseconds in every native draw entry (timing bisection)");
@@ -179,6 +185,10 @@ REXCVAR_DEFINE_INT32(sr_native_dump_swap, 0, "Superman Returns Native",
 REXCVAR_DEFINE_BOOL(sr_native_pm4_mirror, true, "Superman Returns Native",
                     "Take shader/fetch constants from the parsed command stream (GPU truth) "
                     "instead of the XDK device shadow");
+REXCVAR_DEFINE_BOOL(sr_native_used_texture_mask, true, "Superman Returns Native",
+                    "Prepare only textures referenced by known guest shaders; unknown shaders "
+                    "and diagnostic/host-variant paths retain all slots (restart required)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(sr_native_pm4_bounded_reads, true, "Superman Returns Native",
                     "Copy live PM4 constant sources with bounded checked reads instead of "
                     "VirtualQuery validation (D3D12, restart required; false = legacy path)");
@@ -479,6 +489,7 @@ struct CaptureTimings {
   uint64_t watch_us=0,read_us=0,hash_us=0,copy_us=0;
   uint64_t new_entries=0,watch_dirty=0,revalidated=0,changed=0;
   uint64_t watch_scan_hits=0,watch_scan_misses=0;
+  uint64_t texture_slots_skipped=0;
   uint64_t fe_hook_ns=0,fe_begin_ns=0,fe_ring_ns=0,fe_device_ns=0,fe_index_ns=0,fe_streams_ns=0,fe_end_ns=0,fe_flush_ns=0;
   uint64_t fd_shaders_ns=0,fs_prep_ns=0,fs_plan_ns=0,fe_push_ns=0;
   uint64_t fe_pm4_ns=0,fe_textures_ns=0,fs_resolve_ns=0,fs_buffer_ns=0;
@@ -536,6 +547,21 @@ bool TextureSlotLookupCaching() {
 bool TargetedSlotInvalidation() {
   static const bool enabled=[] {
     const char* value=std::getenv("SR_NATIVE_TARGETED_SLOT_INVALIDATION");
+    return !value || !*value || *value!='0';
+  }();
+  return enabled;
+}
+// Keep the locked query available for A/B measurements and older runtimes.
+bool SkipUnpublishedTextureQueries() {
+  static const bool enabled=[] {
+    const char* value=std::getenv("SR_NATIVE_SKIP_UNPUBLISHED_TEXTURE_QUERY");
+    return value && *value && *value!='0';
+  }();
+  return enabled;
+}
+bool TextureFastProofs() {
+  static const bool enabled=[] {
+    const char* value=std::getenv("SR_NATIVE_TEXTURE_FAST_PROOF");
     return !value || !*value || *value!='0';
   }();
   return enabled;
@@ -2153,6 +2179,7 @@ bool Renderer::BeginFrame() {
   upload_peak_ = std::max(upload_peak_, upload_offset_);
   upload_offset_ = 0;
   cb_vs_gpu_ = cb_ps_gpu_ = 0;
+  cb_vs_cache_.Reset();cb_ps_cache_.Reset();
   shared_constants_cache_.Reset();
   if (overflow_page_) {
     Retire(overflow_page_);
@@ -3529,6 +3556,8 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
   return pso.Get();
 }
 
+static bool TextureUpdatesEnabled();
+
 uint32_t Renderer::GetTextureSrvIndex(uint8_t* base, const uint32_t fetch[6],
                                       TextureLookupMetadata& metadata) {
   CpuTimer cpu_timer(cpu_timings.texture_lookup_ns);
@@ -3617,12 +3646,17 @@ uint32_t Renderer::GetTextureSrvIndex(uint8_t* base, const uint32_t fetch[6],
   // Sign fields (dword 0 bits 2-9) are part of the key: gamma changes the view.
   uint64_t key_parts[4] = {fetch[1] | (uint64_t((fetch[0] >> 2) & 0xFF) << 32), fetch[2],
                            fetch[3] & 0x1FFE, fetch[5] & 0xFFFFFE00u};
-  uint64_t key = texture_tracking_mode_==TextureTrackingMode::On ? XXH3_64bits(fetch,6*sizeof(uint32_t)) : XXH3_64bits(key_parts, sizeof(key_parts));
+  const bool share_storage=graphics::guest::TextureStorageReuseEnabled();
+  const auto storage_fetch=graphics::guest::TextureStorageFetch(std::span<const uint32_t,6>(fetch,6),share_storage);
+  uint64_t key = share_storage ? XXH3_64bits(storage_fetch.data(),sizeof(storage_fetch)) :
+      texture_tracking_mode_==TextureTrackingMode::On ? XXH3_64bits(fetch,6*sizeof(uint32_t)) : XXH3_64bits(key_parts, sizeof(key_parts));
   auto it = textures_.find(key);
-  if(it!=textures_.end() && texture_tracking_mode_==TextureTrackingMode::On &&
-      !TextureDescriptorMatches(it->second.descriptor,std::span<const uint32_t,6>(fetch,6))) {
+  if(it!=textures_.end() && (share_storage ?
+      graphics::guest::TextureStorageFetch(it->second.descriptor)!=storage_fetch :
+      texture_tracking_mode_==TextureTrackingMode::On &&
+      !TextureDescriptorMatches(it->second.descriptor,std::span<const uint32_t,6>(fetch,6)))) {
     // A hash bucket is not descriptor identity. Retire even a colliding key.
-    Retire(it->second.resource);RetireSrvIndex(it->second.srv_index);
+    RetireTexture(it->second.resource,it->second.srv_index);
     textures_.erase(it);it=textures_.end();
   }
   if (it != textures_.end()) {
@@ -3644,10 +3678,26 @@ uint32_t Renderer::GetTextureSrvIndex(uint8_t* base, const uint32_t fetch[6],
       bool reused_by_tracking = false;
       if(texture_tracking_mode_==TextureTrackingMode::On && entry.tracking) {
         auto& tracking=*entry.tracking;
-        const auto query_start=CpuProfiling()?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
-        resource_write_tracker_.Sample(tracking.watch,tracking.current);
-        if(CpuProfiling()) tracking_query_ns_+=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-query_start).count();
-        reused_by_tracking=CanReuseTexture(tracking.upload,tracking.current,entry.resource?entry.resource_version:0);
+        const uint64_t live_version=entry.resource?entry.resource_version:0;
+        bool queried=false;
+        const auto query_reuse=[&] {
+          queried=true;
+          const auto query_start=CpuProfiling()?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
+          bool reused=TextureFastProofs() && resource_write_tracker_.CanReuseTextureFast(
+              tracking.upload,tracking.ranges,live_version);
+          if(reused) ++tracking_fast_reuses_;
+          else {
+            resource_write_tracker_.Sample(tracking.watch,tracking.current);
+            reused=CanReuseTexture(tracking.upload,tracking.current,live_version);
+          }
+          if(CpuProfiling()) tracking_query_ns_+=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-query_start).count();
+          return reused;
+        };
+        reused_by_tracking=SkipUnpublishedTextureQueries()
+            ? QueryPublishedTexture(tracking.upload,live_version,query_reuse) : query_reuse();
+        if(!queried) {
+          ++tracking_unpublished_queries_skipped_;
+        }
       }
       CpuTimer watch_timer(cpu_timings.texture_watch_ns);
       const bool written = !reused_by_tracking && texture_watch_ &&
@@ -3744,18 +3794,17 @@ uint32_t Renderer::GetTextureSrvIndex(uint8_t* base, const uint32_t fetch[6],
         if (hash != entry.content_hash) {
           if (CpuProfiling()) ++cpu_timings.texture_hash_changes;
           ++stats_.textures_reloaded;
-          Retire(entry.resource);
-          RetireSrvIndex(entry.srv_index);
-          entry.resource.Reset();
-          entry.srv_index = 0;
           if (!CreateTexture(fetch, entry)) {
+            RetireTexture(entry.resource,entry.srv_index);
             textures_.erase(it);
             return 0;
           }
         }
       }
     }
+    if(share_storage && entry.srv_index && !TextureDescriptorMatches(entry.descriptor,std::span<const uint32_t,6>(fetch,6))) ++stats_.texture_storage_reuses;
     ReportTextureTracking();
+    if(TextureUpdatesEnabled() && entry.srv_index>2) texture_use_fences_[entry.srv_index]={next_fence_value_,frame_count_};
     return entry.srv_index;
   }
   TextureEntry& entry = textures_[key];
@@ -3774,7 +3823,20 @@ void Renderer::InvalidateSlotBindings(uint32_t dest_base) {
 }
 
 void Renderer::RetireSrvIndex(uint32_t index) {
+  texture_use_fences_.erase(index);
   if (index > 2) retired_srvs_.emplace_back(next_fence_value_, index);
+}
+
+void Renderer::RetireTexture(ComPtr<ID3D12Resource> resource,uint32_t srv) {
+  texture_use_fences_.erase(srv);
+  if(TextureUpdatesEnabled() && resource) {
+    // Debug probes can submit and advance the fence while this frame still
+    // references an old version. Keep both resource and descriptor until the
+    // final submission has been assigned, rather than the next debug signal.
+    pending_texture_retirements_.emplace_back(std::move(resource),srv);
+  } else {
+    Retire(std::move(resource));RetireSrvIndex(srv);
+  }
 }
 
 std::pair<uint32_t, uint32_t> Renderer::OnPhysicalWrite(void* context, uint32_t start,
@@ -3811,8 +3873,8 @@ void Renderer::ReportTextureTracking() {
   if(texture_tracking_mode_!=TextureTrackingMode::Off && frame_count_>=tracking_report_frame_+120) {
     tracking_report_frame_=frame_count_;
     const auto counters=resource_write_tracker_.Stats();
-    REXLOG_INFO("native texture tracking: frame={} checks={} bytes={} eligible_bytes={} candidates={} uncovered_checks={} mismatches={} watches={} guest_faults={} physical_faults={} io_begin={} io_end={} protection_failures={} coverage_losses={} skipped_checks={} skipped_bytes={} query_ns={} unknown_checks={} invalidated_checks={} active_checks={} unchanged_lost_checks={}",
-      frame_count_,tracking_checks_,tracking_bytes_,tracking_eligible_bytes_,tracking_candidates_,tracking_races_,tracking_mismatches_,counters.active_watches,counters.guest_faults,counters.physical_faults,counters.io_begin,counters.io_end,counters.protection_failures,counters.coverage_losses,tracking_skipped_checks_,tracking_skipped_bytes_,tracking_query_ns_,tracking_unknown_,tracking_invalidated_,tracking_active_,tracking_unchanged_lost_);
+    REXLOG_INFO("native texture tracking: frame={} checks={} bytes={} eligible_bytes={} candidates={} uncovered_checks={} mismatches={} watches={} guest_faults={} physical_faults={} io_begin={} io_end={} protection_failures={} coverage_losses={} skipped_checks={} skipped_bytes={} query_ns={} unknown_checks={} invalidated_checks={} active_checks={} unchanged_lost_checks={} fast_reuses={} unpublished_queries_skipped={}",
+      frame_count_,tracking_checks_,tracking_bytes_,tracking_eligible_bytes_,tracking_candidates_,tracking_races_,tracking_mismatches_,counters.active_watches,counters.guest_faults,counters.physical_faults,counters.io_begin,counters.io_end,counters.protection_failures,counters.coverage_losses,tracking_skipped_checks_,tracking_skipped_bytes_,tracking_query_ns_,tracking_unknown_,tracking_invalidated_,tracking_active_,tracking_unchanged_lost_,tracking_fast_reuses_,tracking_unpublished_queries_skipped_);
   }
 }
 
@@ -3830,13 +3892,15 @@ bool Renderer::CaptureTextureProof(const uint32_t fetch[6],TextureEntry& entry,D
   for(const auto r:ranges) watched.push_back({r.address,r.length});
   auto candidate=std::make_unique<TextureTrackingEntry>();
   candidate->owner=&resource_write_tracker_;
-  candidate->watch=resource_write_tracker_.Watch(watched);
+  candidate->ranges=std::move(watched);
+  candidate->watch=resource_write_tracker_.Watch(candidate->ranges);
   if(!candidate->watch) return false;
   candidate->before.resize(ranges.size());candidate->current.resize(ranges.size());
   if(texture_tracking_version_==UINT64_MAX) return false;
   candidate->version=++texture_tracking_version_;
   entry.tracking=std::move(candidate);
   auto& tracked=*entry.tracking;
+  tracked.capture_domain=resource_write_tracker_.FastDomain();
   resource_write_tracker_.Sample(tracked.watch,tracked.before);
   if(!SameCoveredContent(tracked.before,tracked.before)) return false;
   std::shared_ptr<const graphics::guest::TextureCapture> snapshot;
@@ -3858,7 +3922,25 @@ bool Renderer::CaptureTextureProof(const uint32_t fetch[6],TextureEntry& entry,D
   ++tracking_candidates_; decoded_out=std::move(decoded_candidate); return true;
 }
 
+static bool TextureUpdatesEnabled() {
+  static const bool enabled=[] {
+    const char* value=std::getenv("SR_NATIVE_TEXTURE_UPDATES");
+    return value && std::strcmp(value,"1")==0;
+  }();
+  return enabled;
+}
+
+static bool SameTextureAllocation(const D3D12_RESOURCE_DESC& a,const D3D12_RESOURCE_DESC& b) {
+  return a.Dimension==b.Dimension && a.Alignment==b.Alignment && a.Width==b.Width &&
+      a.Height==b.Height && a.DepthOrArraySize==b.DepthOrArraySize && a.MipLevels==b.MipLevels &&
+      a.Format==b.Format && a.SampleDesc.Count==b.SampleDesc.Count &&
+      a.SampleDesc.Quality==b.SampleDesc.Quality && a.Layout==b.Layout && a.Flags==b.Flags;
+}
+
 uint32_t Renderer::CreateTexture(const uint32_t fetch[6], TextureEntry& entry) {
+  // Admit after the first content update. Otherwise immutable startup assets
+  // consume the entire snapshot budget before streaming textures can use it.
+  const bool retain_update_snapshot=TextureUpdatesEnabled() && bool(entry.resource);
   entry.tracking.reset();entry.resource_version=0;
   // Watch before reading: arm, hash, then decode. A guest write after arming
   // (e.g. a streaming loader filling the texture while the worker decodes it)
@@ -3962,99 +4044,122 @@ uint32_t Renderer::CreateTexture(const uint32_t fetch[6], TextureEntry& entry) {
   }
   desc.Format = resource_format;
   desc.SampleDesc.Count = 1;
-  if (FAILED(device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-                                              D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                              IID_PPV_ARGS(&entry.resource)))) {
-    return 0;
-  }
-  uint32_t subresources = decoded.mip_levels * (volume ? 1 : decoded.depth);
+  const D3D12_SRV_DIMENSION view_dimension=cube?D3D12_SRV_DIMENSION_TEXTURECUBE:
+      volume?D3D12_SRV_DIMENSION_TEXTURE3D:D3D12_SRV_DIMENSION_TEXTURE2D;
+  const bool compatible=TextureUpdatesEnabled() && !volume && entry.resource &&
+      SameTextureAllocation(entry.resource->GetDesc(),desc) &&
+      entry.update_view_format==srv_format && entry.update_component_mapping==decoded.component_mapping &&
+      entry.update_view_dimension==view_dimension;
+  const auto use=texture_use_fences_.find(entry.srv_index);
+  const bool reuse=compatible && entry.update_snapshot && use!=texture_use_fences_.end() &&
+      use->second.frame<frame_count_ &&
+      D3DTextureCanOverwrite(use->second.fence,fence_->GetCompletedValue(),next_fence_value_);
+  const uint32_t subresources=decoded.mip_levels*(volume?1:decoded.depth);
   std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> layouts(subresources);
   std::vector<UINT> rows(subresources);
   std::vector<UINT64> row_sizes(subresources);
-  UINT64 total = 0;
-  device_->GetCopyableFootprints(&desc, 0, subresources, 0, layouts.data(), rows.data(),
-                                 row_sizes.data(), &total);
-  UploadAlloc upload;
-  if (!Upload(size_t(total), D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT, upload)) {
-    entry.resource.Reset();
-    return 0;
-  }
-  UINT64 upload_base = upload.offset;
-  if (volume) {
-    // One subresource; the footprint holds all depth slices.
-    for (uint32_t z = 0; z < decoded.depth; ++z) {
-      const auto& level = decoded.levels[z];
-      uint8_t* dst = upload.cpu + layouts[0].Offset +
-                     size_t(z) * layouts[0].Footprint.RowPitch * rows[0];
-      uint32_t copy_rows = std::min<uint32_t>(rows[0], level.rows);
-      size_t copy_bytes = std::min<size_t>(size_t(row_sizes[0]), level.row_pitch);
-      for (uint32_t r = 0; r < copy_rows; ++r) {
-        std::memcpy(dst + size_t(r) * layouts[0].Footprint.RowPitch,
-                    decoded.data.data() + level.offset + size_t(r) * level.row_pitch, copy_bytes);
-      }
+  std::vector<bool> changed(subresources,true);
+  bool complete_layout=!volume && decoded.levels.size()==subresources;
+  UINT64 total=0;
+  // Pack only changed footprints into the upload ring. Decoder order is
+  // mip-major/slice-minor; D3D subresource order is slice-major/mip-minor.
+  for(uint32_t sub=0;sub<subresources;++sub) {
+    const size_t level_index=size_t(sub%decoded.mip_levels)*decoded.depth+sub/decoded.mip_levels;
+    UINT64 footprint_bytes=0;
+    device_->GetCopyableFootprints(&desc,sub,1,0,&layouts[sub],&rows[sub],&row_sizes[sub],&footprint_bytes);
+    if(complete_layout) {
+      const auto& level=decoded.levels[level_index];
+      complete_layout=level.rows==rows[sub] && level.row_pitch==row_sizes[sub] &&
+          level.offset<=decoded.data.size() &&
+          uint64_t(level.row_pitch)*level.rows<=decoded.data.size()-level.offset;
     }
-    D3D12_TEXTURE_COPY_LOCATION src{};
-    src.pResource = upload.resource;
-    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    src.PlacedFootprint = layouts[0];
-    src.PlacedFootprint.Offset += upload_base;
-    D3D12_TEXTURE_COPY_LOCATION dst_loc{};
-    dst_loc.pResource = entry.resource.Get();
-    dst_loc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    dst_loc.SubresourceIndex = 0;
-    command_list_->CopyTextureRegion(&dst_loc, 0, 0, 0, &src, nullptr);
-  }
-  for (uint32_t mip = 0; mip < decoded.mip_levels && !volume; ++mip) {
-    for (uint32_t slice = 0; slice < decoded.depth; ++slice) {
-      // Decoder order: mip-major, slice-minor. D3D12 subresource: mip + slice * mips.
-      const auto& level = decoded.levels[size_t(mip) * decoded.depth + slice];
-      uint32_t sub = mip + slice * decoded.mip_levels;
-      uint8_t* dst = upload.cpu + layouts[sub].Offset;
-      uint32_t copy_rows = std::min<uint32_t>(rows[sub], level.rows);
-      size_t copy_bytes = std::min<size_t>(size_t(row_sizes[sub]), level.row_pitch);
-      for (uint32_t r = 0; r < copy_rows; ++r) {
-        std::memcpy(dst + size_t(r) * layouts[sub].Footprint.RowPitch,
-                    decoded.data.data() + level.offset + size_t(r) * level.row_pitch, copy_bytes);
-      }
-      D3D12_TEXTURE_COPY_LOCATION src{};
-      src.pResource = upload.resource;
-      src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-      src.PlacedFootprint = layouts[sub];
-      src.PlacedFootprint.Offset += upload_base;
-      D3D12_TEXTURE_COPY_LOCATION dst_loc{};
-      dst_loc.pResource = entry.resource.Get();
-      dst_loc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-      dst_loc.SubresourceIndex = sub;
-      command_list_->CopyTextureRegion(&dst_loc, 0, 0, 0, &src, nullptr);
+    if(compatible && entry.update_snapshot && complete_layout)
+      changed[sub]=!entry.update_snapshot->Matches(std::span(decoded.data),std::span(decoded.levels),level_index);
+    if(changed[sub]) {
+      total=(total+D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT-1)&~UINT64(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT-1);
+      layouts[sub].Offset=total;
+      total+=footprint_bytes;
     }
   }
-  D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COPY_DEST;
-  Transition(entry.resource.Get(), state,
-             D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
-                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-  D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-  srv.Format = srv_format;
-  srv.Shader4ComponentMapping = decoded.component_mapping;
-  if (cube) {
-    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
-    srv.TextureCube.MipLevels = decoded.mip_levels;
-  } else if (volume) {
-    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
-    srv.Texture3D.MipLevels = decoded.mip_levels;
-  } else {
-    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    srv.Texture2D.MipLevels = decoded.mip_levels;
+  // An incomplete/unknown layout never uses a partial baseline. Recompute the
+  // original full footprint layout, including the volume fallback.
+  if(!complete_layout) {
+    std::fill(changed.begin(),changed.end(),true);
+    device_->GetCopyableFootprints(&desc,0,subresources,0,layouts.data(),rows.data(),row_sizes.data(),&total);
   }
-  entry.srv_index = AllocSrvIndex();
-  if (!entry.srv_index) {
-    Retire(entry.resource);
-    entry.resource.Reset();
-    return 0;
+  UploadAlloc upload{};
+  if(total && (total>SIZE_MAX || !Upload(size_t(total),D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT,upload))) return 0;
+  ComPtr<ID3D12Resource> resource;
+  uint32_t srv_index=entry.srv_index;
+  if(reuse && complete_layout) resource=entry.resource;
+  else {
+    if(FAILED(device_->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,
+        D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&resource)))) return 0;
+    srv_index=AllocSrvIndex();
+    if(!srv_index) return 0;
+    D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+    srv.Format=srv_format;srv.Shader4ComponentMapping=decoded.component_mapping;
+    srv.ViewDimension=view_dimension;
+    if(cube) srv.TextureCube.MipLevels=decoded.mip_levels;
+    else if(volume) srv.Texture3D.MipLevels=decoded.mip_levels;
+    else srv.Texture2D.MipLevels=decoded.mip_levels;
+    device_->CreateShaderResourceView(resource.Get(),&srv,
+        provider_->OffsetViewDescriptor(srv_heap_->GetCPUDescriptorHandleForHeapStart(),srv_index));
   }
-  device_->CreateShaderResourceView(
-      entry.resource.Get(), &srv,
-      provider_->OffsetViewDescriptor(srv_heap_->GetCPUDescriptorHandleForHeapStart(),
-                                      entry.srv_index));
+  const bool reused=resource.Get()==entry.resource.Get();
+  const D3D12_RESOURCE_STATES shader_state=D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+  D3D12_RESOURCE_STATES state=reused?shader_state:D3D12_RESOURCE_STATE_COPY_DEST;
+  if(total) Transition(resource.Get(),state,D3D12_RESOURCE_STATE_COPY_DEST);
+  bool copying_old=false;
+  D3D12_RESOURCE_STATES old_state=shader_state;
+  for(uint32_t sub=0;sub<subresources;++sub) {
+    if(!changed[sub]) {
+      ++texture_mips_skipped_;
+      if(!reused) {
+        // Queue ordering and barriers protect pending readers; old contents
+        // remain immutable. Retire the source on this copy's covering fence.
+        if(!copying_old) {
+          Transition(entry.resource.Get(),old_state,D3D12_RESOURCE_STATE_COPY_SOURCE);
+          copying_old=true;
+        }
+        D3D12_TEXTURE_COPY_LOCATION src{},dst{};
+        src.pResource=entry.resource.Get();src.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;src.SubresourceIndex=sub;
+        dst.pResource=resource.Get();dst.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;dst.SubresourceIndex=sub;
+        command_list_->CopyTextureRegion(&dst,0,0,0,&src,nullptr);
+      }
+      continue;
+    }
+    const uint32_t slices=volume?decoded.depth:1;
+    for(uint32_t z=0;z<slices;++z) {
+      const size_t index=volume?z:size_t(sub%decoded.mip_levels)*decoded.depth+sub/decoded.mip_levels;
+      const auto& level=decoded.levels[index];
+      uint8_t* dst=upload.cpu+layouts[sub].Offset+size_t(z)*layouts[sub].Footprint.RowPitch*rows[sub];
+      const uint32_t copy_rows=std::min<uint32_t>(rows[sub],level.rows);
+      const size_t copy_bytes=std::min<size_t>(size_t(row_sizes[sub]),level.row_pitch);
+      for(uint32_t r=0;r<copy_rows;++r)
+        std::memcpy(dst+size_t(r)*layouts[sub].Footprint.RowPitch,
+            decoded.data.data()+level.offset+size_t(r)*level.row_pitch,copy_bytes);
+      texture_upload_bytes_+=uint64_t(copy_rows)*copy_bytes;
+    }
+    D3D12_TEXTURE_COPY_LOCATION src{},dst{};
+    src.pResource=upload.resource;src.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    src.PlacedFootprint=layouts[sub];src.PlacedFootprint.Offset+=upload.offset;
+    dst.pResource=resource.Get();dst.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;dst.SubresourceIndex=sub;
+    command_list_->CopyTextureRegion(&dst,0,0,0,&src,nullptr);
+  }
+  if(copying_old) Transition(entry.resource.Get(),old_state,shader_state);
+  Transition(resource.Get(),state,shader_state);
+  if(!reused) {
+    RetireTexture(entry.resource,entry.srv_index);
+    entry.resource=std::move(resource);entry.srv_index=srv_index;
+  } else ++texture_resource_reuses_;
+  entry.update_snapshot.reset();
+  if(retain_update_snapshot && complete_layout)
+    entry.update_snapshot=D3DTextureSnapshot::Capture(texture_snapshot_budget_,std::span(decoded.data),std::span(decoded.levels));
+  entry.update_view_format=srv_format;entry.update_component_mapping=decoded.component_mapping;
+  entry.update_view_dimension=view_dimension;
+  if(TextureUpdatesEnabled()) texture_use_fences_[entry.srv_index]={next_fence_value_,frame_count_};
   std::copy_n(fetch,6,entry.descriptor.begin());
   entry.guest_base = decoded.base_address;
   entry.guest_size = decoded.base_size;
@@ -4072,10 +4177,12 @@ uint32_t Renderer::CreateTexture(const uint32_t fetch[6], TextureEntry& entry) {
     resource_write_tracker_.Sample(tracking.watch,tracking.current);
     if(tracking.proof.version && SameCoveredContent(tracking.proof.baseline,tracking.current)) {
       entry.resource_version=tracking.version;
-      tracking.upload={tracking.watch,tracking.proof.baseline,tracking.version};
+      const uint64_t domain=resource_write_tracker_.FastDomain();
+      tracking.upload={tracking.watch,tracking.proof.baseline,tracking.version,
+          domain==tracking.capture_domain?domain:0};
     }
   }
-  ++stats_.textures_created;
+  if(!reused) ++stats_.textures_created;
   return entry.srv_index;
 }
 
@@ -4322,7 +4429,19 @@ void Renderer::FlushRingConstants(uint8_t* base, uint32_t dev) {
   pending_ring_constants_.clear();
 }
 
-bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
+namespace {
+bool TextureUsageFiltering() {
+  return REXCVAR_GET(sr_native_used_texture_mask) &&
+      REXCVAR_GET(sr_native_shader_dir).empty() && !REXCVAR_GET(sr_native_packet_check) &&
+      REXCVAR_GET(sr_native_debug_texture_format) < 0 &&
+      REXCVAR_GET(sr_native_dump_texture_addr).empty() &&
+      !TextureAuditing() && !TextureHashReplayEnabled() && !TextureSourceProbing();
+}
+}  // namespace
+
+bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mask,
+    const graphics::guest::ShaderConstantUsage& vs_usage,
+    const graphics::guest::ShaderConstantUsage& ps_usage) {
   CpuTimer cpu_timer(cpu_timings.constants_ns);
   CpuTimer float_timer(cpu_timings.constant_float_ns);
   if(CpuProfiling()) ++cpu_timings.constant_draws;
@@ -4384,7 +4503,10 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
     CpuTimer write_timer(pixel?d.ps_write_ns:d.vs_write_ns,detail);
     std::memcpy(dst,captured.data(),sizeof(captured));
   };
-  if (!use_mirror || cb_vs_version_ != mirror_.vs_version || !cb_vs_gpu_) {
+  const bool vs_mask_reuse=use_mirror && cb_vs_gpu_ && cb_vs_version_!=mirror_.vs_version &&
+      vs_usage.known && cb_vs_cache_.CanReuse(mirror_.vs_version,vs_usage,[&]() -> const auto& {return mirror_.FloatConstants(false);});
+  if(vs_mask_reuse) ++stats_.vs_constant_mask_reuses;
+  if (!use_mirror || !cb_vs_gpu_ || (cb_vs_version_ != mirror_.vs_version && !vs_mask_reuse)) {
     UploadAlloc vs;
     {
       CpuTimer timer(d.vs_alloc_ns,detail);
@@ -4400,6 +4522,8 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
     if(detail) {++d.vs_uploads; d.vs_bytes+=4096;}
     cb_vs_gpu_ = vs.gpu;
     cb_vs_version_ = use_mirror ? mirror_.vs_version : 0;
+    if(use_mirror && vs_usage.known) cb_vs_cache_.Commit(mirror_.vs_version,mirror_.FloatConstants(false));
+    else cb_vs_cache_.Reset();
   } else if(detail) ++d.vs_reuses;
   if (!REXCVAR_GET(sr_native_debug_vs).empty() && use_mirror &&
       current_vs_hash_ == std::strtoull(REXCVAR_GET(sr_native_debug_vs).c_str(), nullptr, 16)) {
@@ -4445,7 +4569,10 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
       REXLOG_INFO("native dbg ps consts (vs {:016X}):{}", current_vs_hash_, m);
     }
   }
-  if (!use_mirror || override_ps || cb_ps_version_ != mirror_.ps_version || !cb_ps_gpu_) {
+  const bool ps_mask_reuse=use_mirror && !override_ps && cb_ps_gpu_ && cb_ps_version_!=mirror_.ps_version &&
+      ps_usage.known && cb_ps_cache_.CanReuse(mirror_.ps_version,ps_usage,[&]() -> const auto& {return mirror_.FloatConstants(true);});
+  if(ps_mask_reuse) ++stats_.ps_constant_mask_reuses;
+  if (!use_mirror || override_ps || !cb_ps_gpu_ || (cb_ps_version_ != mirror_.ps_version && !ps_mask_reuse)) {
     UploadAlloc ps;
     {
       CpuTimer timer(d.ps_alloc_ns,detail);
@@ -4463,6 +4590,8 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
     if(detail) {++d.ps_uploads; d.ps_bytes+=4096;}
     cb_ps_gpu_ = ps.gpu;
     cb_ps_version_ = (use_mirror && !override_ps) ? mirror_.ps_version : 0;
+    if(use_mirror && !override_ps && ps_usage.known) cb_ps_cache_.Commit(mirror_.ps_version,mirror_.FloatConstants(true));
+    else cb_ps_cache_.Reset();
   } else if(detail) ++d.ps_reuses;
   float_timer.Stop();
   CpuTimer setup_timer(d.setup_ns,detail);
@@ -4487,6 +4616,16 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
   setup_timer.Stop();
   CpuTimer slots_timer(cpu_timings.constant_slots_ns);
   for (uint32_t slot = 0; slot < 16; ++slot) {
+    if (!(texture_mask & (1u << slot))) {
+      // Each dimension has its own null descriptor; never retain a prior draw's
+      // SRV or sampler in the shared block when a slot is omitted.
+      s[slot] = 0;
+      s[16 + slot] = 1;
+      s[32 + slot] = 2;
+      s[48 + slot] = 0;
+      ++stats_.texture_slots_skipped;
+      continue;
+    }
     SlotCache& sc = slot_cache_[slot];
     SlotCache::SrvEntry* cached = nullptr;
     uint32_t fetch[6]{};
@@ -4536,6 +4675,8 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
       if (cached) {
         if(CpuProfiling()) ++cpu_timings.slot_hits;
         srv = cached->srv;
+        if(auto use=texture_use_fences_.find(srv & 0x7FFFu);use!=texture_use_fences_.end())
+          use->second={next_fence_value_,frame_count_};
         smooth = cached->smooth;
         if (versioned_fetch) cached->fetch_version = fetch_version;
       } else {
@@ -5134,11 +5275,10 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
   // hashed by OnCreateShader (the hook fires before the XDK finalizes the
   // container header; see shader_registry.cpp TryRegisterInlineShaders).
   TryRegisterInlineShaders(base, vs_obj, ps_obj);
-  for (uint32_t off : {kDevShaderA, kDevShaderB}) {
-    if (const GuestShaderInfo* info = LookupGuestShader(Load32(base, dev + off))) {
-      (info->is_vertex ? vs_hash : ps_hash) = info->container_hash;
-    }
-  }
+  const auto shader_a = CaptureGuestShader(vs_obj);
+  const auto shader_b = CaptureGuestShader(ps_obj);
+  for (const auto& shader : {shader_a, shader_b})
+    if (shader) (shader->vertex ? vs_hash : ps_hash) = shader->hash;
   uint32_t decl = Load32(base, dev + kDevVertexDecl);
   static const uint64_t skip_ps = [] {
     std::string v = REXCVAR_GET(sr_native_skip_ps);
@@ -5348,7 +5488,25 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
   current_ps_hash_ = ps_hash;
   current_vs_hash_ = vs_hash;
   if(motion_capture_active_) for(auto& source:motion_color_sources_) source={};
-  if (!UploadConstants(base, dev)) {
+  const bool filter_textures = TextureUsageFiltering() && !motion_capture_active_ &&
+      !rt_shadow_draw_active_ && !motion_coverage_draw_active_ && !trace_state_;
+  const uint32_t texture_mask = graphics::guest::TextureMaskForShaders(
+      shader_a.get(), shader_b.get(),
+      (!vs_obj || shader_a) && (!ps_obj || shader_b), filter_textures);
+  if (texture_mask != UINT32_MAX) ++stats_.texture_masked_draws;
+  // Post-VS GS/motion diagnostics read additional VS constants and rely on full
+  // upload-version equality. Explicit host shader/tool overrides have no mask contract.
+  const bool filter_constants=graphics::guest::ShaderConstantMaskEnabled() &&
+      REXCVAR_GET(sr_native_shader_dir).empty() &&
+      REXCVAR_GET(sr_native_preshaders_path).empty() && REXCVAR_GET(sr_native_shader_tools_dir).empty() &&
+      REXCVAR_GET(sr_native_debug_ps_const).empty() &&
+      !motion_capture_active_ && !post_vertex_active_ && !rt_shadow_draw_active_ &&
+      !motion_coverage_draw_active_ && !trace_state_ && !REXCVAR_GET(sr_native_packet_check);
+  const auto vs_usage=graphics::guest::ConstantUsageForShaders(shader_a.get(),shader_b.get(),true,
+      (!vs_obj || shader_a) && (!ps_obj || shader_b),filter_constants);
+  const auto ps_usage=graphics::guest::ConstantUsageForShaders(shader_a.get(),shader_b.get(),false,
+      (!vs_obj || shader_a) && (!ps_obj || shader_b),filter_constants);
+  if (!UploadConstants(base, dev, texture_mask,vs_usage,ps_usage)) {
     return false;
   }
   if ((ssao_ || soft_particles_) && !camera_valid_ && g_current_pass == kPassRenderOpaque) {
@@ -7694,6 +7852,13 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
     queue_->ExecuteCommandLists(1, lists);
     frame_open_ = false;
   }
+  // Cover SlotCache draws and debug submissions recorded after their lookup.
+  for(auto& [index,use]:texture_use_fences_)
+    if(use.frame==frame_count_) use.fence=next_fence_value_;
+  for(auto& [resource,srv]:pending_texture_retirements_) {
+    Retire(std::move(resource));RetireSrvIndex(srv);
+  }
+  pending_texture_retirements_.clear();
   const HRESULT submitted=queue_->Signal(fence_.Get(), next_fence_value_);
   frame_fence_values_[frame_index_] = next_fence_value_;
   if(SUCCEEDED(submitted)) rt_shadow_execution_.Submit(frame_index_,next_fence_value_,frame_count_+1,
@@ -7961,6 +8126,11 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
                   upload_peak_ >> 10, overflow_pages_created_);
     }
     REXLOG_INFO("native: EDRAM reinterpretations {} over {} frames", stats_.edram_reinterprets, frame_count_);
+    REXLOG_INFO("native: texture usage masked_draws={} skipped_slot_preparations={}",
+                stats_.texture_masked_draws, stats_.texture_slots_skipped);
+    REXLOG_INFO("native: texture updates enabled={} bytes_uploaded={} resource_reuses={} mips_skipped={} snapshot_bytes={}",TextureUpdatesEnabled(),texture_upload_bytes_,texture_resource_reuses_,texture_mips_skipped_,texture_snapshot_budget_->used);
+    REXLOG_INFO("native: texture storage sampler_variant_reuses={} enabled={}",stats_.texture_storage_reuses,graphics::guest::TextureStorageReuseEnabled());
+    REXLOG_INFO("native: constant mask vs_saved_uploads={} ps_saved_uploads={} enabled={}",stats_.vs_constant_mask_reuses,stats_.ps_constant_mask_reuses,graphics::guest::ShaderConstantMaskEnabled());
     REXLOG_INFO("native: buffers made dirty by the write watch {} / by the per-frame hash {}; "
                 "tracking proofs reused {} watches {} drops {}",
                 stats_.buffer_watch_dirty, stats_.buffer_hash_dirty, stats_.buffer_tracking_reused,
@@ -8341,6 +8511,7 @@ void Renderer::DumpFrameResources(const std::string& prefix, bool surfaces_only,
       readback->Unmap(0, nullptr);
     }
   }
+  for(auto& [index,use]:texture_use_fences_) use={next_fence_value_,frame_count_};
   REXLOG_INFO("native: dumped {}/{} frame resources ({} slices) to {}", written, items.size(), written_slices, dir);
 }
 
@@ -8479,6 +8650,10 @@ void Renderer::CaptureBytes(uint8_t* base, uint32_t address, uint32_t length) {
 void Renderer::CaptureTextures(uint8_t* base) {
   const bool replay_textures = TextureHashReplayEnabled();
   for (uint32_t slot=0;slot<32;++slot) {
+    if (!(cur_.texture_mask & (1u << slot))) {
+      ++capture_timings.texture_slots_skipped;
+      continue;
+    }
     std::array<uint32_t,6> fetch{};
     const uint32_t first_reg=Pm4Mirror::kFetchConstantBase+slot*6;
     fetch[0]=capture_mirror_.written(first_reg) ? capture_mirror_.reg(first_reg)
@@ -8489,7 +8664,8 @@ void Renderer::CaptureTextures(uint8_t* base) {
       fetch[i]=capture_mirror_.written(reg) ? capture_mirror_.reg(reg)
           : Load32(base,cur_.device+kDev.fetch_constants+slot*24+i*4);
     }
-    auto& entry=TextureSlotLookupCaching()?CapturedTexture(slot,fetch):captured_textures_[fetch];
+    const auto storage_fetch=graphics::guest::TextureStorageFetch(fetch,graphics::guest::TextureStorageReuseEnabled(graphics::guest::TextureStorageBackend::kVulkan));
+    auto& entry=TextureSlotLookupCaching()?CapturedTexture(slot,storage_fetch):captured_textures_[storage_fetch];
     if(!entry.snapshot && entry.failed_frame!=~0ull && front_frame_<entry.failed_frame+16) {cur_.texture_errors.emplace_back(slot,entry.failure);continue;}
     bool dirty=!entry.snapshot;
     bool notified=false;
@@ -8626,6 +8802,12 @@ void Renderer::CaptureDevice(uint8_t* base, uint32_t dev) {
       TryRegisterInlineShaders(base, vs, ps);
       cur_.vertex_shader = CaptureGuestShader(vs);
       cur_.pixel_shader = CaptureGuestShader(ps);
+      // Bind identity, known/absent status and usage must belong to the same
+      // snapshot; never re-read the live shader slots at EndCmd.
+      cur_.texture_mask = graphics::guest::TextureMaskForShaders(
+          cur_.vertex_shader.get(), cur_.pixel_shader.get(),
+          (!vs || cur_.vertex_shader) && (!ps || cur_.pixel_shader),
+          packet_sink_ && TextureUsageFiltering());
     }
   }
   if (profile::kDevicePtrAddr) CaptureBytes(base, profile::kDevicePtrAddr, 4);
@@ -9423,7 +9605,7 @@ void Renderer::OnSwap(uint8_t* base, uint32_t front_buffer_texture, uint64_t swa
   }
   EndCmd(base);
   if(packet_sink_ && (capture_timings.pm4_us+capture_timings.textures_us>100000 || front_frame_%120==0))
-    REXLOG_INFO("native Vulkan capture frame={} pm4_ms={} textures_ms={} reads={} bytes={} virtual_queries={} watch_ms={} read_ms={} hash_ms={} copy_ms={} new={} watch_dirty={} revalidated={} changed={} entries={} watch_scan_hits={} watch_scan_misses={}",front_frame_,capture_timings.pm4_us/1000,capture_timings.textures_us/1000,capture_timings.reads,capture_timings.bytes,capture_timings.queries,capture_timings.watch_us/1000,capture_timings.read_us/1000,capture_timings.hash_us/1000,capture_timings.copy_us/1000,capture_timings.new_entries,capture_timings.watch_dirty,capture_timings.revalidated,capture_timings.changed,captured_textures_.size(),capture_timings.watch_scan_hits,capture_timings.watch_scan_misses);
+    REXLOG_INFO("native Vulkan capture frame={} pm4_ms={} textures_ms={} reads={} bytes={} virtual_queries={} watch_ms={} read_ms={} hash_ms={} copy_ms={} new={} watch_dirty={} revalidated={} changed={} entries={} watch_scan_hits={} watch_scan_misses={} skipped_slot_preparations={}",front_frame_,capture_timings.pm4_us/1000,capture_timings.textures_us/1000,capture_timings.reads,capture_timings.bytes,capture_timings.queries,capture_timings.watch_us/1000,capture_timings.read_us/1000,capture_timings.hash_us/1000,capture_timings.copy_us/1000,capture_timings.new_entries,capture_timings.watch_dirty,capture_timings.revalidated,capture_timings.changed,captured_textures_.size(),capture_timings.watch_scan_hits,capture_timings.watch_scan_misses,capture_timings.texture_slots_skipped);
   if (timeline.enabled()) {
     timeline.RecordSpan(graphics::TimelineStage::kGame, swap_number,
                         timeline_game_exit_ns_ ? timeline_game_exit_ns_ : swap_entry_ns, swap_entry_ns, 0);

@@ -1,12 +1,16 @@
 #include "runtime_memory_tracker.h"
 #include <rex/system/xmemory.h>
 #include <rex/thread.h>
+#include <rex/logging.h>
 #include <algorithm>
 #include <array>
 #include <memory>
 #include <unordered_map>
+#include <cstdlib>
+#include <chrono>
 #if defined(_WIN32)
 #include <windows.h>
+#include "arm_windows_regions.h"
 #endif
 
 namespace sr::tracking {
@@ -16,6 +20,11 @@ constexpr uint32_t kPage = WriteTrackingState::kPageSize;
 constexpr uint32_t kPageCount = 0x20000000 / kPage;
 uint64_t fast_page_epochs[kPageCount];
 uint64_t fast_domain_epoch = 1;
+bool ArmProfiling() {
+  static const bool enabled=[] {const auto* value=std::getenv("SR_TRACKING_ARM_PROFILE");
+    return value && *value && *value!='0';}();
+  return enabled;
+}
 struct View {
   uint8_t* host;
   uint32_t physical_start, length;
@@ -34,6 +43,11 @@ struct Monitor {
   std::vector<uint32_t> references;
   std::vector<uint32_t> host_writers;
   RexTrackingStats stats{};
+  uint64_t arm_calls=0,arm_requested_alias_pages=0,arm_queries=0,arm_protects=0,arm_ns=0;
+  void ReportArmProfile() const {
+    if(ArmProfiling()) REXLOG_INFO("memory tracking arm: calls={} requested_alias_pages={} queries={} protects={} arm_ns={}",
+        arm_calls,arm_requested_alias_pages,arm_queries,arm_protects,arm_ns);
+  }
   bool closing = false;
   Monitor(rex::memory::Memory* mem, uint64_t id) : memory(mem), session(id), references(0x20000000 / kPage),
       host_writers(0x20000000 / kPage) {
@@ -77,8 +91,42 @@ struct Monitor {
     }
   }
   bool Arm(RexTrackingRange range) {
+    const bool profile=ArmProfiling();
+    const auto started=profile?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
+    const bool result=ArmImpl(range,profile);
+    if(profile) {
+      const auto elapsed=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-started).count();
+      ++arm_calls;arm_ns+=elapsed;
+      if(elapsed>=100000000) {
+        REXLOG_INFO("memory tracking arm slow: address={} length={} elapsed_ns={} success={}",
+            range.physical_address,range.length,elapsed,result);
+        ReportArmProfile();
+      }
+    }
+    return result;
+  }
+  bool ArmImpl(RexTrackingRange range,bool profile) {
     const uint32_t first = range.physical_address / kPage;
     const uint32_t last = (range.physical_address + range.length - 1) / kPage;
+    if(profile) for(const auto& view:views) {
+      const auto stop=std::min(size_t(last)+1,view.owned.size());
+      if(first<stop) arm_requested_alias_pages+=stop-first;
+    }
+#if defined(_WIN32)
+    static const bool batch_regions=[] {
+      const auto* value=std::getenv("SR_TRACKING_BATCH_ARM");
+      return !value || !*value || *value!='0';
+    }();
+    if(batch_regions) {
+      for(auto& view:views) {
+        if(!ArmWindowsRegions(view.host,view.owned,first,last,
+            [&](auto* host,auto& mapping) {if(profile) ++arm_queries;return VirtualQuery(host,&mapping,sizeof(mapping))==sizeof(mapping);},
+            [&](auto* host,size_t length) {if(profile) ++arm_protects;return rex::memory::Protect(host,length,rex::memory::PageAccess::kReadOnly);}))
+          return false;
+      }
+      return true;
+    }
+#endif
     for (auto& view : views) {
       for (uint32_t p = first; p <= last && p < view.owned.size(); ++p) {
         size_t length = kPage;
@@ -86,11 +134,14 @@ struct Monitor {
         void* host = view.host + size_t(p) * kPage;
 #if defined(_WIN32)
         MEMORY_BASIC_INFORMATION mapping{};
+        if(profile) ++arm_queries;
         if (!VirtualQuery(host, &mapping, sizeof(mapping)) || mapping.State != MEM_COMMIT ||
             mapping.Type != MEM_MAPPED || mapping.AllocationBase != view.host) return false;
 #endif
+        if(profile) ++arm_queries;
         if (!rex::memory::QueryProtect(host, length, access) || length < kPage) return false;
         if (access == rex::memory::PageAccess::kReadWrite) {
+          if(profile) ++arm_protects;
           if (!rex::memory::Protect(host, kPage, rex::memory::PageAccess::kReadOnly)) return false;
           view.owned[p] = true;
         } else if (access != rex::memory::PageAccess::kReadOnly && access != rex::memory::PageAccess::kNoAccess) {
@@ -138,6 +189,7 @@ RexTrackingStatus Start(void* memory, RexTrackingSession* out) {
 void Stop(RexTrackingSession session) {
   auto lock = rex::thread::global_critical_region::AcquireDirect();
   if (auto* m = Find(session)) {
+    m->ReportArmProfile();
     __atomic_add_fetch(&fast_domain_epoch, 1, __ATOMIC_ACQ_REL);
     m->Restore(); monitor.reset();
   }
@@ -236,7 +288,7 @@ void Invalidate(RexTrackingSession session, RexTrackingWatch id) {
 }
 void Stats(RexTrackingSession session, RexTrackingStats* out) {
   auto lock = rex::thread::global_critical_region::AcquireDirect();
-  if (auto* m = Find(session); m && out) *out = m->stats;
+  if (auto* m = Find(session); m && out) {*out = m->stats;m->ReportArmProfile();}
 }
 }  // namespace
 

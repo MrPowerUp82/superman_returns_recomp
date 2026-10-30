@@ -38,6 +38,22 @@ class ResourceWriteTracker {
   bool FastStampHolds(RexTrackingRange range, uint64_t epoch, uint64_t domain) const {
     return FastStampHoldsIn(fast_, range, epoch, domain);
   }
+  bool CanReuseTextureFast(const TextureUploadProof& proof,
+                           std::span<const RexTrackingRange> ranges,
+                           uint64_t live_resource_version) const {
+    return CanReuseTextureFastIn(fast_, proof, ranges, live_resource_version);
+  }
+  static bool CanReuseTextureFastIn(const RexTrackingFastView* view,
+                                    const TextureUploadProof& proof,
+                                    std::span<const RexTrackingRange> ranges,
+                                    uint64_t live_resource_version) {
+    if (!view || !proof.domain || ranges.size() != proof.stamps.size() ||
+        !CanReuseTexture(proof, proof.stamps, live_resource_version)) return false;
+    for (size_t i = 0; i < ranges.size(); ++i)
+      if (!FastStampHoldsIn(view, ranges[i], proof.stamps[i].invalidation_epoch, proof.domain))
+        return false;
+    return true;
+  }
   static bool FastStampHoldsIn(const RexTrackingFastView* view, RexTrackingRange range,
                                uint64_t epoch, uint64_t domain) {
     if (!view || !domain || !range.length) return false;
@@ -64,6 +80,8 @@ struct TextureTrackingEntry {
   uint64_t version=0;
   TextureWriteProof proof;
   TextureUploadProof upload;
+  std::vector<RexTrackingRange> ranges;
+  uint64_t capture_domain=0;
   std::vector<RexTrackingStamp> before, current;
   ~TextureTrackingEntry() { if(owner && watch) owner->Unwatch(watch); }
 };
