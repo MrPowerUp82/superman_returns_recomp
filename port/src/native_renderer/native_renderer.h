@@ -568,6 +568,29 @@ class Renderer : public NativeFrontend {
   void RecordDepthReceiverProbe();
   std::unique_ptr<graphics::d3d12::RayTracingScene> rt_capture_scene_;
   std::unique_ptr<graphics::d3d12::DlssSuperResolution> dlss_;
+  // Same layout as DepthMotionConstants in dlss_inputs.hlsl.
+  struct DlssMotionConstants {float inverse_current[16],previous[16],width,height;};
+  struct DlssSlot {
+    Microsoft::WRL::ComPtr<ID3D12Resource> color,output,motion,depth;
+    D3D12_RESOURCE_STATES color_state{},output_state{},motion_state{},depth_state{};
+    uint32_t color_srv=0,output_srv=0,depth_in_srv=0,motion_uav=0,depth_uav=0;
+    uint64_t ticket=0,fence_value=0;
+    bool submitted=false;
+  };
+  DlssSlot dlss_slots_[3];
+  Microsoft::WRL::ComPtr<ID3D12RootSignature> dlss_motion_root_,dlss_composite_root_;
+  Microsoft::WRL::ComPtr<ID3D12PipelineState> dlss_motion_pipeline_,dlss_composite_pipeline_;
+  bool dlss_active_=false,dlss_failed_=false,dlss_wanted_=false,dlss_filter_seen_=false,dlss_recorded_=false;
+  bool dlss_ready_=false,dlss_history_=false,dlss_view_projection_valid_=false,dlss_depth_reversed_=false;
+  uint32_t dlss_render_width_=0,dlss_render_height_=0;
+  uint64_t dlss_jitter_index_=0;
+  HostSurface* dlss_scene_ds_=nullptr;
+  graphics::SceneRasterJitter dlss_jitter_{};
+  graphics::Matrix4 dlss_view_projection_{},dlss_previous_view_projection_{};
+  bool CreateDlssPipelines(const D3D12_GRAPHICS_PIPELINE_STATE_DESC& blit);
+  bool EnsureDlssResources(const HostSurface& scene);
+  void BeginDlssFrame();
+  void RecordDlssFrame();
   uint64_t graphics_options_epoch_=0;
   bool ray_tracing_capable_=false;
   bool rt_shadow_wave_capable_=false,rt_shadow_requested_=false,rt_shadow_built_=false;

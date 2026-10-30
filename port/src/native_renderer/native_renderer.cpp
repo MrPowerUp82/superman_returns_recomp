@@ -1134,6 +1134,8 @@ inline std::vector<D3D12_RECT> ScaleRects(const std::vector<D3D12_RECT>& rs, flo
 }
 
 #include "shaders/blit_ps.h"
+#include "../graphics/d3d12/shaders/dlss_depth_motion_cs.h"
+#include "../graphics/d3d12/shaders/dlss_composite_ps.h"
 #include "shaders/blit_vs.h"
 #include "shaders/fxaa_ps.h"
 #include "shaders/ssao_apply_ms_ps.h"
@@ -1196,16 +1198,18 @@ void Renderer::ShutdownWorker() {
   if(worker_.joinable()) worker_.join();
   // The optional scene owns BLAS/TLAS and their source buffers. Retire all
   // queued work before releasing them, including shutdown outside a swap.
-  if((rt_capture_scene_ || rt_shadow_scene_ || post_vertex_capture_ || motion_clips_ || temporal_motion_) && queue_ && fence_ && fence_event_ && device_ &&
+  if((rt_capture_scene_ || rt_shadow_scene_ || post_vertex_capture_ || motion_clips_ || temporal_motion_ || dlss_) && queue_ && fence_ && fence_event_ && device_ &&
      SUCCEEDED(device_->GetDeviceRemovedReason())) {
     const uint64_t value=next_fence_value_++;
     if(SUCCEEDED(queue_->Signal(fence_.Get(),value)) && fence_->GetCompletedValue()<value &&
        SUCCEEDED(fence_->SetEventOnCompletion(value,fence_event_)))
       WaitForSingleObject(fence_event_,INFINITE);
   }
-  // No DLSS dispatch is recorded by the capability-only integration below.
-  // A future scene Evaluate path must pass its submitted covering fence here.
-  if(dlss_) { (void)dlss_->Shutdown(); dlss_.reset(); }
+  // The wait above covers every recorded DLSS creation and evaluation.
+  if(dlss_) {
+    (void)(fence_ && next_fence_value_>1 ? dlss_->Shutdown(fence_.Get(),next_fence_value_-1) : dlss_->Shutdown());
+    dlss_.reset();
+  }
   for(auto& [key,entry]:textures_) entry.tracking.reset();
   resource_write_tracker_.Stop();
   packet_sink_={};cancel_packet_sink_={};
@@ -1355,6 +1359,33 @@ bool Renderer::EnsureInitialized() {
   }
   fence_event_ = CreateEvent(nullptr, FALSE, FALSE, nullptr);
 
+#if SR_HAS_DLSS
+  // Before the output targets are sized: DLSS Quality needs output = 1.5x scene.
+  dlss_=std::make_unique<graphics::d3d12::DlssSuperResolution>();
+  wchar_t executable[32768]{};
+  const DWORD path_length=GetModuleFileNameW(nullptr,executable,DWORD(std::size(executable)));
+  if(path_length && path_length<std::size(executable)) {
+    const auto path=std::filesystem::path(executable).parent_path();
+    const auto result=dlss_->Initialize(device_,path.c_str());
+    REXLOG_INFO("native DLSS SDK initialization: result={} ngx={:08X} support={}",
+                uint32_t(result.error),result.ngxResult,uint32_t(dlss_->GetStatus().support));
+    if(result) {
+      const uint32_t wide=render_scale::HostDimension(kOutputWidth,render_scale_*1.5f);
+      const uint32_t tall=render_scale::HostDimension(kOutputHeight,render_scale_*1.5f);
+      graphics::d3d12::DlssOptimalSettings settings{};
+      const auto optimal=dlss_->QueryOptimalSettings(wide,tall,settings);
+      REXLOG_INFO("native DLSS Quality query: result={} ngx={:08X} output={}x{} render={}x{} scene={}x{}",
+                  uint32_t(optimal.error),optimal.ngxResult,settings.outputWidth,settings.outputHeight,
+                  settings.renderWidth,settings.renderHeight,output_width_,output_height_);
+      if(optimal && settings.renderWidth==output_width_ && settings.renderHeight==output_height_) {
+        dlss_render_width_=output_width_;dlss_render_height_=output_height_;
+        output_width_=wide;output_height_=tall;
+        dlss_active_=true;
+      }
+    }
+  }
+#endif
+
   if (!CreateDrawResources()) {
     return false;
   }
@@ -1407,24 +1438,6 @@ bool Renderer::EnsureInitialized() {
   D3D12_FEATURE_DATA_D3D12_OPTIONS1 wave_options{};
   rt_shadow_wave_capable_=SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1,
       &wave_options,sizeof(wave_options))) && wave_options.WaveOps;
-#if SR_HAS_DLSS
-  dlss_=std::make_unique<graphics::d3d12::DlssSuperResolution>();
-  wchar_t executable[32768]{};
-  const DWORD path_length=GetModuleFileNameW(nullptr,executable,DWORD(std::size(executable)));
-  if(path_length && path_length<std::size(executable)) {
-    const auto path=std::filesystem::path(executable).parent_path();
-    const auto result=dlss_->Initialize(device_,path.c_str());
-    REXLOG_INFO("native DLSS SDK initialization: result={} ngx={:08X} support={} (not applied)",
-                uint32_t(result.error),result.ngxResult,uint32_t(dlss_->GetStatus().support));
-    if(result) {
-      graphics::d3d12::DlssOptimalSettings settings{};
-      const auto optimal=dlss_->QueryOptimalSettings(output_width_,output_height_,settings);
-      REXLOG_INFO("native DLSS Quality query: result={} ngx={:08X} output={}x{} render={}x{} (scene inputs pending; applied Off)",
-                  uint32_t(optimal.error),optimal.ngxResult,settings.outputWidth,settings.outputHeight,
-                  settings.renderWidth,settings.renderHeight);
-    }
-  }
-#endif
   initialized_ = true;
   return true;
 }
@@ -1542,6 +1555,10 @@ bool Renderer::CreateDrawResources() {
   if (FAILED(device_->CreateGraphicsPipelineState(&blit, IID_PPV_ARGS(&blit_pipeline_)))) {
     REXLOG_ERROR("native: blit PSO creation failed");
     return false;
+  }
+  if(dlss_active_ && !CreateDlssPipelines(blit)) {
+    REXLOG_WARN("native DLSS pipelines unavailable; DLSS stays Off");
+    dlss_failed_=true;
   }
 
   // --- Depth resolve copy: root constants (source offset) + SRV table t0. ---
@@ -2166,6 +2183,7 @@ bool Renderer::BeginFrame() {
                  retired_.end());
   frame_open_ = true;
   BeginRayShadows();
+  BeginDlssFrame();
   BeginMotionCapture();
   post_vertex_projection_valid_=post_vertex_camera_conflict_=false;
   if(post_vertex_capture_) post_vertex_capture_->ReportCompleted(frame_index_);
@@ -4702,6 +4720,18 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev) {
       motion_jitter_draw_active_=true;
     }
   }
+  if(dlss_wanted_ && use_mirror && bound_rts_[0] && bound_ds_ && bound_rts_[0]->guest_format==12 &&
+     !ScreenSpaceDraw(base,dev)) {
+    half_pixel[0]+=dlss_jitter_.ndc_x;half_pixel[1]+=dlss_jitter_.ndc_y;
+    dlss_scene_ds_=bound_ds_;
+    if(current_vs_hash_==graphics::CameraCandidateProbe::kViewProjectionShader) {
+      std::memcpy(dlss_view_projection_.data(),mirror_.FloatConstants(false).data(),sizeof(dlss_view_projection_));
+      dlss_view_projection_valid_=true;
+      // Xenos RB_DEPTHCONTROL z_func: 4 GREATER, 6 GEQUAL.
+      const uint32_t z_func=(LoadReg(base,dev,rex::graphics::XE_GPU_REG_RB_DEPTHCONTROL)>>4)&7;
+      dlss_depth_reversed_=z_func==4 || z_func==6;
+    }
+  }
   std::memcpy(&s[73], &half_pixel[0], 4);
   std::memcpy(&s[74], &half_pixel[1], 4);
   if(post_vertex_active_ && use_mirror) {
@@ -5146,6 +5176,12 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
   }();
   if (skip_ps && ps_hash == skip_ps) return false;
   if (benchmark::Active() && benchmark_cut_.ShouldSkip(ps_hash)) return false;
+  if(dlss_wanted_) {
+    // The first draw after the final scene filter: its target still holds the
+    // scene without HUD, and this draw has not rebound anything yet.
+    if(dlss_filter_seen_ && !dlss_recorded_ && ps_hash!=benchmark::kSceneFilterPs) RecordDlssFrame();
+    if(ps_hash==benchmark::kSceneFilterPs) dlss_filter_seen_=true;
+  }
   if (trace_state_ == 1) {
     uint32_t n = decl ? Load32(base, decl + 0x18) : 0;
     std::string els;
@@ -7566,6 +7602,190 @@ void Renderer::HarvestRayShadowExecution() {
         result.frame,result.revision,result.pixels,result.applied[0],result.applied[1]);
 }
 
+bool Renderer::CreateDlssPipelines(const D3D12_GRAPHICS_PIPELINE_STATE_DESC& blit) {
+  const auto serialize=[&](const D3D12_ROOT_SIGNATURE_DESC& desc,ComPtr<ID3D12RootSignature>& root) {
+    ComPtr<ID3DBlob> blob,error;
+    return SUCCEEDED(D3D12SerializeRootSignature(&desc,D3D_ROOT_SIGNATURE_VERSION_1,&blob,&error)) &&
+           SUCCEEDED(device_->CreateRootSignature(0,blob->GetBufferPointer(),blob->GetBufferSize(),IID_PPV_ARGS(&root)));
+  };
+  // Three separate tables: AllocSrvIndex gives no contiguous indices.
+  const auto table=[](D3D12_ROOT_PARAMETER& parameter,D3D12_DESCRIPTOR_RANGE& range,
+                      D3D12_DESCRIPTOR_RANGE_TYPE type,UINT shader_register,D3D12_SHADER_VISIBILITY visibility) {
+    range={};range.RangeType=type;range.NumDescriptors=1;range.BaseShaderRegister=shader_register;
+    parameter={};parameter.ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameter.DescriptorTable.NumDescriptorRanges=1;parameter.DescriptorTable.pDescriptorRanges=&range;
+    parameter.ShaderVisibility=visibility;
+  };
+  D3D12_DESCRIPTOR_RANGE ranges[3];
+  D3D12_ROOT_PARAMETER parameters[4]{};
+  table(parameters[0],ranges[0],D3D12_DESCRIPTOR_RANGE_TYPE_SRV,0,D3D12_SHADER_VISIBILITY_ALL);
+  table(parameters[1],ranges[1],D3D12_DESCRIPTOR_RANGE_TYPE_UAV,0,D3D12_SHADER_VISIBILITY_ALL);
+  table(parameters[2],ranges[2],D3D12_DESCRIPTOR_RANGE_TYPE_UAV,1,D3D12_SHADER_VISIBILITY_ALL);
+  parameters[3].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+  parameters[3].Constants.Num32BitValues=sizeof(DlssMotionConstants)/4;
+  D3D12_ROOT_SIGNATURE_DESC desc{};
+  desc.NumParameters=4;desc.pParameters=parameters;
+  if(!serialize(desc,dlss_motion_root_)) return false;
+  D3D12_COMPUTE_PIPELINE_STATE_DESC compute{};
+  compute.pRootSignature=dlss_motion_root_.Get();
+  compute.CS={kDlssDepthMotionCS,sizeof(kDlssDepthMotionCS)};
+  if(FAILED(device_->CreateComputePipelineState(&compute,IID_PPV_ARGS(&dlss_motion_pipeline_)))) return false;
+
+  table(parameters[0],ranges[0],D3D12_DESCRIPTOR_RANGE_TYPE_SRV,0,D3D12_SHADER_VISIBILITY_PIXEL);
+  table(parameters[1],ranges[1],D3D12_DESCRIPTOR_RANGE_TYPE_SRV,1,D3D12_SHADER_VISIBILITY_PIXEL);
+  table(parameters[2],ranges[2],D3D12_DESCRIPTOR_RANGE_TYPE_SRV,2,D3D12_SHADER_VISIBILITY_PIXEL);
+  parameters[3]={};parameters[3].ParameterType=D3D12_ROOT_PARAMETER_TYPE_CBV;
+  parameters[3].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
+  D3D12_STATIC_SAMPLER_DESC sampler{};
+  sampler.Filter=D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+  sampler.AddressU=sampler.AddressV=sampler.AddressW=D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+  sampler.MaxLOD=D3D12_FLOAT32_MAX;sampler.ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
+  desc.NumStaticSamplers=1;desc.pStaticSamplers=&sampler;
+  if(!serialize(desc,dlss_composite_root_)) return false;
+  auto composite=blit;
+  composite.pRootSignature=dlss_composite_root_.Get();
+  composite.PS={kDlssCompositePS,sizeof(kDlssCompositePS)};
+  return SUCCEEDED(device_->CreateGraphicsPipelineState(&composite,IID_PPV_ARGS(&dlss_composite_pipeline_)));
+}
+
+bool Renderer::EnsureDlssResources(const HostSurface& scene) {
+  auto& slot=dlss_slots_[frame_index_];
+  const auto format=scene.resource->GetDesc().Format;
+  if(slot.color && slot.color->GetDesc().Format==format) return true;
+  if(slot.ticket) return false;  // Resources of a pending evaluation stay alive.
+  D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;
+  const auto create=[&](ComPtr<ID3D12Resource>& resource,DXGI_FORMAT resource_format,uint32_t width,uint32_t height,
+                        D3D12_RESOURCE_FLAGS flags,D3D12_RESOURCE_STATES state) {
+    D3D12_RESOURCE_DESC d{};d.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;d.Width=width;d.Height=height;
+    d.DepthOrArraySize=d.MipLevels=1;d.Format=resource_format;d.SampleDesc.Count=1;d.Flags=flags;
+    return SUCCEEDED(device_->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&d,state,nullptr,IID_PPV_ARGS(&resource)));
+  };
+  const auto uav=D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+  slot.color_state=D3D12_RESOURCE_STATE_COPY_DEST;
+  slot.output_state=slot.motion_state=slot.depth_state=D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+  if(!create(slot.color,format,dlss_render_width_,dlss_render_height_,D3D12_RESOURCE_FLAG_NONE,slot.color_state) ||
+     !create(slot.output,format,output_width_,output_height_,uav,slot.output_state) ||
+     !create(slot.motion,DXGI_FORMAT_R16G16_FLOAT,dlss_render_width_,dlss_render_height_,uav,slot.motion_state) ||
+     !create(slot.depth,DXGI_FORMAT_R32_FLOAT,dlss_render_width_,dlss_render_height_,uav,slot.depth_state)) {
+    slot.color.Reset();
+    return false;
+  }
+  if(!slot.color_srv) {
+    slot.color_srv=AllocSrvIndex();slot.output_srv=AllocSrvIndex();slot.depth_in_srv=AllocSrvIndex();
+    slot.motion_uav=AllocSrvIndex();slot.depth_uav=AllocSrvIndex();
+  }
+  const auto cpu=[&](uint32_t index) {
+    return provider_->OffsetViewDescriptor(srv_heap_->GetCPUDescriptorHandleForHeapStart(),index);
+  };
+  D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+  srv.Format=scene.srv_format;srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
+  srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;srv.Texture2D.MipLevels=1;
+  device_->CreateShaderResourceView(slot.color.Get(),&srv,cpu(slot.color_srv));
+  device_->CreateShaderResourceView(slot.output.Get(),&srv,cpu(slot.output_srv));
+  D3D12_UNORDERED_ACCESS_VIEW_DESC view{};view.ViewDimension=D3D12_UAV_DIMENSION_TEXTURE2D;
+  view.Format=DXGI_FORMAT_R16G16_FLOAT;
+  device_->CreateUnorderedAccessView(slot.motion.Get(),nullptr,&view,cpu(slot.motion_uav));
+  view.Format=DXGI_FORMAT_R32_FLOAT;
+  device_->CreateUnorderedAccessView(slot.depth.Get(),nullptr,&view,cpu(slot.depth_uav));
+  return true;
+}
+
+void Renderer::BeginDlssFrame() {
+  dlss_wanted_=dlss_filter_seen_=dlss_recorded_=dlss_ready_=false;
+  dlss_scene_ds_=nullptr;dlss_view_projection_valid_=false;
+  if(!dlss_active_ || !dlss_) return;
+  for(auto& slot:dlss_slots_) {
+    if(!slot.ticket || !slot.submitted) continue;
+    const auto confirmed=dlss_->ConfirmExecution(slot.ticket,fence_.Get(),slot.fence_value);
+    if(confirmed.error!=graphics::d3d12::DlssError::GpuPending) {slot.ticket=0;slot.submitted=false;}
+  }
+  const bool requested=graphics_frame_request_.requested[4]==1 && !dlss_failed_ && REXCVAR_GET(sr_native_pm4_mirror);
+  dlss_->SetRequested(requested ? graphics::d3d12::DlssRequested::Quality : graphics::d3d12::DlssRequested::Off);
+  if(!requested) {dlss_history_=false;return;}
+  dlss_wanted_=!dlss_slots_[frame_index_].ticket &&
+      graphics::MakeSceneRasterJitter(dlss_jitter_index_++,dlss_render_width_,dlss_render_height_,true,dlss_jitter_);
+}
+
+void Renderer::RecordDlssFrame() {
+  dlss_recorded_=true;
+  HostSurface* scene=bound_rts_[0];
+  HostSurface* depth=dlss_scene_ds_;
+  graphics::Matrix4 inverse{};
+  const auto scene_desc=scene ? scene->resource->GetDesc() : D3D12_RESOURCE_DESC{};
+  const auto depth_desc=depth ? depth->resource->GetDesc() : D3D12_RESOURCE_DESC{};
+  if(!scene || !depth || !dlss_view_projection_valid_ || scene->samples!=1 || depth->samples!=1 ||
+     scene_desc.Width!=dlss_render_width_ || scene_desc.Height!=dlss_render_height_ ||
+     depth_desc.Width!=dlss_render_width_ || depth_desc.Height!=dlss_render_height_ ||
+     !graphics::InvertProjection(dlss_view_projection_,inverse) || !EnsureDlssResources(*scene)) {
+    dlss_history_=false;
+    return;
+  }
+  auto& slot=dlss_slots_[frame_index_];
+  Transition(scene->resource.Get(),scene->state,D3D12_RESOURCE_STATE_COPY_SOURCE);
+  Transition(slot.color.Get(),slot.color_state,D3D12_RESOURCE_STATE_COPY_DEST);
+  command_list_->CopyResource(slot.color.Get(),scene->resource.Get());
+  Transition(slot.color.Get(),slot.color_state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+  Transition(depth->resource.Get(),depth->state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+  Transition(slot.motion.Get(),slot.motion_state,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  Transition(slot.depth.Get(),slot.depth_state,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  Transition(slot.output.Get(),slot.output_state,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  const auto cpu_heap=srv_heap_->GetCPUDescriptorHandleForHeapStart();
+  const auto gpu_heap=srv_heap_->GetGPUDescriptorHandleForHeapStart();
+  D3D12_SHADER_RESOURCE_VIEW_DESC depth_srv{};
+  depth_srv.Format=DXGI_FORMAT_R24_UNORM_X8_TYPELESS;depth_srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
+  depth_srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;depth_srv.Texture2D.MipLevels=1;
+  device_->CreateShaderResourceView(depth->resource.Get(),&depth_srv,provider_->OffsetViewDescriptor(cpu_heap,slot.depth_in_srv));
+  ID3D12DescriptorHeap* heaps[]={srv_heap_.Get(),sampler_heap_.Get()};
+  command_list_->SetDescriptorHeaps(2,heaps);
+  command_list_->SetComputeRootSignature(dlss_motion_root_.Get());
+  command_list_->SetPipelineState(dlss_motion_pipeline_.Get());
+  command_list_->SetComputeRootDescriptorTable(0,provider_->OffsetViewDescriptor(gpu_heap,slot.depth_in_srv));
+  command_list_->SetComputeRootDescriptorTable(1,provider_->OffsetViewDescriptor(gpu_heap,slot.motion_uav));
+  command_list_->SetComputeRootDescriptorTable(2,provider_->OffsetViewDescriptor(gpu_heap,slot.depth_uav));
+  DlssMotionConstants constants{};
+  std::memcpy(constants.inverse_current,inverse.data(),sizeof(constants.inverse_current));
+  const auto& previous=dlss_history_ ? dlss_previous_view_projection_ : dlss_view_projection_;
+  std::memcpy(constants.previous,previous.data(),sizeof(constants.previous));
+  constants.width=float(dlss_render_width_);constants.height=float(dlss_render_height_);
+  command_list_->SetComputeRoot32BitConstants(3,sizeof(constants)/4,&constants,0);
+  command_list_->Dispatch((dlss_render_width_+7)/8,(dlss_render_height_+7)/8,1);
+  Transition(slot.motion.Get(),slot.motion_state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+  Transition(slot.depth.Get(),slot.depth_state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+  graphics::d3d12::DlssEvaluation evaluation;
+  evaluation.commands=command_list_.Get();
+  evaluation.color=slot.color.Get();evaluation.output=slot.output.Get();
+  evaluation.depth=slot.depth.Get();evaluation.motion=slot.motion.Get();
+  evaluation.colorState=evaluation.depthState=evaluation.motionState=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+  evaluation.outputState=D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+  auto& frame=evaluation.frame;
+  frame.renderWidth=dlss_render_width_;frame.renderHeight=dlss_render_height_;
+  frame.outputWidth=output_width_;frame.outputHeight=output_height_;
+  frame.conventionsVerified=frame.colorBeforeHud=frame.rasterJitterApplied=true;
+  frame.motionCameraOnlyAccepted=true;
+  frame.depth=dlss_depth_reversed_ ? graphics::d3d12::DlssDepth::Reversed : graphics::d3d12::DlssDepth::Forward;
+  frame.motion=graphics::d3d12::DlssMotion::CurrentToPreviousPixels;
+  frame.hdr=scene_desc.Format==DXGI_FORMAT_R16G16B16A16_FLOAT || scene_desc.Format==DXGI_FORMAT_R11G11B10_FLOAT;
+  frame.jitterX=dlss_jitter_.pixel_x;frame.jitterY=dlss_jitter_.pixel_y;
+  frame.mvScaleX=frame.mvScaleY=1;
+  frame.reset=!dlss_history_;
+  const auto result=dlss_->Evaluate(evaluation);
+  // The compute pass and NGX both replace the guest's root and pipeline state.
+  frame_state_bound_=false;fixed_state_cached_=false;bound_vertex_views_mask_=0;bound_rt_count_=0;
+  bound_ds_=nullptr;std::memset(bound_rts_,0,sizeof(bound_rts_));
+  if(!result) {
+    // A failed SDK call may have recorded commands, so resources stay alive.
+    REXLOG_ERROR("native DLSS evaluation failed: error={} ngx={:08X}; staying on the normal image",
+                 uint32_t(result.error),result.ngxResult);
+    dlss_failed_=true;dlss_history_=false;
+    return;
+  }
+  slot.ticket=result.ticket;slot.submitted=false;
+  dlss_previous_view_projection_=dlss_view_projection_;
+  dlss_history_=true;dlss_ready_=true;
+}
+
 void Renderer::PublishGraphicsOptions() {
   auto options=graphics::SharedGraphicsOptions();
   const auto request=options->Snapshot();
@@ -7587,8 +7807,10 @@ void Renderer::PublishGraphicsOptions() {
       shadow_ready ? "Occlusion only: reflected colors are not traced yet" : "RT lighting shader is not ready"};
   report.applied=executed.applied;
   const bool dlss_supported=dlss_ && dlss_->GetStatus().support==graphics::d3d12::DlssSupport::Supported;
-  report.features[4]={false,dlss_supported,dlss_supported ?
-      "Scene depth, object motion and HUD separation pending" : "DLSS SDK support is unavailable"};
+  report.features[4]={dlss_supported && dlss_active_ && !dlss_failed_,dlss_supported,
+      !dlss_supported ? "DLSS SDK support is unavailable" : !dlss_active_ || dlss_failed_ ?
+      "DLSS could not start; see the log" : "Camera motion only: moving objects can ghost"};
+  report.applied[4]=dlss_ && dlss_->GetStatus().applied==graphics::d3d12::DlssApplied::Quality ? 1 : 0;
   if(request.requested[0] && !report.applied[0]) report.failure="RT shadows are waiting for a verified shader execution";
   options->PublishBackend(graphics_options_epoch_,report);
 }
@@ -7604,6 +7826,7 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
   }
   EndMotionCapture();
   RecordRayShadowCounter();
+  if(dlss_wanted_ && dlss_filter_seen_ && !dlss_recorded_) RecordDlssFrame();
   // Blit the resolved front buffer into the output target.
   auto latest = resolve_latest_.find(front_buffer_address);
   auto it = latest != resolve_latest_.end() ? resolve_textures_.find(latest->second)
@@ -7631,10 +7854,19 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     ID3D12DescriptorHeap* heaps[] = {srv_heap_.Get(), sampler_heap_.Get()};
     command_list_->SetDescriptorHeaps(2, heaps);
-    command_list_->SetGraphicsRootSignature(blit_root_signature_.Get());
+    const bool dlss_composite=dlss_ready_;
+    command_list_->SetGraphicsRootSignature(dlss_composite ? dlss_composite_root_.Get() : blit_root_signature_.Get());
     command_list_->SetGraphicsRootDescriptorTable(
         0, provider_->OffsetViewDescriptor(srv_heap_->GetGPUDescriptorHandleForHeapStart(),
                                            srv_index));
+    if(dlss_composite) {
+      auto& slot=dlss_slots_[frame_index_];
+      Transition(slot.color.Get(),slot.color_state,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+      Transition(slot.output.Get(),slot.output_state,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+      const auto heap=srv_heap_->GetGPUDescriptorHandleForHeapStart();
+      command_list_->SetGraphicsRootDescriptorTable(1,provider_->OffsetViewDescriptor(heap,slot.color_srv));
+      command_list_->SetGraphicsRootDescriptorTable(2,provider_->OffsetViewDescriptor(heap,slot.output_srv));
+    }
     // Guest display gamma ramp (Xenos applies it at scan-out; Xenia too).
     UploadAlloc gamma;
     if (Upload(1024 + 16, 256, gamma)) {
@@ -7642,9 +7874,9 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
       if (!GuestGammaRamp256(ramp.data())) ramp.fill(0);
       const auto data=BuildGammaUpload(ramp,REXCVAR_GET(sr_native_gamma_ramp));
       std::memcpy(gamma.cpu,data.data(),sizeof(data));
-      command_list_->SetGraphicsRootConstantBufferView(1, gamma.gpu);
+      command_list_->SetGraphicsRootConstantBufferView(dlss_composite ? 3 : 1, gamma.gpu);
     }
-    command_list_->SetPipelineState(blit_pipeline_.Get());
+    command_list_->SetPipelineState(dlss_composite ? dlss_composite_pipeline_.Get() : blit_pipeline_.Get());
     command_list_->OMSetRenderTargets(1, &output_rtvs_[frame_index_], FALSE, nullptr);
     D3D12_VIEWPORT vp{0, 0, float(output_width_), float(output_height_), 0, 1};
     D3D12_RECT sc{0, 0, LONG(output_width_), LONG(output_height_)};
@@ -7731,6 +7963,12 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
   if(SUCCEEDED(submitted)) rt_shadow_execution_.Submit(frame_index_,next_fence_value_,frame_count_+1,
       graphics_frame_request_.request_revision,graphics_frame_request_.requested,rt_shadow_counter_recorded_,
       rt_shadow_character_built_);
+  if(SUCCEEDED(submitted) && dlss_slots_[frame_index_].ticket && !dlss_slots_[frame_index_].submitted) {
+    auto& slot=dlss_slots_[frame_index_];
+    slot.fence_value=next_fence_value_;slot.submitted=true;
+    const auto notified=dlss_->NotifySubmitted(slot.ticket,fence_.Get(),slot.fence_value);
+    if(!notified) REXLOG_WARN("native DLSS submission rejected: error={}",uint32_t(notified.error));
+  }
   ++next_fence_value_;
   HarvestRayShadowExecution();
   PublishGraphicsOptions();
