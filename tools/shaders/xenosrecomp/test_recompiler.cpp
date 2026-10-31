@@ -8,6 +8,60 @@ static bool contains(const std::string& text, const char* fragment) {
     return false;
 }
 
+// Minimal original-style containers exercise the complete PS exit path without
+// game assets. Two exits cover both boolean-conditional and ordinary EXEC_END.
+static std::string outputShader(bool vertex, uint32_t outputs, bool twoExits = false) {
+    std::vector<uint8_t> data(256, 0);
+    const auto put = [&](size_t offset, uint32_t word) {
+        for (uint32_t lane = 0; lane < 4; ++lane)
+            data[offset + lane] = uint8_t(word >> (24 - lane * 8));
+    };
+    constexpr uint32_t virtualSize = 128, shaderOffset = 36;
+    put(0, 0x102A1100u | uint32_t(vertex));
+    put(4, virtualSize);
+    put(8, 12);
+    put(24, shaderOffset);
+    put(shaderOffset + 4, 12); // One packed pair of control-flow instructions.
+    if (!vertex) put(shaderOffset + 28, outputs);
+    // No ALU instructions: address 1 starts immediately after the CF pair.
+    put(virtualSize, 1);
+    put(virtualSize + 4, (twoExits ? 4u : 2u) << 12); // COND_EXEC_END / EXEC_END
+    if (twoExits) put(virtualSize + 8, 2u << 28); // Second EXEC_END.
+    ShaderRecompiler recompiler;
+    recompiler.recompile(data.data(), "");
+    return recompiler.out;
+}
+
+static bool outputScaleTests() {
+    bool ok = true;
+    for (uint32_t outputs : {1u, 2u, 4u, 8u, 15u, 17u}) {
+        const auto source = outputShader(false, outputs, true);
+        const auto alpha = source.find("clip(oC0.w - g_AlphaThreshold);");
+        const auto coverage = source.find("oC0.w = 0.5 + (oC0.w - g_AlphaThreshold)");
+        for (uint32_t target = 0; target < 4; ++target) {
+            const auto scale = fmt::format("oC{} *= g_ColorOutputScale[{}];", target, target);
+            const auto first = source.find(scale);
+            if (outputs & (1u << target)) {
+                ok &= contains(source, scale.c_str());
+                const auto second = source.find(scale, first == std::string::npos ? 0 : first + scale.size());
+                const auto secondCoverage = source.find("oC0.w = 0.5 + (oC0.w - g_AlphaThreshold)",
+                                                        coverage == std::string::npos ? 0 : coverage + 1);
+                ok &= alpha != std::string::npos && coverage != std::string::npos &&
+                      first > coverage && second != std::string::npos &&
+                      secondCoverage != std::string::npos && second > secondCoverage &&
+                      source.find(scale, second + scale.size()) == std::string::npos;
+            } else {
+                ok &= first == std::string::npos;
+            }
+        }
+        ok &= source.find("oDepth *=") == std::string::npos;
+    }
+    ok &= outputShader(true, 0).find("g_ColorOutputScale") == std::string::npos;
+    ok &= outputShader(false, 16).find("g_ColorOutputScale") == std::string::npos;
+    if (!ok) std::fprintf(stderr, "Color output scale must follow coverage at every PS exit, for declared color targets only.\n");
+    return ok;
+}
+
 int main() {
     AluInstruction instruction{};
     instruction.vectorOpcode = AluVectorOpcode::Mul;
@@ -85,5 +139,6 @@ int main() {
     fetch.isMiniFetch = 0;
     static_fetch.recompile(fetch, 7);
     ok &= contains(static_fetch.out, "srVertexInput(0, iPosition0)");
+    ok &= outputScaleTests();
     return ok ? 0 : 1;
 }

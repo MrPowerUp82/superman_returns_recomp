@@ -1,0 +1,46 @@
+--- a/XenosRecomp/shader_common.h
++++ b/XenosRecomp/shader_common.h
+@@ -110,8 +110,11 @@
+ #define g_SoftParticleDistance SR_SHARED_FLOAT(472)
+ #define g_SoftParticleTexelScale SR_SHARED_FLOAT(476)
+ #define g_SoftParticleDepth SR_SHARED_UINT(480)
++#define g_ColorOutputScale SR_SHARED_FLOAT4(496)
+ #define g_SpecConstants() g_SpecConstantsRuntime
+ #else
++// Legacy address-based SPIR-V hosts do not populate the output-scale ABI.
++#define g_ColorOutputScale float4(1.0, 1.0, 1.0, 1.0)
+ [[vk::constant_id(0)]] const uint g_SpecConstants = 0;
+ #define g_SpecConstants() g_SpecConstants
+ #endif
+@@ -141,7 +144,8 @@
+     float g_AlphaThreshold : packoffset(c18.w); \
+     uint4 g_VertexFetchArr[224] : packoffset(c32); \
+     uint4 g_LoopConstantsArr[8] : packoffset(c19); \
+-    float4 g_ScreenXform : packoffset(c27);     uint g_SpecConstantsRuntime : packoffset(c28.x); float g_PixelPosScale : packoffset(c28.y); float g_ShadowAtlasTexelScale : packoffset(c28.z); float g_ShadowSoftness : packoffset(c28.w); float2 g_SoftParticleW : packoffset(c29.x); float g_SoftParticleDistance : packoffset(c29.z); float g_SoftParticleTexelScale : packoffset(c29.w); uint g_SoftParticleDepth : packoffset(c30.x);
++    float4 g_ScreenXform : packoffset(c27);     uint g_SpecConstantsRuntime : packoffset(c28.x); float g_PixelPosScale : packoffset(c28.y); float g_ShadowAtlasTexelScale : packoffset(c28.z); float g_ShadowSoftness : packoffset(c28.w); float2 g_SoftParticleW : packoffset(c29.x); float g_SoftParticleDistance : packoffset(c29.z); float g_SoftParticleTexelScale : packoffset(c29.w); uint g_SoftParticleDepth : packoffset(c30.x); \
++    float4 g_ColorOutputScale : packoffset(c31);
+ 
+ #define g_Booleans(i) (g_BooleansArr[(i) / 4][(i) % 4])
+ #define g_VertexFetch(i) (g_VertexFetchArr[i])
+--- a/XenosRecomp/shader_recompiler.cpp
++++ b/XenosRecomp/shader_recompiler.cpp
+@@ -2659,6 +2659,19 @@
+                     indent();
+                     out += '}';
+                 #endif
++                #ifdef CONAN_RECOMP
++                    // Host RT encoding is applied after alpha test/coverage,
++                    // once at each shader exit, and only to declared colors.
++                    const auto outputs = reinterpret_cast<const PixelShader*>(shader)->outputs.get();
++                    for (uint32_t target = 0; target < 4; ++target)
++                    {
++                        if (uint32_t(outputs) & (1u << target))
++                        {
++                            indent();
++                            println("oC{} *= g_ColorOutputScale[{}];", target, target);
++                        }
++                    }
++                #endif
+                 }
+                 else
+                 {

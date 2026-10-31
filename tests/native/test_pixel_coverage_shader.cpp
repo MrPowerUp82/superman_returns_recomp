@@ -13,8 +13,9 @@ constexpr std::array<uint64_t, 6> kVs{0x4F17209D364D5B51ull, 0x18B4F69400B7F0AFu
 constexpr std::string_view kOutput = "out float4 oC0 : SV_Target0)";
 constexpr std::string_view kExtra = ",\n\tout uint srCoverageId : SV_Target1";
 constexpr std::string_view kAssignment = "\n\tsrCoverageId = g_SrPixelCoverageId;\n\t";
+constexpr std::string_view kOutputScale = "oC0 *= g_ColorOutputScale[0];\n\t";
 
-std::string Source(uint64_t hash) {
+std::string Source(uint64_t hash, bool scaled = false) {
   constexpr const char* names[]{"559F422BEF5E5714.ps.hlsl","220353EB37491B13.ps.hlsl",
       "E6C740EAC16B70D4.ps.hlsl","3EF6A4A3C740ADB1.ps.hlsl","E83A13DF3297C6CB.ps.hlsl","71CB82D791DE8E77.ps.hlsl"};
   const char* name=nullptr;
@@ -27,6 +28,15 @@ std::string Source(uint64_t hash) {
   // The input corpus contains CRLF in the preamble and LF in the main body.
   std::string lf;
   for (char c : result) if (c != '\r') lf += c;
+  // Keep both audited emitter generations covered while the local corpus may
+  // contain either. Only normalize the exact new final output-scale statement.
+  const auto final_return = lf.rfind("return;\n}");
+  SR_CHECK(final_return != std::string::npos);
+  if (final_return == std::string::npos) return lf;
+  if (final_return >= kOutputScale.size() &&
+      lf.compare(final_return - kOutputScale.size(), kOutputScale.size(), kOutputScale) == 0)
+    lf.erase(final_return - kOutputScale.size(), kOutputScale.size());
+  if (scaled) lf.insert(lf.rfind("return;\n}"), kOutputScale);
   return lf;
 }
 void Reject(uint64_t hash, std::string_view source) {
@@ -58,30 +68,73 @@ SR_TEST(pixel_coverage_only_audited_ps_and_exact_vs_ps_pairs_are_supported) {
 
 SR_TEST(pixel_coverage_actual_sources_keep_all_original_code_and_fragment_tail) {
   for (uint64_t hash : kPs) {
-    const auto source = Source(hash);
-    std::string output, error = "stale error";
-    const bool specialized = SpecializePixelCoverageShader(hash, source, output, error);
-    SR_CHECK(specialized);
-    if (!specialized) std::printf("  specialization error: %s\n", error.c_str());
-    if (!specialized) continue;
-    SR_CHECK(error.empty());
-    SR_CHECK(output.find("cbuffer SrPixelCoverage : register(b4, space4)") != std::string::npos);
-    SR_CHECK(output.find("uint g_SrPixelCoverageId;") != std::string::npos);
-    const auto start = output.find(source.substr(0, 80));
-    SR_CHECK(start != std::string::npos);
-    if (start == std::string::npos) continue;
-    auto restored = output.substr(start);
-    const auto extra = restored.find(kExtra), assignment = restored.find(kAssignment);
-    SR_CHECK(extra != std::string::npos && assignment != std::string::npos);
-    if (extra == std::string::npos || assignment == std::string::npos) continue;
-    SR_CHECK(assignment > restored.rfind("clip(oC0.w - g_AlphaThreshold);"));
-    SR_CHECK(assignment > restored.rfind("fwidth(oC0.w)"));
-    const auto final_return = restored.substr(assignment + kAssignment.size());
-    SR_CHECK(final_return == "return;\n}" || final_return == "return;\n}\n");
-    restored.erase(assignment, kAssignment.size());
-    restored.erase(extra, kExtra.size());
-    SR_CHECK(restored == source); // Original color, clip/discard, helpers and return unchanged.
-    Reject(hash, output); // No double specialization.
+    for (bool scaled : {false, true}) {
+      const auto source = Source(hash, scaled);
+      std::string output, error = "stale error";
+      const bool specialized = SpecializePixelCoverageShader(hash, source, output, error);
+      SR_CHECK(specialized);
+      if (!specialized) std::printf("  specialization error: %s\n", error.c_str());
+      if (!specialized) continue;
+      SR_CHECK(error.empty());
+      SR_CHECK(output.find("cbuffer SrPixelCoverage : register(b4, space4)") != std::string::npos);
+      SR_CHECK(output.find("uint g_SrPixelCoverageId;") != std::string::npos);
+      const auto start = output.find(source.substr(0, 80));
+      SR_CHECK(start != std::string::npos);
+      if (start == std::string::npos) continue;
+      auto restored = output.substr(start);
+      const auto extra = restored.find(kExtra), assignment = restored.find(kAssignment);
+      SR_CHECK(extra != std::string::npos && assignment != std::string::npos);
+      if (extra == std::string::npos || assignment == std::string::npos) continue;
+      SR_CHECK(assignment > restored.rfind("clip(oC0.w - g_AlphaThreshold);"));
+      SR_CHECK(assignment > restored.rfind("fwidth(oC0.w)"));
+      const auto scale = restored.find(kOutputScale);
+      if (scaled) {
+        SR_CHECK(scale != std::string::npos);
+        SR_CHECK(scale > restored.rfind("clip(oC0.w - g_AlphaThreshold);"));
+        SR_CHECK(scale > restored.rfind("fwidth(oC0.w)"));
+        SR_CHECK(assignment > scale);
+        SR_CHECK(restored.find(kOutputScale, scale + kOutputScale.size()) == std::string::npos);
+      } else {
+        SR_CHECK(scale == std::string::npos);
+      }
+      const auto final_return = restored.substr(assignment + kAssignment.size());
+      SR_CHECK(final_return == "return;\n}" || final_return == "return;\n}\n");
+      restored.erase(assignment, kAssignment.size());
+      restored.erase(extra, kExtra.size());
+      SR_CHECK(restored == source); // Original color, clip/discard, helpers and return unchanged.
+      Reject(hash, output); // No double specialization.
+    }
+  }
+}
+
+SR_TEST(pixel_coverage_rejects_unaudited_scale_statements_and_tail_changes) {
+  for (uint64_t hash : kPs) {
+    for (std::string_view replacement : {
+        "oC0 *= g_ColorOutputScale[1];\n\t",
+        "oC1 *= g_ColorOutputScale[0];\n\t",
+        "oC0.w *= g_ColorOutputScale[0];\n\t",
+        "oC0 *= g_ColorOutputScale[0] / 32.0;\n\t",
+        "oC0 *= g_ColorOutputScale[0];\n\toC0 *= g_ColorOutputScale[0];\n\t",
+        "oC0 *= g_ColorOutputScale[0];\n\toC0 = 0;\n\t"}) {
+      auto changed = Source(hash, true);
+      Replace(changed, kOutputScale, replacement);
+      Reject(hash, changed);
+    }
+    for (std::string_view anchor : {"clip(oC0.w - g_AlphaThreshold);",
+                                   "oC0.w *= 1.0 + computeMipLevel(pixelCoord) * 0.25;"}) {
+      auto changed = Source(hash, true);
+      Replace(changed, kOutputScale, "");
+      Replace(changed, anchor, std::string(kOutputScale) + std::string(anchor));
+      Reject(hash, changed); // Scaling may not affect alpha-test/coverage input.
+    }
+    for (bool scaled : {false, true}) {
+      auto changed = Source(hash, scaled);
+      Replace(changed, "clip(oC0.w - g_AlphaThreshold);", "clip(oC0.w * 0.5 - g_AlphaThreshold);");
+      Reject(hash, changed);
+      changed = Source(hash, scaled);
+      Replace(changed, "fwidth(oC0.w)", "fwidth(oC0.x)");
+      Reject(hash, changed);
+    }
   }
 }
 
@@ -193,10 +246,11 @@ SR_TEST(pixel_coverage_cache_identity_contains_version_and_actual_emitted_patch)
   SR_CHECK(prefix_end != std::string::npos);
   if (prefix_end == std::string::npos) return;
   const auto identity = PixelCoverageShaderCacheIdentity();
-  SR_CHECK(identity.find("v1") != std::string_view::npos);
+  SR_CHECK(identity.find("pixel-coverage-structural-audit-v2") != std::string_view::npos);
   SR_CHECK(identity.find(std::string_view(output).substr(0, prefix_end)) != std::string_view::npos);
   SR_CHECK(identity.find(kExtra) != std::string_view::npos);
   SR_CHECK(identity.find(kAssignment) != std::string_view::npos);
+  SR_CHECK(identity.find(kOutputScale) != std::string_view::npos);
 }
 
 SR_TEST(pixel_coverage_cape_accepts_only_the_original_pixel_position_branch) {

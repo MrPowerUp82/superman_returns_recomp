@@ -110,8 +110,11 @@ struct PushConstants
 #define g_SoftParticleDistance SR_SHARED_FLOAT(472)
 #define g_SoftParticleTexelScale SR_SHARED_FLOAT(476)
 #define g_SoftParticleDepth SR_SHARED_UINT(480)
+#define g_ColorOutputScale SR_SHARED_FLOAT4(496)
 #define g_SpecConstants() g_SpecConstantsRuntime
 #else
+// Legacy address-based SPIR-V hosts do not populate the output-scale ABI.
+#define g_ColorOutputScale float4(1.0, 1.0, 1.0, 1.0)
 [[vk::constant_id(0)]] const uint g_SpecConstants = 0;
 #define g_SpecConstants() g_SpecConstants
 #endif
@@ -141,7 +144,8 @@ struct PushConstants
     float g_AlphaThreshold : packoffset(c18.w); \
     uint4 g_VertexFetchArr[224] : packoffset(c32); \
     uint4 g_LoopConstantsArr[8] : packoffset(c19); \
-    float4 g_ScreenXform : packoffset(c27);     uint g_SpecConstantsRuntime : packoffset(c28.x); float g_PixelPosScale : packoffset(c28.y); float g_ShadowAtlasTexelScale : packoffset(c28.z); float g_ShadowSoftness : packoffset(c28.w); float2 g_SoftParticleW : packoffset(c29.x); float g_SoftParticleDistance : packoffset(c29.z); float g_SoftParticleTexelScale : packoffset(c29.w); uint g_SoftParticleDepth : packoffset(c30.x);
+    float4 g_ScreenXform : packoffset(c27);     uint g_SpecConstantsRuntime : packoffset(c28.x); float g_PixelPosScale : packoffset(c28.y); float g_ShadowAtlasTexelScale : packoffset(c28.z); float g_ShadowSoftness : packoffset(c28.w); float2 g_SoftParticleW : packoffset(c29.x); float g_SoftParticleDistance : packoffset(c29.z); float g_SoftParticleTexelScale : packoffset(c29.w); uint g_SoftParticleDepth : packoffset(c30.x); \
+    float4 g_ColorOutputScale : packoffset(c31);
 
 #define g_Booleans(i) (g_BooleansArr[(i) / 4][(i) % 4])
 #define g_VertexFetch(i) (g_VertexFetchArr[i])
@@ -177,7 +181,7 @@ uint g_SpecConstants();
 // Xenos returns linear values, converted with its piecewise-linear curve
 // (xenos::PWLGammaToLinear, applied after filtering like the Xenia/ReXGlue
 // Xenos backend).
-// Bits 16-27 = host scale of a texture rendered at a different size than its guest size
+// Bits 16-27 = host scale of a texture rendered larger than its guest size
 // (render_scale resolve targets, 8.8 fixed point, 0 = 1:1): texel offsets and
 // filter weights stay in guest texels, like on Xenos. SRV indices use bits 0-14.
 #define TEX_INDEX(i) ((i) & 0x7FFFu)

@@ -20,6 +20,7 @@
 #include "texture_source_probe.h"
 #include "stacked_resolve_policy.h"
 #include "../graphics/guest/render_state.h"
+#include "../graphics/fixed16_color.h"
 #include "../graphics/guest/edram_alias.h"
 #include "../graphics/guest/render_packet.h"
 #include "../graphics/guest/parallel_replay.h"
@@ -4978,6 +4979,14 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
     ++stats_.alpha_test_draws[g_current_pass & 31];
   }
   s[112] = spec;
+  // c31: per-target normalization, before the SNORM RTV clamps fixed16.
+  // Populate every slot on every draw, including unbound slots, so switching
+  // from the shadow pass back to the scene cannot retain its 1/32 scale.
+  for (uint32_t i = 0; i < 4; ++i) {
+    const float scale = bound_rts_[i]
+        ? graphics::ColorOutputScale(bound_rts_[i]->guest_format) : 1.0f;
+    std::memcpy(&s[124 + i], &scale, sizeof(scale));
+  }
   // g_PixelPosScale (c28.y): host pixel -> guest pixel for the pixel position
   // input (targets rendered at render_scale / shadow_quality).
   {
@@ -6913,7 +6922,8 @@ void Renderer::ExecBeginTiling(uint8_t* base, uint32_t count, uint32_t rects,
         continue;
       }
       Transition(other.resource.Get(), other.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
-      command_list_->ClearRenderTargetView(other.view, color, 0, nullptr);
+      const auto host_color = graphics::ColorClearValue(other.guest_format, color);
+      command_list_->ClearRenderTargetView(other.view, host_color.data(), 0, nullptr);
     }
   }
   if (ds) {
@@ -7315,7 +7325,8 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
           continue;
         }
         Transition(other.resource.Get(), other.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        command_list_->ClearRenderTargetView(other.view, color, 1, &r);
+        const auto host_color = graphics::ColorClearValue(other.guest_format, color);
+        command_list_->ClearRenderTargetView(other.view, host_color.data(), 1, &r);
       }
     }
   }
@@ -9821,7 +9832,8 @@ void Renderer::ExecClear(uint8_t* base, uint32_t count, uint32_t rects, uint32_t
         }
         Transition(other.resource.Get(), other.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
         std::vector<D3D12_RECT> scaled = ScaleRects(rs, other.scale);
-        command_list_->ClearRenderTargetView(other.view, color, nrs, nrs ? scaled.data() : nullptr);
+        const auto host_color = graphics::ColorClearValue(other.guest_format, color);
+        command_list_->ClearRenderTargetView(other.view, host_color.data(), nrs, nrs ? scaled.data() : nullptr);
         MarkWritten(&other);
       }
     }

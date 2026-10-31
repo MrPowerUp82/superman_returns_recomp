@@ -29,8 +29,9 @@ cbuffer SrPixelCoverage : register(b4, space4)
 };
 
 )hlsl";
-// Exact normalized emitter tail, shared by the audited sources. This anchors
-// the insertion AFTER soft particles, clip/discard and alpha-to-coverage logic.
+// Exact normalized legacy emitter tail, shared by the audited sources. The
+// only newer audited form adds the host color encoding after alpha coverage.
+// Both anchor insertion AFTER all original fragment/output processing.
 constexpr std::string_view kTail = R"hlsl([branch] if (g_SpecConstants() & (SPEC_CONSTANT_SOFT_PARTICLE_RGBA | SPEC_CONSTANT_SOFT_PARTICLE_ALPHA))	{		float conanSceneZ = g_Texture2DDescriptorHeap[g_SoftParticleDepth].Load(int3(iPos.xy * g_SoftParticleTexelScale, 0)).x;
 		float conanFade = saturate((rcp(conanSceneZ * g_SoftParticleW.x + g_SoftParticleW.y) - rcp(iPos.z * g_SoftParticleW.x + g_SoftParticleW.y)) / g_SoftParticleDistance);
 		if (g_SpecConstants() & SPEC_CONSTANT_SOFT_PARTICLE_RGBA) oC0 *= conanFade; else oC0.w *= conanFade;
@@ -39,6 +40,15 @@ constexpr std::string_view kTail = R"hlsl([branch] if (g_SpecConstants() & (SPEC
 		oC0.w = 0.5 + (oC0.w - g_AlphaThreshold) / max(fwidth(oC0.w), 1e-6);
 	}	return;
 })hlsl";
+
+const std::string& ScaledTail() {
+  static const std::string tail = [] {
+    std::string text(kTail);
+    text.insert(text.find("return;"), "oC0 *= g_ColorOutputScale[0];\n\t");
+    return text;
+  }();
+  return tail;
+}
 
 bool Unique(std::string_view source, std::string_view needle) {
   const auto at = source.find(needle);
@@ -246,10 +256,13 @@ bool SpecializePixelCoverageShader(uint64_t hash, std::string_view source,
         return reject("Pixel coverage requires a single unconditional final return");
     }
   }
-  if (returns != 1 || !Unique(code, "void main(") || !Unique(normalized, kTail))
+  const bool legacy_tail = Unique(normalized, kTail);
+  const bool scaled_tail = Unique(normalized, ScaledTail());
+  if (returns != 1 || !Unique(code, "void main(") || legacy_tail == scaled_tail)
     return reject("Pixel coverage main or fragment tail is not audited");
-  const size_t tail = normalized.find(kTail);
-  if (tail <= tokens[body].at || tail + kTail.size() != tokens[end].at + 1)
+  const std::string_view audited_tail = legacy_tail ? kTail : std::string_view(ScaledTail());
+  const size_t tail = normalized.find(audited_tail);
+  if (tail <= tokens[body].at || tail + audited_tail.size() != tokens[end].at + 1)
     return reject("Pixel coverage fragment tail must finish main");
 
   // Descending edits keep normalized source offsets valid. All original bytes,
@@ -263,9 +276,9 @@ bool SpecializePixelCoverageShader(uint64_t hash, std::string_view source,
   return true;
 }
 std::string_view PixelCoverageShaderCacheIdentity() {
-  static const std::string identity = std::string("pixel-coverage-structural-audit-v1\n") +
+  static const std::string identity = std::string("pixel-coverage-structural-audit-v2\n") +
       std::string(kPrefix) + std::string(kOutput) + std::string(kExtra) +
-      std::string(kAssignment) + std::string(kTail) + std::string(kCapePixelPosition) + AuditedParameters() +
+      std::string(kAssignment) + std::string(kTail) + ScaledTail() + std::string(kCapePixelPosition) + AuditedParameters() +
       std::string(kLoadBuffers) + std::string(kLoadAddress);
   return identity;
 }

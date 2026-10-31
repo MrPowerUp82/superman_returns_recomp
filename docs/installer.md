@@ -15,6 +15,19 @@ DXIL reproduz `ComputeHashRetail` do DXC; os testes comparam a assinatura com
 o validador Microsoft `dxv.exe`. Só os containers não comprimidos nos `.AST`
 são cobertos; shaders do XEX e criados dinamicamente continuam no runtime.
 
+## Atualização da correção das sombras (30/10/2026)
+
+A [correção da profundidade das sombras](shadow-fixed16-normalization-2026-10-30.md)
+exige o executável atualizado e shaders gerados pelo tradutor correspondente.
+As bibliotecas antigas de pré-shaders não são corrigidas pelo cache de runtime.
+Na página, selecione seu jogo, marque **Só atualizar o build** e gere novamente
+os pré-shaders das APIs utilizadas. Substitua as bibliotecas ao lado do
+executável. Os arquivos do jogo não precisam ser copiados novamente.
+
+Ao publicar essa correção, atualize também `docs/wasm/hlsl.mjs`, `hlsl.wasm`
+e `shader_common.h`, além do pacote do jogo e de suas ferramentas nativas.
+O gerador no navegador precisa emitir a mesma normalização que o runtime.
+
 ## Peças
 
 | Peça | Onde | O que faz |

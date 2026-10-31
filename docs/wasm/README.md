@@ -9,6 +9,11 @@ em `docs/js/dxil-container-hash.js`, conforme o algoritmo aberto do DXC.
 O bundle XXH3 em `docs/js/vendor/` reproduz as chaves das bibliotecas D3D12;
 procedência, versão, hash e licença estão no README dessa pasta.
 
+Em 30/10/2026, o emissor e o cabeçalho foram atualizados com o patch local
+`0014-color-output-scale.patch`, que preserva a profundidade das sombras.
+As bibliotecas geradas anteriormente devem ser regeneradas e usadas com o
+build que inclui a correção. A atualização cobre D3D12 e Vulkan.
+
 | Arquivos | Procedência | Licenças |
 | --- | --- | --- |
 | `hlsl.mjs`, `hlsl.wasm`, `shader_common.h` | XenosRecomp `339af41df2c23dbe3256c1c377716b81a0e0fe6b`, patches locais, `tools/shaders/build_wasm.ps1`, Emscripten 4.0.23 | XenosRecomp/fmt MIT; xxHash BSD-2-Clause |

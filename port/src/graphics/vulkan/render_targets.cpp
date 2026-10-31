@@ -1,4 +1,5 @@
 #include "render_targets.h"
+#include "../fixed16_color.h"
 #include <algorithm>
 #include <cstring>
 namespace superman_returns::graphics::vulkan {
@@ -210,7 +211,10 @@ bool TargetStore::Clear(const guest::ClearPacket& clear,Error& e) {
     VkRenderPassBeginInfo begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};begin.renderPass=pass->render_pass;begin.framebuffer=pass->framebuffer;begin.renderArea={{0,0},plan.extent};
     VkClearAttachment attachment{};attachment.aspectMask=aspects;
     if(surface.depth) attachment.clearValue.depthStencil={std::clamp(clear.depth,0.0f,1.0f),clear.stencil&255};
-    else std::memcpy(attachment.clearValue.color.float32,clear.color.data(),16);
+    else {
+      const auto color=ColorClearValue(surface.geometry.format,clear.color.data());
+      std::memcpy(attachment.clearValue.color.float32,color.data(),16);
+    }
     c_.f.vkCmdBeginRenderPass(command_,&begin,VK_SUBPASS_CONTENTS_INLINE);
     c_.f.vkCmdClearAttachments(command_,1,&attachment,uint32_t(rects.size()),rects.data());
     c_.f.vkCmdEndRenderPass(command_);MarkWritten(*pass);

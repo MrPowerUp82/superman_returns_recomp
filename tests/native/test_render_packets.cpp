@@ -16,6 +16,25 @@ SR_TEST(packet_check_cadence_limits_debug_capture) {
 #include <stdexcept>
 #include <thread>
 using namespace superman_returns::graphics::guest;
+SR_TEST(shadow_output_scale_follows_each_target_and_resets_after_shadow_pass) {
+  DrawPacket draw;
+  draw.colors[0] = {1, false, {640, 640, 0, 4, 0, 0}};
+  draw.colors[2] = {2, false, {640, 640, 0, 4, 0, 0}};
+  const auto scale = [&](uint32_t slot) {
+    float value;
+    std::memcpy(&value, draw.constants.shared.data() + 496 + 4 * slot, 4);
+    return value;
+  };
+  FinalizeDrawConstants(draw);
+  SR_CHECK(scale(0) == 1.0f / 32);
+  SR_CHECK(scale(1) == 1 && scale(2) == 1.0f / 32 && scale(3) == 1);
+  // The next draw reuses the block for HDR + depth; stale shadow state would
+  // darken the entire scene. An unbound target must also be reset to identity.
+  draw.colors[0].geometry.format = 12;
+  draw.colors[2] = {};
+  FinalizeDrawConstants(draw);
+  for (uint32_t slot = 0; slot < 4; ++slot) SR_CHECK(scale(slot) == 1);
+}
 SR_TEST(pooled_draws_remain_owned_until_last_alias_and_reset_on_reuse) {
   auto pool=std::make_shared<DrawPacketPool>();
   auto capture=std::make_shared<ShaderCapture>();

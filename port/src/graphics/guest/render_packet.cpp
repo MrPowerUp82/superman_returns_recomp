@@ -1,6 +1,7 @@
 #include "render_packet.h"
 #include "../../native_renderer/game_profile.h"
 #include "../../native_renderer/pm4_mirror.h"
+#include "../fixed16_color.h"
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -230,6 +231,8 @@ void FinalizeDrawConstants(DrawPacket &d) {
   putf(113, 1);
   putf(114, 1);
   putf(115, 0);
+  for (uint32_t i = 0; i < 4; ++i)
+    putf(124 + i, d.colors[i].id ? ColorOutputScale(d.colors[i].geometry.format) : 1.0f);
   float xform[4] = {1, 1, 0, 0};
   if (screen) {
     uint32_t win = d.registers[0x80];
