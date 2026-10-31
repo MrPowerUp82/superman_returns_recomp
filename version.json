@@ -1,0 +1,20 @@
+{
+  "version": "2026.10.30-88c81bc",
+  "commit": "88c81bc",
+  "built": "2026-10-31T00:29:09.6678266Z",
+  "xex_sha256": "c8f243acd99de9a91f5ae4f409721c0e954e3d5eb96861419d3da07b8106db2b",
+  "zip_parts": [
+    {
+      "name": "superman_returns_win64.1918d2f1b82d1b6c.part001",
+      "size": 83886080,
+      "sha256": "cfd9a58d92043b323eeed48ec6f289ed1c662890e6a11a724bb49a5a87c39695"
+    },
+    {
+      "name": "superman_returns_win64.1918d2f1b82d1b6c.part002",
+      "size": 25154250,
+      "sha256": "fda6bbd961f24c3e17d303dd55131468d9df4e3c8bf6cd01fe5441ec1b3844a2"
+    }
+  ],
+  "zip_size": 109040330,
+  "zip_sha256": "1918d2f1b82d1b6c45b0700dba5855eb16487377e7f157c0b25b869b6ac6acd3"
+}
