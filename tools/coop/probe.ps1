@@ -8,6 +8,7 @@ param(
   [ValidateRange(1, 5000)][int]$Milliseconds = 250,
   [switch]$NoScript,
   [switch]$CameraProbe,
+  [switch]$SecondCamera,
   [ValidateSet('native', 'xenos')][string]$Renderer = 'native'
 )
 $ErrorActionPreference = 'Stop'
@@ -77,6 +78,7 @@ switch ($Action) {
     )
     if (-not $NoScript) { $arguments += "--sr_coop_script=`"$mailbox`"" }
     if ($CameraProbe) { $arguments += '--sr_coop_camera_probe=true' }
+    if ($SecondCamera) { $arguments += '--sr_coop_second_camera=true' }
     $oldInput = $env:SR_BENCH_INPUT
     $oldP2Input = $env:SR_BENCH_INPUT_P2
     $oldDump = $env:SR_DUMP_IMAGE

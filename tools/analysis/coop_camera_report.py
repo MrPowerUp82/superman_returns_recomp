@@ -19,13 +19,14 @@ def vector(value: str, count: int) -> list[float]:
     return result
 
 
-def analyze(lines, required_targets=(), tolerance=0.001) -> dict:
+def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=False) -> dict:
     rows = {"update": {}, "submit": {}, "consume": {}, "apply": {}}
     errors = []
     started = False
     render_frame = None
     render_groups = []
     techniques = []
+    secondary = []
     for line in lines:
         if "coop: single-instance input preparation;" in line:
             rows = {key: {} for key in rows}
@@ -34,10 +35,26 @@ def analyze(lines, required_targets=(), tolerance=0.001) -> dict:
             render_frame = None
             render_groups = []
             techniques = []
+            secondary = []
         if not started:
             continue
         if "Unhandled guest access violation" in line or re.search(r"coop Lua: status=[1-9]", line):
             errors.append("guest/script failure in latest run")
+        if "coop second camera:" in line:
+            values = dict(re.findall(r"(\w+)=([^\s]+)", line))
+            try:
+                owner, primary = int(values["owner"], 16), int(values["primary"], 16)
+                target, primary_target = int(values["target"]), int(values["primary_target"])
+                if not owner or not primary or owner == primary or target in (0, 255) or target == primary_target:
+                    raise ValueError("second camera aliases primary camera/target")
+                if values["singleton_unchanged"] != "true" or values["finite"] != "true":
+                    raise ValueError("second camera changed singleton or produced invalid data")
+                position = vector(values["position"], 3)
+                primary_position = vector(values["primary_position"], 3)
+                secondary.append({"owner": owner, "target": target,
+                                  "separation": math.dist(position, primary_position)})
+            except (KeyError, ValueError) as error:
+                errors.append(f"second camera: {error}")
         if "coop camera render frame:" in line:
             render_frame = dict(re.findall(r"(\w+)=([^\s]+)", line))
             render_frame["sampled_groups"] = list(render_groups)
@@ -106,11 +123,17 @@ def analyze(lines, required_targets=(), tolerance=0.001) -> dict:
     for target in required_targets:
         if target not in verified_targets:
             errors.append(f"camera target {target} has no matching submission")
+    if required_secondary and len(secondary) < 3:
+        errors.append("fewer than three valid second-camera samples")
     return {"passed": not errors, "scope": "sampled single-camera propagation",
             "targets": targets, "verified_submission_targets": sorted(verified_targets),
             "samples": {k: len(v) for k, v in rows.items()},
             "update_to_submit": producer, "consume_to_apply": consumer,
             "last_render_frame": render_frame,
+            "second_camera": {"samples": len(secondary),
+                              "owners": sorted({row["owner"] for row in secondary}),
+                              "targets": sorted({row["target"] for row in secondary}),
+                              "max_separation": max((row["separation"] for row in secondary), default=None)},
             "errors": sorted(set(errors))}
 
 
@@ -119,6 +142,7 @@ def main():
     parser.add_argument("--log", type=Path, default=Path("artifacts/coop-test/probe.log"))
     parser.add_argument("--output", type=Path, default=Path("artifacts/coop-test/camera-check.json"))
     parser.add_argument("--require-target", type=int, action="append", default=[])
+    parser.add_argument("--require-secondary", action="store_true")
     args = parser.parse_args()
     # spdlog names older segments probe.1.log, probe.2.log, ... . Read oldest
     # first so the latest startup can reset both previous-run errors and samples.
@@ -135,7 +159,7 @@ def main():
             with path.open(encoding="utf-8", errors="replace") as source:
                 yield from source
 
-    report = analyze(lines(), args.require_target)
+    report = analyze(lines(), args.require_target, required_secondary=args.require_secondary)
     report["input_files"] = [str(path) for path in paths]
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

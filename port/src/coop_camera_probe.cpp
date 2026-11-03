@@ -1,4 +1,5 @@
 #include "coop_camera_probe.h"
+#include "coop_second_camera.h"
 
 #include <array>
 #include <atomic>
@@ -100,9 +101,11 @@ void NoteCameraProbeGroup(uint32_t group, uint32_t subgroup, uint32_t caller) {
 
 REX_HOOK_RAW(sub_821808F8) {
   using namespace superman_returns::coop;
-  if (!Enabled()) { __imp__sub_821808F8(ctx, base); return; }
   const uint32_t manager = ctx.r3.u32, caller = uint32_t(ctx.lr);
+  const double dt = ctx.f1.f64;
   __imp__sub_821808F8(ctx, base);
+  UpdateSecondCamera(ctx, base, manager, dt);
+  if (!Enabled()) return;
   const auto sequence = updates.fetch_add(1) + 1;
   if (sequence <= 3 || sequence % 120 == 0) ObserveCamera(base, manager, caller, sequence);
 }

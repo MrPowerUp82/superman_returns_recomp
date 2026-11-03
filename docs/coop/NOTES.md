@@ -7,7 +7,8 @@ with split-screen views**. The earlier two-process/localhost route is retired.
 No networking is required for this local mode.
 
 **Status: experimental second-actor creation and controller binding, exercised
-through an isolated development probe. There is no finished two-player mode or
+through an isolated development probe, plus an opt-in separate native camera
+controller for P2. There is no finished two-player mode or
 split-screen rendering yet.** `run_coop.cmd` still enables input preparation only.
 
 ## Current implementation
@@ -124,6 +125,31 @@ the active effect route, and the remaining work for a second view. In the tested
 run, the packet's second transform block was inactive; the renderer's separate
 camera used for group 23 must also be accounted for before reusing a view slot.
 
+### Separate P2 camera controller (development)
+
+`./tools/coop/probe.ps1 -Action Start -CameraProbe -SecondCamera` additionally
+enables `sr_coop_second_camera`. It constructs an owned native camera graph
+alongside the primary camera's initialization, when its parameter resources are
+available. After P2 is bound to port 1, it binds that actor to the new graph and
+updates only the active native controller. The primary camera's singleton is
+never replaced. The complete manager update, global camera side effects and
+world simulation are not run a second time.
+
+At join, if the guest selected P2 as the primary camera home, the probe returns
+that home to the actor on port 0 through the native setter. Other scripted home
+targets are preserved. When P2 disappears, secondary updates stop; the parameter
+graph is retained for rebinding. Primary-manager destruction calls the secondary
+native destructor, retaining the small reusable outer SystemHeap reservation.
+
+After stopping the probe, add `--require-secondary` to the camera report command
+to require at least three finite snapshots from distinct camera owners and actor
+targets. The implementation and validation limits are in
+`docs/checkpoints/checkpoint6.md`.
+
+**This computes a second camera transform; it does not send it to the render
+thread or draw a second viewport.** Mode transitions, right-stick camera control,
+collision, cutscenes and full level/shutdown lifecycle still need validation.
+
 | Item | Finding |
 |---|---|
 | Title | Superman Returns (Xbox 360, 2006) |
@@ -193,8 +219,9 @@ actor or independent views. The earlier two-window test only validated the retir
 validation of the requested local co-op mode.
 
 Continuation evidence is recorded in `docs/checkpoints/checkpoint3.md`,
-`docs/checkpoints/checkpoint4.md` and `docs/checkpoints/checkpoint5.md`. These cover
-movement checks, despawn/rebind and the camera/render handoff. Physical controllers, full combat and
+`docs/checkpoints/checkpoint4.md`, `docs/checkpoints/checkpoint5.md` and
+`docs/checkpoints/checkpoint6.md`. These cover movement checks, despawn/rebind,
+the camera/render handoff and the separate native P2 controller. Physical controllers, full combat and
 independent views remain unverified. A previous development script enumerating
 `_G` with `pairs` and `string.find` triggered guest access violations; that failure
 is not localized. The latest isolated movement run had no guest/script errors.

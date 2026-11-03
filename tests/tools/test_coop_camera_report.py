@@ -27,6 +27,18 @@ def trace():
 
 
 class CameraEvidence(unittest.TestCase):
+    def test_second_camera_requires_distinct_owner_and_target(self):
+        second = ("coop second camera: seq={seq} owner=01000000 primary=02000000 "
+                  "target=99 primary_target=1 singleton_unchanged=true finite=true "
+                  "position=12,20,30 primary_position=10,20,30")
+        good = trace() + [second.format(seq=i) for i in range(1, 4)]
+        self.assertTrue(reporter.analyze(good, required_secondary=True)["passed"])
+        bad = [line.replace("owner=01000000", "owner=02000000") for line in good]
+        self.assertFalse(reporter.analyze(bad, required_secondary=True)["passed"])
+        bad = [line.replace("primary_target=1", "primary_target=99") for line in good]
+        self.assertFalse(reporter.analyze(bad, required_secondary=True)["passed"])
+        self.assertFalse(reporter.analyze(trace(), required_secondary=True)["passed"])
+
     def test_cli_reads_rotated_segments_in_chronological_order(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
