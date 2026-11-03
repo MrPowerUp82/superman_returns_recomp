@@ -8,7 +8,8 @@ No networking is required for this local mode.
 
 **Status: experimental second-actor creation and controller binding, exercised
 through an isolated development probe, plus an opt-in separate native camera
-controller for P2 and optional transport to the render thread. There is no finished two-player mode or
+controller for P2, optional transport to the render thread and a native P2
+world-view preview. There is no finished two-player mode or
 split-screen rendering yet.** `run_coop.cmd` still enables input preparation only.
 
 ## Current implementation
@@ -176,6 +177,26 @@ clear before respawning; startup zeros do not count as leave evidence. The isola
 leave/rejoin evidence and remaining rendering work are recorded in
 `docs/checkpoints/checkpoint7.md`.
 
+### Native P2 world-view preview (development)
+
+`./tools/coop/probe.ps1 -Action Start -PreviewP2` enables the camera/transport
+dependencies and `sr_coop_camera_preview`. Once P2 exists, it applies the consumed
+secondary matrix and perspective parameters to the existing world camera before
+normal preparation/drawing. The main gameplay camera still follows P1. The HUD
+camera keeps its existing role. Removing P2 restores the P1 world view.
+
+After stopping, add `--require-preview` to the camera report command. This also
+requires transport evidence, current world/HUD selection, matching application
+and draw samples, correspondence with consumed P2 positions in every active
+interval, and a verified primary return for each exercised clear. Allow a
+stationary sample at each boundary. Runtime evidence and limits are in
+`docs/checkpoints/checkpoint8.md`.
+
+**This renders P2 in the existing viewport; two simultaneous viewports remain
+pending.** Independent visibility/streaming at large separation, repeated
+per-view preparation, post effects and HUD ownership still need implementation
+and validation.
+
 | Item | Finding |
 |---|---|
 | Title | Superman Returns (Xbox 360, 2006) |
@@ -246,8 +267,10 @@ validation of the requested local co-op mode.
 
 Continuation evidence is recorded in `docs/checkpoints/checkpoint3.md`,
 `docs/checkpoints/checkpoint4.md`, `docs/checkpoints/checkpoint5.md` and
-`docs/checkpoints/checkpoint6.md`, and `docs/checkpoints/checkpoint7.md`. These cover movement checks, despawn/rebind,
-the camera/render handoff, the separate native P2 controller and secondary packet transport. Physical controllers, full combat and
+`docs/checkpoints/checkpoint6.md`, `docs/checkpoints/checkpoint7.md` and
+`docs/checkpoints/checkpoint8.md`. These cover movement checks, despawn/rebind,
+the camera/render handoff, the separate native P2 controller, secondary packet
+transport and P2 world-view preview. Physical controllers, full combat and
 independent views remain unverified. A previous development script enumerating
 `_G` with `pairs` and `string.find` triggered guest access violations; that failure
 is not localized. The latest isolated movement run had no guest/script errors.

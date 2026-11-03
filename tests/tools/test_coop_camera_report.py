@@ -27,6 +27,59 @@ def trace():
 
 
 class CameraEvidence(unittest.TestCase):
+    def test_preview_requires_preserved_packet_hud_and_matching_world_draw(self):
+        applied = ("coop camera preview: seq={seq} generation=3221225473 camera=01000000 hud=02000000 "
+                   "packet_unchanged=true hud_unchanged=true matrix_matches=true selection_matches=true position=12,20,30")
+        draw = ("coop camera preview draw: seq={seq} generation=3221225473 camera=01000000 hud=02000000 "
+                "matrix_matches=true selection_matches=true position=12,20,30")
+        preview_only = trace() + [line.format(seq=i) for i in range(1,4) for line in (applied,draw)]
+        self.assertFalse(reporter.analyze(preview_only, required_preview=True)["passed"])
+        publication = ("coop camera transport: seq={seq} generation=3221225473 active=true "
+                       "primary_unchanged=true secondary_matches=true position=12,20,30")
+        consumed = (trace()[3] + " secondary_flags=C0000001 secondary_position=12,20,30 "
+                    "secondary_projection=0.5,18000,1.2,1.7777778 secondary_viewport=00000000,050002D0")
+        good = (trace() + [publication.format(seq=i) for i in range(1,4)] + [consumed]*3 +
+                [line.format(seq=i) for i in range(1,4) for line in (applied,draw)])
+        self.assertTrue(reporter.analyze(good, required_preview=True)["passed"])
+        cases = [trace(), good[:-1],
+                 [s.replace("packet_unchanged=true", "packet_unchanged=false") for s in good],
+                 [s.replace("hud_unchanged=true", "hud_unchanged=false") for s in good],
+                 [s.replace("hud=02000000", "hud=01000000") for s in good],
+                 [s.replace("matrix_matches=true", "matrix_matches=false") for s in good],
+                 [s.replace("selection_matches=true", "selection_matches=false") for s in good],
+                 [s.replace("position=12,20,30", "position=90,20,30") if "preview draw:" in s else s for s in good]]
+        for bad in cases:
+            with self.subTest(bad=bad):
+                self.assertFalse(reporter.analyze(bad, required_preview=True)["passed"])
+
+    def test_preview_must_follow_consumed_camera_and_confirm_return_to_primary(self):
+        publication = ("coop camera transport: seq={seq} generation={version} active={active} "
+                       "primary_unchanged=true secondary_matches=true position=12,20,30")
+        consumed = (trace()[3] + " secondary_flags=C0000001 secondary_position=12,20,30 "
+                    "secondary_projection=0.5,18000,1.2,1.7777778 secondary_viewport=00000000,050002D0")
+        applied = ("coop camera preview: seq={seq} generation=3221225473 camera=01000000 hud=02000000 "
+                   "packet_unchanged=true hud_unchanged=true matrix_matches=true selection_matches=true position=12,20,30")
+        draw = ("coop camera preview draw: seq={seq} generation=3221225473 camera=01000000 hud=02000000 "
+                "matrix_matches=true selection_matches=true position=12,20,30")
+        good = trace()
+        for i in range(1,4):
+            good += [publication.format(seq=i,version=0xC0000001,active="true"), consumed,
+                     applied.format(seq=i), draw.format(seq=i)]
+        self.assertTrue(reporter.analyze(good, required_handoff=True, required_preview=True)["passed"])
+        wrong_source = [s.replace("position=12,20,30", "position=90,20,30") if "preview" in s else s for s in good]
+        self.assertFalse(reporter.analyze(wrong_source, required_handoff=True, required_preview=True)["passed"])
+        clear = consumed.replace("secondary_flags=C0000001", "secondary_flags=00000000").replace(
+            "secondary_position=12,20,30", "secondary_position=0,0,0").replace(
+            "secondary_projection=0.5,18000,1.2,1.7777778", "secondary_projection=0,0,0,0").replace(
+            "secondary_viewport=00000000,050002D0", "secondary_viewport=00000000,00000000")
+        left = good + [publication.format(seq=4,version=0,active="false"), clear]
+        self.assertFalse(reporter.analyze(left, required_handoff=True, required_preview=True)["passed"])
+        restored = ("coop camera preview restored: generation=0 camera=01000000 hud=02000000 "
+                    "matrix_matches=true selection_matches=true position=10,20,30")
+        self.assertTrue(reporter.analyze(left+[restored], required_handoff=True, required_preview=True)["passed"])
+        stale = left+[restored,applied.format(seq=4),draw.format(seq=4)]
+        self.assertFalse(reporter.analyze(stale, required_handoff=True, required_preview=True)["passed"])
+
     def test_handoff_requires_received_version_and_preserved_primary(self):
         published=("coop camera transport: seq={seq} camera_seq={seq} target=99 "
                    "generation=3221225473 active=true primary_unchanged=true secondary_matches=true "

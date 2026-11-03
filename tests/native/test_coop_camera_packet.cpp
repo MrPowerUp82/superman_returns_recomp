@@ -1,4 +1,5 @@
 #include "../../port/src/coop_camera_packet.h"
+#include "../../port/src/coop_camera_preview.h"
 #include "test_main.h"
 #include <algorithm>
 #include <array>
@@ -54,4 +55,43 @@ SR_TEST(coop_packet_rejects_short_spans_invalid_projection_and_nonfinite_transfo
   SR_CHECK(!EncodeView(Matrix(),{1,0.5f,1.2f,1.7f},1));
   SR_CHECK(!EncodeView(Matrix(),{0.5f,18000,4,1.7f},1));
   SR_CHECK(!View(0));
+}
+SR_TEST(coop_packet_decodes_only_owned_complete_perspective_views) {
+  std::array<uint8_t,208> data{};
+  PacketOwner owner;
+  SR_CHECK(owner.Publish(data,0x1000,View(0xC0000001))==Result::Published);
+  const auto before=data;
+  auto decoded=DecodeOwnedSecondary(data);
+  SR_CHECK(decoded.has_value());
+  if(decoded) {
+    SR_CHECK_EQ(decoded->generation,0xC0000001u);
+    SR_CHECK_EQ(decoded->matrix[12],12.f);
+    SR_CHECK_EQ(decoded->projection[0],0.5f);
+    SR_CHECK_EQ(decoded->projection[3],16.f/9.f);
+  }
+  SR_CHECK(data==before);
+  WriteWord(data,200,0);
+  SR_CHECK(!DecodeOwnedSecondary(data));
+  WriteWord(data,200,9); // Native/foreign flags are not our camera transport.
+  SR_CHECK(!DecodeOwnedSecondary(data));
+  WriteWord(data,200,0xC0000000);
+  SR_CHECK(!DecodeOwnedSecondary(data));
+  data=before; WriteWord(data,196,0x028002D0); // Unsupported viewport for this preview.
+  SR_CHECK(!DecodeOwnedSecondary(data));
+  data=before; WriteWord(data,160,0x7FC00000);
+  SR_CHECK(!DecodeOwnedSecondary(data));
+  data=before; WriteWord(data,184,std::bit_cast<uint32_t>(4.f));
+  SR_CHECK(!DecodeOwnedSecondary(data));
+  SR_CHECK(!DecodeOwnedSecondary(std::span(data).first(200)));
+}
+SR_TEST(coop_preview_requires_current_world_and_hud_selection) {
+  using namespace superman_returns::coop;
+  std::array<uint8_t,64> matrix{};
+  SR_CHECK(PreviewMatrixMatches({0x1000,0x2000},{0x1000,0x2000},matrix,matrix));
+  // An old camera still contains the right matrix after slot 0 was replaced.
+  SR_CHECK(!PreviewMatrixMatches({0x1000,0x2000},{0x3000,0x2000},matrix,matrix));
+  SR_CHECK(!PreviewMatrixMatches({0x1000,0x2000},{0x1000,0x3000},matrix,matrix));
+  SR_CHECK(!PreviewMatrixMatches({0x1000,0x1000},{0x1000,0x1000},matrix,matrix));
+  auto changed=matrix; changed[48]=1;
+  SR_CHECK(!PreviewMatrixMatches({0x1000,0x2000},{0x1000,0x2000},matrix,changed));
 }

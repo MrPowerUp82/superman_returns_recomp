@@ -1,6 +1,7 @@
 """Check sampled camera handoffs in the latest isolated probe run.
 
-This verifies primary propagation and optional secondary transport, not drawing.
+This verifies primary propagation, secondary transport and optional draw-entry
+camera selection. It does not prove final pixels or split-screen composition.
 Only uses local logs; no game image or extracted assets are needed.
 """
 from __future__ import annotations
@@ -19,7 +20,9 @@ def vector(value: str, count: int) -> list[float]:
     return result
 
 
-def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=False, required_handoff=False) -> dict:
+def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=False, required_handoff=False,
+            required_preview=False) -> dict:
+    required_handoff = required_handoff or required_preview
     rows = {"update": {}, "submit": {}, "consume": {}, "apply": {}}
     errors = []
     started = False
@@ -31,6 +34,8 @@ def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=Fals
     received = []
     cleared = 0
     intervals = []
+    previews, preview_draws = {}, {}
+    blocked_preview_generations = set()
     for line in lines:
         if "coop: single-instance input preparation;" in line:
             rows = {key: {} for key in rows}
@@ -44,12 +49,53 @@ def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=Fals
             received = []
             cleared = 0
             intervals = []
+            previews, preview_draws = {}, {}
+            blocked_preview_generations = set()
         if not started:
             continue
         if "Unhandled guest access violation" in line or re.search(r"coop Lua: status=[1-9]", line):
             errors.append("guest/script failure in latest run")
         if "coop camera transport failed:" in line or "coop camera transport refused:" in line:
             errors.append("camera transport write/readback failed or slot occupied")
+        if "coop camera preview failed:" in line or "coop camera preview refused:" in line:
+            errors.append("camera preview rejected or failed verification")
+        if "coop camera preview:" in line or "coop camera preview draw:" in line:
+            values = dict(re.findall(r"(\w+)=([^\s]+)", line))
+            drawing = "preview draw:" in line
+            try:
+                sequence, generation = int(values["seq"]), int(values["generation"])
+                camera, hud = int(values["camera"], 16), int(values["hud"], 16)
+                if not generation or not camera or not hud or camera == hud:
+                    raise ValueError("missing generation or distinct world/HUD cameras")
+                flags = ("matrix_matches", "selection_matches") if drawing else (
+                    "matrix_matches", "selection_matches", "packet_unchanged", "hud_unchanged")
+                if any(values[key] != "true" for key in flags):
+                    raise ValueError("preview changed packet/HUD or matrix mismatched")
+                row = {"generation": generation, "camera": camera, "hud": hud,
+                       "position": vector(values["position"], 3)}
+                if generation in blocked_preview_generations:
+                    raise ValueError("preview reused a generation after its consumed clear")
+                (preview_draws if drawing else previews)[sequence] = row
+                if drawing:
+                    interval = next((entry for entry in reversed(intervals) if entry["generation"] == generation), None)
+                    if interval is not None:
+                        interval["previews"].append(row)
+                    elif required_handoff:
+                        raise ValueError("preview generation has no publication interval")
+            except (KeyError, ValueError) as error:
+                errors.append(f"preview: {error}")
+        if "coop camera preview restored:" in line:
+            values = dict(re.findall(r"(\w+)=([^\s]+)", line))
+            try:
+                camera, hud = int(values["camera"], 16), int(values["hud"], 16)
+                if (values["generation"] != "0" or not camera or not hud or camera == hud or
+                        values["matrix_matches"] != "true" or values["selection_matches"] != "true"):
+                    raise ValueError("primary return did not match the current world camera")
+                if not intervals or intervals[-1]["generation"] != 0:
+                    raise ValueError("primary return has no clear publication interval")
+                intervals[-1]["restored"].append(vector(values["position"], 3))
+            except (KeyError, ValueError) as error:
+                errors.append(f"preview restored: {error}")
         if "coop camera transport:" in line:
             values=dict(re.findall(r"(\w+)=([^\s]+)",line))
             try:
@@ -61,7 +107,9 @@ def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=Fals
                 if values["active"] == "false" and version:
                     raise ValueError("inactive view has nonzero generation")
                 if not intervals or intervals[-1]["generation"] != version:
-                    intervals.append({"generation": version, "published": [], "received": []})
+                    intervals.append({"generation": version, "published": [], "received": [],
+                                      "previews": [], "restored": []})
+                    blocked_preview_generations.discard(version)
                 if values["active"] == "true":
                     if not version: raise ValueError("active view without generation")
                     row = {"generation": version, "position": vector(values["position"], 3)}
@@ -137,7 +185,9 @@ def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=Fals
                                     any(vector(values["secondary_projection"], 4)) or
                                     values["secondary_viewport"] != "00000000,00000000"):
                                 raise ValueError("received clear retains secondary camera data")
-                            intervals[-1]["received"].append({"generation": 0})
+                            intervals[-1]["received"].append({"generation": 0, "position": transform[12:15]})
+                            blocked_preview_generations.update(entry["generation"] for entry in intervals
+                                                               if entry["generation"])
             else:
                 values["position_values"] = vector(values["position"], 3)
                 if kind == "update":
@@ -181,12 +231,24 @@ def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=Fals
     matching=sum(any(a["generation"]==b["generation"] and math.dist(a["position"],b["position"])<=0.05
                      for a in published) for b in received)
     lifecycle = []
+    preview_position_matches = restored_position_matches = 0
     for interval in intervals:
         version = interval["generation"]
         matches = sum(any(math.dist(a["position"], b["position"]) <= 0.05
                           for a in interval["published"]) for b in interval["received"]) if version else 0
         lifecycle.append({"generation": version, "received_samples": len(interval["received"]),
                           "matching_sampled_positions": matches})
+        preview_matches = sum(any(math.dist(a["position"], b["position"]) <= 0.05
+                                  for a in interval["received"]) for b in interval["previews"])
+        restored_matches = sum(any(math.dist(a["position"], b) <= 0.05
+                                   for a in interval["received"]) for b in interval["restored"])
+        preview_position_matches += preview_matches
+        restored_position_matches += restored_matches
+        if required_preview:
+            if version and not preview_matches:
+                errors.append(f"preview lifecycle interval {len(lifecycle)}: no position matches consumed P2")
+            if not version and not restored_matches:
+                errors.append(f"preview lifecycle interval {len(lifecycle)}: no verified return to consumed P1")
         if required_handoff:
             if not interval["received"]:
                 errors.append(f"secondary lifecycle interval {len(lifecycle)} generation {version}: no matching consumption")
@@ -197,6 +259,20 @@ def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=Fals
             errors.append("fewer than three active publication/consumption samples")
         if unknown: errors.append("received secondary generation was never published")
         if not matching: errors.append("no received position matches a sampled publication")
+    preview_pairs = 0
+    drawn_generations = set()
+    for sequence, draw in preview_draws.items():
+        applied = previews.get(sequence)
+        if applied != draw:
+            errors.append(f"preview draw {sequence}: no matching camera application")
+        else:
+            preview_pairs += 1
+            drawn_generations.add(draw["generation"])
+    if required_preview:
+        if preview_pairs < 3 or len(previews) != preview_pairs:
+            errors.append("fewer than three complete preview application/draw pairs")
+        if generations - drawn_generations:
+            errors.append("published generation has no verified preview draw")
     return {"passed": not errors, "scope": "sampled primary propagation and secondary transport",
             "targets": targets, "verified_submission_targets": sorted(verified_targets),
             "samples": {k: len(v) for k, v in rows.items()},
@@ -210,6 +286,10 @@ def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=Fals
                                   "generations":sorted(generations),"unknown_generations":sorted(unknown),
                                   "matching_sampled_positions":matching,"inactive_received_samples":cleared,
                                   "lifecycle_intervals": lifecycle},
+            "preview": {"applied_samples": len(previews), "draw_samples": len(preview_draws),
+                        "verified_pairs": preview_pairs, "generations": sorted(drawn_generations),
+                        "consumed_position_matches": preview_position_matches,
+                        "restored_position_matches": restored_position_matches},
             "errors": sorted(set(errors))}
 
 
@@ -220,6 +300,7 @@ def main():
     parser.add_argument("--require-target", type=int, action="append", default=[])
     parser.add_argument("--require-secondary", action="store_true")
     parser.add_argument("--require-handoff", action="store_true")
+    parser.add_argument("--require-preview", action="store_true")
     args = parser.parse_args()
     # spdlog names older segments probe.1.log, probe.2.log, ... . Read oldest
     # first so the latest startup can reset both previous-run errors and samples.
@@ -236,7 +317,8 @@ def main():
             with path.open(encoding="utf-8", errors="replace") as source:
                 yield from source
 
-    report = analyze(lines(), args.require_target, required_secondary=args.require_secondary, required_handoff=args.require_handoff)
+    report = analyze(lines(), args.require_target, required_secondary=args.require_secondary,
+                     required_handoff=args.require_handoff, required_preview=args.require_preview)
     report["input_files"] = [str(path) for path in paths]
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

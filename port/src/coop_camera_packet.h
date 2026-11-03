@@ -32,6 +32,24 @@ inline std::optional<ViewBytes> EncodeView(const std::array<float,16>& matrix,
   WriteWord(bytes,88,generation); // 0 invalid; a change disables cross-join interpolation
   return bytes;
 }
+struct DecodedView {
+  std::array<float,16> matrix{};
+  std::array<float,4> projection{}; // near, far, FOV, aspect
+  uint32_t generation=0;
+};
+inline std::optional<DecodedView> DecodeOwnedSecondary(std::span<const uint8_t> bytes) {
+  if(bytes.size()<kPacketSize) return {};
+  const auto view=bytes.subspan(kSecondaryOffset,kViewSize);
+  DecodedView result;
+  result.generation=ReadWord(view,88);
+  if((result.generation&0xC0000000u)!=0xC0000000u || !(result.generation&0x3FFFFFFFu) ||
+     ReadWord(view,80)!=0 || ReadWord(view,84)!=0x050002D0u) return {};
+  for(size_t i=0;i<16;++i) result.matrix[i]=std::bit_cast<float>(ReadWord(view,i*4));
+  for(size_t i=0;i<4;++i) result.projection[i]=std::bit_cast<float>(ReadWord(view,64+i*4));
+  if(!EncodeView(result.matrix,result.projection,result.generation)) return {};
+  return result;
+}
+
 enum class Result { Invalid, Inactive, Occupied, Published, Cleared };
 class PacketOwner {
  public:
