@@ -27,6 +27,42 @@ def trace():
 
 
 class CameraEvidence(unittest.TestCase):
+    def test_radar_requires_native_p2_anchor_correct_aspect_and_same_frame_composition(self):
+        publication = ("coop camera transport: seq={seq} generation=3221225473 active=true "
+                       "primary_unchanged=true secondary_matches=true position=12,20,30")
+        consumed = (trace()[3]+" secondary_flags=C0000001 secondary_position=12,20,30 "
+                    "secondary_projection=0.5,18000,1.2,1.7777778 secondary_viewport=00000000,050002D0")
+        good = trace()+[publication.format(seq=i) for i in range(1,4)]+[consumed]*3
+        good += ["coop radar producer: seq=1 target=8780 generation=3221225473 primary_unchanged=true "
+                 "position=15,22,31 terrain=20 heading=1.2"]
+        for frame in range(1,4):
+            good += [f"coop split world: frame={frame} generation=3221225473 selected=true "
+                     "primary_restored=true hud_unchanged=true phase_restored=true passes=2 extra_prepare=1 extra_dt=0 "
+                     "primary=10,20,30 secondary=12,20,30"]
+            for view in (0, 1):
+                good += [f"coop split capture: frame={frame} generation=3221225473 view={view} "
+                         f"width=1280 height=720 format=28 ready={'true' if view else 'false'}",
+                         f"coop radar draw: frame={frame} generation=3221225473 view={view} "
+                         f"target={8780 if view else 0} retargeted={'true' if view else 'false'} "
+                         "packet_verified=true cache_restored=true aspect_applied=true "
+                         "position=15,22,31 terrain=20 heading=1.2"]
+            good += [f"coop split composite: frame={frame} generation=3221225473 views=2 size=1920x1080"]
+        self.assertTrue(reporter.analyze(good, required_radar=True)["passed"])
+        cases = [trace(), [s for s in good if 'radar producer:' not in s],
+                 [s for s in good if 'radar draw: frame=3' not in s],
+                 [s.replace('cache_restored=true','cache_restored=false') for s in good],
+                 [s.replace('aspect_applied=true','aspect_applied=false') for s in good],
+                 [s.replace('packet_verified=true','packet_verified=false') for s in good],
+                 [s.replace('primary_unchanged=true','primary_unchanged=false') for s in good],
+                 [s.replace('target=8780','target=255') for s in good],
+                 [s.replace('position=15,22,31','position=99,22,31') if 'radar draw:' in s else s for s in good],
+                 [s.replace('heading=1.2','heading=nan') for s in good],
+                 [s.replace('generation=3221225473','generation=3221225474') if 'radar draw:' in s else s for s in good],
+                 good+["coop radar failed: private cache restoration"]]
+        for bad in cases:
+            with self.subTest(bad=bad):
+                self.assertFalse(reporter.analyze(bad, required_radar=True)["passed"])
+
     def test_split_requires_current_two_capture_views_and_matching_composite(self):
         world = ("coop split world: frame={frame} generation=3221225473 selected=true "
                  "primary_restored=true hud_unchanged=true phase_restored=true passes=2 extra_prepare=1 extra_dt=0 "

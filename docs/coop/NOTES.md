@@ -215,8 +215,17 @@ composition must have both captures and the world record for the same frame and
 P2 binding. Capture extents remain 1280x720; output may scale to a larger 16:9
 window. See `docs/checkpoints/checkpoint9.md` for runtime evidence and limits.
 
-This remains an experimental mode. Both panes currently include the original
-HUD; independent health/map ownership and proper HUD sizing are pending.
+Add `--require-radar` instead to also check the native radar producers, matching
+P2 anchors, corrected-aspect draws and same-frame radar/composition samples.
+
+This remains an experimental mode. The native radar uses each actor's own
+position/terrain/heading and a corrected map aspect in the two panes. Flash
+bars, district labels, reticles and other HUD elements remain shared/P1-derived;
+their per-player ownership and layout are pending. See checkpoint10 for scope
+and validation.
+
+In the current probe scene, despawning P2 returns to one image but hides the HUD
+until rejoin; correct HUD lifecycle on leaving remains unresolved.
 Streaming/culling at large separation, flight/death/transitions, temporal effects,
 physical controllers and performance need further validation.
 
@@ -291,9 +300,11 @@ validation of the requested local co-op mode.
 Continuation evidence is recorded in `docs/checkpoints/checkpoint3.md`,
 `docs/checkpoints/checkpoint4.md`, `docs/checkpoints/checkpoint5.md`,
 `docs/checkpoints/checkpoint6.md`, `docs/checkpoints/checkpoint7.md`,
-`docs/checkpoints/checkpoint8.md` and `docs/checkpoints/checkpoint9.md`. These cover movement checks, despawn/rebind,
+`docs/checkpoints/checkpoint8.md`, `docs/checkpoints/checkpoint9.md` and
+`docs/checkpoints/checkpoint10.md`. These cover movement checks, despawn/rebind,
 the camera/render handoff, the separate native P2 controller, secondary packet
-transport, P2 world-view preview and experimental simultaneous split views.
+transport, P2 world-view preview, experimental simultaneous split views and
+independent native radar anchors.
 Physical controllers, full combat and distant independent visibility remain
 unverified. A previous development script enumerating
 `_G` with `pairs` and `string.find` triggered guest access violations; that failure

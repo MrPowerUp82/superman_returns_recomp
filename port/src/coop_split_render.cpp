@@ -58,6 +58,7 @@ struct State {
   std::array<uint8_t,packet::kPacketSize> packet{};
   packet::DecodedView second;
   bool drawing=false;
+  bool secondary=false;
   uint64_t frame=0;
   ReplayPhase phase;
 };
@@ -145,6 +146,7 @@ void EndSplitWorld(PPCContext& ctx,uint8_t* base,uint32_t graphics) {
   native::QueueCoopSplitMarker(base,1,state.frame,state.generation);
   native::QueueCoopSplitMarker(base,2,state.frame,state.generation);
   Apply(ctx,base,state.cameras.world,state.address+112,state.second.projection);
+  state.secondary=true;
   // Render-list preparation only: do not consume state packets or step the world
   // again. Zero delta avoids advancing render participants' time a second time.
   ctx.r3.u64=Word(base,0x829A93B8);ctx.f1.f64=0;
@@ -176,5 +178,9 @@ void EndSplitWorld(PPCContext& ctx,uint8_t* base,uint32_t graphics) {
         std::bit_cast<float>(packet::ReadWord(state.packet,72)),
         state.second.matrix[12],state.second.matrix[13],state.second.matrix[14]);
   state.drawing=false;
+}
+std::optional<SplitHudContext> CurrentSplitHud() {
+  if(!state.drawing)return {};
+  return SplitHudContext{state.frame,state.generation,state.secondary?1u:0u};
 }
 }

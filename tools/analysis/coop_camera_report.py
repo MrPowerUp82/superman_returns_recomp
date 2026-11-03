@@ -1,7 +1,8 @@
-"""Check sampled camera handoffs in the latest isolated probe run.
+"""Check sampled camera/radar handoffs in the latest isolated probe run.
 
-This verifies primary propagation, secondary transport and optional draw-entry
-camera selection. It does not prove final pixels or split-screen composition.
+This verifies primary propagation, secondary transport and optional draw-entry,
+radar and split capture/composition marker correlation. It does not prove final
+pixels, complete HUD ownership or performance.
 Only uses local logs; no game image or extracted assets are needed.
 """
 from __future__ import annotations
@@ -21,7 +22,8 @@ def vector(value: str, count: int) -> list[float]:
 
 
 def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=False, required_handoff=False,
-            required_preview=False, required_split=False) -> dict:
+            required_preview=False, required_split=False, required_radar=False) -> dict:
+    required_split = required_split or required_radar
     required_handoff = required_handoff or required_preview or required_split
     rows = {"update": {}, "submit": {}, "consume": {}, "apply": {}}
     errors = []
@@ -38,6 +40,7 @@ def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=Fals
     blocked_preview_generations = set()
     split_world, split_captures, split_composites = {}, {}, {}
     split_positions = []
+    radar_producers, radar_draws = [], {}
     for line in lines:
         if "coop: single-instance input preparation;" in line:
             rows = {key: {} for key in rows}
@@ -55,10 +58,44 @@ def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=Fals
             blocked_preview_generations = set()
             split_world, split_captures, split_composites = {}, {}, {}
             split_positions = []
+            radar_producers, radar_draws = [], {}
         if not started:
             continue
         if re.search(r"coop split(?: capture)? failed:", line):
             errors.append("split world/capture verification failed")
+        if "coop radar failed:" in line:
+            errors.append("radar producer/packet/cache verification failed")
+        radar = re.search(r"coop radar (producer|draw): (.*)", line)
+        if radar:
+            values = dict(re.findall(r"(\w+)=([^\s]+)", radar[2]))
+            try:
+                generation, target = int(values["generation"]), int(values["target"])
+                if generation & 0xC0000000 != 0xC0000000 or not generation & 0x3FFFFFFF:
+                    raise ValueError("invalid radar binding")
+                row = {"generation": generation, "target": target,
+                       "position": vector(values["position"], 3),
+                       "terrain": vector(values["terrain"], 1)[0],
+                       "heading": vector(values["heading"], 1)[0]}
+                if radar[1] == "producer":
+                    if target in (0, 255) or values["primary_unchanged"] != "true":
+                        raise ValueError("invalid radar target or changed primary manager")
+                    radar_producers.append(row)
+                else:
+                    frame, view = int(values["frame"]), int(values["view"])
+                    if not frame or view not in (0, 1) or (frame, view) in radar_draws:
+                        raise ValueError("invalid/duplicate radar draw")
+                    if values["packet_verified"] != "true" or values["cache_restored"] != "true":
+                        raise ValueError("radar packet/cache not verified")
+                    if values["retargeted"] != ("true" if view else "false"):
+                        raise ValueError("wrong radar retarget view")
+                    if view and (target in (0, 255) or generation in blocked_preview_generations):
+                        raise ValueError("missing target or radar reused cleared binding")
+                    if values["aspect_applied"] not in ("true", "false"):
+                        raise ValueError("invalid radar aspect flag")
+                    row["aspect_applied"] = values["aspect_applied"] == "true"
+                    radar_draws[frame, view] = row
+            except (KeyError, ValueError) as error:
+                errors.append(f"radar: {error}")
         split = re.search(r"coop split (world|capture|composite): (.*)", line)
         if split:
             values = dict(re.findall(r"(\w+)=([^\s]+)", split[2]))
@@ -329,6 +366,24 @@ def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=Fals
         errors.append("split camera positions have no matching consumed P1/P2 samples")
     if required_split and generations - set(split_composites.values()):
         errors.append("published binding has no verified split composition")
+    radar_pairs, radar_matched_generations = 0, set()
+    for frame, generation in split_composites.items():
+        a, b = radar_draws.get((frame, 0)), radar_draws.get((frame, 1))
+        if a and b and a["generation"] == b["generation"] == generation:
+            radar_pairs += 1
+            if any(row["generation"] == generation and row["target"] == b["target"] and
+                   math.dist(row["position"], b["position"]) <= tolerance and
+                   abs(row["terrain"]-b["terrain"]) <= tolerance and
+                   abs(row["heading"]-b["heading"]) <= tolerance for row in radar_producers):
+                radar_matched_generations.add(generation)
+    if required_radar:
+        if radar_pairs < 3:
+            errors.append("fewer than three same-frame radar/split composition pairs")
+        if generations - radar_matched_generations:
+            errors.append("radar binding has no matching native P2 producer/draw")
+        for view in (0, 1):
+            if sum(row["aspect_applied"] for (frame, v), row in radar_draws.items() if v == view) < 3:
+                errors.append(f"radar view {view}: fewer than three corrected-aspect draws")
     return {"passed": not errors, "scope": "sampled primary propagation and secondary transport",
             "targets": targets, "verified_submission_targets": sorted(verified_targets),
             "samples": {k: len(v) for k, v in rows.items()},
@@ -350,6 +405,10 @@ def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=Fals
                       "verified_pairs": split_pairs,
                       "matched_consumed_generations": sorted(split_matches),
                       "generations": sorted(set(split_composites.values()))},
+            "radar": {"producer_samples": len(radar_producers), "draw_samples": len(radar_draws),
+                      "verified_pairs": radar_pairs,
+                      "matched_producer_generations": sorted(radar_matched_generations),
+                      "targets": sorted({row["target"] for row in radar_producers})},
             "errors": sorted(set(errors))}
 
 
@@ -362,6 +421,7 @@ def main():
     parser.add_argument("--require-handoff", action="store_true")
     parser.add_argument("--require-preview", action="store_true")
     parser.add_argument("--require-split", action="store_true")
+    parser.add_argument("--require-radar", action="store_true")
     args = parser.parse_args()
     # spdlog names older segments probe.1.log, probe.2.log, ... . Read oldest
     # first so the latest startup can reset both previous-run errors and samples.
@@ -380,7 +440,7 @@ def main():
 
     report = analyze(lines(), args.require_target, required_secondary=args.require_secondary,
                      required_handoff=args.require_handoff, required_preview=args.require_preview,
-                     required_split=args.require_split)
+                     required_split=args.require_split, required_radar=args.require_radar)
     report["input_files"] = [str(path) for path in paths]
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

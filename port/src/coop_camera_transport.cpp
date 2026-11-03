@@ -1,4 +1,5 @@
 #include "coop_second_camera.h"
+#include "coop_hud.h"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -89,6 +90,7 @@ void Publish(uint8_t* base,uint32_t address) {
 }
 }
 REX_HOOK_RAW(sub_82782200) {
+  if(CaptureCoopHud(ctx,base))return;
   if(Enabled()) Publish(base,ctx.r3.u32);
   __imp__sub_82782200(ctx,base);
 }
