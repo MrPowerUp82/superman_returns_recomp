@@ -46,6 +46,11 @@ python tools/analysis/coop_ast_probe.py
 ./tools/coop/probe.ps1 -Action Script -Script tools/coop/status.lua
 ./tools/coop/probe.ps1 -Action Script -Script tools/coop/spawn_p2.lua
 ./tools/coop/probe.ps1 -Action Script -Script tools/coop/inspect_p2.lua
+# On foot, in open ground: pauses enemy FSMs in this disposable probe.
+./tools/coop/test_movement.ps1
+# Optional lifecycle probe: remove P2, then create/bind a replacement.
+./tools/coop/probe.ps1 -Action Script -Script tools/coop/despawn_p2.lua
+./tools/coop/probe.ps1 -Action Script -Script tools/coop/spawn_p2.lua
 ./tools/coop/probe.ps1 -Action Status
 ./tools/coop/probe.ps1 -Action Stop
 ```
@@ -53,18 +58,29 @@ python tools/analysis/coop_ast_probe.py
 - The opt-in `sr_coop_script` mailbox executes one Lua chunk per file edit on the
   guest's own thread, preserving PPC registers and the Lua stack. UTF-8 BOMs are
   stripped for Lua 5.0.2. Errors/results are written to the log.
-- A leading `-- sr-coop-context: player1` waits until the VM is processing P1's
-  actual script context. `SpawnEntityActive` derives the template's world-flow
+- A leading `-- sr-coop-context: player1` or `player2` waits until the VM is
+  processing the actor bound to port 0 or 1. File edits are polled every 250 ms;
+  a cached pending chunk checks context on each valid callback and executes once.
+  A newer edit replaces a pending chunk. `SpawnEntityActive` derives the template's world-flow
   ownership from this context. A game Entity pointer cannot substitute for a
   ScriptEntity interface; an earlier such experiment was removed after crashing.
 - The mailbox-only overload `SetActorToDefaultController(actor, port)` binds a
   zero-based port through the game's `sub_8229F380` routine. It validates 0..3,
-  refuses to replace another actor occupying the requested port, and returns a
-  boolean. Original single-argument calls retain their original behavior.
+  refuses to replace another live actor occupying the requested port, and returns
+  a boolean. A removed actor's stale slot can be reclaimed through the native
+  binding routine. Original single-argument calls retain their original behavior.
 - `spawn_p2.lua` uses the game's `SupermanEnt` template, sets its control mode to
   gameplay, and binds it to port 1. A session-local guard prevents repeated
   execution from creating more actors. This guard is **not** a transition/join
   lifecycle implementation; stale IDs after level changes remain to be handled.
+- `despawn_p2.lua` restores the camera to P1, removes P2 and clears the local
+  guard; `bind_p2.lua` retries binding without spawning. `movement_p1.lua` and
+  `movement_p2.lua` sample inputs, speed and desired speed in each actor's context.
+- `test_movement.ps1` measures both actors before/after port 1, port 0 and
+  simultaneous commands, then checks release/idle. It requires a running loaded
+  probe with P2 and P1 on foot in open ground. It pauses enemies, repositions P2
+  and follows P2 with the single camera. Stop the disposable probe afterward.
+  Results, including raw positions, go to `artifacts/coop-test/motion-check.json`.
 - `SR_BENCH_INPUT_P2` enables a second synthetic pad only alongside
   `SR_BENCH_INPUT`, co-op input and no title benchmark. The probe sets both.
   Its assignment routes only that device to port 1, leaving normal physical-pad
@@ -111,10 +127,12 @@ path has been excluded.
 1. **Input preparation (implemented):** independent guest controller ports in one
    process. Verify with two real controllers, disconnect/reconnect and rumble.
 2. **Player lifecycle (experimental spawn exercised):** P2 was created from the
-   gameplay template and registered as a distinct ID. Destruction, singleton
-   references, transitions and repeatable join/leave remain open.
-3. **Independent control (partial):** separate actor binding and synthetic pad
-   movement responses have been observed. P2 stop/idle still needs investigation.
+   gameplay template and registered as a distinct ID. Explicit despawn/respawn
+   with stale-slot recovery passed. Singleton references, transitions and
+   automatic join/leave remain open.
+3. **Independent control (partial):** isolated ground movement, release/idle and
+   simultaneous synthetic inputs passed six automated checks with enemies paused.
+   The earlier displacement during combat remains unlocalized.
    Validate guest ports 0 and 1 across separate actors, including
    movement, flight, combat, animation and collision. Verify that P2 input never
    drives P1. Keep missions and saving under P1's ownership.
@@ -143,7 +161,9 @@ These original launcher checks did not verify real-controller routing, a second
 actor or independent views. The earlier two-window test only validated the retired launcher and is not
 validation of the requested local co-op mode.
 
-Continuation evidence is recorded in `docs/checkpoints/checkpoint3.md`. The
-second-actor creation is now observed, but physical controllers and independent
-views remain unverified. A development script enumerating `_G` with `pairs` and
-`string.find` triggered guest access violations; that failure is not localized.
+Continuation evidence is recorded in `docs/checkpoints/checkpoint3.md` and
+`docs/checkpoints/checkpoint4.md`. The latter records the movement checks,
+despawn/rebind fix and camera source map. Physical controllers, full combat and
+independent views remain unverified. A previous development script enumerating
+`_G` with `pairs` and `string.find` triggered guest access violations; that failure
+is not localized. The latest isolated movement run had no guest/script errors.

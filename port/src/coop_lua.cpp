@@ -88,53 +88,68 @@ void MaybeRunScript(PPCContext& ctx, uint8_t* base, uint32_t lua) {
   if (!lock) return;
   using Clock = std::chrono::steady_clock;
   static auto next_poll = Clock::time_point{};
-  const auto now = Clock::now();
-  if (now < next_poll) return;
-  next_poll = now + std::chrono::milliseconds(250);
-  std::error_code error;
-  const auto stamp = std::filesystem::last_write_time(script_path, error);
-  if (error) return;
   static bool has_stamp = false;
   static std::filesystem::file_time_type last_stamp;
-  if (has_stamp && stamp == last_stamp) return;
-  std::ifstream input(script_path, std::ios::binary);
-  std::string script(kScriptCapacity, '\0');
-  input.read(script.data(), script.size());
-  const auto count = input.gcount();
-  if (!input || count == 0 || count >= kScriptCapacity) {
-    // EOF is expected for a short file; fail only on bad I/O or invalid size.
-    if (input.bad() || count == 0 || count >= kScriptCapacity) {
-      REXLOG_WARN("coop Lua: script must contain 1..65535 bytes");
+  static std::string pending_script;
+  const auto now = Clock::now();
+  if (now >= next_poll) {
+    next_poll = now + std::chrono::milliseconds(250);
+    std::error_code error;
+    const auto stamp = std::filesystem::last_write_time(script_path, error);
+    if (error) {
+      pending_script.clear();
+      has_stamp = false;
       return;
     }
+    if (!has_stamp || stamp != last_stamp) {
+      std::ifstream input(script_path, std::ios::binary);
+      if (!input) return;  // retry transient open failures without consuming the edit
+      std::string incoming(kScriptCapacity, '\0');
+      input.read(incoming.data(), incoming.size());
+      const auto count = input.gcount();
+      last_stamp = stamp;
+      has_stamp = true;
+      pending_script.clear();
+      if (input.bad() || count == 0 || count >= kScriptCapacity) {
+        REXLOG_WARN("coop Lua: script must contain 1..65535 bytes");
+        return;
+      }
+      incoming.resize(size_t(count));
+      // PowerShell 5 writes a UTF-8 BOM; Lua 5.0's loader doesn't skip it.
+      if (incoming.starts_with("\xEF\xBB\xBF")) incoming.erase(0, 3);
+      pending_script = std::move(incoming);
+      REXLOG_INFO("coop Lua: queued {} bytes", pending_script.size());
+    }
   }
-  script.resize(size_t(count));
-  // PowerShell 5 writes a UTF-8 BOM; Lua 5.0's buffer loader doesn't skip it.
-  if (script.starts_with("\xEF\xBB\xBF")) script.erase(0, 3);
-  if (script.empty()) return;
+  if (pending_script.empty()) return;
 
   // Script contexts are ScriptEntity interfaces, not actor objects. Spawn's
-  // world-flow lookup requires the real actor script context. Wait for it
-  // instead of putting an Entity pointer into the ScriptEntity context stack.
-  if (script.starts_with("-- sr-coop-context: player1")) {
+  // world-flow lookup requires the real actor script context. Check every valid
+  // callback for a pending chunk; limiting this check to the disk poll interval
+  // can repeatedly miss an actor whose callbacks occupy another frame phase.
+  const int context_port = pending_script.starts_with("-- sr-coop-context: player1") ? 0 :
+      pending_script.starts_with("-- sr-coop-context: player2") ? 1 : -1;
+  if (context_port >= 0) {
     const PPCContext saved = ctx;
     ctx.r3.u64 = lua;
     ctx.r4.u64 = 100001;  // missing argument -> resolve the current script actor
     sub_82262B38(ctx, base);
     const uint32_t current_actor = ctx.r3.u32;
     ctx = saved;
-    uint32_t manager = 0, slots = 0, p1_id = 0;
+    uint32_t manager = 0, slots = 0, target_id = 0, count_word = 0;
     if (!current_actor || !ReadWord(base, kInputManager, manager) || !manager ||
+        !ReadWord(base, manager + 8, count_word) ||
+        (count_word >> 24) <= static_cast<uint32_t>(context_port) ||
         !ReadWord(base, manager + 4, slots) || !slots ||
-        !ReadWord(base, slots, p1_id) || p1_id == 255) return;
-    ctx.r3.u64 = p1_id;
+        !ReadWord(base, slots + context_port * 4, target_id) || target_id == 255) return;
+    ctx.r3.u64 = target_id;
     sub_821C23E0(ctx, base);
-    const uint32_t p1 = ctx.r3.u32;
+    const uint32_t target_actor = ctx.r3.u32;
     ctx = saved;
-    if (!p1 || p1 != current_actor) return;
+    if (!target_actor || target_actor != current_actor) return;
   }
-  last_stamp = stamp;
-  has_stamp = true;
+  std::string script;
+  script.swap(pending_script);
 
   const PPCContext saved = ctx;
   struct RestoreContext {
@@ -243,11 +258,24 @@ REX_HOOK_RAW(sub_8229F778) {
       !ReadWord(base, kInputManager, manager) || !manager ||
       !ReadWord(base, manager + 8, count_word) || (count_word >> 24) <= port ||
       !ReadWord(base, manager + 4, slots) || !slots ||
-      !ReadWord(base, slots + port * 4, occupant) ||
-      (occupant != 255 && occupant != actor_id)) {
-    REXLOG_WARN("coop Lua: refused actor binding to occupied/invalid port {}", port);
+      !ReadWord(base, slots + port * 4, occupant)) {
+    REXLOG_WARN("coop Lua: refused actor binding to invalid port {}", port);
     ReturnLuaBool(ctx, base, false);
     return;
+  }
+  if (occupant != 255 && occupant != actor_id) {
+    ctx.r3.u64 = occupant;
+    sub_821C23E0(ctx, base);
+    const bool occupied_by_live_entity = ctx.r3.u32 != 0;
+    ctx = saved;
+    if (occupied_by_live_entity) {
+      REXLOG_WARN("coop Lua: refused actor binding to occupied port {} (actor={})", port, occupant);
+      ReturnLuaBool(ctx, base, false);
+      return;
+    }
+    // DespawnEntity does not clear this table. The native binding routine
+    // already handles an old slot whose entity lookup returns null.
+    REXLOG_INFO("coop Lua: reclaiming stale actor={} on guest port={}", occupant, port);
   }
   ctx.r3.u64 = manager;
   ctx.r4.u64 = actor;
