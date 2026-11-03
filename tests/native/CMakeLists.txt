@@ -43,6 +43,7 @@ add_executable(sr_native_tests
     test_frame_generation_policy.cpp
     test_temporal_frame.cpp
     test_camera_candidate_probe.cpp
+    test_coop_camera_packet.cpp
     test_surface_sequence.cpp
     test_geometry_submission_probe.cpp
     test_post_vertex_geometry.cpp

@@ -9,6 +9,7 @@ param(
   [switch]$NoScript,
   [switch]$CameraProbe,
   [switch]$SecondCamera,
+  [switch]$CameraTransport,
   [ValidateSet('native', 'xenos')][string]$Renderer = 'native'
 )
 $ErrorActionPreference = 'Stop'
@@ -77,8 +78,9 @@ switch ($Action) {
       '--sr_coop_input=true', '--sr_skip_intro=true', "--sr_renderer=$Renderer"
     )
     if (-not $NoScript) { $arguments += "--sr_coop_script=`"$mailbox`"" }
-    if ($CameraProbe) { $arguments += '--sr_coop_camera_probe=true' }
-    if ($SecondCamera) { $arguments += '--sr_coop_second_camera=true' }
+    if ($CameraProbe -or $CameraTransport) { $arguments += '--sr_coop_camera_probe=true' }
+    if ($SecondCamera -or $CameraTransport) { $arguments += '--sr_coop_second_camera=true' }
+    if ($CameraTransport) { $arguments += '--sr_coop_camera_transport=true' }
     $oldInput = $env:SR_BENCH_INPUT
     $oldP2Input = $env:SR_BENCH_INPUT_P2
     $oldDump = $env:SR_DUMP_IMAGE

@@ -1,6 +1,6 @@
 """Check sampled camera handoffs in the latest isolated probe run.
 
-This verifies data propagation for one camera, not split-screen or scheduling.
+This verifies primary propagation and optional secondary transport, not drawing.
 Only uses local logs; no game image or extracted assets are needed.
 """
 from __future__ import annotations
@@ -19,7 +19,7 @@ def vector(value: str, count: int) -> list[float]:
     return result
 
 
-def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=False) -> dict:
+def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=False, required_handoff=False) -> dict:
     rows = {"update": {}, "submit": {}, "consume": {}, "apply": {}}
     errors = []
     started = False
@@ -27,6 +27,10 @@ def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=Fals
     render_groups = []
     techniques = []
     secondary = []
+    published = []
+    received = []
+    cleared = 0
+    intervals = []
     for line in lines:
         if "coop: single-instance input preparation;" in line:
             rows = {key: {} for key in rows}
@@ -36,10 +40,35 @@ def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=Fals
             render_groups = []
             techniques = []
             secondary = []
+            published = []
+            received = []
+            cleared = 0
+            intervals = []
         if not started:
             continue
         if "Unhandled guest access violation" in line or re.search(r"coop Lua: status=[1-9]", line):
             errors.append("guest/script failure in latest run")
+        if "coop camera transport failed:" in line or "coop camera transport refused:" in line:
+            errors.append("camera transport write/readback failed or slot occupied")
+        if "coop camera transport:" in line:
+            values=dict(re.findall(r"(\w+)=([^\s]+)",line))
+            try:
+                if values["primary_unchanged"]!="true" or values["secondary_matches"]!="true":
+                    raise ValueError("primary changed or secondary readback mismatched")
+                version = int(values["generation"])
+                if values["active"] not in ("true", "false"):
+                    raise ValueError("invalid active state")
+                if values["active"] == "false" and version:
+                    raise ValueError("inactive view has nonzero generation")
+                if not intervals or intervals[-1]["generation"] != version:
+                    intervals.append({"generation": version, "published": [], "received": []})
+                if values["active"] == "true":
+                    if not version: raise ValueError("active view without generation")
+                    row = {"generation": version, "position": vector(values["position"], 3)}
+                    published.append(row)
+                    intervals[-1]["published"].append(row)
+            except (KeyError,ValueError) as error:
+                errors.append(f"transport: {error}")
         if "coop second camera:" in line:
             values = dict(re.findall(r"(\w+)=([^\s]+)", line))
             try:
@@ -87,6 +116,28 @@ def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=Fals
                     raise ValueError("invalid camera projection")
                 if values["viewport"] != "00000000,050002D0":
                     raise ValueError("unexpected viewport; this probe checks the original 1280x720 view")
+                if kind=="consume" and "secondary_flags" in values:
+                    version=int(values["secondary_flags"],16)
+                    if version:
+                        position=vector(values["secondary_position"],3)
+                        p=vector(values["secondary_projection"],4)
+                        if not (0<p[0]<p[1] and 0<p[2]<math.pi and p[3]>0):
+                            raise ValueError("invalid received secondary projection")
+                        if values["secondary_viewport"]!="00000000,050002D0":
+                            raise ValueError("invalid received secondary viewport")
+                        row = {"generation": version, "position": position}
+                        received.append(row)
+                        if intervals and intervals[-1]["generation"] == version:
+                            intervals[-1]["received"].append(row)
+                    else:
+                        cleared+=1
+                        # Startup zeros cannot prove a later leave was consumed.
+                        if intervals and intervals[-1]["generation"] == 0:
+                            if (any(vector(values["secondary_position"], 3)) or
+                                    any(vector(values["secondary_projection"], 4)) or
+                                    values["secondary_viewport"] != "00000000,00000000"):
+                                raise ValueError("received clear retains secondary camera data")
+                            intervals[-1]["received"].append({"generation": 0})
             else:
                 values["position_values"] = vector(values["position"], 3)
                 if kind == "update":
@@ -125,7 +176,28 @@ def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=Fals
             errors.append(f"camera target {target} has no matching submission")
     if required_secondary and len(secondary) < 3:
         errors.append("fewer than three valid second-camera samples")
-    return {"passed": not errors, "scope": "sampled single-camera propagation",
+    generations={row["generation"] for row in published}
+    unknown={row["generation"] for row in received}-generations
+    matching=sum(any(a["generation"]==b["generation"] and math.dist(a["position"],b["position"])<=0.05
+                     for a in published) for b in received)
+    lifecycle = []
+    for interval in intervals:
+        version = interval["generation"]
+        matches = sum(any(math.dist(a["position"], b["position"]) <= 0.05
+                          for a in interval["published"]) for b in interval["received"]) if version else 0
+        lifecycle.append({"generation": version, "received_samples": len(interval["received"]),
+                          "matching_sampled_positions": matches})
+        if required_handoff:
+            if not interval["received"]:
+                errors.append(f"secondary lifecycle interval {len(lifecycle)} generation {version}: no matching consumption")
+            elif version and not matches:
+                errors.append(f"secondary lifecycle interval {len(lifecycle)} generation {version}: no matching position")
+    if required_handoff:
+        if len(published)<3 or len(received)<3:
+            errors.append("fewer than three active publication/consumption samples")
+        if unknown: errors.append("received secondary generation was never published")
+        if not matching: errors.append("no received position matches a sampled publication")
+    return {"passed": not errors, "scope": "sampled primary propagation and secondary transport",
             "targets": targets, "verified_submission_targets": sorted(verified_targets),
             "samples": {k: len(v) for k, v in rows.items()},
             "update_to_submit": producer, "consume_to_apply": consumer,
@@ -134,6 +206,10 @@ def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=Fals
                               "owners": sorted({row["owner"] for row in secondary}),
                               "targets": sorted({row["target"] for row in secondary}),
                               "max_separation": max((row["separation"] for row in secondary), default=None)},
+            "secondary_handoff": {"published_samples":len(published),"received_samples":len(received),
+                                  "generations":sorted(generations),"unknown_generations":sorted(unknown),
+                                  "matching_sampled_positions":matching,"inactive_received_samples":cleared,
+                                  "lifecycle_intervals": lifecycle},
             "errors": sorted(set(errors))}
 
 
@@ -143,6 +219,7 @@ def main():
     parser.add_argument("--output", type=Path, default=Path("artifacts/coop-test/camera-check.json"))
     parser.add_argument("--require-target", type=int, action="append", default=[])
     parser.add_argument("--require-secondary", action="store_true")
+    parser.add_argument("--require-handoff", action="store_true")
     args = parser.parse_args()
     # spdlog names older segments probe.1.log, probe.2.log, ... . Read oldest
     # first so the latest startup can reset both previous-run errors and samples.
@@ -159,7 +236,7 @@ def main():
             with path.open(encoding="utf-8", errors="replace") as source:
                 yield from source
 
-    report = analyze(lines(), args.require_target, required_secondary=args.require_secondary)
+    report = analyze(lines(), args.require_target, required_secondary=args.require_secondary, required_handoff=args.require_handoff)
     report["input_files"] = [str(path) for path in paths]
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

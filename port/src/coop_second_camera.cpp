@@ -4,6 +4,7 @@
 #include <atomic>
 #include <bit>
 #include <cmath>
+#include <mutex>
 #include <rex/cvar.h>
 #include <rex/hook.h>
 #include <rex/logging.h>
@@ -27,6 +28,13 @@ std::atomic<uint32_t> storage{0};
 uint32_t owner = 0, primary_owner = 0, target_id = 0;
 uint64_t sequence = 0;
 bool waiting_logged = false;
+std::mutex snapshot_mutex;
+SecondCameraSnapshot snapshot;
+uint32_t view_generation=0;
+void InvalidateSnapshot() {
+  std::lock_guard lock(snapshot_mutex);
+  snapshot={};
+}
 
 struct Restore {
   PPCContext& ctx;
@@ -68,6 +76,7 @@ void InstallSecondCamera(rex::Runtime& runtime) {
 }
 
 void DestroySecondCamera(PPCContext& ctx, uint8_t* base) {
+  InvalidateSnapshot();
   if (!owner) return;
   Restore restore(ctx);
   const uint32_t previous = owner, previous_target = target_id;
@@ -94,6 +103,7 @@ void InitializeSecondCamera(PPCContext& ctx, uint8_t* base) {
 void UpdateSecondCamera(PPCContext& ctx, uint8_t* base, uint32_t primary, double dt) {
   const uint32_t block = storage.load(std::memory_order_acquire);
   if (!block) return;
+  InvalidateSnapshot();
   Restore restore(ctx);
   const uint32_t input = Word(base, kInputGlobal);
   const uint32_t slots = input ? Word(base, input + 4) : 0;
@@ -130,6 +140,8 @@ void UpdateSecondCamera(PPCContext& ctx, uint8_t* base, uint32_t primary, double
     ctx.r4.u64 = actor;
     sub_82181590(ctx, base);  // bind native target and initialize controller/view
     target_id = p2_id;
+    view_generation=(view_generation+1)&0x3FFFFFFF;
+    if(!view_generation) ++view_generation;
     // Joining can leave P2 selected as the primary camera home. Give that home
     // back to port 0 at join, using the
     // native setter; leave other scripted/cutscene targets alone.
@@ -163,12 +175,26 @@ void UpdateSecondCamera(PPCContext& ctx, uint8_t* base, uint32_t primary, double
     finite = finite && std::isfinite(std::bit_cast<float>(word));
   }
   ++sequence;
+  std::array<float,16> values{};
+  for(size_t i=0;i<values.size();++i) values[i]=std::bit_cast<float>(matrix[i]);
+  std::optional<packet::ViewBytes> encoded;
+  if(finite && (Word(base,view+20)>>24)==0)
+    encoded=packet::EncodeView(values,{Float(base,view+12),Float(base,view+16),
+                                     Float(base,view+4),Float(base,view+8)},0xC0000000u|view_generation);
+  {
+    std::lock_guard lock(snapshot_mutex);
+    snapshot={encoded,target_id,primary,sequence};
+  }
   if (sequence <= 3 || sequence % 120 == 0)
     REXLOG_INFO("coop second camera: seq={} owner={:08X} primary={:08X} target={} primary_target={} singleton_unchanged={} finite={} position={},{},{} primary_position={},{},{}",
         sequence, owner, primary, target_id, Word(base, primary + 432),
         Word(base, kCameraGlobal) == primary, finite,
         std::bit_cast<float>(matrix[12]), std::bit_cast<float>(matrix[13]), std::bit_cast<float>(matrix[14]),
         Float(base, primary + 480), Float(base, primary + 484), Float(base, primary + 488));
+}
+SecondCameraSnapshot SampleSecondCamera() {
+  std::lock_guard lock(snapshot_mutex);
+  return snapshot;
 }
 }  // namespace superman_returns::coop
 

@@ -8,7 +8,7 @@ No networking is required for this local mode.
 
 **Status: experimental second-actor creation and controller binding, exercised
 through an isolated development probe, plus an opt-in separate native camera
-controller for P2. There is no finished two-player mode or
+controller for P2 and optional transport to the render thread. There is no finished two-player mode or
 split-screen rendering yet.** `run_coop.cmd` still enables input preparation only.
 
 ## Current implementation
@@ -146,9 +146,35 @@ to require at least three finite snapshots from distinct camera owners and actor
 targets. The implementation and validation limits are in
 `docs/checkpoints/checkpoint6.md`.
 
-**This computes a second camera transform; it does not send it to the render
-thread or draw a second viewport.** Mode transitions, right-stick camera control,
+**This option computes a second camera transform.** Enable the separate transport
+option below to send it to the render thread; neither option draws a second
+viewport. Mode transitions, right-stick camera control,
 collision, cutscenes and full level/shutdown lifecycle still need validation.
+
+### P2 camera packet transport (development)
+
+`./tools/coop/probe.ps1 -Action Start -CameraTransport` enables the camera probe,
+secondary controller and `sr_coop_camera_transport` together. All remain off by
+default. The transport writes only the unused second 96-byte view in the exact
+native camera producer packet before its original serialization. It refuses an
+occupied slot, verifies the primary bytes after writing, clears its own slot
+when P2 disappears, and changes the view generation on every new actor binding.
+The native consumer carries the secondary transform, projection and generation
+across its existing state-buffer boundary.
+
+After stopping the probe:
+
+```powershell
+python tools/analysis/coop_camera_report.py --require-target 1 --require-secondary --require-handoff --output artifacts/coop-test/camera-transport-check.json
+```
+
+This checks sampled publication/consumption and primary preservation; it does
+not prove full matrix correctness or render the second view. Every exercised
+publication interval must reach the consumer, including an all-zero block after
+leave and a matching position for each rejoin generation. Wait for a sampled
+clear before respawning; startup zeros do not count as leave evidence. The isolated
+leave/rejoin evidence and remaining rendering work are recorded in
+`docs/checkpoints/checkpoint7.md`.
 
 | Item | Finding |
 |---|---|
@@ -220,8 +246,8 @@ validation of the requested local co-op mode.
 
 Continuation evidence is recorded in `docs/checkpoints/checkpoint3.md`,
 `docs/checkpoints/checkpoint4.md`, `docs/checkpoints/checkpoint5.md` and
-`docs/checkpoints/checkpoint6.md`. These cover movement checks, despawn/rebind,
-the camera/render handoff and the separate native P2 controller. Physical controllers, full combat and
+`docs/checkpoints/checkpoint6.md`, and `docs/checkpoints/checkpoint7.md`. These cover movement checks, despawn/rebind,
+the camera/render handoff, the separate native P2 controller and secondary packet transport. Physical controllers, full combat and
 independent views remain unverified. A previous development script enumerating
 `_G` with `pairs` and `string.find` triggered guest access violations; that failure
 is not localized. The latest isolated movement run had no guest/script errors.

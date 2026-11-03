@@ -66,6 +66,7 @@ set(SUPERMANRETURNS_SOURCES
     src/coop_lua.cpp
     src/coop_camera_probe.cpp
     src/coop_second_camera.cpp
+    src/coop_camera_transport.cpp
     src/xma_fixes.cpp
     src/sr_settings.cpp
     src/graphics/backend_selection.cpp
