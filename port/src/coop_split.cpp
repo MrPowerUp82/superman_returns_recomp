@@ -1,5 +1,6 @@
 #include "coop_split.h"
 #include "coop_lua.h"
+#include "benchmark_input_driver.h"
 
 #include <memory>
 #include <rex/cvar.h>
@@ -25,7 +26,7 @@ void Install(rex::Runtime& runtime) {
   if (auto* system = static_cast<rex::input::InputSystem*>(runtime.input_system())) {
     // SDK slot assignment keeps each physical pad on its own guest port,
     // including across disconnects. Keyboard/mouse emulation feeds only port 0.
-    system->SetDeviceAssignment(std::make_unique<rex::input::SlotAssignment>());
+    system->SetDeviceAssignment(MakeCoopDeviceAssignment());
     REXLOG_INFO("coop: single-instance input preparation; controller ordinals map "
                 "to guest ports, keyboard/mouse to port 0");
     REXLOG_WARN("coop: second Superman, independent cameras and split-screen "

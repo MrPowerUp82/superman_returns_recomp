@@ -1,6 +1,7 @@
 #include "coop_lua.h"
 
 #include <atomic>
+#include <cmath>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -28,6 +29,7 @@ namespace {
 constexpr uint32_t kScriptCapacity = 64 * 1024;
 constexpr uint32_t kLuaManager = 0x8296D8CC;
 constexpr uint32_t kContextStack = 0x8296E114;
+constexpr uint32_t kInputManager = 0x8296E8C8;
 std::atomic<uint32_t> script_buffer{0};
 std::filesystem::path script_path;
 std::mutex mailbox_mutex;
@@ -61,6 +63,14 @@ std::string ReadString(const uint8_t* base, uint32_t address) {
   return result;
 }
 
+void ReturnLuaBool(PPCContext& ctx, uint8_t* base, bool value) {
+  const PPCContext saved = ctx;
+  ctx.r4.u64 = value;
+  sub_8275CCF0(ctx, base);  // lua_pushboolean
+  ctx = saved;
+  ctx.r3.u64 = 1;
+}
+
 void MaybeRunScript(PPCContext& ctx, uint8_t* base, uint32_t lua) {
   const uint32_t buffer = script_buffer.load(std::memory_order_acquire);
   if (!buffer || running_mailbox) return;
@@ -87,9 +97,6 @@ void MaybeRunScript(PPCContext& ctx, uint8_t* base, uint32_t lua) {
   static bool has_stamp = false;
   static std::filesystem::file_time_type last_stamp;
   if (has_stamp && stamp == last_stamp) return;
-  last_stamp = stamp;
-  has_stamp = true;
-
   std::ifstream input(script_path, std::ios::binary);
   std::string script(kScriptCapacity, '\0');
   input.read(script.data(), script.size());
@@ -102,6 +109,32 @@ void MaybeRunScript(PPCContext& ctx, uint8_t* base, uint32_t lua) {
     }
   }
   script.resize(size_t(count));
+  // PowerShell 5 writes a UTF-8 BOM; Lua 5.0's buffer loader doesn't skip it.
+  if (script.starts_with("\xEF\xBB\xBF")) script.erase(0, 3);
+  if (script.empty()) return;
+
+  // Script contexts are ScriptEntity interfaces, not actor objects. Spawn's
+  // world-flow lookup requires the real actor script context. Wait for it
+  // instead of putting an Entity pointer into the ScriptEntity context stack.
+  if (script.starts_with("-- sr-coop-context: player1")) {
+    const PPCContext saved = ctx;
+    ctx.r3.u64 = lua;
+    ctx.r4.u64 = 100001;  // missing argument -> resolve the current script actor
+    sub_82262B38(ctx, base);
+    const uint32_t current_actor = ctx.r3.u32;
+    ctx = saved;
+    uint32_t manager = 0, slots = 0, p1_id = 0;
+    if (!current_actor || !ReadWord(base, kInputManager, manager) || !manager ||
+        !ReadWord(base, manager + 4, slots) || !slots ||
+        !ReadWord(base, slots, p1_id) || p1_id == 255) return;
+    ctx.r3.u64 = p1_id;
+    sub_821C23E0(ctx, base);
+    const uint32_t p1 = ctx.r3.u32;
+    ctx = saved;
+    if (!p1 || p1 != current_actor) return;
+  }
+  last_stamp = stamp;
+  has_stamp = true;
 
   const PPCContext saved = ctx;
   struct RestoreContext {
@@ -110,6 +143,7 @@ void MaybeRunScript(PPCContext& ctx, uint8_t* base, uint32_t lua) {
     ~RestoreContext() { target = saved; running_mailbox = false; }
   } restore{ctx, saved};
   running_mailbox = true;
+  REXLOG_INFO("coop Lua: executing {} bytes context={:08X}", script.size(), entity);
 
   ctx.r3.u64 = lua;
   sub_8275BDA0(ctx, base);  // lua_gettop
@@ -165,6 +199,64 @@ void InstallLuaBridge(rex::Runtime& runtime) {
 }
 
 }  // namespace superman_returns::coop
+
+// Development-only extension: SetActorToDefaultController(actor, port).
+// Calls made by the guest itself, or outside the injected mailbox, keep the
+// original single-argument behavior. Ports are zero-based, as in XamInputGetState.
+REX_HOOK_RAW(sub_8229F778) {
+  using namespace superman_returns::coop;
+  if (!running_mailbox) {
+    __imp__sub_8229F778(ctx, base);
+    return;
+  }
+  const PPCContext saved = ctx;
+  sub_8275BDA0(ctx, base);
+  const int32_t top = ctx.r3.s32;
+  ctx = saved;
+  if (top != 2) {
+    __imp__sub_8229F778(ctx, base);
+    return;
+  }
+
+  // Match Lua's numeric conversion, then validate before narrowing to an index.
+  ctx.r4.s64 = 2;
+  sub_8275C110(ctx, base);  // lua_isnumber
+  const bool number = ctx.r3.u32 != 0;
+  ctx = saved;
+  ctx.r4.s64 = 2;
+  sub_8275C518(ctx, base);  // lua_tonumber
+  const double requested_port = ctx.f1.f64;
+  ctx = saved;
+  if (!number || !std::isfinite(requested_port) || requested_port < 0 ||
+      requested_port > 3 || std::floor(requested_port) != requested_port) {
+    REXLOG_WARN("coop Lua: controller port must be an integer in 0..3");
+    ReturnLuaBool(ctx, base, false);
+    return;
+  }
+  const uint32_t port = static_cast<uint32_t>(requested_port);
+  ctx.r4.u64 = 1;
+  sub_82262B38(ctx, base);  // resolve the actor and its ACTR interface
+  const uint32_t actor = ctx.r3.u32;
+  ctx = saved;
+  uint32_t manager = 0, slots = 0, actor_id = 0, occupant = 0, count_word = 0;
+  if (!actor || !ReadWord(base, actor + 88, actor_id) ||
+      !ReadWord(base, kInputManager, manager) || !manager ||
+      !ReadWord(base, manager + 8, count_word) || (count_word >> 24) <= port ||
+      !ReadWord(base, manager + 4, slots) || !slots ||
+      !ReadWord(base, slots + port * 4, occupant) ||
+      (occupant != 255 && occupant != actor_id)) {
+    REXLOG_WARN("coop Lua: refused actor binding to occupied/invalid port {}", port);
+    ReturnLuaBool(ctx, base, false);
+    return;
+  }
+  ctx.r3.u64 = manager;
+  ctx.r4.u64 = actor;
+  ctx.r5.u64 = port;
+  sub_8229F380(ctx, base);  // the guest's existing actor/port binding routine
+  ctx = saved;
+  ReturnLuaBool(ctx, base, true);  // only the two-argument extension returns a bool
+  REXLOG_INFO("coop Lua: actor={} bound to guest port={}", actor_id, port);
+}
 
 REX_HOOK_RAW(sub_8275D340) {
   const uint32_t lua = ctx.r3.u32;
