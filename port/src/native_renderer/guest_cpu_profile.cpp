@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <mutex>
 #include "checked_guest_memory.h"
+#include "../coop_camera_probe.h"
 
 namespace {
 using Clock=std::chrono::steady_clock;
@@ -193,7 +194,12 @@ GuestNativeCaptureProfile::~GuestNativeCaptureProfile() {
     Scope scope(index);__imp__sub_##address(ctx,base); \
   }
 SR_PROFILE_GUEST(823055A8,0)
-SR_PROFILE_GUEST(82783948,1)
+REX_EXTERN(__imp__sub_82783948);
+extern "C" REX_FUNC(sub_82783948) {
+  superman_returns::coop::NoteCameraProbeGroup(ctx.r4.u32, ctx.r5.u32, uint32_t(ctx.lr));
+  if (!Enabled()) { __imp__sub_82783948(ctx, base); return; }
+  Scope scope(1); __imp__sub_82783948(ctx, base);
+}
 SR_PROFILE_GUEST(82305B88,2)
 SR_PROFILE_GUEST(82316958,3)
 SR_PROFILE_GUEST(82319108,4)

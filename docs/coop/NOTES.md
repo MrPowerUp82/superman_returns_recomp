@@ -93,6 +93,37 @@ python tools/analysis/coop_ast_probe.py
 
 ## Evidence and reverse-engineering leads
 
+### Camera/render handoff probe
+
+Start the isolated probe with `./tools/coop/probe.ps1 -Action Start -CameraProbe`.
+This enables `sr_coop_camera_probe` only for this run. It is off by default,
+requires co-op input, and is disabled during title benchmarks. Its hooks call
+each original exactly once and observe checked copies of guest memory; they do
+not add a camera, change a viewport or replay a simulation/render pass.
+
+After loading gameplay and spawning P2, send `tools/coop/camera_p2.lua` through
+`-Action Script` to make the **existing** camera follow P2; `camera_p1.lua`
+restores P1. Wait for samples (first three calls, then every 120 calls). Stop the
+owned probe before collecting the final report so log rotation cannot race it:
+
+```powershell
+./tools/coop/probe.ps1 -Action Stop
+python tools/analysis/coop_camera_report.py --require-target 1 --require-target P2_ID
+```
+
+Replace `P2_ID` with the numeric ID returned by spawn. The report reads the
+active log plus numbered spdlog rotations in chronological order and evaluates
+only the latest startup. Missing startup/samples, unreadable data, non-finite
+positions, changed projection/viewport or inconsistent position copies fail the
+check. This checks sampled position propagation at two boundaries, not full
+matrix correctness, producer/consumer packet identity, two views or input timing.
+It also records the most recent sampled render-group/technique sequence.
+
+`docs/checkpoints/checkpoint5.md` records verified camera submission/consumption,
+the active effect route, and the remaining work for a second view. In the tested
+run, the packet's second transform block was inactive; the renderer's separate
+camera used for group 23 must also be accounted for before reusing a view slot.
+
 | Item | Finding |
 |---|---|
 | Title | Superman Returns (Xbox 360, 2006) |
@@ -161,9 +192,9 @@ These original launcher checks did not verify real-controller routing, a second
 actor or independent views. The earlier two-window test only validated the retired launcher and is not
 validation of the requested local co-op mode.
 
-Continuation evidence is recorded in `docs/checkpoints/checkpoint3.md` and
-`docs/checkpoints/checkpoint4.md`. The latter records the movement checks,
-despawn/rebind fix and camera source map. Physical controllers, full combat and
+Continuation evidence is recorded in `docs/checkpoints/checkpoint3.md`,
+`docs/checkpoints/checkpoint4.md` and `docs/checkpoints/checkpoint5.md`. These cover
+movement checks, despawn/rebind and the camera/render handoff. Physical controllers, full combat and
 independent views remain unverified. A previous development script enumerating
 `_G` with `pairs` and `string.find` triggered guest access violations; that failure
 is not localized. The latest isolated movement run had no guest/script errors.

@@ -5,6 +5,7 @@
 // original recompiled body.
 
 #include "frame_stats.h"
+#include "coop_camera_probe.h"
 
 #include <atomic>
 #include <chrono>
@@ -45,6 +46,7 @@ void MaybeLogFps(uint64_t frames) {
 }  // namespace
 
 REX_HOOK_RAW(sub_82112050) {
+  superman_returns::coop::NoteCameraProbePresent();
   const uint64_t frames = g_frames.fetch_add(1, std::memory_order_relaxed) + 1;
   MaybeLogFps(frames);
   OnGuestFrameForCapture(frames);
