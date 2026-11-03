@@ -9,8 +9,8 @@ No networking is required for this local mode.
 **Status: experimental second-actor creation and controller binding, exercised
 through an isolated development probe, plus an opt-in separate native camera
 controller for P2, optional transport to the render thread and a native P2
-world-view preview. There is no finished two-player mode or
-split-screen rendering yet.** `run_coop.cmd` still enables input preparation only.
+world-view preview. The two-player mode remains experimental. A two-view renderer is available
+through the isolated probe.** `run_coop.cmd` still enables input preparation only.
 
 ## Current implementation
 
@@ -192,10 +192,33 @@ interval, and a verified primary return for each exercised clear. Allow a
 stationary sample at each boundary. Runtime evidence and limits are in
 `docs/checkpoints/checkpoint8.md`.
 
-**This renders P2 in the existing viewport; two simultaneous viewports remain
-pending.** Independent visibility/streaming at large separation, repeated
-per-view preparation, post effects and HUD ownership still need implementation
-and validation.
+**This renders P2 in the existing viewport. Two simultaneous viewports are
+available through the split preview below.** Independent visibility/streaming at
+large separation and the safety of repeated render preparation remain unverified.
+Post effects and HUD ownership still need work.
+
+### Two native world views (development)
+
+`./tools/coop/probe.ps1 -Action Start -SplitPreview` enables the camera/transport
+dependencies and `sr_coop_split_preview`, selects native D3D12 at 100% capture
+scale and disables DLSS. Once P2 exists, P1 and P2 are drawn separately in one
+outer render frame, captured on the native worker and composed side by side.
+Each pane uses its own world-camera matrix with 8/9 aspect. The shared native
+world camera is restored to P1 after the additional draw; the HUD camera remains
+a separate object. Known effect clocks/cadence are replayed and restored rather
+than advanced twice. The internal native presentation is deferred until both
+images are ready.
+
+After stopping, add `--require-split` to the camera report. This also requires
+transport evidence and matching consumed camera positions. Every sampled
+composition must have both captures and the world record for the same frame and
+P2 binding. Capture extents remain 1280x720; output may scale to a larger 16:9
+window. See `docs/checkpoints/checkpoint9.md` for runtime evidence and limits.
+
+This remains an experimental mode. Both panes currently include the original
+HUD; independent health/map ownership and proper HUD sizing are pending.
+Streaming/culling at large separation, flight/death/transitions, temporal effects,
+physical controllers and performance need further validation.
 
 | Item | Finding |
 |---|---|
@@ -266,11 +289,12 @@ actor or independent views. The earlier two-window test only validated the retir
 validation of the requested local co-op mode.
 
 Continuation evidence is recorded in `docs/checkpoints/checkpoint3.md`,
-`docs/checkpoints/checkpoint4.md`, `docs/checkpoints/checkpoint5.md` and
-`docs/checkpoints/checkpoint6.md`, `docs/checkpoints/checkpoint7.md` and
-`docs/checkpoints/checkpoint8.md`. These cover movement checks, despawn/rebind,
+`docs/checkpoints/checkpoint4.md`, `docs/checkpoints/checkpoint5.md`,
+`docs/checkpoints/checkpoint6.md`, `docs/checkpoints/checkpoint7.md`,
+`docs/checkpoints/checkpoint8.md` and `docs/checkpoints/checkpoint9.md`. These cover movement checks, despawn/rebind,
 the camera/render handoff, the separate native P2 controller, secondary packet
-transport and P2 world-view preview. Physical controllers, full combat and
-independent views remain unverified. A previous development script enumerating
+transport, P2 world-view preview and experimental simultaneous split views.
+Physical controllers, full combat and distant independent visibility remain
+unverified. A previous development script enumerating
 `_G` with `pairs` and `string.find` triggered guest access violations; that failure
 is not localized. The latest isolated movement run had no guest/script errors.

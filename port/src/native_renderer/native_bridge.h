@@ -58,10 +58,14 @@ void NoteGuestSwap(uint8_t* base, uint32_t dev, uint32_t front_buffer);
 // with the r3/r4 it received. Forwards to the renderer while game_profile.h
 // names sub_82112050 as the (confirmed) D3DDevice_Swap.
 void OnFrameStatsSwap(uint8_t* base, uint32_t dev, uint32_t front_buffer);
+bool CoopSplitSupported();
+bool QueueCoopSplitMarker(uint8_t* base,uint32_t action,uint64_t frame,uint32_t generation);
 
 #else
 
 inline void OnFrameStatsSwap(uint8_t*, uint32_t, uint32_t) {}
+inline bool CoopSplitSupported(){return false;}
+inline bool QueueCoopSplitMarker(uint8_t*,uint32_t,uint64_t,uint32_t){return false;}
 
 #endif
 

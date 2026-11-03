@@ -7285,6 +7285,10 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
       Transition(dst.resource.Get(), dst.state,
                  D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
                      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+      if(coop_pair_.next && !depth && !volume && dest_w==1280 && dest_h==720 &&
+          !x1 && !y1 && !dx && !dy && x2==uint32_t(dst.resource->GetDesc().Width) &&
+          y2==dst.resource->GetDesc().Height)
+        coop_last_full_resolve_=&dst;
     }
   }
 
@@ -7328,6 +7332,7 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
         const auto host_color = graphics::ColorClearValue(other.guest_format, color);
         command_list_->ClearRenderTargetView(other.view, host_color.data(), 1, &r);
       }
+      if(coop_pair_.next) {coop_cleared_source_=rt;coop_cleared_stamp_=rt->last_write;}
     }
   }
   if (flags & 0x200) {
@@ -8037,7 +8042,8 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     ID3D12DescriptorHeap* heaps[] = {srv_heap_.Get(), sampler_heap_.Get()};
     command_list_->SetDescriptorHeaps(2, heaps);
-    const bool dlss_composite=dlss_ready_;
+    const bool coop_composite=coop_pair_.Ready() && coop_images_[0].resource && coop_images_[1].resource;
+    const bool dlss_composite=dlss_ready_ && !coop_composite;
     if(dlss_composite && ++dlss_composited_frames_==1) REXLOG_INFO("native DLSS output composited");
     command_list_->SetGraphicsRootSignature(dlss_composite ? dlss_composite_root_.Get() : blit_root_signature_.Get());
     command_list_->SetGraphicsRootDescriptorTable(
@@ -8069,7 +8075,29 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
     command_list_->RSSetViewports(1, &vp);
     command_list_->RSSetScissorRects(1, &sc);
     command_list_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    command_list_->DrawInstanced(3, 1, 0, 0);
+    if(coop_composite) {
+      for(uint32_t view=0;view<2;++view) {
+        auto& saved=coop_images_[view];
+        auto& index=coop_blit_slots_[frame_index_][view];
+        if(!index)index=AllocSrvIndex();
+        D3D12_SHADER_RESOURCE_VIEW_DESC view_srv=srv;
+        view_srv.Format=saved.srv_format;
+        device_->CreateShaderResourceView(saved.resource.Get(),&view_srv,
+            provider_->OffsetViewDescriptor(srv_heap_->GetCPUDescriptorHandleForHeapStart(),index));
+        Transition(saved.resource.Get(),saved.state,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        command_list_->SetGraphicsRootDescriptorTable(0,
+            provider_->OffsetViewDescriptor(srv_heap_->GetGPUDescriptorHandleForHeapStart(),index));
+        const float half=float(output_width_)/2;
+        D3D12_VIEWPORT half_vp{view*half,0,half,float(output_height_),0,1};
+        D3D12_RECT half_sc{LONG(view*output_width_/2),0,LONG((view+1)*output_width_/2),LONG(output_height_)};
+        command_list_->RSSetViewports(1,&half_vp);
+        command_list_->RSSetScissorRects(1,&half_sc);
+        command_list_->DrawInstanced(3,1,0,0);
+      }
+      if(coop_pair_.frame<=3 || coop_pair_.frame%120==0)
+        REXLOG_INFO("coop split composite: frame={} generation={} views=2 size={}x{}",
+            coop_pair_.frame,coop_pair_.generation,output_width_,output_height_);
+    } else command_list_->DrawInstanced(3, 1, 0, 0);
     frame_state_bound_ = false;
     fixed_state_cached_ = false;
     bound_vertex_views_mask_ = 0;
@@ -8077,6 +8105,7 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
     float color[4] = {0.3f, 0.0f, 0.3f, 1.0f};  // magenta-ish: no front buffer resolved
     command_list_->ClearRenderTargetView(output_rtvs_[frame_index_], color, 0, nullptr);
   }
+  coop_pair_.Reset();
 
   // native_present=false: render (and dump) natively but leave presentation to
   // Xenos, for same-run A/B comparisons against its screenshots.
@@ -8823,6 +8852,85 @@ void Renderer::DumpFrameResources(const std::string& prefix, bool surfaces_only,
 // Front end (guest threads): capture + queue. See sr_native_worker.
 // ---------------------------------------------------------------------------
 
+bool Renderer::CoopSplitSupported() {
+  std::lock_guard lock(front_mutex_);
+  return !packet_sink_ && !worker_stop_ && !REXCVAR_GET(sr_native_ab_mode) &&
+      rex::cvar::Query<std::string>("sr_dlss")=="off";
+}
+bool Renderer::CoopSplitMarker(uint8_t* base,uint32_t action,uint64_t frame,uint32_t generation) {
+  std::lock_guard lock(front_mutex_);
+  if(packet_sink_ || worker_stop_)return false;
+  guest_base_=base;
+  BeginCmd(Op::kCoopSplit);
+  cur_.packet_check=false; // D3D12-only executor command, no guest packet form.
+  cur_.u[0]=action;cur_.u[1]=generation;cur_.u64=frame;
+  EndCmd(base);return true;
+}
+void Renderer::ExecCoopSplitMarker(uint32_t action,uint64_t frame,uint32_t generation) {
+  auto cancel=[&] {
+    coop_pair_.Reset();coop_last_full_resolve_=nullptr;
+    if(coop_deferred_front_) {
+      const auto front=coop_deferred_front_;coop_deferred_front_=0;
+      EndFrameAndPresent(front);
+    }
+  };
+  if(action==4) {cancel();return;}
+  if(!coop_pair_.Marker(action,frame,generation)) {
+    REXLOG_ERROR("coop split capture failed: marker order/frame/binding action={}",action);cancel();return;
+  }
+  if(action==0 || action==2) {
+    coop_last_full_resolve_=nullptr;coop_cleared_source_=nullptr;coop_cleared_stamp_=0;return;
+  }
+  if(!BeginFrame()) {cancel();return;}
+  HostSurface* bound=bound_rt_count_ ? bound_rts_[0] : nullptr;
+  const bool bound_valid=bound && !bound->depth && bound->width==1280 && bound->height==720 && bound->resource;
+  const bool cleared=bound && bound==coop_cleared_source_ && bound->last_write==coop_cleared_stamp_;
+  const auto choice=coop::ChooseSplitSource(bound_valid,cleared,coop_last_full_resolve_!=nullptr);
+  if(choice==coop::SplitSource::None) {
+    REXLOG_ERROR("coop split capture failed: no full world target (action={})",action);
+    cancel();return;
+  }
+  const bool resolved=choice==coop::SplitSource::Resolved;
+  auto* source=resolved?coop_last_full_resolve_->resource.Get():bound->resource.Get();
+  auto& source_state=resolved?coop_last_full_resolve_->state:bound->state;
+  const auto source_format=resolved?coop_last_full_resolve_->format:bound->view_format;
+  const auto source_srv=resolved?coop_last_full_resolve_->srv_format:bound->srv_format;
+  const uint32_t samples=resolved?1:bound->samples;
+  auto& image=coop_images_[action==1?0:1];
+  auto desc=source->GetDesc();
+  desc.Flags=D3D12_RESOURCE_FLAG_NONE;
+  desc.SampleDesc.Count=1;desc.SampleDesc.Quality=0;
+  const auto old=image.resource?image.resource->GetDesc():D3D12_RESOURCE_DESC{};
+  if(!image.resource || old.Width!=desc.Width || old.Height!=desc.Height || old.Format!=desc.Format) {
+    Retire(image.resource);image.resource.Reset();
+    D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;
+    image.state=D3D12_RESOURCE_STATE_COPY_DEST;
+    if(FAILED(device_->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,image.state,
+            nullptr,IID_PPV_ARGS(&image.resource)))) {
+      REXLOG_ERROR("coop split capture failed: image allocation");cancel();return;
+    }
+  }
+  image.srv_format=source_srv;
+  const auto previous=source_state;
+  if(samples>1) {
+    Transition(source,source_state,D3D12_RESOURCE_STATE_RESOLVE_SOURCE);
+    Transition(image.resource.Get(),image.state,D3D12_RESOURCE_STATE_RESOLVE_DEST);
+    command_list_->ResolveSubresource(image.resource.Get(),0,source,0,source_format);
+  } else {
+    Transition(source,source_state,D3D12_RESOURCE_STATE_COPY_SOURCE);
+    Transition(image.resource.Get(),image.state,D3D12_RESOURCE_STATE_COPY_DEST);
+    command_list_->CopyResource(image.resource.Get(),source);
+  }
+  Transition(source,source_state,previous);
+  if(frame<=3 || frame%120==0)
+    REXLOG_INFO("coop split capture: frame={} generation={} view={} width={} height={} format={} ready={} resolved={}",
+        frame,generation,action==1?0:1,desc.Width,desc.Height,uint32_t(desc.Format),coop_pair_.Ready(),resolved);
+  if(coop_pair_.Ready() && coop_deferred_front_) {
+    const auto front=coop_deferred_front_;coop_deferred_front_=0;
+    EndFrameAndPresent(front);
+  }
+}
+
 void Renderer::BeginCmd(Op op) {
   DetailScope scope(capture_timings.fe_begin_ns);
   if(CpuProfiling()) front_cpu_timings.capture_start=std::chrono::steady_clock::now();
@@ -9483,6 +9591,9 @@ void Renderer::Execute(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd
   const bool profiling = prof_active_ && frame_open_;
   const uint64_t prof_stats_draws = stats_.draws;
   switch (cmd.op) {
+    case Op::kCoopSplit:
+      ExecCoopSplitMarker(cmd.u[0],cmd.u64,cmd.u[1]);
+      break;
     case Op::kDraw:
       ExecDrawVertices(base, batch, cmd);
       break;
@@ -10011,6 +10122,10 @@ void Renderer::ExecOnSwap(uint8_t* base, uint32_t front_buffer_texture, uint64_t
   uint32_t front_buffer_address = 0;
   if (front_buffer_texture) {
     front_buffer_address = GuestPhysical(Load32(base, front_buffer_texture + 0x1C + 4) & 0xFFFFF000u);
+  }
+  if(coop_pair_.DeferSwap()) {
+    coop_deferred_front_=front_buffer_address;
+    return;
   }
   EndFrameAndPresent(front_buffer_address);
 }

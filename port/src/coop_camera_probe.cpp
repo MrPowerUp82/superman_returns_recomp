@@ -1,6 +1,7 @@
 #include "coop_camera_probe.h"
 #include "coop_second_camera.h"
 #include "coop_camera_preview.h"
+#include "coop_split_render.h"
 
 #include <array>
 #include <atomic>
@@ -146,7 +147,8 @@ REX_HOOK_RAW(sub_82775AA0) {
         fallbacks.load(), graphics, index, camera, caller, readable,
         Float(transform[12]), Float(transform[13]), Float(transform[14]));
   }
-  ApplyP2CameraPreview(ctx,base,graphics,index,caller);
+  if(!PrepareSplitCamera(ctx,base,graphics,index,caller))
+    ApplyP2CameraPreview(ctx,base,graphics,index,caller);
 }
 
 REX_HOOK_RAW(sub_827758F8) {
@@ -162,14 +164,21 @@ REX_HOOK_RAW(sub_827758F8) {
 
 REX_HOOK_RAW(sub_82776038) {
   using namespace superman_returns::coop;
+  const uint32_t split_graphics=ctx.r3.u32;
+  const bool split=BeginSplitWorld(base,split_graphics);
   ObserveP2CameraDraw(base,ctx.r3.u32);
-  if (!Enabled()) { __imp__sub_82776038(ctx, base); return; }
+  if (!Enabled()) {
+    __imp__sub_82776038(ctx, base);
+    if(split)EndSplitWorld(ctx,base,split_graphics);
+    return;
+  }
   const uint32_t graphics = ctx.r3.u32;
   const auto sequence = render_frames.fetch_add(1) + 1;
   sample_render = sequence <= 3 || sequence % 120 == 0;
   sampled_groups = sampled_techniques = 0;
   const bool sample = sample_render;
   __imp__sub_82776038(ctx, base);
+  if(split)EndSplitWorld(ctx,base,split_graphics);
   sample_render = false;
   if (sample) {
     std::array<uint32_t, 2> state{};

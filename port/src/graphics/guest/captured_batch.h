@@ -59,7 +59,8 @@ enum class Op : uint8_t {
   kSwap,
   kPassEnd,
   kRing,
-  kClear
+  kClear,
+  kCoopSplit
 };
 struct WorkCmd {
   Op op = Op::kRing;

@@ -27,6 +27,42 @@ def trace():
 
 
 class CameraEvidence(unittest.TestCase):
+    def test_split_requires_current_two_capture_views_and_matching_composite(self):
+        world = ("coop split world: frame={frame} generation=3221225473 selected=true "
+                 "primary_restored=true hud_unchanged=true phase_restored=true passes=2 extra_prepare=1 extra_dt=0 "
+                 "primary=10,20,30 secondary=12,20,30")
+        capture = ("coop split capture: frame={frame} generation=3221225473 view={view} "
+                   "width=1280 height=720 format=28 ready={ready}")
+        composite = "coop split composite: frame={frame} generation=3221225473 views=2 size=1280x720"
+        good = trace()
+        for frame in range(1,4):
+            good += [world.format(frame=frame),capture.format(frame=frame,view=0,ready="false"),
+                     capture.format(frame=frame,view=1,ready="true"),composite.format(frame=frame)]
+        no_transport = list(good)
+        publication = ("coop camera transport: seq={seq} generation=3221225473 active=true "
+                       "primary_unchanged=true secondary_matches=true position=12,20,30")
+        consumed = (trace()[3]+" secondary_flags=C0000001 secondary_position=12,20,30 "
+                    "secondary_projection=0.5,18000,1.2,1.7777778 secondary_viewport=00000000,050002D0")
+        good += [publication.format(seq=i) for i in range(1,4)]+[consumed]*3
+        self.assertTrue(reporter.analyze(good, required_split=True)["passed"])
+        self.assertTrue(reporter.analyze([s.replace("size=1280x720", "size=1920x1080") for s in good],
+                                        required_split=True)["passed"])
+        broken = [trace(), [s for s in good if "composite: frame=3 " not in s], no_transport,
+                  good+[publication.format(seq=4).replace("3221225473", "3221225474"),
+                        consumed.replace("C0000001", "C0000002")],
+                  [s.replace("width=1280 height=720", "width=1 height=1") for s in good],
+                  [s.replace("size=1280x720", "size=1x1") for s in good],
+                  [s.replace("secondary=12,20,30", "secondary=90,20,30") for s in good],
+                  [s.replace("generation=3221225473", "generation=3221225474") if "composite:" in s else s for s in good],
+                  [s.replace("primary_restored=true", "primary_restored=false") for s in good],
+                  [s.replace("hud_unchanged=true", "hud_unchanged=false") for s in good],
+                  [s.replace("phase_restored=true", "phase_restored=false") for s in good],
+                  [s.replace("view=1", "view=0") for s in good],
+                  good+["coop split capture failed: no full world target"]]
+        for bad in broken:
+            with self.subTest(bad=bad):
+                self.assertFalse(reporter.analyze(bad, required_split=True)["passed"])
+
     def test_preview_requires_preserved_packet_hud_and_matching_world_draw(self):
         applied = ("coop camera preview: seq={seq} generation=3221225473 camera=01000000 hud=02000000 "
                    "packet_unchanged=true hud_unchanged=true matrix_matches=true selection_matches=true position=12,20,30")

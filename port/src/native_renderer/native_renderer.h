@@ -40,6 +40,7 @@
 #include "resource_write_tracking.h"
 #include "buffer_tracking_policy.h"
 #include "../title_benchmark_policy.h"
+#include "../coop_split_frame.h"
 
 #include <atomic>
 #include <chrono>
@@ -144,6 +145,8 @@ using graphics::guest::CaptureRange;
 class Renderer : public NativeFrontend {
  public:
   static Renderer& Get();
+  bool CoopSplitSupported();
+  bool CoopSplitMarker(uint8_t*,uint32_t action,uint64_t frame,uint32_t generation);
   using PacketSink=std::function<bool(graphics::guest::RenderPacket&&,std::string&)>;
   // Installed once before guest execution. The sink owns the native API path;
   // every dependency is captured and no D3D executor is called for this mode.
@@ -382,6 +385,15 @@ class Renderer : public NativeFrontend {
   bool CreateDrawResources();
   bool BeginFrame();
   void EndFrameAndPresent(uint32_t front_buffer_address);
+  void ExecCoopSplitMarker(uint32_t action,uint64_t frame,uint32_t generation);
+  struct CoopImage {
+    Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+    D3D12_RESOURCE_STATES state=D3D12_RESOURCE_STATE_COPY_DEST;
+    DXGI_FORMAT srv_format=DXGI_FORMAT_UNKNOWN;
+  };
+  CoopImage coop_images_[2];
+  coop::SplitFrame coop_pair_;
+  uint32_t coop_deferred_front_=0;
 
   struct UploadAlloc {
     uint8_t* cpu = nullptr;
@@ -462,6 +474,9 @@ class Renderer : public NativeFrontend {
     bool resolve_shadow = false;
     bool resolve_depth = false;
   };
+  ResolveTexture* coop_last_full_resolve_=nullptr;
+  HostSurface* coop_cleared_source_=nullptr;
+  uint64_t coop_cleared_stamp_=0;
 
   const std::vector<uint8_t>* LoadShader(uint64_t hash, bool vertex);
   ID3D12PipelineState* GetPipeline(uint8_t* base, uint32_t dev, uint64_t vs_hash, uint64_t ps_hash,
@@ -511,6 +526,7 @@ class Renderer : public NativeFrontend {
   uint32_t AllocSrvIndex();
 
   static constexpr uint32_t kFramesInFlight = 3;
+  uint32_t coop_blit_slots_[kFramesInFlight][2]={};
   static constexpr uint32_t kOutputWidth = profile::kOutputWidth;
   static constexpr uint32_t kOutputHeight = profile::kOutputHeight;
   static constexpr size_t kUploadBytesPerFrame = 128u << 20;

@@ -262,6 +262,21 @@ void OnFrameStatsSwap(uint8_t* base, uint32_t dev, uint32_t front_buffer) {
 #endif
 }
 
+bool CoopSplitSupported() {
+#if SR_NATIVE_RENDERER_BUILD
+  return RendererActive() && Renderer::Get().CoopSplitSupported();
+#else
+  return false;
+#endif
+}
+bool QueueCoopSplitMarker(uint8_t* base,uint32_t action,uint64_t frame,uint32_t generation) {
+#if SR_NATIVE_RENDERER_BUILD
+  return RendererActive() && Renderer::Get().CoopSplitMarker(base,action,frame,generation);
+#else
+  return false;
+#endif
+}
+
 std::unique_ptr<rex::system::IGraphicsSystem> CreateNativeGraphicsSystem(
     GraphicsSystemFactory create_xenos, GraphicsSystemFactory create_xenos_ab) {
   graphics::NativeApi api;std::string api_error;

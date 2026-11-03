@@ -21,8 +21,8 @@ def vector(value: str, count: int) -> list[float]:
 
 
 def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=False, required_handoff=False,
-            required_preview=False) -> dict:
-    required_handoff = required_handoff or required_preview
+            required_preview=False, required_split=False) -> dict:
+    required_handoff = required_handoff or required_preview or required_split
     rows = {"update": {}, "submit": {}, "consume": {}, "apply": {}}
     errors = []
     started = False
@@ -36,6 +36,8 @@ def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=Fals
     intervals = []
     previews, preview_draws = {}, {}
     blocked_preview_generations = set()
+    split_world, split_captures, split_composites = {}, {}, {}
+    split_positions = []
     for line in lines:
         if "coop: single-instance input preparation;" in line:
             rows = {key: {} for key in rows}
@@ -51,8 +53,44 @@ def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=Fals
             intervals = []
             previews, preview_draws = {}, {}
             blocked_preview_generations = set()
+            split_world, split_captures, split_composites = {}, {}, {}
+            split_positions = []
         if not started:
             continue
+        if re.search(r"coop split(?: capture)? failed:", line):
+            errors.append("split world/capture verification failed")
+        split = re.search(r"coop split (world|capture|composite): (.*)", line)
+        if split:
+            values = dict(re.findall(r"(\w+)=([^\s]+)", split[2]))
+            try:
+                frame, generation = int(values["frame"]), int(values["generation"])
+                if not frame or not generation: raise ValueError("missing frame/binding")
+                if split[1] == "world":
+                    if any(values[key] != "true" for key in ("selected", "primary_restored", "hud_unchanged", "phase_restored")):
+                        raise ValueError("camera/HUD selection failed")
+                    if (values["passes"], values["extra_prepare"], values["extra_dt"]) != ("2", "1", "0"):
+                        raise ValueError("unexpected render repetition")
+                    split_positions.append({"generation": generation,
+                                            "primary": vector(values["primary"], 3),
+                                            "secondary": vector(values["secondary"], 3)})
+                    split_world[frame] = generation
+                elif split[1] == "capture":
+                    view = int(values["view"])
+                    if view not in (0, 1) or (values["width"], values["height"]) != ("1280", "720"):
+                        raise ValueError("invalid capture view/extent")
+                    if values["ready"] != ("true" if view else "false"):
+                        raise ValueError("incomplete/out-of-order capture")
+                    if (frame, view) in split_captures:
+                        raise ValueError("duplicate view capture")
+                    split_captures[frame, view] = generation
+                else:
+                    if values["views"] != "2": raise ValueError("not two views")
+                    width, height = map(int, values["size"].split("x"))
+                    if width<1280 or height<720 or width%2 or width*9!=height*16:
+                        raise ValueError("unsupported composite extent")
+                    split_composites[frame] = generation
+            except (KeyError, ValueError) as error:
+                errors.append(f"split: {error}")
         if "Unhandled guest access violation" in line or re.search(r"coop Lua: status=[1-9]", line):
             errors.append("guest/script failure in latest run")
         if "coop camera transport failed:" in line or "coop camera transport refused:" in line:
@@ -273,6 +311,24 @@ def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=Fals
             errors.append("fewer than three complete preview application/draw pairs")
         if generations - drawn_generations:
             errors.append("published generation has no verified preview draw")
+    split_pairs = sum(split_world.get(frame) == version and
+                      split_captures.get((frame, 0)) == version and
+                      split_captures.get((frame, 1)) == version
+                      for frame, version in split_composites.items())
+    if required_split and (split_pairs < 3 or split_pairs != len(split_composites)):
+        errors.append("fewer than three complete same-frame split world/capture/composite pairs")
+    split_matches = set()
+    for sample in split_positions:
+        primary_matches = any(math.dist(sample["primary"], row["position_values"]) <= 0.05
+                              for row in rows["consume"].values())
+        secondary_matches = any(row["generation"] == sample["generation"] and
+                                math.dist(sample["secondary"], row["position"]) <= 0.05 for row in received)
+        if primary_matches and secondary_matches:
+            split_matches.add(sample["generation"])
+    if required_split and set(split_composites.values()) - split_matches:
+        errors.append("split camera positions have no matching consumed P1/P2 samples")
+    if required_split and generations - set(split_composites.values()):
+        errors.append("published binding has no verified split composition")
     return {"passed": not errors, "scope": "sampled primary propagation and secondary transport",
             "targets": targets, "verified_submission_targets": sorted(verified_targets),
             "samples": {k: len(v) for k, v in rows.items()},
@@ -290,6 +346,10 @@ def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=Fals
                         "verified_pairs": preview_pairs, "generations": sorted(drawn_generations),
                         "consumed_position_matches": preview_position_matches,
                         "restored_position_matches": restored_position_matches},
+            "split": {"world_samples": len(split_world), "composite_samples": len(split_composites),
+                      "verified_pairs": split_pairs,
+                      "matched_consumed_generations": sorted(split_matches),
+                      "generations": sorted(set(split_composites.values()))},
             "errors": sorted(set(errors))}
 
 
@@ -301,6 +361,7 @@ def main():
     parser.add_argument("--require-secondary", action="store_true")
     parser.add_argument("--require-handoff", action="store_true")
     parser.add_argument("--require-preview", action="store_true")
+    parser.add_argument("--require-split", action="store_true")
     args = parser.parse_args()
     # spdlog names older segments probe.1.log, probe.2.log, ... . Read oldest
     # first so the latest startup can reset both previous-run errors and samples.
@@ -318,7 +379,8 @@ def main():
                 yield from source
 
     report = analyze(lines(), args.require_target, required_secondary=args.require_secondary,
-                     required_handoff=args.require_handoff, required_preview=args.require_preview)
+                     required_handoff=args.require_handoff, required_preview=args.require_preview,
+                     required_split=args.require_split)
     report["input_files"] = [str(path) for path in paths]
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

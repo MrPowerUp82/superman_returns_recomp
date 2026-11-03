@@ -519,6 +519,9 @@ bool DecodeCapturedPacket(const WorkBatch &batch, const WorkCmd &cmd,
       out=std::move(packet);
       return true;
     }
+    case Op::kCoopSplit:
+      error="Co-op split markers require the D3D12 executor";
+      return false;
     case Op::kEndTiling:
     case Op::kPassEnd:
     case Op::kRing:

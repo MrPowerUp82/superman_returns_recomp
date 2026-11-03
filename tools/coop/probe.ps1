@@ -11,6 +11,7 @@ param(
   [switch]$SecondCamera,
   [switch]$CameraTransport,
   [switch]$PreviewP2,
+  [switch]$SplitPreview,
   [ValidateSet('native', 'xenos')][string]$Renderer = 'native'
 )
 $ErrorActionPreference = 'Stop'
@@ -43,6 +44,7 @@ function Set-Mailbox([string]$source) {
 
 switch ($Action) {
   Start {
+    if($SplitPreview -and $Renderer -ne 'native'){throw 'Split preview requires the native renderer'}
     if (-not (Test-Path -LiteralPath $exe)) { throw 'Build the game with build.cmd first' }
     if (Get-CimInstance Win32_Process -Filter "Name = 'superman_returns.exe'") {
       throw 'Close the running game before starting the isolated probe'
@@ -79,10 +81,11 @@ switch ($Action) {
       '--sr_coop_input=true', '--sr_skip_intro=true', "--sr_renderer=$Renderer"
     )
     if (-not $NoScript) { $arguments += "--sr_coop_script=`"$mailbox`"" }
-    if ($CameraProbe -or $CameraTransport -or $PreviewP2) { $arguments += '--sr_coop_camera_probe=true' }
-    if ($SecondCamera -or $CameraTransport -or $PreviewP2) { $arguments += '--sr_coop_second_camera=true' }
-    if ($CameraTransport -or $PreviewP2) { $arguments += '--sr_coop_camera_transport=true' }
+    if ($CameraProbe -or $CameraTransport -or $PreviewP2 -or $SplitPreview) { $arguments += '--sr_coop_camera_probe=true' }
+    if ($SecondCamera -or $CameraTransport -or $PreviewP2 -or $SplitPreview) { $arguments += '--sr_coop_second_camera=true' }
+    if ($CameraTransport -or $PreviewP2 -or $SplitPreview) { $arguments += '--sr_coop_camera_transport=true' }
     if ($PreviewP2) { $arguments += '--sr_coop_camera_preview=true' }
+    if ($SplitPreview) { $arguments += '--sr_coop_split_preview=true','--sr_native_api=d3d12','--sr_dlss=off','--sr_native_render_scale=1','--sr_render_scale=100' }
     $oldInput = $env:SR_BENCH_INPUT
     $oldP2Input = $env:SR_BENCH_INPUT_P2
     $oldDump = $env:SR_DUMP_IMAGE
