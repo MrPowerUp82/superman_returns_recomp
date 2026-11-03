@@ -13,6 +13,7 @@
 
 #include "frame_stats.h"
 #include "benchmark_input_driver.h"
+#include "coop_split.h"
 #include "title_benchmark.h"
 #include "title_benchmark_dialog.h"
 #include <rex/input/input_system.h>
@@ -156,6 +157,7 @@ class SupermanReturnsApp : public rex::ReXApp {
   // Feed the F3 debug overlay with the guest frame rate.
   void OnPostSetup() override {
     SetGuestFrameStats(SampleGuestFrameStats);InstallBenchmarkInput(*runtime());
+    superman_returns::coop::Install(*runtime());
   }
 
   // Override virtual hooks for customization:

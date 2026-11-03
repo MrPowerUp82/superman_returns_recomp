@@ -62,6 +62,8 @@ set(SUPERMANRETURNS_SOURCES
     src/title_benchmark_hooks.cpp
     src/costume_override.cpp
     src/benchmark_input_driver.cpp
+    src/coop_split.cpp
+    src/coop_lua.cpp
     src/xma_fixes.cpp
     src/sr_settings.cpp
     src/graphics/backend_selection.cpp
