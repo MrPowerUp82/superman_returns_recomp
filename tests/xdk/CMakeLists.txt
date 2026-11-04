@@ -23,6 +23,12 @@ set(SR_REFERENCE_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/constant_references.cpp")
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/constant_references.cpp" "#include \"superman_returns_pch.h\"\n")
 extract_constant_reference(superman_returns_recomp.9.cpp sub_820F4920 reference_vs)
 extract_constant_reference(superman_returns_recomp.75.cpp sub_820F4A30 reference_ps)
+if(WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  # Match the generated game's asynchronous exception handling, while the
+  # native replacement uses the ordinary native-hook compiler options.
+  set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/constant_references.cpp"
+      PROPERTIES COMPILE_OPTIONS "-fasync-exceptions")
+endif()
 add_executable(sr_xdk_constant_tests test_constant_copy.cpp "${CMAKE_CURRENT_BINARY_DIR}/constant_references.cpp")
 target_include_directories(sr_xdk_constant_tests PRIVATE "${SR_SDK}/include" "${SR_ROOT}/port/generated/default")
 target_compile_options(sr_xdk_constant_tests PRIVATE -mssse3 -msse4.1)

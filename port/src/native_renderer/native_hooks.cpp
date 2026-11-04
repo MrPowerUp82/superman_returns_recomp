@@ -43,6 +43,7 @@
 #include "checked_guest_memory.h"
 #include "idle_yield.h"
 #include "xdk_constant_copy.h"
+#include "xdk_constant_bank_copy.h"
 #include "xdk_draw_submission.h"
 #include "guest_cpu_profile.h"
 #include "resource_unlock_audit.h"
@@ -323,6 +324,13 @@ void superman_returns::native::ObserveTextureValidationForUnlockAudit(const uint
 #define SR_ADDRESS(addr) SR_ADDRESS_(addr)
 
 namespace {
+bool NativeFullConstantsEnabled() {
+  static const bool enabled=[] {
+    const char* value=std::getenv("SR_NATIVE_XDK_FULL_COPY");
+    return value && *value=='1';
+  }();
+  return enabled;
+}
 bool NativeBulkConstantsEnabled() {
   static const bool enabled=[] {
     const char* value=std::getenv("SR_NATIVE_XDK_BULK_COPY");
@@ -554,12 +562,16 @@ bool TryNativeDrawSubmission(PPCContext& ctx,uint8_t* base,bool indexed) {
 }
 #if SR_HOOK_ENABLED(FLOAT_COPY_VS)
 SR_DEFINE_HOOK(SR_ADDR_FLOAT_COPY_VS) {
+  if(NativeFullConstantsEnabled() && native::Enabled() &&
+     native::TryCopyConstantBank(ctx,base,false)) return;
   if(NativeBulkConstantsEnabled() && native::Enabled()) native::TryCopyConstantPrefix(ctx,base,false);
   SR_ORIGINAL(SR_ADDR_FLOAT_COPY_VS)(ctx,base);
 }
 #endif
 #if SR_HOOK_ENABLED(FLOAT_COPY_PS)
 SR_DEFINE_HOOK(SR_ADDR_FLOAT_COPY_PS) {
+  if(NativeFullConstantsEnabled() && native::Enabled() &&
+     native::TryCopyConstantBank(ctx,base,true)) return;
   if(NativeBulkConstantsEnabled() && native::Enabled()) native::TryCopyConstantPrefix(ctx,base,true);
   SR_ORIGINAL(SR_ADDR_FLOAT_COPY_PS)(ctx,base);
 }
