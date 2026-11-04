@@ -1,6 +1,6 @@
 -- sr-coop-context: player1
--- Experimental actor lifecycle probe. Run only against the isolated probe save.
--- The mailbox waits until the VM is processing P1's own script context.
+-- Shared by the isolated probe and the built-in launcher join.
+-- The bridge waits until the VM is processing P1's own script context.
 if SR_COOP_P2 then return "P2 already spawned: " .. tostring(SR_COOP_P2) end
 if not IsWorldFlowRunning("SupermenActorWorldFlow") then return "world not ready" end
 local p1 = GetIDFromBinIndex("SUPERMAN", 0)

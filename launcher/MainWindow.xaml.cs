@@ -13,6 +13,7 @@ public partial class MainWindow : Window
     private readonly string _settingsPath;
     private LauncherSettings _settings;
     private bool _ready;
+    private bool _coopOverridesDisplayed;
     private sealed record Choice(string Value, string Label) { public override string ToString() => Label; }
 
     public MainWindow()
@@ -34,6 +35,8 @@ public partial class MainWindow : Window
         VSyncBox.Checked += (_, _) => UpdateSummary();
         SkipIntroBox.Checked += (_, _) => UpdateSummary();
         SkipIntroBox.Unchecked += (_, _) => UpdateSummary();
+        CoopBox.Checked += (_, _) => UpdateSummary();
+        CoopBox.Unchecked += (_, _) => UpdateSummary();
         VSyncBox.Unchecked += (_, _) => UpdateSummary();
         GameExeBox.TextChanged += (_, _) => UpdateSummary();
         GameDataBox.TextChanged += (_, _) => UpdateSummary();
@@ -90,6 +93,7 @@ public partial class MainWindow : Window
     private static void Select(ComboBox box, string value) => box.SelectedItem = box.Items.Cast<Choice>().FirstOrDefault(x => x.Value == value) ?? box.Items[0];
     private void ApplySettingsToUi()
     {
+        _coopOverridesDisplayed = false;
         Select(RendererBox, _settings.Renderer); Select(ApiBox, _settings.GraphicsApi); SkipIntroBox.IsChecked = _settings.SkipIntro;
         Select(ResolutionBox, _settings.Resolution); Select(DisplayModeBox, _settings.DisplayMode);
         Select(InputBox, _settings.InputMode); Select(CostumeBox, _settings.Costume); Select(RenderScaleBox, _settings.RenderScale);
@@ -99,6 +103,7 @@ public partial class MainWindow : Window
         GpuBox.SelectedItem = adapters.FirstOrDefault(x => !string.IsNullOrEmpty(_settings.GpuLuid) && x.Luid == _settings.GpuLuid)
             ?? adapters.FirstOrDefault(x => x.Name == _settings.Gpu) ?? adapters[0];
         VSyncBox.IsChecked = _settings.VSync;
+        CoopBox.IsChecked = _settings.Coop;
         FrameGenerationBox.IsChecked = _settings.FrameGeneration;
         FrameGenerationDllBox.Text = string.IsNullOrWhiteSpace(_settings.FrameGenerationDll) ? LauncherSettings.FindFrameGenerationDll() : _settings.FrameGenerationDll;
         GameExeBox.Text = _settings.GameExe; GameDataBox.Text = _settings.GameData;
@@ -106,14 +111,19 @@ public partial class MainWindow : Window
     private static string Value(ComboBox box) => ((Choice)box.SelectedItem).Value;
     private void ReadSettings()
     {
-        _settings.Renderer = Value(RendererBox); _settings.GraphicsApi = Value(ApiBox); _settings.SkipIntro = SkipIntroBox.IsChecked == true;
+        if (!_coopOverridesDisplayed) {
+            _settings.Renderer = Value(RendererBox); _settings.GraphicsApi = Value(ApiBox);
+            _settings.InputMode = Value(InputBox); _settings.RenderScale = Value(RenderScaleBox);
+            _settings.FrameGeneration = FrameGenerationBox.IsChecked == true;
+        }
+        _settings.SkipIntro = SkipIntroBox.IsChecked == true;
         _settings.Resolution = Value(ResolutionBox); _settings.DisplayMode = Value(DisplayModeBox);
-        _settings.InputMode = Value(InputBox); _settings.Costume = Value(CostumeBox); _settings.RenderScale = Value(RenderScaleBox);
+        _settings.Costume = Value(CostumeBox);
         _settings.Antialiasing = Value(AaBox); _settings.TextureFilter = Value(FilterBox);
         _settings.FpsLimit = Value(FpsBox); _settings.ShadowQuality = Value(ShadowBox); _settings.Msaa = Value(MsaaBox);
         var gpu = (GpuAdapter)GpuBox.SelectedItem; _settings.Gpu = gpu.Name; _settings.GpuIndex = gpu.Index; _settings.GpuLuid = gpu.Luid;
         _settings.VSync = VSyncBox.IsChecked == true;
-        _settings.FrameGeneration = FrameGenerationBox.IsChecked == true;
+        _settings.Coop = CoopBox.IsChecked == true;
         _settings.FrameGenerationDll = FrameGenerationDllBox.Text.Trim();
         _settings.GameExe = GameExeBox.Text.Trim(); _settings.GameData = GameDataBox.Text.Trim();
     }
@@ -121,18 +131,31 @@ public partial class MainWindow : Window
     {
         if (!_ready) return;
         ReadSettings();
-        FrameGenerationPanel.Visibility = _settings.FrameGeneration ? Visibility.Visible : Visibility.Collapsed;
-        SummaryText.Text = _settings.UsesVulkan
+        // Show the effective co-op choices, retaining solo values in settings.
+        // Suppress selection events while applying these temporary overrides.
+        _ready = false;
+        Select(RendererBox, _settings.Coop ? "native" : _settings.Renderer);
+        Select(ApiBox, _settings.Coop ? "d3d12" : _settings.GraphicsApi);
+        Select(RenderScaleBox, _settings.Coop ? "100" : _settings.RenderScale);
+        Select(InputBox, _settings.Coop ? "Controller" : _settings.InputMode);
+        FrameGenerationBox.IsChecked = !_settings.Coop && _settings.FrameGeneration;
+        _coopOverridesDisplayed = _settings.Coop;
+        _ready = true;
+        CoopNote.Visibility = _settings.Coop ? Visibility.Visible : Visibility.Collapsed;
+        foreach (var control in new Control[] { RendererBox, ApiBox, RenderScaleBox, InputBox, FrameGenerationBox })
+            control.IsEnabled = !_settings.Coop;
+        FrameGenerationPanel.Visibility = _settings.FrameGeneration && !_settings.Coop ? Visibility.Visible : Visibility.Collapsed;
+        SummaryText.Text = _settings.Coop ? T("CoopSummary") : _settings.UsesVulkan
             ? $"Vulkan · {T("Native")} · {_settings.Resolution.Replace("x", " × ")} · 100% {T("Internal")}"
             : $"Direct3D 12 · {(_settings.Renderer == "xenos" ? "Xenos" : T("Native"))} · {_settings.Resolution.Replace("x", " × ")} · {_settings.RenderScale}% {T("Internal")}";
-        FpsNote.Text = !_settings.UsesVulkan && _settings.Renderer == "xenos"
+        FpsNote.Text = !_settings.Coop && !_settings.UsesVulkan && _settings.Renderer == "xenos"
             ? T("XenosFpsNote")
             : _settings.FpsLimit == "30"
                 ? T("OriginalFpsNote")
                 : _settings.FpsLimit == "0"
                     ? (_settings.VSync ? T("VSyncFpsNote") : T("UncappedFpsNote"))
                     : T("ExperimentalFpsNote");
-        EngineNote.Text = _settings.UsesVulkan ? T("VulkanNote") : _settings.Renderer == "xenos" ? (_settings.RenderScale is "50" or "75" ? T("XenosScaleNote") : T("XenosNote")) : _settings.RenderScale is "50" or "75" ? T("NativeScaleNote") : T("NativeNote");
+        EngineNote.Text = _settings.Coop ? T("NativeNote") : _settings.UsesVulkan ? T("VulkanNote") : _settings.Renderer == "xenos" ? (_settings.RenderScale is "50" or "75" ? T("XenosScaleNote") : T("XenosNote")) : _settings.RenderScale is "50" or "75" ? T("NativeScaleNote") : T("NativeNote");
         ArgumentsPreview.Text = _settings.BuildArguments();
     }
     private void Save_Click(object sender, RoutedEventArgs e)
@@ -176,7 +199,7 @@ public partial class MainWindow : Window
     private void Defaults_Click(object sender, RoutedEventArgs e)
     {
         ReadSettings();
-        _settings = new LauncherSettings { Language = _settings.Language, GameExe = _settings.GameExe, GameData = _settings.GameData, Gpu = _settings.Gpu, GpuLuid = _settings.GpuLuid };
+        _settings = new LauncherSettings { Language = _settings.Language, Coop = _settings.Coop, GameExe = _settings.GameExe, GameData = _settings.GameData, Gpu = _settings.Gpu, GpuLuid = _settings.GpuLuid };
         _ready = false; ApplySettingsToUi(); _ready = true; UpdateSummary();
         StatusText.Text = T("DefaultsRestored");
     }

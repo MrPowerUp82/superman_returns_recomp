@@ -1,5 +1,29 @@
 # Superman Returns: local co-op in one instance
 
+## Launcher entry (2026-11-04)
+
+Select **Cooperativo — 2 jogadores (experimental)** / **Co-op — 2 players
+(experimental)**, connect two controllers before clicking Play, and load a save
+in Metropolis. The built-in `sr_coop_autojoin` executes the same `spawn_p2.lua`
+body, compiled into the game, only on P1's valid Lua context. It retries the
+read-only world/control readiness checks once per second. Success, partial
+spawns, script errors, and other results stop automatic joining for the session.
+There is no editable mailbox or synthetic input in a launcher co-op session.
+Game transitions and death/respawn are still experimental; restart the game to
+start another automatic join session.
+
+The launcher enables the existing second-camera/transport/split/idle/status/APT
+stamina options and uses native D3D12 at 100% scale with DLSS/frame generation
+off. Solo preferences are retained, and the benchmark ignores co-op. The normal
+game save is used; it is not replaced by the isolated probe's bundled save.
+`run_coop.cmd` remains the legacy input-only entry point.
+
+For isolated reproduction, `./tools/coop/probe.ps1 -Action Start -AutoJoin -NoScript`
+implies `-StaminaPreview` and exercises the built-in join on a copied save.
+Load slot 2 (15%) and Metropolis without sending `spawn_p2.lua` to the mailbox.
+Unlike the launcher, this development probe retains synthetic input for menu
+navigation and movement checks.
+
 ## Decision (2026-11-03)
 
 The requested architecture is **two players in one process, one shared world,
@@ -28,8 +52,8 @@ through the isolated probe.** `run_coop.cmd` still enables input preparation onl
 - Removed `--sr_coop_pad`, `--sr_coop_keyboard`, `--sr_coop_window`, background
   joystick overrides and per-copy config relocation. Use `run_keyboard.cmd` or
   `--mnk_mode` when keyboard/mouse emulation is wanted.
-- Startup explicitly warns that player 2 and split-screen are not implemented.
-  Exposing guest port 1 alone cannot make the original game use it.
+- Startup clarifies that input preparation alone does not enable P2 or split
+  screen. Use the launcher co-op option to enable the complete experimental path.
 
 ## Development probe (2026-11-03 continuation)
 
@@ -341,7 +365,8 @@ Continuation evidence is recorded in `docs/checkpoints/checkpoint3.md`,
 `docs/checkpoints/checkpoint8.md`, `docs/checkpoints/checkpoint9.md` and
 `docs/checkpoints/checkpoint10.md`, `docs/checkpoints/checkpoint11.md` and
 `docs/checkpoints/checkpoint12.md`, `docs/checkpoints/checkpoint13.md` and
-`docs/checkpoints/checkpoint14.md` and `docs/checkpoints/checkpoint15.md`.
+`docs/checkpoints/checkpoint14.md`, `docs/checkpoints/checkpoint15.md` and
+`docs/checkpoints/checkpoint16.md`.
 These cover movement checks, despawn/rebind,
 the camera/render handoff, the separate native P2 controller, secondary packet
 transport, P2 world-view preview, experimental simultaneous split views and

@@ -30,6 +30,19 @@ e `DATA` antes de iniciar. As preferências ficam em
 `%LOCALAPPDATA%\SupermanReturns\launcher\<identificador-da-instalação>.ini`.
 O jogo grava `logs/game.log` ao lado do executável.
 
+**Cooperativo — 2 jogadores (experimental)** inicia uma instância com tela
+dividida. Conecte dois controles antes de clicar em **JOGAR** e carregue um save
+em Metropolis. Quando P1 receber o controle no mundo, o segundo Superman é criado
+automaticamente e vinculado ao segundo controle (porta interna 1). Não exige
+PowerShell, scripts externos nem entradas simuladas. O save usado é o normal do
+jogo; o launcher não o substitui pelo save do probe.
+
+Esse modo seleciona Nativo + Direct3D 12, escala interna de 100%, DLSS e geração
+de quadros desligados. As escolhas de jogo solo ficam guardadas e retornam ao
+desmarcar a opção. O benchmark usa as configurações solo. A entrada automática
+acontece uma vez por execução; transições de fase e morte/respawn continuam
+experimentais. Para reiniciar uma sessão, feche o jogo e abra pelo launcher.
+
 O botão **BENCHMARK** inicia o sobrevoo da cidade da tela de título com as opções
 escolhidas, mede após 5 s de aquecimento por 60 s e exibe os resultados ao final.
 Os resultados também são salvos em JSON e CSV na pasta `benchmarks`.

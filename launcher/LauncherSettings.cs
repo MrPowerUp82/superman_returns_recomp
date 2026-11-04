@@ -29,6 +29,7 @@ public sealed class LauncherSettings
     public string GraphicsApi { get; set; } = "d3d12";
     public bool UsesVulkan => GraphicsApi == "vulkan";
     public bool SkipIntro { get; set; }
+    public bool Coop { get; set; }
     // default (the game's choice), 2 (Golden Age, forced without unlocking) or
     // kingdom_come (skin painted over the Superman Returns suit).
     public string Costume { get; set; } = "default";
@@ -68,6 +69,7 @@ public sealed class LauncherSettings
                 case "graphics_api": s.GraphicsApi = value == "vulkan" ? "vulkan" : "d3d12"; break;
                 case "costume": s.Costume = Costumes.Contains(value) ? value : "default"; break;
                 case "skip_intro": if (bool.TryParse(value, out var si)) s.SkipIntro = si; break;
+                case "coop": if (bool.TryParse(value, out var coop)) s.Coop = coop; break;
                 case "frame_generation": if (bool.TryParse(value, out var fg)) s.FrameGeneration = fg; break;
                 case "frame_generation_dll": s.FrameGenerationDll = value; break;
             }
@@ -84,6 +86,7 @@ public sealed class LauncherSettings
             $"texture_filter={TextureFilter}", $"antialiasing={Antialiasing}", $"shadow_quality={ShadowQuality}",
             $"msaa={Msaa}", $"input={InputMode}", $"renderer={Renderer}", $"graphics_api={GraphicsApi}",
             $"skip_intro={SkipIntro.ToString().ToLowerInvariant()}", $"costume={Costume}",
+            $"coop={Coop.ToString().ToLowerInvariant()}",
             $"frame_generation={FrameGeneration.ToString().ToLowerInvariant()}", $"frame_generation_dll={FrameGenerationDll}" };
         var temporary = path + ".tmp";
         File.WriteAllLines(temporary, lines, new UTF8Encoding(false));
@@ -97,6 +100,7 @@ public sealed class LauncherSettings
     // rejects a flag given twice, so the intro value is replaced, not appended).
     public IReadOnlyList<string> BuildArgumentList(bool benchmark = false)
     {
+        var coop = Coop && !benchmark;
         var resolution = Resolution.Split('x');
         int width = 1280, height = 720;
         if (resolution.Length == 2 && int.TryParse(resolution[0], out var w) && int.TryParse(resolution[1], out var h)
@@ -105,16 +109,16 @@ public sealed class LauncherSettings
             "Anisotropic8x" => 8, "Anisotropic16x" => 16, _ => -1 };
         // Vulkan does not support the enhancement options yet: they stay at the
         // game's defaults so the engine accepts the launch (backend_selection.cpp).
-        var vulkan = UsesVulkan;
-        var percent = vulkan ? 100 : ValidChoice(RenderScale, 100, 50, 75, 100, 125, 150, 200, 300, 400);
+        var vulkan = !coop && UsesVulkan;
+        var percent = coop || vulkan ? 100 : ValidChoice(RenderScale, 100, 50, 75, 100, 125, 150, 200, 300, 400);
         if (vulkan) filter = -1;
         // D3D12 scales every host surface and resolve in one coordinate system.
         // Shrinking the guest's 1280x720 present parameters instead truncates
         // post-process resolves and leaves black/stale regions on screen.
-        var nativeD3d12 = !vulkan && Renderer != "xenos";
+        var nativeD3d12 = !vulkan && (coop || Renderer != "xenos");
         var scale = (nativeD3d12 ? percent : (vulkan ? 100 : Math.Max(100, percent))) / 100.0;
         var result = new List<string> {
-            $"--sr_renderer={(Renderer == "xenos" && !vulkan ? "xenos" : "native")}", "--sr_preset=custom",
+            $"--sr_renderer={(!coop && Renderer == "xenos" && !vulkan ? "xenos" : "native")}", "--sr_preset=custom",
             $"--sr_native_api={(vulkan ? "vulkan" : "d3d12")}",
             $"--sr_skip_intro={(SkipIntro || benchmark).ToString().ToLowerInvariant()}",
             "--sr_render_scale=100",
@@ -132,15 +136,21 @@ public sealed class LauncherSettings
         // An empty "--flag=" makes the engine's argument parser take the next argument
         // as its value, so the LUID is passed only when a GPU was chosen.
         if (!string.IsNullOrWhiteSpace(GpuLuid)) result.Add($"--sr_native_gpu_luid={GpuLuid.Trim()}");
-        result.Add($"--sr_lsfg={FrameGeneration.ToString().ToLowerInvariant()}");
-        if (FrameGeneration) {
+        result.Add($"--sr_lsfg={(FrameGeneration && !coop).ToString().ToLowerInvariant()}");
+        if (FrameGeneration && !coop) {
             result.Add("--sr_lsfg_mode=performance");
             if (!string.IsNullOrWhiteSpace(FrameGenerationDll)) result.Add("--sr_lsfg_dll=" + FrameGenerationDll.Trim());
         }
         if (Costume == "2") result.Add("--sr_costume=2");
         else if (Costume == "kingdom_come") result.Add("--sr_costume_skin=kingdom_come");
         if (benchmark) result.Add("--sr_benchmark=true");
-        if (InputMode == "KeyboardMouse") { result.Add("--mnk_mode=true"); result.Add("--mnk_mouse=true"); }
+        if (coop) {
+            foreach (var flag in new[] { "input", "autojoin", "second_camera", "camera_probe", "camera_transport",
+                "split_preview", "idle", "status_probe", "apt_probe", "stamina_preview" })
+                result.Add($"--sr_coop_{flag}=true");
+            result.Add("--sr_dlss=off");
+        }
+        if (!coop && InputMode == "KeyboardMouse") { result.Add("--mnk_mode=true"); result.Add("--mnk_mouse=true"); }
         else { result.Add("--mnk_mode=false"); result.Add("--mnk_mouse=false"); }
         return result;
     }
@@ -149,9 +159,10 @@ public sealed class LauncherSettings
 
     public ProcessStartInfo CreateLaunch(string baseDirectory, bool benchmark = false)
     {
+        var coop = Coop && !benchmark;
         if (benchmark && !UsesVulkan && Renderer == "xenos")
             throw new InvalidOperationException(LauncherText.Get("BenchmarkRequiresNative", Language));
-        if (!UsesVulkan && Renderer == "xenos" && ValidChoice(RenderScale, 100, 50, 75, 100, 125, 150, 200, 300, 400) < 100)
+        if (!coop && !UsesVulkan && Renderer == "xenos" && ValidChoice(RenderScale, 100, 50, 75, 100, 125, 150, 200, 300, 400) < 100)
             throw new InvalidOperationException(LauncherText.Get("XenosScaleError", Language));
         var exe = Path.GetFullPath(GameExe, baseDirectory);
         if (!File.Exists(exe) || !Path.GetFileName(exe).Equals("superman_returns.exe", StringComparison.OrdinalIgnoreCase))
@@ -159,11 +170,17 @@ public sealed class LauncherSettings
         var data = Path.GetFullPath(string.IsNullOrWhiteSpace(GameData) ? Path.Combine(Path.GetDirectoryName(exe)!, "game") : GameData, baseDirectory);
         if (!File.Exists(Path.Combine(data, "default.xex")) || !Directory.Exists(Path.Combine(data, "DATA")))
             throw new InvalidOperationException(LauncherText.Get("DataError", Language));
-        if (FrameGeneration && (string.IsNullOrWhiteSpace(FrameGenerationDll) || !File.Exists(FrameGenerationDll)))
+        if (!coop && FrameGeneration && (string.IsNullOrWhiteSpace(FrameGenerationDll) || !File.Exists(FrameGenerationDll)))
             throw new InvalidOperationException(LauncherText.Get("DllError", Language));
         var logDir = Path.Combine(Path.GetDirectoryName(exe)!, "logs");
         Directory.CreateDirectory(logDir);
         var start = new ProcessStartInfo(exe) { WorkingDirectory = Path.GetDirectoryName(exe)!, UseShellExecute = false };
+        if (coop) {
+            // A launcher session always uses real controllers, even when started
+            // from a developer shell that has the probe's environment enabled.
+            start.Environment.Remove("SR_BENCH_INPUT");
+            start.Environment.Remove("SR_BENCH_INPUT_P2");
+        }
         foreach (var argument in BuildArgumentList(benchmark)) start.ArgumentList.Add(argument);
         start.ArgumentList.Add($"--game_data_root={data}");
         start.ArgumentList.Add($"--log_file={Path.Combine(logDir, "game.log")}");

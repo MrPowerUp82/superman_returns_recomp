@@ -157,5 +157,52 @@ Check(LauncherSettings.Load(languagePath).Language == "pt-BR", "unknown saved la
 Check(new LauncherSettings { Language = "en", RenderScale = "150" }.BuildArgumentList()
     .SequenceEqual(new LauncherSettings { Language = "pt-BR", RenderScale = "150" }.BuildArgumentList()),
     "launcher language leaves game arguments unchanged");
+Check(!new LauncherSettings().Coop && !LauncherSettings.Load(oldIni).Coop,
+    "co-op defaults off for new and existing preferences");
+var coopPath = Path.Combine(fixture, "coop.ini");
+foreach (var enabled in new[] { true, false }) {
+    new LauncherSettings { Coop = enabled }.Save(coopPath);
+    Check(LauncherSettings.Load(coopPath).Coop == enabled, $"co-op preference {enabled} survives restart");
+}
+var coopSettings = new LauncherSettings { Coop = true, GraphicsApi = "vulkan", Renderer = "xenos", RenderScale = "50",
+    InputMode = "KeyboardMouse", FrameGeneration = true, GameExe = settings.GameExe, GameData = settings.GameData };
+var coopArgs = coopSettings.BuildArgumentList();
+Check(coopArgs.Contains("--sr_renderer=native") && coopArgs.Contains("--sr_native_api=d3d12") &&
+    coopArgs.Contains("--sr_native_render_scale=1") && coopArgs.Contains("--sr_render_scale=100") &&
+    coopArgs.Contains("--sr_dlss=off") && coopArgs.Contains("--sr_lsfg=false"),
+    "co-op selects the validated split renderer even with incompatible solo preferences");
+Check(coopArgs.Contains("--mnk_mode=false") && coopArgs.Contains("--mnk_mouse=false"),
+    "co-op uses two real controllers");
+foreach (var flag in new[] { "input", "autojoin", "second_camera", "camera_probe", "camera_transport",
+    "split_preview", "idle", "status_probe", "apt_probe", "stamina_preview" })
+    Check(coopArgs.Contains($"--sr_coop_{flag}=true"), $"co-op enables {flag}");
+Check(coopArgs.GroupBy(a => a.Split('=')[0]).All(group => group.Count() == 1),
+    "co-op forwards every option once (duplicate arguments are rejected by the engine)");
+var inheritedInput = Environment.GetEnvironmentVariable("SR_BENCH_INPUT");
+var inheritedP2 = Environment.GetEnvironmentVariable("SR_BENCH_INPUT_P2");
+try {
+    Environment.SetEnvironmentVariable("SR_BENCH_INPUT", "developer-p1.txt");
+    Environment.SetEnvironmentVariable("SR_BENCH_INPUT_P2", "developer-p2.txt");
+    var coopLaunch = coopSettings.CreateLaunch(fixture);
+    Check(!coopLaunch.Environment.ContainsKey("SR_BENCH_INPUT") && !coopLaunch.Environment.ContainsKey("SR_BENCH_INPUT_P2"),
+        "co-op launch excludes inherited synthetic input files");
+    Check(coopLaunch.ArgumentList.Contains("--sr_coop_autojoin=true") &&
+        !coopLaunch.ArgumentList.Any(a => a.StartsWith("--sr_coop_script=") || a.StartsWith("--user_data_root=")),
+        "co-op uses a built-in join with the normal save, without a development mailbox");
+} finally {
+    Environment.SetEnvironmentVariable("SR_BENCH_INPUT", inheritedInput);
+    Environment.SetEnvironmentVariable("SR_BENCH_INPUT_P2", inheritedP2);
+}
+Check(coopSettings.Coop && coopSettings.Renderer == "xenos" && coopSettings.GraphicsApi == "vulkan" &&
+    coopSettings.RenderScale == "50" && coopSettings.InputMode == "KeyboardMouse" && coopSettings.FrameGeneration,
+    "co-op does not overwrite solo preferences");
+var coopBenchmark = coopSettings.BuildArgumentList(benchmark: true);
+Check(!coopBenchmark.Any(a => a.StartsWith("--sr_coop_")) && coopBenchmark.Contains("--sr_native_api=vulkan"),
+    "benchmark ignores the co-op preference and retains solo graphics");
+coopSettings.Coop = false;
+var soloAgain = coopSettings.BuildArgumentList();
+Check(!soloAgain.Any(a => a.StartsWith("--sr_coop_")) && soloAgain.Contains("--sr_native_api=vulkan") &&
+    soloAgain.Contains("--mnk_mode=true") && soloAgain.Contains("--sr_lsfg=true"),
+    "disabling co-op restores solo graphics and input");
 Console.WriteLine($"{failed} failed checks");
 return failed == 0 ? 0 : 1;

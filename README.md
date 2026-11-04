@@ -41,6 +41,12 @@ de iniciar. Preferências já salvas mantêm a API escolhida. Com Vulkan, escala
 detalhes em [launcher/README.md](launcher/README.md). O pacote de distribuição também
 inclui o launcher. A seleção de GPU exige o executável do jogo da mesma build.
 
+Para jogar em dupla, marque **Cooperativo — 2 jogadores (experimental)** no
+launcher, conecte dois controles e clique em **JOGAR**. Carregue um save em
+Metropolis: o segundo Superman entra automaticamente com tela dividida. O modo
+usa Nativo + Direct3D 12 e resolução interna de 100%; as preferências solo
+retornam ao desmarcá-lo. A entrada automática ocorre uma vez por execução.
+
 Depois de compilar com `build.cmd`:
 
 | Script | Uso |

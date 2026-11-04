@@ -92,6 +92,12 @@ else()
 endif()
 
 rexglue_setup_target(superman_returns GPU_PLUGINS xenos)
+# Ship the already exercised join script inside the executable. The launcher
+# does not need a checkout, PowerShell, or an editable Lua mailbox.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../tools/coop/spawn_p2.lua")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/../tools/coop/spawn_p2.lua" SR_COOP_JOIN_LUA)
+configure_file(src/coop_join_script.h.in "${CMAKE_CURRENT_BINARY_DIR}/coop_join_script.h" @ONLY)
+set_property(SOURCE src/coop_lua.cpp APPEND PROPERTY INCLUDE_DIRECTORIES "${CMAKE_CURRENT_BINARY_DIR}")
 if(SR_MEMORY_TRACKING_SDK)
     # Installed SDK headers flatten ImGui into include/. In the source build,
     # public UI headers still need its original include directory. Its code

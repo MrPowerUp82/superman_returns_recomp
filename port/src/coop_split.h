@@ -1,7 +1,7 @@
 #pragma once
 
-// Input preparation for local co-op in one game instance. This does not yet
-// create a second player or camera, or render split-screen views.
+// Install the opt-in input, join, camera and HUD parts for local co-op in one
+// game instance. The launcher enables their individual options together.
 namespace rex { class Runtime; }
 
 namespace superman_returns::coop {

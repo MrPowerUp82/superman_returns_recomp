@@ -1,0 +1,8 @@
+#pragma once
+#include <string_view>
+
+namespace superman_returns::coop {
+inline constexpr std::string_view kJoinScript = R"SR_COOP(@SR_COOP_JOIN_LUA@)SR_COOP";
+static_assert(!kJoinScript.empty() && kJoinScript.size() < 64 * 1024);
+static_assert(kJoinScript.starts_with("-- sr-coop-context: player1"));
+}

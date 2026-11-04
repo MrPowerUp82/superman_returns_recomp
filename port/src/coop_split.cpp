@@ -15,8 +15,7 @@
 #include "title_benchmark.h"
 
 REXCVAR_DEFINE_BOOL(sr_coop_input, false, "Superman Returns",
-                    "Prepare separate controller slots in one instance; second player "
-                    "gameplay and split-screen rendering are not implemented")
+                    "Prepare separate controller slots for experimental local co-op")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 namespace superman_returns::coop {
@@ -35,8 +34,7 @@ void Install(rex::Runtime& runtime) {
     system->SetDeviceAssignment(MakeCoopDeviceAssignment());
     REXLOG_INFO("coop: single-instance input preparation; controller ordinals map "
                 "to guest ports, keyboard/mouse to port 0");
-    REXLOG_WARN("coop: second Superman, independent cameras and split-screen "
-                "rendering are not implemented; gameplay is still single-player");
+    REXLOG_INFO("coop: input preparation enabled; P2 join and split screen require their separate options");
   }
 }
 

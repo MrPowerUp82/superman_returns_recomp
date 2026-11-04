@@ -27,6 +27,8 @@
     <TextBlock Text="{DynamicResource Language}"/><ComboBox x:Name="LanguageBox" AutomationProperties.Name="{DynamicResource Language}" HorizontalAlignment="Left" MinWidth="190"/>
     <TextBlock Text="{DynamicResource SettingsHeading}" FontSize="27" FontWeight="SemiBold"/>
     <TextBlock x:Name="SummaryText" Foreground="{StaticResource Muted}" Margin="0,7,0,20"/>
+    <CheckBox x:Name="CoopBox" Content="{DynamicResource Coop}" AutomationProperties.Name="{DynamicResource Coop}"/>
+    <TextBlock x:Name="CoopNote" Text="{DynamicResource CoopNote}" Foreground="{StaticResource Muted}" TextWrapping="Wrap" FontSize="12" Margin="0,0,0,12" Visibility="Collapsed"/>
     <UniformGrid Columns="2">
      <StackPanel Margin="0,0,12,0">
       <TextBlock Text="{DynamicResource Renderer}"/><ComboBox x:Name="RendererBox" AutomationProperties.Name="{DynamicResource Renderer}"/>

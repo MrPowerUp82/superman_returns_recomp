@@ -1,4 +1,5 @@
 #include "coop_lua.h"
+#include "coop_join_script.h"
 
 #include <atomic>
 #include <cmath>
@@ -23,6 +24,10 @@ REXCVAR_DEFINE_STRING(sr_coop_script, "", "Superman Returns",
                       "Development: run a local Lua file once per edit on the game thread; "
                       "empty disables the co-op script mailbox")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(sr_coop_autojoin, false, "Superman Returns",
+                    "Experimental: create P2 once after P1 enters gameplay; requires co-op input")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DECLARE(bool, sr_coop_input);
 
 namespace superman_returns::coop {
 namespace {
@@ -34,6 +39,7 @@ std::atomic<uint32_t> script_buffer{0};
 std::filesystem::path script_path;
 std::mutex mailbox_mutex;
 thread_local bool running_mailbox = false;
+bool autojoin_enabled = false;
 
 bool ReadWord(const uint8_t* base, uint32_t address, uint32_t& result) {
 #ifdef _WIN32
@@ -91,17 +97,17 @@ void MaybeRunScript(PPCContext& ctx, uint8_t* base, uint32_t lua) {
   static bool has_stamp = false;
   static std::filesystem::file_time_type last_stamp;
   static std::string pending_script;
+  static bool pending_autojoin = false;
+  static auto next_join = Clock::time_point{};
   const auto now = Clock::now();
-  if (now >= next_poll) {
+  if (!script_path.empty() && now >= next_poll) {
     next_poll = now + std::chrono::milliseconds(250);
     std::error_code error;
     const auto stamp = std::filesystem::last_write_time(script_path, error);
     if (error) {
-      pending_script.clear();
+      if (!pending_autojoin) pending_script.clear();
       has_stamp = false;
-      return;
-    }
-    if (!has_stamp || stamp != last_stamp) {
+    } else if (!has_stamp || stamp != last_stamp) {
       std::ifstream input(script_path, std::ios::binary);
       if (!input) return;  // retry transient open failures without consuming the edit
       std::string incoming(kScriptCapacity, '\0');
@@ -110,6 +116,7 @@ void MaybeRunScript(PPCContext& ctx, uint8_t* base, uint32_t lua) {
       last_stamp = stamp;
       has_stamp = true;
       pending_script.clear();
+      pending_autojoin = false;
       if (input.bad() || count == 0 || count >= kScriptCapacity) {
         REXLOG_WARN("coop Lua: script must contain 1..65535 bytes");
         return;
@@ -120,6 +127,10 @@ void MaybeRunScript(PPCContext& ctx, uint8_t* base, uint32_t lua) {
       pending_script = std::move(incoming);
       REXLOG_INFO("coop Lua: queued {} bytes", pending_script.size());
     }
+  }
+  if (pending_script.empty() && autojoin_enabled && now >= next_join) {
+    pending_script = kJoinScript;
+    pending_autojoin = true;
   }
   if (pending_script.empty()) return;
 
@@ -150,6 +161,11 @@ void MaybeRunScript(PPCContext& ctx, uint8_t* base, uint32_t lua) {
   }
   std::string script;
   script.swap(pending_script);
+  const bool automatic = pending_autojoin;
+  pending_autojoin = false;
+  // Stop by default before invoking any guest code. Only a read-only readiness
+  // result may re-arm the join; errors and partial spawns never create duplicates.
+  if (automatic) autojoin_enabled = false;
 
   const PPCContext saved = ctx;
   struct RestoreContext {
@@ -158,7 +174,7 @@ void MaybeRunScript(PPCContext& ctx, uint8_t* base, uint32_t lua) {
     ~RestoreContext() { target = saved; running_mailbox = false; }
   } restore{ctx, saved};
   running_mailbox = true;
-  REXLOG_INFO("coop Lua: executing {} bytes context={:08X}", script.size(), entity);
+  if (!automatic) REXLOG_INFO("coop Lua: executing {} bytes context={:08X}", script.size(), entity);
 
   ctx.r3.u64 = lua;
   sub_8275BDA0(ctx, base);  // lua_gettop
@@ -192,22 +208,37 @@ void MaybeRunScript(PPCContext& ctx, uint8_t* base, uint32_t lua) {
   ctx.r3.u64 = lua;
   ctx.r4.s64 = top;
   sub_8275BDB8(ctx, base);  // lua_settop
-  REXLOG_INFO("coop Lua: status={} context={:08X} result={}", status, entity, message);
+  if (automatic) {
+    const bool waiting = status == 0 && (message == "world not ready" ||
+        message == "P1 not ready" || message == "P1 not in gameplay control");
+    if (waiting) {
+      autojoin_enabled = true;
+      next_join = Clock::now() + std::chrono::seconds(1);
+    } else {
+      REXLOG_INFO("coop autojoin: status={} context={:08X} result={}; automatic join finished",
+                  status, entity, message);
+    }
+  } else {
+    REXLOG_INFO("coop Lua: status={} context={:08X} result={}", status, entity, message);
+  }
 }
 }  // namespace
 
 void InstallLuaBridge(rex::Runtime& runtime) {
   const std::string path = REXCVAR_GET(sr_coop_script);
-  if (path.empty()) return;
+  const bool automatic = REXCVAR_GET(sr_coop_autojoin) && REXCVAR_GET(sr_coop_input);
+  if (path.empty() && !automatic) return;
 #ifdef _WIN32
   script_path = path;
+  autojoin_enabled = automatic;
   const uint32_t buffer = runtime.memory()->SystemHeapAlloc(kScriptCapacity + 64);
   if (!buffer) {
     REXLOG_ERROR("coop Lua: could not allocate the script mailbox");
     return;
   }
   script_buffer.store(buffer, std::memory_order_release);
-  REXLOG_INFO("coop Lua: local development mailbox enabled");
+  if (!path.empty()) REXLOG_INFO("coop Lua: local development mailbox enabled");
+  if (automatic) REXLOG_INFO("coop autojoin: waiting for P1 gameplay; built-in join script, once per session");
 #else
   REXLOG_WARN("coop Lua: mailbox currently requires Windows checked guest reads");
 #endif
@@ -215,8 +246,8 @@ void InstallLuaBridge(rex::Runtime& runtime) {
 
 }  // namespace superman_returns::coop
 
-// Development-only extension: SetActorToDefaultController(actor, port).
-// Calls made by the guest itself, or outside the injected mailbox, keep the
+// Bridge-only extension: SetActorToDefaultController(actor, port).
+// Calls made by the guest itself, or outside the built-in join/mailbox, keep the
 // original single-argument behavior. Ports are zero-based, as in XamInputGetState.
 REX_HOOK_RAW(sub_8229F778) {
   using namespace superman_returns::coop;
