@@ -273,6 +273,14 @@ bars still share their original model; independent Flash widget state/layout
 remains the next HUD task. See `docs/checkpoints/checkpoint12.md` for the
 100%/25%, 100%/75%, 50%/75% and leave/rejoin runtime evidence.
 
+Checkpoint13 adds `tools/analysis/coop_apt_probe.py` and the evidence ledger
+`docs/coop/APT_STAMINA.md`. The decoder processed Main_Hud, StaminaMeter and
+GenericMeter timelines/actions, identifying the translated fill pieces,
+mask, notch and low-shield state. Native drawing has a separate context, but
+the per-view packet bridge, stamina identity and retention lifetime remain
+unproven. The next experiment is a read-only observation of adapter `826D1648`
+inside the split HUD passes. Independent APT bar pixels remain pending.
+
 1. **Input preparation (implemented):** independent guest controller ports in one
    process. Verify with two real controllers, disconnect/reconnect and rumble.
 2. **Player lifecycle (experimental spawn exercised):** P2 was created from the
@@ -315,12 +323,14 @@ Continuation evidence is recorded in `docs/checkpoints/checkpoint3.md`,
 `docs/checkpoints/checkpoint6.md`, `docs/checkpoints/checkpoint7.md`,
 `docs/checkpoints/checkpoint8.md`, `docs/checkpoints/checkpoint9.md` and
 `docs/checkpoints/checkpoint10.md`, `docs/checkpoints/checkpoint11.md` and
-`docs/checkpoints/checkpoint12.md`.
+`docs/checkpoints/checkpoint12.md` and `docs/checkpoints/checkpoint13.md`.
 These cover movement checks, despawn/rebind,
 the camera/render handoff, the separate native P2 controller, secondary packet
 transport, P2 world-view preview, experimental simultaneous split views and
 independent native radar anchors, shared idle-camera/HUD ownership and distinct
 native stamina records selected by each split HUD pass.
+Checkpoint13 records static APT bytecode/draw-boundary research and adds no
+new gameplay/runtime validation.
 Physical controllers, full combat and distant independent visibility remain
 unverified. A previous development script enumerating
 `_G` with `pairs` and `string.find` triggered guest access violations; that failure
