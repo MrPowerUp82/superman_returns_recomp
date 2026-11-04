@@ -19,6 +19,7 @@ def main():
     parser.add_argument("--batch", choices=("default", "32", "128", "256"), default="default")
     parser.add_argument("--seconds", type=float, default=60)
     parser.add_argument("--flag", action="append", default=[])
+    parser.add_argument("--env", action="append", default=[], metavar="SR_NAME=VALUE")
     options = parser.parse_args()
     directory = ROOT / "artifacts/d3d12-fps-20261104" / options.label
     directory.mkdir(parents=True, exist_ok=False)
@@ -33,6 +34,11 @@ def main():
                    SR_FRAME_TIMELINE=str(directory / "timeline.csv"))
     if options.batch != "default":
         env["SR_NATIVE_BATCH_COMMANDS"] = options.batch
+    for item in options.env:
+        name, separator, value = item.partition("=")
+        if not separator or not name.startswith("SR_"):
+            parser.error("--env requires SR_NAME=VALUE")
+        env[name] = value
     args = [str(exe), f"--game_data_root={ROOT / 'game'}", f"--log_file={directory / 'game.log'}",
             "--sr_renderer=native", "--sr_native_api=d3d12", "--sr_preset=custom",
             "--sr_benchmark=true", "--sr_benchmark_headless=true", "--sr_skip_intro=true",
