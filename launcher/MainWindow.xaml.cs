@@ -23,7 +23,10 @@ public partial class MainWindow : Window
         _settings = LauncherSettings.DetectDefaults(AppContext.BaseDirectory);
         string? loadWarning = null;
         try { if (File.Exists(_settingsPath)) _settings = LauncherSettings.Load(_settingsPath); }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { loadWarning = "Não foi possível ler as preferências salvas. Usando os padrões."; }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { loadWarning = T("LoadWarning"); }
+        SetChoices(LanguageBox, new(LauncherText.Portuguese, "Português (Brasil)"), new(LauncherText.English, "English"));
+        Select(LanguageBox, _settings.Language);
+        ApplyLanguage();
         PopulateChoices();
         ApplySettingsToUi();
         foreach (var box in new[] { RendererBox, ApiBox, ResolutionBox, DisplayModeBox, InputBox, GpuBox, RenderScaleBox, AaBox, FilterBox, FpsBox, CostumeBox, ShadowBox, MsaaBox })
@@ -37,27 +40,52 @@ public partial class MainWindow : Window
         FrameGenerationBox.Checked += (_, _) => UpdateSummary();
         FrameGenerationBox.Unchecked += (_, _) => UpdateSummary();
         FrameGenerationDllBox.TextChanged += (_, _) => UpdateSummary();
+        LanguageBox.SelectionChanged += Language_Changed;
         _ready = true;
         UpdateSummary();
         if (loadWarning is not null) StatusText.Text = loadWarning;
     }
 
+    private string T(string key) => LauncherText.Get(key, _settings.Language);
+
+    private void ApplyLanguage()
+    {
+        Language = System.Windows.Markup.XmlLanguage.GetLanguage(_settings.Language);
+        foreach (var key in LauncherText.Strings.Keys) Resources[key] = T(key);
+    }
+
+    private void Language_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_ready) return;
+        ReadSettings();
+        _settings.Language = Value(LanguageBox);
+        _ready = false;
+        ApplyLanguage();
+        PopulateChoices();
+        ApplySettingsToUi();
+        _ready = true;
+        UpdateSummary();
+        try { _settings.Save(_settingsPath); StatusText.Text = T("Saved"); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        { StatusText.Text = T("SaveError") + error.Message; }
+    }
+
     private static void SetChoices(ComboBox box, params Choice[] choices) => box.ItemsSource = choices;
     private void PopulateChoices()
     {
-        SetChoices(RendererBox, new("native", "Nativo (recomendado)"), new("xenos", "Xenos (compatibilidade)"));
-        SetChoices(ApiBox, new("d3d12", "Direct3D 12 (recomendado)"), new("vulkan", "Vulkan (experimental)"));
-        SetChoices(ResolutionBox, new("960x540", "960 × 540 (PC fraco)"), new("1280x720", "1280 × 720"), new("1600x900", "1600 × 900"), new("1920x1080", "1920 × 1080"), new("2560x1440", "2560 × 1440"), new("3840x2160", "3840 × 2160"));
-        SetChoices(DisplayModeBox, new("Fullscreen", "Tela cheia sem bordas"), new("Windowed", "Janela"));
-        SetChoices(InputBox, new("KeyboardMouse", "Teclado e mouse"), new("Controller", "Controle Xbox / XInput"));
-        SetChoices(CostumeBox, new("default", "Padrão do jogo"), new("2", "Golden Age"), new("kingdom_come", "Reino do Amanhã"));
-        SetChoices(RenderScaleBox, new("50", "50% — 360p (nativo D3D12)"), new("75", "75% — 540p (nativo D3D12)"), new("100", "100% — 720p original"), new("125", "125% — 900p"), new("150", "150% — 1080p"), new("200", "200% — 1440p"), new("300", "300% — 2160p"), new("400", "400% — 2880p"));
-        SetChoices(AaBox, new("Off", "Desativado"), new("FXAA", "FXAA"));
-        SetChoices(FilterBox, new("Original", "Original do jogo"), new("Anisotropic2x", "Anisotrópico 2×"), new("Anisotropic4x", "Anisotrópico 4×"), new("Anisotropic8x", "Anisotrópico 8×"), new("Anisotropic16x", "Anisotrópico 16×"));
-        SetChoices(FpsBox, new("0", "Sem limite nativo — padrão"), new("30", "30 FPS — original"), new("60", "60 FPS — experimental"), new("120", "120 FPS — experimental"));
+        SetChoices(RendererBox, new("native", T("NativeRecommended")), new("xenos", T("XenosCompatibility")));
+        SetChoices(ApiBox, new("d3d12", T("D3dRecommended")), new("vulkan", "Vulkan (experimental)"));
+        SetChoices(ResolutionBox, new("960x540", T("LowEndResolution")), new("1280x720", "1280 × 720"), new("1600x900", "1600 × 900"), new("1920x1080", "1920 × 1080"), new("2560x1440", "2560 × 1440"), new("3840x2160", "3840 × 2160"));
+        SetChoices(DisplayModeBox, new("Fullscreen", T("Borderless")), new("Windowed", T("Windowed")));
+        SetChoices(InputBox, new("KeyboardMouse", T("KeyboardMouse")), new("Controller", T("Controller")));
+        SetChoices(CostumeBox, new("default", T("DefaultCostume")), new("2", "Golden Age"), new("kingdom_come", T("KingdomCome")));
+        SetChoices(RenderScaleBox, new("50", T("Scale50")), new("75", T("Scale75")), new("100", "100% — 720p original"), new("125", "125% — 900p"), new("150", "150% — 1080p"), new("200", "200% — 1440p"), new("300", "300% — 2160p"), new("400", "400% — 2880p"));
+        SetChoices(AaBox, new("Off", T("Off")), new("FXAA", "FXAA"));
+        SetChoices(FilterBox, new("Original", T("OriginalFilter")), new("Anisotropic2x", T("Anisotropic2")), new("Anisotropic4x", T("Anisotropic4")), new("Anisotropic8x", T("Anisotropic8")), new("Anisotropic16x", T("Anisotropic16")));
+        SetChoices(FpsBox, new("0", T("Uncapped")), new("30", "30 FPS — original"), new("60", "60 FPS — experimental"), new("120", "120 FPS — experimental"));
         SetChoices(ShadowBox, new("1", "Original"), new("2", "2×"), new("4", "4×"));
-        SetChoices(MsaaBox, new("1", "Desativado"), new("4", "4×"), new("8", "8×"));
-        GpuBox.ItemsSource = GpuEnumerator.GetAdapters();
+        SetChoices(MsaaBox, new("1", T("Off")), new("4", "4×"), new("8", "8×"));
+        GpuBox.ItemsSource = GpuEnumerator.GetAdapters(_settings.Language);
     }
     private static void Select(ComboBox box, string value) => box.SelectedItem = box.Items.Cast<Choice>().FirstOrDefault(x => x.Value == value) ?? box.Items[0];
     private void ApplySettingsToUi()
@@ -95,22 +123,22 @@ public partial class MainWindow : Window
         ReadSettings();
         FrameGenerationPanel.Visibility = _settings.FrameGeneration ? Visibility.Visible : Visibility.Collapsed;
         SummaryText.Text = _settings.UsesVulkan
-            ? $"Vulkan · Nativo · {_settings.Resolution.Replace("x", " × ")} · 100% interno"
-            : $"Direct3D 12 · {(_settings.Renderer == "xenos" ? "Xenos" : "Nativo")} · {_settings.Resolution.Replace("x", " × ")} · {_settings.RenderScale}% interno";
+            ? $"Vulkan · {T("Native")} · {_settings.Resolution.Replace("x", " × ")} · 100% {T("Internal")}"
+            : $"Direct3D 12 · {(_settings.Renderer == "xenos" ? "Xenos" : T("Native"))} · {_settings.Resolution.Replace("x", " × ")} · {_settings.RenderScale}% {T("Internal")}";
         FpsNote.Text = !_settings.UsesVulkan && _settings.Renderer == "xenos"
-            ? "O limite nativo não se aplica ao Xenos. O VSync é configurado separadamente."
+            ? T("XenosFpsNote")
             : _settings.FpsLimit == "30"
-                ? "Temporização nativa original. O VSync pode limitar a apresentação separadamente."
+                ? T("OriginalFpsNote")
                 : _settings.FpsLimit == "0"
-                    ? (_settings.VSync ? "O VSync está ligado. Desative-o para testar o alvo sem limite de 30 FPS." : "Alvo sem limite de 30 FPS. O desempenho depende da cena e do PC; acima de 30 ainda é experimental.")
-                    : "O desempenho depende do PC e do jogo; acima de 30 FPS ainda é experimental. O VSync segue sua configuração.";
-        EngineNote.Text = _settings.UsesVulkan ? "Vulkan: escala interna, FXAA, MSAA, sombras e filtro anisotrópico ficam no padrão do jogo. A primeira execução traduz os shaders e demora alguns minutos." : _settings.Renderer == "xenos" ? (_settings.RenderScale is "50" or "75" ? "Xenos não suporta 50%/75%: escolha Nativo com Direct3D 12 para reduzir a resolução interna." : "Xenos é o motor alternativo, mais lento e menos corrigido; use apenas se o nativo falhar.") : _settings.RenderScale is "50" or "75" ? "D3D12: reduz os alvos internos e os resolves juntos; exibição e HUD permanecem na área total da janela." : "Nativo: renderizador atual, com as correções de cutscenes, HUD e War World.";
+                    ? (_settings.VSync ? T("VSyncFpsNote") : T("UncappedFpsNote"))
+                    : T("ExperimentalFpsNote");
+        EngineNote.Text = _settings.UsesVulkan ? T("VulkanNote") : _settings.Renderer == "xenos" ? (_settings.RenderScale is "50" or "75" ? T("XenosScaleNote") : T("XenosNote")) : _settings.RenderScale is "50" or "75" ? T("NativeScaleNote") : T("NativeNote");
         ArgumentsPreview.Text = _settings.BuildArguments();
     }
     private void Save_Click(object sender, RoutedEventArgs e)
     {
-        try { ReadSettings(); _settings.Save(_settingsPath); StatusText.Text = "Preferências salvas para a próxima execução."; }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { StatusText.Text = "Não foi possível salvar: " + error.Message; }
+        try { ReadSettings(); _settings.Save(_settingsPath); StatusText.Text = T("Saved"); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { StatusText.Text = T("SaveError") + error.Message; }
     }
     private void Play_Click(object sender, RoutedEventArgs e) => Launch(benchmark: false);
     private void Benchmark_Click(object sender, RoutedEventArgs e) => Launch(benchmark: true);
@@ -129,7 +157,7 @@ public partial class MainWindow : Window
     }
     private void Browse_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new OpenFileDialog { Filter = "Superman Returns|superman_returns.exe", Title = "Selecione a build do jogo" };
+        var dialog = new OpenFileDialog { Filter = "Superman Returns|superman_returns.exe", Title = T("BrowseExecutable") };
         if (dialog.ShowDialog() != true) return;
         GameExeBox.Text = dialog.FileName;
         var adjacent = Path.Combine(Path.GetDirectoryName(dialog.FileName)!, "game");
@@ -137,19 +165,19 @@ public partial class MainWindow : Window
     }
     private void BrowseData_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new OpenFolderDialog { Title = "Selecione a pasta game (default.xex e DATA)" };
+        var dialog = new OpenFolderDialog { Title = T("BrowseData") };
         if (dialog.ShowDialog() == true) GameDataBox.Text = dialog.FolderName;
     }
     private void BrowseFrameGeneration_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new OpenFileDialog { Filter = "Lossless Scaling|Lossless.dll", Title = "Selecione a Lossless.dll instalada" };
+        var dialog = new OpenFileDialog { Filter = "Lossless Scaling|Lossless.dll", Title = T("BrowseDll") };
         if (dialog.ShowDialog() == true) FrameGenerationDllBox.Text = dialog.FileName;
     }
     private void Defaults_Click(object sender, RoutedEventArgs e)
     {
         ReadSettings();
-        _settings = new LauncherSettings { GameExe = _settings.GameExe, GameData = _settings.GameData, Gpu = _settings.Gpu, GpuLuid = _settings.GpuLuid };
+        _settings = new LauncherSettings { Language = _settings.Language, GameExe = _settings.GameExe, GameData = _settings.GameData, Gpu = _settings.Gpu, GpuLuid = _settings.GpuLuid };
         _ready = false; ApplySettingsToUi(); _ready = true; UpdateSummary();
-        StatusText.Text = "Qualidade original restaurada. Clique em Salvar para guardar.";
+        StatusText.Text = T("DefaultsRestored");
     }
 }

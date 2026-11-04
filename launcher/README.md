@@ -1,6 +1,10 @@
 # Launcher Windows
 
-GUI WPF em português, adaptada do pacote fornecido pelo usuário. Inicia o renderer
+GUI WPF com seletor **Idioma / Language** para **Português (Brasil)** e **English**.
+A troca é imediata e salva a preferência para a próxima execução. Instalações e
+preferências antigas continuam em português por padrão. Restaurar a qualidade
+original preserva o idioma escolhido. O seletor altera apenas o launcher.
+Inicia o renderer
 nativo com a API escolhida: Direct3D 12 (padrão e recomendado) ou Vulkan (experimental)
 (`--sr_native_api`). Preferências de API já salvas são respeitadas.
 Com Vulkan, escala interna, FXAA, MSAA, sombras e filtro anisotrópico ficam no padrão do jogo.

@@ -7,6 +7,8 @@ namespace SupermanReturnsLauncher;
 
 public sealed class LauncherSettings
 {
+    private string _language = LauncherText.Portuguese;
+    public string Language { get => _language; set => _language = LauncherText.NormalizeLanguage(value); }
     public string GameExe { get; set; } = "superman_returns.exe";
     public string GameData { get; set; } = "";
     public string Resolution { get; set; } = "1280x720";
@@ -47,6 +49,7 @@ public sealed class LauncherSettings
             var value = line[(idx + 1)..].Trim();
             switch (line[..idx].Trim().ToLowerInvariant())
             {
+                case "language": s.Language = value; break;
                 case "game_exe": s.GameExe = value; break;
                 case "game_data": s.GameData = value; break;
                 case "resolution": s.Resolution = value; break;
@@ -75,7 +78,7 @@ public sealed class LauncherSettings
     public void Save(string path)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
-        var lines = new[] { "# Superman Returns — launcher", $"game_exe={GameExe}", $"game_data={GameData}",
+        var lines = new[] { "# Superman Returns — launcher", $"language={Language}", $"game_exe={GameExe}", $"game_data={GameData}",
             $"resolution={Resolution}", $"display_mode={DisplayMode}", $"gpu={Gpu}", $"gpu_luid={GpuLuid}",
             $"vsync={VSync.ToString().ToLowerInvariant()}", $"fps_limit={FpsLimit}", $"render_scale={RenderScale}",
             $"texture_filter={TextureFilter}", $"antialiasing={Antialiasing}", $"shadow_quality={ShadowQuality}",
@@ -147,17 +150,17 @@ public sealed class LauncherSettings
     public ProcessStartInfo CreateLaunch(string baseDirectory, bool benchmark = false)
     {
         if (benchmark && !UsesVulkan && Renderer == "xenos")
-            throw new InvalidOperationException("O benchmark precisa do renderizador Nativo (Direct3D 12 ou Vulkan).");
+            throw new InvalidOperationException(LauncherText.Get("BenchmarkRequiresNative", Language));
         if (!UsesVulkan && Renderer == "xenos" && ValidChoice(RenderScale, 100, 50, 75, 100, 125, 150, 200, 300, 400) < 100)
-            throw new InvalidOperationException("Xenos ainda não suporta resolução interna abaixo de 100%. Selecione o renderizador Nativo com Direct3D 12 para usar 540p ou 360p.");
+            throw new InvalidOperationException(LauncherText.Get("XenosScaleError", Language));
         var exe = Path.GetFullPath(GameExe, baseDirectory);
         if (!File.Exists(exe) || !Path.GetFileName(exe).Equals("superman_returns.exe", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("Selecione o executável superman_returns.exe da build do jogo.");
+            throw new InvalidOperationException(LauncherText.Get("ExecutableError", Language));
         var data = Path.GetFullPath(string.IsNullOrWhiteSpace(GameData) ? Path.Combine(Path.GetDirectoryName(exe)!, "game") : GameData, baseDirectory);
         if (!File.Exists(Path.Combine(data, "default.xex")) || !Directory.Exists(Path.Combine(data, "DATA")))
-            throw new InvalidOperationException("Selecione a pasta game que contém default.xex e a pasta DATA.");
+            throw new InvalidOperationException(LauncherText.Get("DataError", Language));
         if (FrameGeneration && (string.IsNullOrWhiteSpace(FrameGenerationDll) || !File.Exists(FrameGenerationDll)))
-            throw new InvalidOperationException("Selecione a Lossless.dll instalada para ativar a geração de quadros.");
+            throw new InvalidOperationException(LauncherText.Get("DllError", Language));
         var logDir = Path.Combine(Path.GetDirectoryName(exe)!, "logs");
         Directory.CreateDirectory(logDir);
         var start = new ProcessStartInfo(exe) { WorkingDirectory = Path.GetDirectoryName(exe)!, UseShellExecute = false };

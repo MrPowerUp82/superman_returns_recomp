@@ -1,0 +1,107 @@
+namespace SupermanReturnsLauncher;
+
+// Keep UI language separate from game arguments and the operating system culture.
+public static class LauncherText
+{
+    public const string Portuguese = "pt-BR";
+    public const string English = "en";
+    public static string NormalizeLanguage(string? language) => language == English ? English : Portuguese;
+
+    public static IReadOnlyDictionary<string, (string Portuguese, string English)> Strings { get; } =
+        new Dictionary<string, (string Portuguese, string English)>
+        {
+            ["ReadyHeading"] = ("Pronto para Metropolis", "Ready for Metropolis"),
+            ["Intro"] = ("Ajuste o jogo antes de começar. Suas preferências ficam salvas neste computador.", "Adjust the game before you start. Your preferences are saved on this computer."),
+            ["Play"] = ("JOGAR", "PLAY"),
+            ["PlayAccessible"] = ("Jogar", "Play"),
+            ["Save"] = ("Salvar preferências", "Save preferences"),
+            ["Defaults"] = ("Restaurar qualidade original", "Restore original quality"),
+            ["Ready"] = ("Pronto.", "Ready."),
+            ["EngineHeading"] = ("MOTOR E API", "ENGINE AND API"),
+            ["EngineRecommendation"] = ("Nativo + Direct3D 12 é a combinação validada.", "Native + Direct3D 12 is the validated combination."),
+            ["SettingsHeading"] = ("Configure sua experiência", "Configure your experience"),
+            ["Renderer"] = ("Motor de renderização", "Renderer"),
+            ["GraphicsApi"] = ("API gráfica", "Graphics API"),
+            ["WindowResolution"] = ("Resolução da janela", "Window resolution"),
+            ["ResolutionAccessible"] = ("Resolução", "Resolution"),
+            ["DisplayMode"] = ("Modo de exibição", "Display mode"),
+            ["Gpu"] = ("Placa de vídeo", "Graphics card"),
+            ["Input"] = ("Como você vai jogar", "How you will play"),
+            ["InputAccessible"] = ("Controles", "Controls"),
+            ["RenderScale"] = ("Resolução interna", "Internal resolution"),
+            ["Antialiasing"] = ("Suavização da imagem", "Antialiasing"),
+            ["AntialiasingAccessible"] = ("Suavização", "Antialiasing"),
+            ["TextureFilter"] = ("Filtro de texturas", "Texture filtering"),
+            ["FrameLimit"] = ("Limite de quadros", "Frame rate limit"),
+            ["FrameLimitAccessible"] = ("Limite de FPS", "FPS limit"),
+            ["Costume"] = ("Traje", "Costume"),
+            ["FrameGeneration"] = ("Geração de quadros (2x)", "Frame generation (2x)"),
+            ["FrameGenerationAccessible"] = ("Geração de quadros", "Frame generation"),
+            ["FrameGenerationNote"] = ("Melhora a fluidez com quadros intermediários. A velocidade e a resposta do jogo continuam nos FPS reais.", "Improves smoothness with intermediate frames. Game speed and responsiveness still depend on the real frame rate."),
+            ["InstalledDll"] = ("Lossless.dll instalada", "Installed Lossless.dll"),
+            ["Browse"] = ("Procurar", "Browse"),
+            ["MoreGraphics"] = ("Mais opções gráficas", "More graphics options"),
+            ["ShadowResolution"] = ("Resolução das sombras", "Shadow resolution"),
+            ["ShadowMsaa"] = ("MSAA das sombras", "Shadow MSAA"),
+            ["VSync"] = ("Sincronização vertical (VSync)", "Vertical synchronization (VSync)"),
+            ["SkipIntro"] = ("Pular logos e vídeos legais da abertura", "Skip opening logos and legal videos"),
+            ["ShadowNote"] = ("Sombras maiores e MSAA podem aumentar bastante o custo de renderização.", "Larger shadows and MSAA can significantly increase rendering cost."),
+            ["GameFiles"] = ("Arquivos do jogo", "Game files"),
+            ["BuildExecutable"] = ("Executável da build", "Build executable"),
+            ["GameExecutableAccessible"] = ("Executável do jogo", "Game executable"),
+            ["GameFolder"] = ("Pasta game — default.xex e DATA", "Game folder — default.xex and DATA"),
+            ["GameFolderAccessible"] = ("Pasta do jogo", "Game folder"),
+            ["LaunchDetails"] = ("Detalhes de inicialização", "Launch details"),
+            ["Language"] = ("Idioma / Language", "Language / Idioma"),
+            ["LoadWarning"] = ("Não foi possível ler as preferências salvas. Usando os padrões.", "Could not read saved preferences. Using defaults."),
+            ["NativeRecommended"] = ("Nativo (recomendado)", "Native (recommended)"),
+            ["XenosCompatibility"] = ("Xenos (compatibilidade)", "Xenos (compatibility)"),
+            ["D3dRecommended"] = ("Direct3D 12 (recomendado)", "Direct3D 12 (recommended)"),
+            ["LowEndResolution"] = ("960 × 540 (PC fraco)", "960 × 540 (low-end PC)"),
+            ["Borderless"] = ("Tela cheia sem bordas", "Borderless fullscreen"),
+            ["Windowed"] = ("Janela", "Windowed"),
+            ["KeyboardMouse"] = ("Teclado e mouse", "Keyboard and mouse"),
+            ["Controller"] = ("Controle Xbox / XInput", "Xbox / XInput controller"),
+            ["DefaultCostume"] = ("Padrão do jogo", "Game default"),
+            ["KingdomCome"] = ("Reino do Amanhã", "Kingdom Come"),
+            ["Scale50"] = ("50% — 360p (nativo D3D12)", "50% — 360p (native D3D12)"),
+            ["Scale75"] = ("75% — 540p (nativo D3D12)", "75% — 540p (native D3D12)"),
+            ["Off"] = ("Desativado", "Off"),
+            ["OriginalFilter"] = ("Original do jogo", "Game default"),
+            ["Anisotropic2"] = ("Anisotrópico 2×", "Anisotropic 2×"),
+            ["Anisotropic4"] = ("Anisotrópico 4×", "Anisotropic 4×"),
+            ["Anisotropic8"] = ("Anisotrópico 8×", "Anisotropic 8×"),
+            ["Anisotropic16"] = ("Anisotrópico 16×", "Anisotropic 16×"),
+            ["Uncapped"] = ("Sem limite nativo — padrão", "Uncapped native frame rate — default"),
+            ["Native"] = ("Nativo", "Native"),
+            ["Internal"] = ("interno", "internal"),
+            ["XenosFpsNote"] = ("O limite nativo não se aplica ao Xenos. O VSync é configurado separadamente.", "The native frame rate limit does not apply to Xenos. VSync is configured separately."),
+            ["OriginalFpsNote"] = ("Temporização nativa original. O VSync pode limitar a apresentação separadamente.", "Original native timing. VSync may limit presentation separately."),
+            ["VSyncFpsNote"] = ("O VSync está ligado. Desative-o para testar o alvo sem limite de 30 FPS.", "VSync is on. Turn it off to test without the 30 FPS cap."),
+            ["UncappedFpsNote"] = ("Alvo sem limite de 30 FPS. O desempenho depende da cena e do PC; acima de 30 ainda é experimental.", "No 30 FPS cap. Performance depends on the scene and your PC; above 30 FPS is still experimental."),
+            ["ExperimentalFpsNote"] = ("O desempenho depende do PC e do jogo; acima de 30 FPS ainda é experimental. O VSync segue sua configuração.", "Performance depends on your PC and the game; above 30 FPS is still experimental. VSync follows your setting."),
+            ["VulkanNote"] = ("Vulkan: escala interna, FXAA, MSAA, sombras e filtro anisotrópico ficam no padrão do jogo. A primeira execução traduz os shaders e demora alguns minutos.", "Vulkan: internal resolution, FXAA, MSAA, shadows and anisotropic filtering use game defaults. The first run translates shaders and takes a few minutes."),
+            ["XenosScaleNote"] = ("Xenos não suporta 50%/75%: escolha Nativo com Direct3D 12 para reduzir a resolução interna.", "Xenos does not support 50%/75%: choose Native with Direct3D 12 to lower internal resolution."),
+            ["XenosNote"] = ("Xenos é o motor alternativo, mais lento e menos corrigido; use apenas se o nativo falhar.", "Xenos is the alternative renderer, slower and with fewer fixes; use it only if Native fails."),
+            ["NativeScaleNote"] = ("D3D12: reduz os alvos internos e os resolves juntos; exibição e HUD permanecem na área total da janela.", "D3D12: scales internal render targets and resolves together; display and HUD keep the full window area."),
+            ["NativeNote"] = ("Nativo: renderizador atual, com as correções de cutscenes, HUD e War World.", "Native: current renderer, with cutscene, HUD and War World fixes."),
+            ["Saved"] = ("Preferências salvas para a próxima execução.", "Preferences saved for the next launch."),
+            ["SaveError"] = ("Não foi possível salvar: ", "Could not save: "),
+            ["BrowseExecutable"] = ("Selecione a build do jogo", "Select the game build"),
+            ["BrowseData"] = ("Selecione a pasta game (default.xex e DATA)", "Select the game folder (default.xex and DATA)"),
+            ["BrowseDll"] = ("Selecione a Lossless.dll instalada", "Select the installed Lossless.dll"),
+            ["DefaultsRestored"] = ("Qualidade original restaurada. Clique em Salvar para guardar.", "Original quality restored. Click Save preferences to keep it."),
+            ["BenchmarkRequiresNative"] = ("O benchmark precisa do renderizador Nativo (Direct3D 12 ou Vulkan).", "The benchmark requires the Native renderer (Direct3D 12 or Vulkan)."),
+            ["XenosScaleError"] = ("Xenos ainda não suporta resolução interna abaixo de 100%. Selecione o renderizador Nativo com Direct3D 12 para usar 540p ou 360p.", "Xenos does not support internal resolution below 100% yet. Select the Native renderer with Direct3D 12 to use 540p or 360p."),
+            ["ExecutableError"] = ("Selecione o executável superman_returns.exe da build do jogo.", "Select superman_returns.exe from the game build."),
+            ["DataError"] = ("Selecione a pasta game que contém default.xex e a pasta DATA.", "Select the game folder containing default.xex and the DATA folder."),
+            ["DllError"] = ("Selecione a Lossless.dll instalada para ativar a geração de quadros.", "Select the installed Lossless.dll to enable frame generation."),
+            ["AutomaticGpu"] = ("Automática", "Automatic"),
+        };
+
+    public static string Get(string key, string language)
+    {
+        var text = Strings[key];
+        return NormalizeLanguage(language) == English ? text.English : text.Portuguese;
+    }
+}

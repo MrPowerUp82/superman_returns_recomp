@@ -24,9 +24,9 @@ internal static class GpuEnumerator
     private static T Method<T>(nint instance, int slot) where T : Delegate =>
         Marshal.GetDelegateForFunctionPointer<T>(Marshal.ReadIntPtr(Marshal.ReadIntPtr(instance), slot * nint.Size));
 
-    public static IReadOnlyList<GpuAdapter> GetAdapters()
+    public static IReadOnlyList<GpuAdapter> GetAdapters(string language)
     {
-        var result = new List<GpuAdapter> { new(-1, "Automática") };
+        var result = new List<GpuAdapter> { new(-1, LauncherText.Get("AutomaticGpu", language)) };
         nint factory = 0;
         try
         {

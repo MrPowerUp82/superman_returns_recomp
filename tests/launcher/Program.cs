@@ -138,5 +138,24 @@ foreach (var costume in new[] { "kingdom_come", "2", "default" }) {
 }
 File.WriteAllText(costumePath, "costume=batman\n");
 Check(LauncherSettings.Load(costumePath).Costume == "default", "an unknown saved costume falls back to the game's choice");
+Check(new LauncherSettings().Language == "pt-BR", "new preferences retain Portuguese as the default");
+Check(LauncherSettings.Load(oldIni).Language == "pt-BR", "existing preferences without a language retain Portuguese");
+var languagePath = Path.Combine(fixture, "language.ini");
+foreach (var language in new[] { "pt-BR", "en" }) {
+    var localized = new LauncherSettings { Language = language, GraphicsApi = "d3d12", Renderer = "xenos" };
+    localized.Save(languagePath);
+    Check(LauncherSettings.Load(languagePath).Language == language, $"saved language {language} survives restart");
+    var message = "";
+    try { localized.CreateLaunch(fixture, benchmark: true); }
+    catch (InvalidOperationException error) { message = error.Message; }
+    Check(message == (language == "en"
+        ? "The benchmark requires the Native renderer (Direct3D 12 or Vulkan)."
+        : "O benchmark precisa do renderizador Nativo (Direct3D 12 ou Vulkan)."), $"launch validation uses {language}");
+}
+File.WriteAllText(languagePath, "language=unknown\n");
+Check(LauncherSettings.Load(languagePath).Language == "pt-BR", "unknown saved languages fall back to Portuguese");
+Check(new LauncherSettings { Language = "en", RenderScale = "150" }.BuildArgumentList()
+    .SequenceEqual(new LauncherSettings { Language = "pt-BR", RenderScale = "150" }.BuildArgumentList()),
+    "launcher language leaves game arguments unchanged");
 Console.WriteLine($"{failed} failed checks");
 return failed == 0 ? 0 : 1;
