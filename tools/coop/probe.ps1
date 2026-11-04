@@ -14,6 +14,7 @@ param(
   [switch]$SplitPreview,
   [switch]$SharedIdle,
   [switch]$StatusProbe,
+  [switch]$AptProbe,
   [ValidateSet('native', 'xenos')][string]$Renderer = 'native'
 )
 $ErrorActionPreference = 'Stop'
@@ -46,6 +47,7 @@ function Set-Mailbox([string]$source) {
 
 switch ($Action) {
   Start {
+    if($AptProbe){$SplitPreview=$true}
     if($SplitPreview -and $Renderer -ne 'native'){throw 'Split preview requires the native renderer'}
     if (-not (Test-Path -LiteralPath $exe)) { throw 'Build the game with build.cmd first' }
     if (Get-CimInstance Win32_Process -Filter "Name = 'superman_returns.exe'") {
@@ -87,6 +89,7 @@ switch ($Action) {
     if ($SecondCamera -or $CameraTransport -or $PreviewP2 -or $SplitPreview -or $SharedIdle -or $StatusProbe) { $arguments += '--sr_coop_second_camera=true' }
     if ($SharedIdle -or $SplitPreview) { $arguments += '--sr_coop_idle=true' }
     if ($StatusProbe -or $SplitPreview) { $arguments += '--sr_coop_status_probe=true' }
+    if ($AptProbe) { $arguments += '--sr_coop_apt_probe=true' }
     if ($CameraTransport -or $PreviewP2 -or $SplitPreview) { $arguments += '--sr_coop_camera_transport=true' }
     if ($PreviewP2) { $arguments += '--sr_coop_camera_preview=true' }
     if ($SplitPreview) { $arguments += '--sr_coop_split_preview=true','--sr_native_api=d3d12','--sr_dlss=off','--sr_native_render_scale=1','--sr_render_scale=100' }

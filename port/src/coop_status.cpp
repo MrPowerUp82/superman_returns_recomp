@@ -1,5 +1,6 @@
 #include "coop_status_packet.h"
 #include "coop_status.h"
+#include "coop_apt_probe.h"
 #include "coop_second_camera.h"
 #include "coop_split_render.h"
 #include <mutex>
@@ -125,6 +126,8 @@ void superman_returns::coop::UpdateCoopStatus(PPCContext& ctx,uint8_t* base) {
   Produce(ctx,base,root,uint32_t(ctx.lr));
 }
 REX_HOOK_RAW(sub_82775EF8) {
+  BeginAptHudProbe();
   if(Enabled())ObserveHudEntry();
   __imp__sub_82775EF8(ctx,base);
+  EndAptHudProbe();
 }

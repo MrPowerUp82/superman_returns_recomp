@@ -281,6 +281,14 @@ the per-view packet bridge, stamina identity and retention lifetime remain
 unproven. The next experiment is a read-only observation of adapter `826D1648`
 inside the split HUD passes. Independent APT bar pixels remain pending.
 
+Checkpoint14 observed that bridge in both HUD passes using opt-in `-AptProbe`
+(`sr_coop_apt_probe`), with 9422 verified packet observations across 31 composed
+frames and two P2 generations. Captured headers identify GenericMeter shape
+geometry, and the examined consumer copies transformed vertices synchronously.
+Unique stamina-instance/ancestor selection remains open because other widgets
+reuse that geometry. `tools/analysis/coop_apt_render_report.py` verifies the
+sampled bridge and readbacks; the probe performs no APT state substitution.
+
 1. **Input preparation (implemented):** independent guest controller ports in one
    process. Verify with two real controllers, disconnect/reconnect and rumble.
 2. **Player lifecycle (experimental spawn exercised):** P2 was created from the
@@ -323,7 +331,8 @@ Continuation evidence is recorded in `docs/checkpoints/checkpoint3.md`,
 `docs/checkpoints/checkpoint6.md`, `docs/checkpoints/checkpoint7.md`,
 `docs/checkpoints/checkpoint8.md`, `docs/checkpoints/checkpoint9.md` and
 `docs/checkpoints/checkpoint10.md`, `docs/checkpoints/checkpoint11.md` and
-`docs/checkpoints/checkpoint12.md` and `docs/checkpoints/checkpoint13.md`.
+`docs/checkpoints/checkpoint12.md`, `docs/checkpoints/checkpoint13.md` and
+`docs/checkpoints/checkpoint14.md`.
 These cover movement checks, despawn/rebind,
 the camera/render handoff, the separate native P2 controller, secondary packet
 transport, P2 world-view preview, experimental simultaneous split views and

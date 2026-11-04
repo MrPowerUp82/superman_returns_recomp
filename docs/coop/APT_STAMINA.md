@@ -105,3 +105,63 @@ with the identified stamina fill/notch nodes. Keep that experiment opt-in and
 read-only. Only after packet identity and retention lifetime are established
 should a private per-view substitution be attempted. Native city-health state
 and the complete interpreter state remain shared until explicitly separated.
+
+## Runtime continuation — checkpoint14
+
+The experiment above ran in owned PID 20652. `826D1648` executes inside both
+consumed HUD passes: 9422 verified packet observations across 62 sampled passes
+and 31 composed frames, covering `C0000001` and replacement `C0000002`.
+All captured packets used consumer `826E08F8` and caller `826AD0DC`.
+Carrier+32 matched the render object; packet+4 matched the predicted 80-byte
+slot; packet+8/+12 matched the incoming arguments; transform bytes were
+unchanged after the original consumer. This establishes the bridge previously
+marked unresolved. It does not assert that every packet produced visible pixels.
+
+`826ADD40` (recomp.102.cpp:22384,22438,22453) writes the owning root from
+character-table slot zero into carrier+4. Type-1 shape loading passes the
+character index through callback table+96, storing its render object at +32.
+The observed carrier layout is type +0, owning root +4, reference count/flags
++8/+10, retained movie/file handle +12 and four bounds floats +16..31.
+`826AE6D0` (recomp.135.cpp:25894) initializes handle fields +16/+20/+24;
+the runtime handle contents were not captured and remain unverified.
+
+The seven changed carriers shared owning root `050741DC` and handle `051151A4`.
+Subtracting GenericMeter's root offset `11C` yields asset base `050740C0`.
+All seven runtime addresses, type words and bounds matched the extracted
+GenericMeter character records (`artifacts/coop-test/apt-identity-check.json`):
+
+| Carrier | Render object | Character / file offset | Geometry role |
+| --- | --- | --- | --- |
+| 05074308 | 05107EA8 | 9 / 248 | Mask descendant |
+| 050743B0 | 05107F10 | 15 / 2F0 | Fill body |
+| 050743F0 | 05107F78 | 17 / 330 | Fill/cap line |
+| 05074498 | 05107FE0 | 23 / 3D8 | Cap shared by left/right |
+| 05074540 | 05108048 | 29 / 480 | Notch glow |
+| 050745E8 | 05132EA8 | 35 / 528 | Notch descendant |
+| 0507463C | 05132F10 | 38 / 57C | Notch star descendant |
+
+Addresses above identify this recorded run only; they are not runtime constants
+in the implementation. Captured nodes also matched GenericMeter sprites
+`mFillRight` (26, source 050744F4, node 0515A248, depth 30), `mFillFill`
+(21, source 05074468, node 05159898, depth 34), `mFillLeft` (27, source 05074510,
+node 0514F6F8, depth 39) and `mNotch` (40, source 0507467C, node 0514F744,
+depth 43). Only the first 256 nodes per sampled pass were captured.
+
+**Identity limit:** character 21 also supplies `mBalanceFill`; left/right caps
+share character 23 and line geometry is reused. Geometry identity therefore
+does not uniquely select the stamina widget. Ancestor/instance identity must
+be established before substituting any packet.
+
+**Bounded retention result:** `826D1048` (recomp.126.cpp:23791) returns
+packet+4. The examined `826E08F8` consumer (recomp.105.cpp:26419,26553) reads
+transform vectors +0/+16/+48 and writes transformed vertices into a separate
+batch buffer. `826DE670` (recomp.35.cpp:25152) copies packet+8/+12 values into
+batch state. No packet/matrix pointer retention was found in that examined
+path: storage is needed through the synchronous call and its helpers; batched
+vertices persist separately. Other consumer methods and reentrant execution
+remain outside this result. Render objects live longer: `826A3180`
+(recomp.122.cpp:25054) releases through callback+100 and clears carrier+32.
+
+The next step is now **stamina instance/ancestor selection**, followed by a
+private packet/transform limited to that instance and the examined consumer.
+Do not use the geometry IDs alone to retarget every GenericMeter in the HUD.
