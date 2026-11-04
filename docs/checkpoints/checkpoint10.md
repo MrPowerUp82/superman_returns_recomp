@@ -109,6 +109,10 @@ view but the HUD was absent in this scene; rejoining restored it. The script
 also resets the native camera home. The cause is not localized, and normal HUD
 visibility after leaving is **not** accepted as fixed by this milestone.
 
+Follow-up: checkpoint11 traces this observation to the native idle-camera/HUD
+fade and verifies input-triggered recovery without rejoining. It also adds
+opt-in shared idle ownership for the two-actor experiment.
+
 Diagnostic-off isolated PID 19220 reached the ordinary title screen. Its command
 line contained input preparation but no camera, transport or split flags. There
 were no radar/camera/split messages or guest access violations in that startup;

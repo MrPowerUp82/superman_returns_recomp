@@ -224,8 +224,12 @@ bars, district labels, reticles and other HUD elements remain shared/P1-derived;
 their per-player ownership and layout are pending. See checkpoint10 for scope
 and validation.
 
-In the current probe scene, despawning P2 returns to one image but hides the HUD
-until rejoin; correct HUD lifecycle on leaving remains unresolved.
+The HUD disappearance recorded after despawn in checkpoint10 was traced to the
+native idle-camera fade: input restores it without rejoining. The new opt-in
+`sr_coop_idle` policy (implied by `-SplitPreview`, also available as `-SharedIdle`)
+keeps P1 as the shared idle tracker owner and considers activity on either port.
+Both players inactive still allows the native fade. See checkpoint11 for the
+investigation, timestamp rounding case and runtime scope.
 Streaming/culling at large separation, flight/death/transitions, temporal effects,
 physical controllers and performance need further validation.
 
@@ -301,10 +305,11 @@ Continuation evidence is recorded in `docs/checkpoints/checkpoint3.md`,
 `docs/checkpoints/checkpoint4.md`, `docs/checkpoints/checkpoint5.md`,
 `docs/checkpoints/checkpoint6.md`, `docs/checkpoints/checkpoint7.md`,
 `docs/checkpoints/checkpoint8.md`, `docs/checkpoints/checkpoint9.md` and
-`docs/checkpoints/checkpoint10.md`. These cover movement checks, despawn/rebind,
+`docs/checkpoints/checkpoint10.md` and `docs/checkpoints/checkpoint11.md`.
+These cover movement checks, despawn/rebind,
 the camera/render handoff, the separate native P2 controller, secondary packet
 transport, P2 world-view preview, experimental simultaneous split views and
-independent native radar anchors.
+independent native radar anchors and shared idle-camera/HUD ownership.
 Physical controllers, full combat and distant independent visibility remain
 unverified. A previous development script enumerating
 `_G` with `pairs` and `string.find` triggered guest access violations; that failure

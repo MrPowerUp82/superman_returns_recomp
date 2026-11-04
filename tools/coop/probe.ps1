@@ -12,6 +12,7 @@ param(
   [switch]$CameraTransport,
   [switch]$PreviewP2,
   [switch]$SplitPreview,
+  [switch]$SharedIdle,
   [ValidateSet('native', 'xenos')][string]$Renderer = 'native'
 )
 $ErrorActionPreference = 'Stop'
@@ -82,7 +83,8 @@ switch ($Action) {
     )
     if (-not $NoScript) { $arguments += "--sr_coop_script=`"$mailbox`"" }
     if ($CameraProbe -or $CameraTransport -or $PreviewP2 -or $SplitPreview) { $arguments += '--sr_coop_camera_probe=true' }
-    if ($SecondCamera -or $CameraTransport -or $PreviewP2 -or $SplitPreview) { $arguments += '--sr_coop_second_camera=true' }
+    if ($SecondCamera -or $CameraTransport -or $PreviewP2 -or $SplitPreview -or $SharedIdle) { $arguments += '--sr_coop_second_camera=true' }
+    if ($SharedIdle -or $SplitPreview) { $arguments += '--sr_coop_idle=true' }
     if ($CameraTransport -or $PreviewP2 -or $SplitPreview) { $arguments += '--sr_coop_camera_transport=true' }
     if ($PreviewP2) { $arguments += '--sr_coop_camera_preview=true' }
     if ($SplitPreview) { $arguments += '--sr_coop_split_preview=true','--sr_native_api=d3d12','--sr_dlss=off','--sr_native_render_scale=1','--sr_render_scale=100' }

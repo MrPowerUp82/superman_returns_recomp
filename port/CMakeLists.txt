@@ -70,6 +70,7 @@ set(SUPERMANRETURNS_SOURCES
     src/coop_camera_preview.cpp
     src/coop_split_render.cpp
     src/coop_hud.cpp
+    src/coop_idle.cpp
     src/xma_fixes.cpp
     src/sr_settings.cpp
     src/graphics/backend_selection.cpp
