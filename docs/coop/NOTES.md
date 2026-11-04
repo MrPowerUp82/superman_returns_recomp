@@ -264,6 +264,15 @@ path has been excluded.
 
 ## Implementation milestones
 
+Checkpoint12 adds an opt-in native stamina data handoff for both split HUD
+passes (`sr_coop_status_probe`, probe `-StatusProbe`, also implied by
+`-SplitPreview`). It validates distinct actor IDs and consumed view generations,
+preserves the native stamina/capacity/city cache, and records per-view values.
+`stamina_status.lua` queries the native explicit-actor getters. The existing APT
+bars still share their original model; independent Flash widget state/layout
+remains the next HUD task. See `docs/checkpoints/checkpoint12.md` for the
+100%/25%, 100%/75%, 50%/75% and leave/rejoin runtime evidence.
+
 1. **Input preparation (implemented):** independent guest controller ports in one
    process. Verify with two real controllers, disconnect/reconnect and rumble.
 2. **Player lifecycle (experimental spawn exercised):** P2 was created from the
@@ -305,11 +314,13 @@ Continuation evidence is recorded in `docs/checkpoints/checkpoint3.md`,
 `docs/checkpoints/checkpoint4.md`, `docs/checkpoints/checkpoint5.md`,
 `docs/checkpoints/checkpoint6.md`, `docs/checkpoints/checkpoint7.md`,
 `docs/checkpoints/checkpoint8.md`, `docs/checkpoints/checkpoint9.md` and
-`docs/checkpoints/checkpoint10.md` and `docs/checkpoints/checkpoint11.md`.
+`docs/checkpoints/checkpoint10.md`, `docs/checkpoints/checkpoint11.md` and
+`docs/checkpoints/checkpoint12.md`.
 These cover movement checks, despawn/rebind,
 the camera/render handoff, the separate native P2 controller, secondary packet
 transport, P2 world-view preview, experimental simultaneous split views and
-independent native radar anchors and shared idle-camera/HUD ownership.
+independent native radar anchors, shared idle-camera/HUD ownership and distinct
+native stamina records selected by each split HUD pass.
 Physical controllers, full combat and distant independent visibility remain
 unverified. A previous development script enumerating
 `_G` with `pairs` and `string.find` triggered guest access violations; that failure

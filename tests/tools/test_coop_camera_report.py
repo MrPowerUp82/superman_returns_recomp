@@ -27,6 +27,47 @@ def trace():
 
 
 class CameraEvidence(unittest.TestCase):
+    def test_status_handoff_requires_distinct_native_actor_values_and_current_composition(self):
+        publication = ("coop camera transport: seq={seq} generation=3221225473 active=true "
+                       "primary_unchanged=true secondary_matches=true position=12,20,30")
+        consumed = (trace()[3]+" secondary_flags=C0000001 secondary_position=12,20,30 "
+                    "secondary_projection=0.5,18000,1.2,1.7777778 secondary_viewport=00000000,050002D0")
+        good=trace()+[publication.format(seq=i) for i in range(1,4)]+[consumed]*3
+        good += ["coop status producer: seq=120 generation=3221225473 primary=1 primary_current=10000 "
+                 "primary_max=10000 primary_scaled=10000 secondary=8780 secondary_current=2500 "
+                 "secondary_max=10000 secondary_scaled=2500 model_unchanged=true primary_meter_matches=true "
+                 "city_cache=3F800000 apt_override=false"]
+        for frame in range(1,4):
+            good += [f"coop split world: frame={frame} generation=3221225473 selected=true "
+                     "primary_restored=true hud_unchanged=true phase_restored=true passes=2 extra_prepare=1 extra_dt=0 "
+                     "primary=10,20,30 secondary=12,20,30"]
+            for view in (0,1):
+                value=2500 if view else 10000
+                good += [f"coop split capture: frame={frame} generation=3221225473 view={view} width=1280 height=720 "
+                         f"format=28 ready={'true' if view else 'false'}",
+                         f"coop status draw: frame={frame} generation=3221225473 view={view} ready=true source_seq=120 "
+                         f"target={8780 if view else 1} current={value} maximum=10000 scaled={value} apt_override=false"]
+            good += [f"coop split composite: frame={frame} generation=3221225473 views=2 size=1920x1080"]
+        self.assertTrue(reporter.analyze(good,required_status=True)["passed"])
+        conflicting_source = next(s for s in good if 'status producer:' in s).replace(
+            'seq=120','seq=240').replace('primary_current=10000','primary_current=9000').replace(
+            'primary_scaled=10000','primary_scaled=9000')
+        cases=[trace(),[s for s in good if 'status producer:' not in s],
+               [s for s in good if 'status draw: frame=3' not in s],
+               [s.replace('model_unchanged=true','model_unchanged=false') for s in good],
+               [s.replace('apt_override=false','apt_override=true') for s in good],
+               [s.replace('target=8780','target=1') for s in good],
+               [s.replace('secondary=8780','secondary=1') for s in good],
+               [s.replace('scaled=2500','scaled=10000') for s in good],
+               [s.replace('current=2500','current=-1') for s in good],
+               [s.replace('source_seq=120','source_seq=0') for s in good],
+               [s.replace('generation=3221225473','generation=3221225474') if 'status draw:' in s else s for s in good],
+               good+["coop status failed: native HUD model readback"],
+               [s.replace('source_seq=120','source_seq=240') for s in good]+[conflicting_source]]
+        for bad in cases:
+            with self.subTest(bad=bad):
+                self.assertFalse(reporter.analyze(bad,required_status=True)["passed"])
+
     def test_radar_requires_native_p2_anchor_correct_aspect_and_same_frame_composition(self):
         publication = ("coop camera transport: seq={seq} generation=3221225473 active=true "
                        "primary_unchanged=true secondary_matches=true position=12,20,30")

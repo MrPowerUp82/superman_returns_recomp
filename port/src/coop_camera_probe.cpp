@@ -2,6 +2,7 @@
 #include "coop_second_camera.h"
 #include "coop_camera_preview.h"
 #include "coop_split_render.h"
+#include "coop_status.h"
 
 #include <array>
 #include <atomic>
@@ -107,6 +108,7 @@ REX_HOOK_RAW(sub_821808F8) {
   const double dt = ctx.f1.f64;
   __imp__sub_821808F8(ctx, base);
   UpdateSecondCamera(ctx, base, manager, dt);
+  UpdateCoopStatus(ctx, base);
   if (!Enabled()) return;
   const auto sequence = updates.fetch_add(1) + 1;
   if (sequence <= 3 || sequence % 120 == 0) ObserveCamera(base, manager, caller, sequence);

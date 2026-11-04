@@ -12,6 +12,7 @@ import json
 import math
 from pathlib import Path
 import re
+import struct
 
 
 def vector(value: str, count: int) -> list[float]:
@@ -21,9 +22,19 @@ def vector(value: str, count: int) -> list[float]:
     return result
 
 
+def stamina(target, current, maximum, scaled):
+    target, current, maximum, scaled = map(int, (target, current, maximum, scaled))
+    if not 0<target<=0xFFFFFFFF or target==255 or current<0 or maximum<=0 or current>maximum or maximum>0x7FFFFFFF:
+        raise ValueError("invalid actor stamina")
+    f32 = lambda value: struct.unpack(">f", struct.pack(">f", value))[0]
+    expected = int(f32(f32(f32(current)/f32(max(maximum,500)))*10000))
+    if scaled!=expected: raise ValueError("incorrect native stamina scale")
+    return {"target": target, "current": current, "maximum": maximum, "scaled": scaled}
+
+
 def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=False, required_handoff=False,
-            required_preview=False, required_split=False, required_radar=False) -> dict:
-    required_split = required_split or required_radar
+            required_preview=False, required_split=False, required_radar=False, required_status=False) -> dict:
+    required_split = required_split or required_radar or required_status
     required_handoff = required_handoff or required_preview or required_split
     rows = {"update": {}, "submit": {}, "consume": {}, "apply": {}}
     errors = []
@@ -41,6 +52,7 @@ def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=Fals
     split_world, split_captures, split_composites = {}, {}, {}
     split_positions = []
     radar_producers, radar_draws = [], {}
+    status_producers, status_draws, status_unavailable = [], {}, 0
     for line in lines:
         if "coop: single-instance input preparation;" in line:
             rows = {key: {} for key in rows}
@@ -59,10 +71,46 @@ def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=Fals
             split_world, split_captures, split_composites = {}, {}, {}
             split_positions = []
             radar_producers, radar_draws = [], {}
+            status_producers, status_draws, status_unavailable = [], {}, 0
         if not started:
             continue
         if re.search(r"coop split(?: capture)? failed:", line):
             errors.append("split world/capture verification failed")
+        if "coop status failed:" in line:
+            errors.append("status native-model verification failed")
+        status = re.search(r"coop status (producer|draw): (.*)", line)
+        if status:
+            values = dict(re.findall(r"(\w+)=([^\s]+)", status[2]))
+            try:
+                version=int(values["generation"])
+                if version & 0xC0000000 != 0xC0000000 or not version & 0x3FFFFFFF:
+                    raise ValueError("invalid status binding")
+                if values["apt_override"]!="false": raise ValueError("unexpected APT override")
+                if status[1]=="producer":
+                    if int(values["seq"])<=0 or values["model_unchanged"]!="true":
+                        raise ValueError("missing source sequence or changed native model")
+                    a=stamina(values["primary"],values["primary_current"],values["primary_max"],values["primary_scaled"])
+                    b=stamina(values["secondary"],values["secondary_current"],values["secondary_max"],values["secondary_scaled"])
+                    if a["target"]==b["target"]: raise ValueError("status actors alias")
+                    if values["primary_meter_matches"] not in ("true","false"):
+                        raise ValueError("invalid native meter flag")
+                    int(values["city_cache"],16)
+                    status_producers.append({"generation":version,"sequence":int(values["seq"]),"players":[a,b],
+                                             "primary_meter_matches":values["primary_meter_matches"]=="true"})
+                else:
+                    frame,view=int(values["frame"]),int(values["view"])
+                    if frame<=0 or view not in (0,1): raise ValueError("invalid status draw")
+                    if values["ready"]=="false": status_unavailable+=1
+                    elif values["ready"]=="true":
+                        if int(values["source_seq"])<=0 or (frame,view) in status_draws:
+                            raise ValueError("missing source sequence or duplicate draw")
+                        if version in blocked_preview_generations:
+                            raise ValueError("status reused cleared binding")
+                        row=stamina(values["target"],values["current"],values["maximum"],values["scaled"])
+                        status_draws[frame,view]={"generation":version,"source_sequence":int(values["source_seq"]),"value":row}
+                    else: raise ValueError("invalid ready state")
+            except (KeyError,ValueError,OverflowError) as error:
+                errors.append(f"status: {error}")
         if "coop radar failed:" in line:
             errors.append("radar producer/packet/cache verification failed")
         radar = re.search(r"coop radar (producer|draw): (.*)", line)
@@ -384,6 +432,24 @@ def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=Fals
         for view in (0, 1):
             if sum(row["aspect_applied"] for (frame, v), row in radar_draws.items() if v == view) < 3:
                 errors.append(f"radar view {view}: fewer than three corrected-aspect draws")
+    status_pairs, status_matches = 0, set()
+    # Logs sample only some native publications. An unsampled source can be
+    # corroborated by matching values, but a sampled source must never disagree
+    # with the draw that explicitly names it, even if an older row matches.
+    for (frame,view), draw in status_draws.items():
+        known=[row for row in status_producers if row["generation"]==draw["generation"] and
+               row["sequence"]==draw["source_sequence"]]
+        if any(row["players"][view]!=draw["value"] for row in known):
+            errors.append(f"status draw {frame}/{view}: referenced native source contradicts actor values")
+    for frame, version in split_composites.items():
+        draws=[status_draws.get((frame,view)) for view in (0,1)]
+        if all(row and row["generation"]==version for row in draws):
+            if any(row["generation"]==version and row["players"]==[d["value"] for d in draws]
+                   for row in status_producers):
+                status_pairs+=1;status_matches.add(version)
+    if required_status:
+        if status_pairs<3: errors.append("fewer than three verified native status/composition pairs")
+        if generations-status_matches: errors.append("status binding lacks matching native actor values for both views")
     return {"passed": not errors, "scope": "sampled primary propagation and secondary transport",
             "targets": targets, "verified_submission_targets": sorted(verified_targets),
             "samples": {k: len(v) for k, v in rows.items()},
@@ -409,6 +475,10 @@ def analyze(lines, required_targets=(), tolerance=0.001, required_secondary=Fals
                       "verified_pairs": radar_pairs,
                       "matched_producer_generations": sorted(radar_matched_generations),
                       "targets": sorted({row["target"] for row in radar_producers})},
+            "status": {"producer_samples":len(status_producers), "draw_samples":len(status_draws),
+                       "unavailable_samples":status_unavailable,"verified_pairs":status_pairs,
+                       "matched_generations":sorted(status_matches),
+                       "primary_meter_mismatch_samples":sum(not row["primary_meter_matches"] for row in status_producers)},
             "errors": sorted(set(errors))}
 
 
@@ -422,6 +492,7 @@ def main():
     parser.add_argument("--require-preview", action="store_true")
     parser.add_argument("--require-split", action="store_true")
     parser.add_argument("--require-radar", action="store_true")
+    parser.add_argument("--require-status", action="store_true")
     args = parser.parse_args()
     # spdlog names older segments probe.1.log, probe.2.log, ... . Read oldest
     # first so the latest startup can reset both previous-run errors and samples.
@@ -440,7 +511,8 @@ def main():
 
     report = analyze(lines(), args.require_target, required_secondary=args.require_secondary,
                      required_handoff=args.require_handoff, required_preview=args.require_preview,
-                     required_split=args.require_split, required_radar=args.require_radar)
+                     required_split=args.require_split, required_radar=args.require_radar,
+                     required_status=args.require_status)
     report["input_files"] = [str(path) for path in paths]
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

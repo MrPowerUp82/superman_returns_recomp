@@ -71,6 +71,7 @@ set(SUPERMANRETURNS_SOURCES
     src/coop_split_render.cpp
     src/coop_hud.cpp
     src/coop_idle.cpp
+    src/coop_status.cpp
     src/xma_fixes.cpp
     src/sr_settings.cpp
     src/graphics/backend_selection.cpp
