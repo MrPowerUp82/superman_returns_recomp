@@ -5,6 +5,7 @@
 // docs/native-port-plan.md section 2.
 //
 #include "native_renderer.h"
+#include "command_batch_policy.h"
 #include "guest_cpu_profile.h"
 #include "checked_guest_memory.h"
 #include "guest_hash.h"
@@ -9030,14 +9031,11 @@ void Renderer::EndCmd(uint8_t* base) {
     return;
   }
   // Coarse batches amortize replay-worker dispatch. Keep byte-pressure and
-  // explicit swap flushes unchanged; the original 32-command path is default.
-  static const size_t vulkan_batch_limit=[] {
-    const char* flag=std::getenv("SR_NATIVE_BATCH_COMMANDS");
-    if(flag && !std::strcmp(flag,"128"))return size_t(128);
-    if(flag && !std::strcmp(flag,"256"))return size_t(256);
-    return size_t(32);
-  }();
-  if (batch_->cmds.size() >= (packet_sink_?vulkan_batch_limit:32) || batch_->bytes.size() >= (4u << 20)) {
+  // explicit swap flushes unchanged. D3D12 uses 128; Vulkan retains 32.
+  // SR_NATIVE_BATCH_COMMANDS=32 restores the previous D3D12 dispatch cadence.
+  static const char* batch_override=std::getenv("SR_NATIVE_BATCH_COMMANDS");
+  const size_t batch_limit=CommandBatchLimit(batch_override, bool(packet_sink_));
+  if (batch_->cmds.size() >= batch_limit || batch_->bytes.size() >= (4u << 20)) {
     FlushBatch();
   }
 }
@@ -9314,8 +9312,7 @@ void Renderer::WorkerMain() {
   if(replay_options.prepared)parallel=std::make_unique<graphics::guest::ParallelReplayDecoder>(replay_threads,replay_options.scheduling);
   REXLOG_INFO("native renderer: replay decode threads {} (ordered batches)",parallel?replay_threads:1);
   const char* batch_flag=std::getenv("SR_NATIVE_BATCH_COMMANDS");
-  const unsigned batch_limit=packet_sink_ && batch_flag && !std::strcmp(batch_flag,"256")?256:
-      (packet_sink_ && batch_flag && !std::strcmp(batch_flag,"128")?128:32);
+  const size_t batch_limit=CommandBatchLimit(batch_flag, bool(packet_sink_));
   REXLOG_INFO("native renderer: replay mode={} api={} threads={} scheduling={} batch_limit={}",
       parallel?"prepared":"direct",packet_sink_?"vulkan":"d3d12",replay_threads,
       replay_options.scheduling==graphics::guest::ReplayScheduling::kInterleaved?"interleaved":"contiguous",batch_limit);

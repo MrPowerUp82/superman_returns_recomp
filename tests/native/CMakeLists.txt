@@ -26,6 +26,7 @@ add_executable(sr_native_tests
     test_buffer_srv_cache.cpp
     test_buffer_heap_layout.cpp
     test_buffer_tracking_policy.cpp
+    test_command_batch_policy.cpp
     test_tracking_fast_view.cpp
     test_title_benchmark_policy.cpp
     test_mnk_bind_match.cpp
