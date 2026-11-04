@@ -125,6 +125,10 @@ void superman_returns::coop::UpdateCoopStatus(PPCContext& ctx,uint8_t* base) {
   if(!root){Publish({});return;}
   Produce(ctx,base,root,uint32_t(ctx.lr));
 }
+std::optional<superman_returns::coop::status::Stamina>
+superman_returns::coop::StaminaForHud(uint32_t generation,uint32_t view) {
+  return Enabled()?status::Select(Sample(),generation,view):std::optional<status::Stamina>{};
+}
 REX_HOOK_RAW(sub_82775EF8) {
   BeginAptHudProbe();
   if(Enabled())ObserveHudEntry();

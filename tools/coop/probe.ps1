@@ -15,6 +15,7 @@ param(
   [switch]$SharedIdle,
   [switch]$StatusProbe,
   [switch]$AptProbe,
+  [switch]$StaminaPreview,
   [ValidateSet('native', 'xenos')][string]$Renderer = 'native'
 )
 $ErrorActionPreference = 'Stop'
@@ -47,6 +48,7 @@ function Set-Mailbox([string]$source) {
 
 switch ($Action) {
   Start {
+    if($StaminaPreview){$AptProbe=$true}
     if($AptProbe){$SplitPreview=$true}
     if($SplitPreview -and $Renderer -ne 'native'){throw 'Split preview requires the native renderer'}
     if (-not (Test-Path -LiteralPath $exe)) { throw 'Build the game with build.cmd first' }
@@ -90,6 +92,7 @@ switch ($Action) {
     if ($SharedIdle -or $SplitPreview) { $arguments += '--sr_coop_idle=true' }
     if ($StatusProbe -or $SplitPreview) { $arguments += '--sr_coop_status_probe=true' }
     if ($AptProbe) { $arguments += '--sr_coop_apt_probe=true' }
+    if ($StaminaPreview) { $arguments += '--sr_coop_stamina_preview=true' }
     if ($CameraTransport -or $PreviewP2 -or $SplitPreview) { $arguments += '--sr_coop_camera_transport=true' }
     if ($PreviewP2) { $arguments += '--sr_coop_camera_preview=true' }
     if ($SplitPreview) { $arguments += '--sr_coop_split_preview=true','--sr_native_api=d3d12','--sr_dlss=off','--sr_native_render_scale=1','--sr_render_scale=100' }

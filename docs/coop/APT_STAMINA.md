@@ -165,3 +165,70 @@ remain outside this result. Render objects live longer: `826A3180`
 The next step is now **stamina instance/ancestor selection**, followed by a
 private packet/transform limited to that instance and the examined consumer.
 Do not use the geometry IDs alone to retarget every GenericMeter in the HUD.
+
+## Instance selection and private preview — checkpoint15
+
+The native stack protocol was resolved: `8268C568` and alternate `8268C670`
+push a node's transform; `82685290` pops. A bounded host stack mirrors these
+calls, validates pop identity and rejects further selection after mismatch or
+overflow. It does not change the native tree or its version traversal.
+
+Checked reads resolve each source's owning root, character table and exported
+symbol pointers. Selection requires adjacent exported Main_Hud -> StaminaMeter
+(placement depth 172) -> GenericMeter (depth 1), then the exact role character/
+depth pairs already decoded: mask 13/24, right 26/30, body 21/34, left 27/39,
+notch 40/43. Descendants must remain in that GenericMeter resource. Thus the
+shared balance body 21/13 and mask 13/7 are excluded. These are asset character
+indices/depths, not hardcoded guest pointers.
+
+Runtime observation confirmed the exported chain and balanced stack in both
+HUD views. The private preview (`sr_coop_stamina_preview`, probe
+`-StaminaPreview`) then uses this chain every active split HUD pass, not just
+the sampled diagnostic frames. Ordinary `-AptProbe` remains read-only.
+
+The following relationships were checked against the raw component actions:
+
+```text
+p = clamp((scaledValue - 500) / 9500, 0, 1)
+W = localX(mMask.mRight) - localX(mMask.mFill)
+F = W + 8 + 8
+S = original placement X of mFillLeft
+N = original placement X of mNotch
+
+leftX  = S - F*(1-p)
+bodyX  = S + 8 - F*(1-p)
+rightX = S + F - 8 - F*(1-p)
+notchX = N + F*p
+```
+
+The constructor default LEFT direction applies to the imported stamina symbol;
+the standalone GenericMeter root's RIGHT/width/scale demonstration is excluded.
+GenericMeter onLoad records S/N before SetWidth (body F7B4–F83D); SetWidth and
+SetFillWidth update the live mask interior (F868–FAA3 and 10528–1061D).
+UpdateFill translates the complete fill pieces (106CC–10879), while
+UpdateNotch moves the notch (108A4–10A1C). Stamina's initialized width is 180,
+with W=148 and F=164; S=8 and N approximately -2.1. Live geometry supplies W,
+and the original named placement records supply S/N. Cap character 23 must
+still have an eight-unit horizontal extent. No P1 percentage or APT tween
+variable is needed to reconstruct the desired P2 positions.
+
+The native minimum 500 matters: raw scaled value 5000 corresponds to
+4500/9500 of the rendered interval. Its predicted 86.315789-unit shift matched
+the earlier observed 86.316 packet displacement.
+
+For each selected moving role, the consumer hook computes
+`deltaX = desiredRoleX - currentRoleLocalX`. It adds deltaX times the captured
+GenericMeter X basis to the leaf matrix's four translation components. The
+original packet's other fields and matrix/color/effect bytes are copied exactly
+into one private 96-byte allocation. Only the private matrix pointer and its
+translation differ. The examined synchronous consumer `826E08F8` receives that
+packet; original packet/transform and private-storage readbacks are checked
+after the call. A mutex and thread-local recursion guard protect the scratch
+call. P1 and nonselected widgets call the original consumer unchanged.
+
+The flag defaults off. The initial preview admits two native maxima of 10000,
+positive supported geometry and matching consumed generation; unsupported or
+missing state falls back to the original consumer. It separates fill/notch
+**positions**. Original effect frames, low-shield/tired state, colors and
+visibility remain shared; city health remains shared-world state. Capacity
+changes, full independent UI animation/state and performance are not claimed.

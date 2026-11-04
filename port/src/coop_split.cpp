@@ -2,6 +2,7 @@
 #include "coop_lua.h"
 #include "coop_second_camera.h"
 #include "coop_hud.h"
+#include "coop_apt_probe.h"
 #include "benchmark_input_driver.h"
 
 #include <memory>
@@ -26,6 +27,7 @@ void Install(rex::Runtime& runtime) {
   if (!REXCVAR_GET(sr_coop_input)) return;
   InstallSecondCamera(runtime);
   InstallCoopHud(runtime);
+  InstallAptPreview(runtime);
 
   if (auto* system = static_cast<rex::input::InputSystem*>(runtime.input_system())) {
     // SDK slot assignment keeps each physical pad on its own guest port,

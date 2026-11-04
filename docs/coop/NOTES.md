@@ -289,6 +289,15 @@ Unique stamina-instance/ancestor selection remains open because other widgets
 reuse that geometry. `tools/analysis/coop_apt_render_report.py` verifies the
 sampled bridge and readbacks; the probe performs no APT state substitution.
 
+Checkpoint15 adds an opt-in native P2 stamina fill/notch position preview:
+`probe.ps1 -Action Start -StaminaPreview` (`sr_coop_stamina_preview`). It resolves
+the exact exported HUD/stamina/meter ancestry, uses a private packet/transform
+for P2 and retains P1's original APT state. Visible 100%/25%, 100%/75%, 50%/75%
+and replacement-P2 cases passed, with 55 verified composed preview pairs across
+two generations. It currently admits two 10000-point capacities. Colors,
+effect frames and shield/tired state remain shared; this is not a complete
+independent Flash widget. See `docs/checkpoints/checkpoint15.md`.
+
 1. **Input preparation (implemented):** independent guest controller ports in one
    process. Verify with two real controllers, disconnect/reconnect and rumble.
 2. **Player lifecycle (experimental spawn exercised):** P2 was created from the
@@ -332,7 +341,7 @@ Continuation evidence is recorded in `docs/checkpoints/checkpoint3.md`,
 `docs/checkpoints/checkpoint8.md`, `docs/checkpoints/checkpoint9.md` and
 `docs/checkpoints/checkpoint10.md`, `docs/checkpoints/checkpoint11.md` and
 `docs/checkpoints/checkpoint12.md`, `docs/checkpoints/checkpoint13.md` and
-`docs/checkpoints/checkpoint14.md`.
+`docs/checkpoints/checkpoint14.md` and `docs/checkpoints/checkpoint15.md`.
 These cover movement checks, despawn/rebind,
 the camera/render handoff, the separate native P2 controller, secondary packet
 transport, P2 world-view preview, experimental simultaneous split views and

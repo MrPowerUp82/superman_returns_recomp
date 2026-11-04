@@ -48,6 +48,8 @@ add_executable(sr_native_tests
     test_coop_hud_packet.cpp
     test_coop_idle.cpp
     test_coop_status.cpp
+    test_coop_apt_ancestry.cpp
+    test_coop_apt_stamina.cpp
     test_surface_sequence.cpp
     test_geometry_submission_probe.cpp
     test_post_vertex_geometry.cpp
