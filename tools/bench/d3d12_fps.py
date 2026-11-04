@@ -20,7 +20,12 @@ def main():
     parser.add_argument("--seconds", type=float, default=60)
     parser.add_argument("--flag", action="append", default=[])
     parser.add_argument("--env", action="append", default=[], metavar="SR_NAME=VALUE")
+    parser.add_argument("--llvm-profile", type=Path, help="Write training counters to a new .profraw file")
     options = parser.parse_args()
+    if options.llvm_profile:
+        options.llvm_profile = options.llvm_profile.resolve()
+        if options.llvm_profile.exists():
+            parser.error("--llvm-profile must name a new file")
     directory = ROOT / "artifacts/d3d12-fps-20261104" / options.label
     directory.mkdir(parents=True, exist_ok=False)
     exe = options.exe.resolve()
@@ -28,6 +33,9 @@ def main():
     for key in list(env):
         if key.startswith("SR_"):
             del env[key]
+    env.pop("LLVM_PROFILE_FILE", None)
+    if options.llvm_profile:
+        env["LLVM_PROFILE_FILE"] = str(options.llvm_profile)
     if options.profile:
         env.update(SR_NATIVE_CPU_PROFILE="1", SR_NATIVE_CONSTANTS_PROFILE="1",
                    SR_NATIVE_STREAMS_PROFILE="1", SR_FRAME_TIMELINE_DETAIL="1",
@@ -48,13 +56,15 @@ def main():
             "--sr_native_anisotropic_filtering=-1", "--sr_native_fxaa=false",
             "--sr_native_shadow_quality=1", "--sr_native_msaa_samples=1",
             "--sr_lsfg=false", "--mnk_mode=false", "--mnk_mouse=false", *options.flag]
-    manifest = {"args": args, "environment": {k: v for k, v in env.items() if k.startswith("SR_")},
+    manifest = {"args": args, "environment": {k: v for k, v in env.items() if k.startswith("SR_") or k == "LLVM_PROFILE_FILE"},
                 "hashes": {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
                            for p in [exe, exe.parent / "rexruntime.dll"]}, "started": time.time()}
     manifest_path = directory / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2))
     with (directory / "stdout.txt").open("w") as stdout:
         process = subprocess.Popen(args, cwd=exe.parent, env=env, stdout=stdout, stderr=subprocess.STDOUT)
+        manifest["pid"] = process.pid
+        manifest_path.write_text(json.dumps(manifest, indent=2))
         try:
             manifest["exit_code"] = process.wait(timeout=options.seconds + 180)
         except subprocess.TimeoutExpired:
@@ -62,6 +72,12 @@ def main():
             process.wait(timeout=15)
             manifest.update(exit_code=process.returncode, timeout=True)
     manifest["ended"] = time.time()
+    if options.llvm_profile:
+        if options.llvm_profile.is_file() and options.llvm_profile.stat().st_size:
+            manifest["llvm_profile"] = {"path": str(options.llvm_profile), "bytes": options.llvm_profile.stat().st_size,
+                                        "sha256": hashlib.sha256(options.llvm_profile.read_bytes()).hexdigest()}
+        else:
+            manifest["profile_missing"] = True
     results = sorted((exe.parent / "benchmarks").glob("*.json"), key=lambda p: p.stat().st_mtime)
     if results and results[-1].stat().st_mtime >= manifest["started"]:
         result = results[-1]
@@ -70,7 +86,7 @@ def main():
         manifest["result"] = json.loads(result.read_text(encoding="utf-8"))
     manifest_path.write_text(json.dumps(manifest, indent=2))
     print(json.dumps(manifest.get("result", manifest), indent=2), flush=True)
-    return 0 if manifest["exit_code"] == 0 and manifest.get("result", {}).get("valid") else 1
+    return 0 if manifest["exit_code"] == 0 and manifest.get("result", {}).get("valid") and not manifest.get("profile_missing") else 1
 
 
 if __name__ == "__main__":

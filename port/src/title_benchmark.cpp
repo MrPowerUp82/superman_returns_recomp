@@ -12,6 +12,10 @@
 #include <rex/cvar.h>
 #include <rex/logging.h>
 
+#if defined(SR_PGO_GENERATE)
+extern "C" int __llvm_profile_write_file(void);
+#endif
+
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -184,6 +188,12 @@ void OnGuestPresent() {
 }
 
 void ExitNow(int code) {
+#if defined(SR_PGO_GENERATE)
+  // TerminateProcess/_Exit deliberately bypass atexit. Flush training counters
+  // after results are finalized; profile-use and normal builds omit this call.
+  const int profile_status=__llvm_profile_write_file();
+  REXLOG_INFO("benchmark: LLVM PGO profile write status={}",profile_status);
+#endif
   rex::FlushLogging();
 #if defined(_WIN32)
   TerminateProcess(GetCurrentProcess(), UINT(code));
