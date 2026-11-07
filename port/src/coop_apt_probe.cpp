@@ -2,6 +2,7 @@
 #include "coop_camera_packet.h"
 #include "coop_apt_ancestry.h"
 #include "coop_apt_stamina.h"
+#include "coop_guest_string.h"
 #include "coop_status.h"
 #include "coop_split_render.h"
 #include "title_benchmark.h"
@@ -93,15 +94,9 @@ template<size_t N> std::string Hex(const std::array<uint8_t,N>& bytes) {
   return text;
 }
 std::string String(uint8_t* base,uint32_t address) {
-  if(!address)return {};
-  std::string value;
-  for(uint32_t i=0;i<128;++i) {
-    uint8_t byte=0;if(!Read(base,uint64_t(address)+i,&byte,1))return {};
-    if(!byte)return value;
-    if(byte<32 || byte>126)return {};
-    value+=char(byte);
-  }
-  return {};
+  return ReadGuestSymbol(address,[&](uint64_t at,void* out,size_t size) {
+    return Read(base,at,out,size);
+  });
 }
 const MovieInfo& Movie(uint8_t* base,uint32_t root) {
   auto [entry,inserted]=pass.movies.try_emplace(root);

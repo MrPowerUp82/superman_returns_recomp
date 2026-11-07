@@ -117,6 +117,10 @@ por hash continua. `set SR_MEMORY_TRACKING_SDK=OFF` permite compilar com o runti
 original. Detalhes e validação em
 [CPU e desbloqueio de FPS](docs/cpu-optimization-unlock-fps-2026-10-27.md).
 
+O SDK dos milestones é preparado em `.tools/rexglue-object-motion-source`, com
+os patches de pacing e teclado. A variável `SR_MEMORY_SDK_CHECKOUT` permite
+escolher outro checkout isolado; [detalhes da seleção](docs/build-sdk-selection-2026-11-07.md).
+
 Em 29/10, o D3D12 passou a verificar texturas intactas pelas épocas das páginas
 sem consultar os locks do runtime quando a prova do upload continua válida.
 Também foram corrigidos o tamanho do pacote em bits e o argumento do segundo

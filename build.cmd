@@ -18,12 +18,21 @@ set "SDK=%ROOT%.tools\rexglue-sdk\win-amd64"
 rem Texture hash reuse needs the pinned runtime's write-tracking API.
 rem Set SR_MEMORY_TRACKING_SDK=OFF to use the stock runtime and hash fallback.
 if not defined SR_MEMORY_TRACKING_SDK set "SR_MEMORY_TRACKING_SDK=ON"
+rem Keep older experimental SDK checkouts intact; use the milestone SDK.
+if not defined SR_MEMORY_SDK_CHECKOUT set "SR_MEMORY_SDK_CHECKOUT=%ROOT%.tools\rexglue-object-motion-source"
 set "SR_MEMORY_SDK_DIR="
 set "SR_MEMORY_SDK_ARGS="
 if /i "%SR_MEMORY_TRACKING_SDK%"=="ON" (
-  powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%tools\setup_memory_tracking_sdk.ps1"
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%tools\setup_memory_tracking_sdk.ps1" -Checkout "%SR_MEMORY_SDK_CHECKOUT%"
   if errorlevel 1 exit /b 1
-  set "SR_MEMORY_SDK_DIR=%ROOT%.tools/rexglue-write-tracking-source"
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%tools\setup_presentation_pacing_sdk.ps1" -Checkout "%SR_MEMORY_SDK_CHECKOUT%"
+  if errorlevel 1 exit /b 1
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%tools\setup_keyboard_poll_edge_sdk.ps1" -Checkout "%SR_MEMORY_SDK_CHECKOUT%"
+  if errorlevel 1 exit /b 1
+  rem Refresh the combined manifest after installing the optional overlays.
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%tools\setup_memory_tracking_sdk.ps1" -Checkout "%SR_MEMORY_SDK_CHECKOUT%" -SkipDependencies
+  if errorlevel 1 exit /b 1
+  set "SR_MEMORY_SDK_DIR=%SR_MEMORY_SDK_CHECKOUT%"
   set "SR_MEMORY_SDK_ARGS=-DREXGLUE_ENABLE_TRACY=OFF -DREXGLUE_USE_VULKAN=OFF"
 ) else if /i not "%SR_MEMORY_TRACKING_SDK%"=="OFF" (
   echo SR_MEMORY_TRACKING_SDK must be ON or OFF.
