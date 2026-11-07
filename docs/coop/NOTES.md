@@ -1,16 +1,15 @@
 # Superman Returns: local co-op in one instance
 
-## Launcher entry (2026-11-04)
+## Launcher entry (updated 2026-11-07)
 
-Select **Cooperativo — 2 jogadores (experimental)** / **Co-op — 2 players
-(experimental)**, connect two controllers before clicking Play, and load a save
-in Metropolis. The built-in `sr_coop_autojoin` executes the same `spawn_p2.lua`
-body, compiled into the game, only on P1's valid Lua context. It retries the
-read-only world/control readiness checks once per second. Success, partial
-spawns, script errors, and other results stop automatic joining for the session.
-There is no editable mailbox or synthetic input in a launcher co-op session.
-Game transitions and death/respawn are still experimental; restart the game to
-start another automatic join session.
+Select **Cooperativo — 2 jogadores (experimental)** in the launcher to prepare
+resources, connect two controllers and load gameplay. Co-op starts **disabled**.
+Press **F2** to spawn P2 near P1 and enable split screen. F2 removes P2 and returns
+to one view; enabling again creates a fresh actor near P1's current position.
+The legacy `sr_coop_autojoin` flag now enables this interactive lifecycle; it
+does not create an actor automatically. There is no editable mailbox or
+synthetic input in a normal launcher session. Guest operations execute only
+on P1's validated Lua context. Transitions and death/respawn remain experimental.
 
 The launcher enables the existing second-camera/transport/split/idle/status/APT
 stamina options and uses native D3D12 at 100% scale with DLSS/frame generation
@@ -19,8 +18,8 @@ game save is used; it is not replaced by the isolated probe's bundled save.
 `run_coop.cmd` remains the legacy input-only entry point.
 
 For isolated reproduction, `./tools/coop/probe.ps1 -Action Start -AutoJoin -NoScript`
-implies `-StaminaPreview` and exercises the built-in join on a copied save.
-Load slot 2 (15%) and Metropolis without sending `spawn_p2.lua` to the mailbox.
+implies `-StaminaPreview` and prepares the F2 lifecycle on a copied save.
+Load a slot and enter gameplay, then press F2 without sending `spawn_p2.lua` to the mailbox.
 Unlike the launcher, this development probe retains synthetic input for menu
 navigation and movement checks.
 

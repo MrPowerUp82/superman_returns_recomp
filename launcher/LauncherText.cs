@@ -29,7 +29,7 @@ public static class LauncherText
             ["Input"] = ("Como você vai jogar", "How you will play"),
             ["InputAccessible"] = ("Controles", "Controls"),
             ["Coop"] = ("Cooperativo — 2 jogadores (experimental)", "Co-op — 2 players (experimental)"),
-            ["CoopNote"] = ("Conecte dois controles antes de jogar e carregue um save em Metropolis. O segundo Superman entra automaticamente, com tela dividida. Usa Nativo + Direct3D 12, resolução interna de 100% e geração de quadros desligada.", "Connect two controllers before playing and load a save in Metropolis. The second Superman joins automatically with split screen. Uses Native + Direct3D 12, 100% internal resolution and frame generation off."),
+            ["CoopNote"] = ("O co-op inicia desligado. Conecte dois controles, entre na gameplay e pressione F2 para criar o P2 perto do P1. F2 desativa/ativa; ao reativar, um novo P2 nasce perto do P1. Usa Nativo + Direct3D 12, resolução interna de 100% e geração de quadros desligada.", "Co-op starts disabled. Connect two controllers, enter gameplay and press F2 to spawn P2 near P1. F2 toggles co-op; re-enabling creates a new P2 near P1. Uses Native + Direct3D 12, 100% internal resolution and frame generation off."),
             ["CoopSummary"] = ("Cooperativo · 2 controles · Direct3D 12 · 100% interno", "Co-op · 2 controllers · Direct3D 12 · 100% internal"),
             ["RenderScale"] = ("Resolução interna", "Internal resolution"),
             ["Antialiasing"] = ("Suavização da imagem", "Antialiasing"),

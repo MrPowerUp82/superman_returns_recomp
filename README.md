@@ -42,10 +42,12 @@ detalhes em [launcher/README.md](launcher/README.md). O pacote de distribuição
 inclui o launcher. A seleção de GPU exige o executável do jogo da mesma build.
 
 Para jogar em dupla, marque **Cooperativo — 2 jogadores (experimental)** no
-launcher, conecte dois controles e clique em **JOGAR**. Carregue um save em
-Metropolis: o segundo Superman entra automaticamente com tela dividida. O modo
-usa Nativo + Direct3D 12 e resolução interna de 100%; as preferências solo
-retornam ao desmarcá-lo. A entrada automática ocorre uma vez por execução.
+launcher, conecte dois controles e clique em **JOGAR**. O co-op inicia desligado:
+carregue a gameplay e pressione **F2** para criar o P2 perto do P1 com tela dividida.
+Durante essa sessão, **F2** desativa/ativa o co-op. Desativar remove o P2 e volta
+à tela inteira; reativar cria outro P2 perto da posição atual do P1. Use o atalho
+durante a gameplay. O modo usa Nativo + Direct3D 12 e resolução interna de 100%; as preferências solo
+retornam ao desmarcá-lo. Não há spawn automático ao carregar a fase.
 
 Depois de compilar com `build.cmd`:
 

@@ -13,6 +13,7 @@ struct SecondCameraSnapshot {
   std::optional<packet::ViewBytes> view;
   uint32_t target=0, primary_owner=0;
   uint64_t sequence=0;
+  uint64_t session_generation=0;
 };
 // Immutable copy under a short host lock; no guest pointers escape to readers.
 SecondCameraSnapshot SampleSecondCamera();

@@ -1,10 +1,13 @@
 #include "coop_lua.h"
 #include "coop_join_script.h"
+#include "coop_session.h"
+#include <array>
 
 #include <atomic>
 #include <cmath>
 #include <chrono>
 #include <cstring>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -25,7 +28,7 @@ REXCVAR_DEFINE_STRING(sr_coop_script, "", "Superman Returns",
                       "empty disables the co-op script mailbox")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(sr_coop_autojoin, false, "Superman Returns",
-                    "Experimental: create P2 once after P1 enters gameplay; requires co-op input")
+                    "Experimental: enable F2 co-op lifecycle, initially disabled; requires co-op input")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DECLARE(bool, sr_coop_input);
 
@@ -39,7 +42,24 @@ std::atomic<uint32_t> script_buffer{0};
 std::filesystem::path script_path;
 std::mutex mailbox_mutex;
 thread_local bool running_mailbox = false;
-bool autojoin_enabled = false;
+bool automatic_session = false;
+std::atomic<bool> interactive_session{false};
+std::atomic<uint64_t> runtime_state{1};
+std::atomic<uint64_t> requested_session{0};
+constexpr char kRemoveScript[]=R"(-- sr-coop-context: player1
+local p1=GetIDFromBinIndex("SUPERMAN",0)
+if not p1 or p1==0 or p1==255 then return "P1 not ready" end
+if GetDASValue("currentControl",p1)~=2 then return "P1 not in gameplay control" end
+local p2=SR_COOP_P2
+if p2 then
+  SetCameraHomeEntity(p1)
+  DespawnEntity(p2)
+end
+SR_COOP_P2=nil
+SR_COOP_LAST_POS=nil
+return "disabled"
+)";
+enum class InternalScript {None,Spawn,Remove};
 
 bool ReadWord(const uint8_t* base, uint32_t address, uint32_t& result) {
 #ifdef _WIN32
@@ -97,15 +117,21 @@ void MaybeRunScript(PPCContext& ctx, uint8_t* base, uint32_t lua) {
   static bool has_stamp = false;
   static std::filesystem::file_time_type last_stamp;
   static std::string pending_script;
-  static bool pending_autojoin = false;
+  static InternalScript operation=InternalScript::None;
+  static uint64_t pending_request=0;
   static auto next_join = Clock::time_point{};
+  static SessionLifecycle lifecycle;
   const auto now = Clock::now();
+  const auto request=requested_session.load(std::memory_order_acquire);
+  if(operation!=InternalScript::None && pending_request!=request) {
+    pending_script.clear();operation=InternalScript::None;next_join={};
+  }
   if (!script_path.empty() && now >= next_poll) {
     next_poll = now + std::chrono::milliseconds(250);
     std::error_code error;
     const auto stamp = std::filesystem::last_write_time(script_path, error);
     if (error) {
-      if (!pending_autojoin) pending_script.clear();
+      if (operation==InternalScript::None) pending_script.clear();
       has_stamp = false;
     } else if (!has_stamp || stamp != last_stamp) {
       std::ifstream input(script_path, std::ios::binary);
@@ -116,7 +142,7 @@ void MaybeRunScript(PPCContext& ctx, uint8_t* base, uint32_t lua) {
       last_stamp = stamp;
       has_stamp = true;
       pending_script.clear();
-      pending_autojoin = false;
+      operation=InternalScript::None;
       if (input.bad() || count == 0 || count >= kScriptCapacity) {
         REXLOG_WARN("coop Lua: script must contain 1..65535 bytes");
         return;
@@ -128,9 +154,13 @@ void MaybeRunScript(PPCContext& ctx, uint8_t* base, uint32_t lua) {
       REXLOG_INFO("coop Lua: queued {} bytes", pending_script.size());
     }
   }
-  if (pending_script.empty() && autojoin_enabled && now >= next_join) {
-    pending_script = kJoinScript;
-    pending_autojoin = true;
+  if (pending_script.empty() && automatic_session && now >= next_join) {
+    const auto action=lifecycle.Next(request);
+    if(action!=SessionAction::None) {
+      pending_script=action==SessionAction::Spawn?kJoinScript:kRemoveScript;
+      operation=action==SessionAction::Spawn?InternalScript::Spawn:InternalScript::Remove;
+      pending_request=request;
+    }
   }
   if (pending_script.empty()) return;
 
@@ -158,14 +188,18 @@ void MaybeRunScript(PPCContext& ctx, uint8_t* base, uint32_t lua) {
     const uint32_t target_actor = ctx.r3.u32;
     ctx = saved;
     if (!target_actor || target_actor != current_actor) return;
+
   }
   std::string script;
   script.swap(pending_script);
-  const bool automatic = pending_autojoin;
-  pending_autojoin = false;
-  // Stop by default before invoking any guest code. Only a read-only readiness
-  // result may re-arm the join; errors and partial spawns never create duplicates.
-  if (automatic) autojoin_enabled = false;
+  const auto executed=operation;
+  operation=InternalScript::None;
+  const bool automatic=executed==InternalScript::Spawn;
+  const auto action=automatic?SessionAction::Spawn:
+      executed==InternalScript::Remove?SessionAction::Remove:SessionAction::None;
+  // Pessimistically consume operations before guest calls. Only exact read-only
+  // waiting replies or verified success may advance the lifecycle.
+  lifecycle.Begin(action);
 
   const PPCContext saved = ctx;
   struct RestoreContext {
@@ -174,7 +208,7 @@ void MaybeRunScript(PPCContext& ctx, uint8_t* base, uint32_t lua) {
     ~RestoreContext() { target = saved; running_mailbox = false; }
   } restore{ctx, saved};
   running_mailbox = true;
-  if (!automatic) REXLOG_INFO("coop Lua: executing {} bytes context={:08X}", script.size(), entity);
+  if (executed==InternalScript::None) REXLOG_INFO("coop Lua: executing {} bytes context={:08X}", script.size(), entity);
 
   ctx.r3.u64 = lua;
   sub_8275BDA0(ctx, base);  // lua_gettop
@@ -208,16 +242,27 @@ void MaybeRunScript(PPCContext& ctx, uint8_t* base, uint32_t lua) {
   ctx.r3.u64 = lua;
   ctx.r4.s64 = top;
   sub_8275BDB8(ctx, base);  // lua_settop
-  if (automatic) {
+  if (executed==InternalScript::Spawn || executed==InternalScript::Remove) {
     const bool waiting = status == 0 && (message == "world not ready" ||
         message == "P1 not ready" || message == "P1 not in gameplay control");
+    uint32_t p1=0,p2=0;std::array<double,3> spawn{};int consumed=0;
+    const bool joined=automatic && status==0 && std::sscanf(message.c_str(),"P1=%u P2=%u spawn=%lf,%lf,%lf%n",
+        &p1,&p2,&spawn[0],&spawn[1],&spawn[2],&consumed)==5 && size_t(consumed)==message.size() &&
+        p1 && p2 && p1!=p2 && p1!=255 && p2!=255 &&
+        std::isfinite(spawn[0]) && std::isfinite(spawn[1]) && std::isfinite(spawn[2]);
+    const bool removed=!automatic && status==0 && message=="disabled";
+    lifecycle.Complete(action,waiting?SessionResult::Waiting:
+        (joined || removed)?SessionResult::Success:SessionResult::Failed);
+    const auto epoch=(runtime_state.load(std::memory_order_relaxed)&~uint64_t{1})+((joined || removed)?2:0);
+    runtime_state.store(epoch|uint64_t(lifecycle.Active()),std::memory_order_release);
     if (waiting) {
-      autojoin_enabled = true;
       next_join = Clock::now() + std::chrono::seconds(1);
     } else {
-      REXLOG_INFO("coop autojoin: status={} context={:08X} result={}; automatic join finished",
-                  status, entity, message);
+      next_join={};
+      if(automatic)REXLOG_INFO("coop session spawn: status={} context={:08X} result={} active={}",status,entity,message,lifecycle.Active());
+      else REXLOG_INFO("coop session: status={} result={} active={}",status,message,lifecycle.Active());
     }
+
   } else {
     REXLOG_INFO("coop Lua: status={} context={:08X} result={}", status, entity, message);
   }
@@ -230,18 +275,34 @@ void InstallLuaBridge(rex::Runtime& runtime) {
   if (path.empty() && !automatic) return;
 #ifdef _WIN32
   script_path = path;
-  autojoin_enabled = automatic;
+  automatic_session = automatic;
   const uint32_t buffer = runtime.memory()->SystemHeapAlloc(kScriptCapacity + 64);
   if (!buffer) {
     REXLOG_ERROR("coop Lua: could not allocate the script mailbox");
     return;
   }
   script_buffer.store(buffer, std::memory_order_release);
+  runtime_state.store(automatic?0:1,std::memory_order_release);
+  requested_session.store(0,std::memory_order_release);
+  interactive_session.store(automatic,std::memory_order_release);
   if (!path.empty()) REXLOG_INFO("coop Lua: local development mailbox enabled");
-  if (automatic) REXLOG_INFO("coop autojoin: waiting for P1 gameplay; built-in join script, once per session");
+  if (automatic) REXLOG_INFO("coop session ready: initially disabled; press F2 during gameplay to spawn P2 beside P1");
 #else
   REXLOG_WARN("coop Lua: mailbox currently requires Windows checked guest reads");
 #endif
+}
+
+bool CanToggleCoop() {return interactive_session.load(std::memory_order_acquire);}
+void RequestCoopToggle() {
+  if(!CanToggleCoop())return;
+  const auto request=requested_session.fetch_add(1,std::memory_order_acq_rel)+1;
+  REXLOG_INFO("coop session request: revision={} enabled={}",request,bool(request&1));
+}
+bool RuntimeCoopActive() {
+  return bool(RuntimeCoopState()&1);
+}
+uint64_t RuntimeCoopState() {
+  return interactive_session.load(std::memory_order_acquire)?runtime_state.load(std::memory_order_acquire):1;
 }
 
 }  // namespace superman_returns::coop

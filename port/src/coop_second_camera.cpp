@@ -1,4 +1,5 @@
 #include "coop_second_camera.h"
+#include "coop_lua.h"
 
 #include <array>
 #include <atomic>
@@ -31,6 +32,7 @@ bool waiting_logged = false;
 std::mutex snapshot_mutex;
 SecondCameraSnapshot snapshot;
 uint32_t view_generation=0;
+uint64_t session_generation=0;
 void InvalidateSnapshot() {
   std::lock_guard lock(snapshot_mutex);
   snapshot={};
@@ -105,6 +107,9 @@ void UpdateSecondCamera(PPCContext& ctx, uint8_t* base, uint32_t primary, double
   if (!block) return;
   InvalidateSnapshot();
   Restore restore(ctx);
+  const auto session=RuntimeCoopState();
+  if(session_generation!=(session>>1)) {target_id=0;session_generation=session>>1;}
+  if(!(session&1)) {target_id=0;return;}
   const uint32_t input = Word(base, kInputGlobal);
   const uint32_t slots = input ? Word(base, input + 4) : 0;
   const uint32_t count = input ? Word(base, input + 8) >> 24 : 0;
@@ -183,7 +188,7 @@ void UpdateSecondCamera(PPCContext& ctx, uint8_t* base, uint32_t primary, double
                                      Float(base,view+4),Float(base,view+8)},0xC0000000u|view_generation);
   {
     std::lock_guard lock(snapshot_mutex);
-    snapshot={encoded,target_id,primary,sequence};
+    snapshot={encoded,target_id,primary,sequence,session_generation};
   }
   if (sequence <= 3 || sequence % 120 == 0)
     REXLOG_INFO("coop second camera: seq={} owner={:08X} primary={:08X} target={} primary_target={} singleton_unchanged={} finite={} position={},{},{} primary_position={},{},{}",
@@ -194,6 +199,8 @@ void UpdateSecondCamera(PPCContext& ctx, uint8_t* base, uint32_t primary, double
 }
 SecondCameraSnapshot SampleSecondCamera() {
   std::lock_guard lock(snapshot_mutex);
+  const auto session=RuntimeCoopState();
+  if(!(session&1) || snapshot.session_generation!=(session>>1))return {};
   return snapshot;
 }
 }  // namespace superman_returns::coop

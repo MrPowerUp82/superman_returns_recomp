@@ -2,6 +2,8 @@
 #include "coop_camera_packet.h"
 #include "coop_camera_preview.h"
 #include "coop_split_frame.h"
+#include "coop_lua.h"
+#include "coop_second_camera.h"
 #include "native_renderer/native_bridge.h"
 #include <array>
 #include <cstring>
@@ -114,14 +116,17 @@ bool Verify(uint8_t* base,size_t offset) {
 bool PrepareSplitCamera(PPCContext& ctx,uint8_t* base,uint32_t graphics,uint32_t view,uint32_t caller) {
   if(!Enabled() || view || caller!=0x82776000)return false;
   state={};
+  if(!RuntimeCoopActive())return false;
   if(!native::CoopSplitSupported())return false;
   const auto consumer=Word(base,0x829A9398);
   if(!consumer)return false;
   std::array<uint8_t,packet::kPacketSize> data{};
   if(!Read(base,consumer+96,data.data(),data.size()))return false;
   const auto second=packet::DecodeOwnedSecondary(data);
+  const auto snapshot=SampleSecondCamera();
   const auto cameras=Selection(base,graphics);
-  if(!second || !cameras.world || !cameras.hud || cameras.world==cameras.hud)return false;
+  if(!second || !snapshot.view || packet::ReadWord(*snapshot.view,88)!=second->generation ||
+      !cameras.world || !cameras.hud || cameras.world==cameras.hud)return false;
   state.graphics=graphics;state.address=consumer+96;state.generation=second->generation;
   state.cameras=cameras;state.packet=data;state.second=*second;state.frame=++frames;
   Restore restore{ctx,ctx};
@@ -130,7 +135,7 @@ bool PrepareSplitCamera(PPCContext& ctx,uint8_t* base,uint32_t graphics,uint32_t
   return state.graphics!=0;
 }
 bool BeginSplitWorld(uint8_t* base,uint32_t graphics) {
-  if(!Enabled() || state.graphics!=graphics || !state.generation || state.drawing)return false;
+  if(!Enabled() || !RuntimeCoopActive() || state.graphics!=graphics || !state.generation || state.drawing)return false;
   if(!Verify(base,16)){REXLOG_ERROR("coop split failed: primary draw selection");return false;}
   const auto phase=ReadPhase(base);
   if(!phase){REXLOG_ERROR("coop split failed: unreadable effect phase");return false;}

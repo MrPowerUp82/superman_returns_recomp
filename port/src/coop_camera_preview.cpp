@@ -1,5 +1,6 @@
 #include "coop_camera_preview.h"
 #include "coop_camera_packet.h"
+#include "coop_lua.h"
 #include <array>
 #include <cstring>
 #include <rex/cvar.h>
@@ -59,7 +60,7 @@ void ApplyP2CameraPreview(PPCContext& ctx,uint8_t* base,uint32_t graphics,
                           uint32_t view,uint32_t caller) {
   // This is the normal preparation caller. Never apply to the HUD camera or
   // mutate either consumed packet block to select a different source view.
-  if(!Enabled() || view!=0 || caller!=0x82776000) return;
+  if(!Enabled() || !RuntimeCoopActive() || view!=0 || caller!=0x82776000) return;
   frame={};
   const uint32_t consumer=Word(base,0x829A9398);
   const uint32_t address=consumer ? consumer+96 : 0;

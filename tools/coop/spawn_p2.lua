@@ -15,4 +15,4 @@ SR_COOP_P2 = p2 -- retain before any following call, so retry never spawns anoth
 SetDASValue("currentControl", 2, p2)
 local bound = SetActorToDefaultController(p2, 1) -- mailbox-only zero-based port extension
 if not bound then return "P2 spawned but port 1 binding refused: " .. tostring(p2) end
-return "P1=" .. tostring(p1) .. " P2=" .. tostring(p2)
+return "P1=" .. tostring(p1) .. " P2=" .. tostring(p2) .. " spawn=" .. tostring(x) .. "," .. tostring(y) .. "," .. tostring(z)

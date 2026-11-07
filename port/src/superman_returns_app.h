@@ -14,6 +14,10 @@
 #include "frame_stats.h"
 #include "benchmark_input_driver.h"
 #include "coop_split.h"
+#include "coop_lua.h"
+#include <rex/ui/ui_event.h>
+#include <rex/ui/virtual_key.h>
+#include <rex/ui/keybinds.h>
 #include "title_benchmark.h"
 #include "title_benchmark_dialog.h"
 #include <rex/input/input_system.h>
@@ -154,6 +158,16 @@ class SupermanReturnsApp : public rex::ReXApp {
   }
 
   // Feed the F3 debug overlay with the guest frame rate.
+  void OnKeyDown(rex::ui::KeyEvent& event) override {
+    if(superman_returns::coop::CanToggleCoop() && event.virtual_key()==rex::ui::VirtualKey::kF2 &&
+        !event.is_ctrl_pressed() && !event.is_alt_pressed() && !event.is_shift_pressed() && !event.is_super_pressed()) {
+      if(!event.prev_state())superman_returns::coop::RequestCoopToggle();
+      event.set_handled(true);
+      return;
+    }
+    // ReXApp's private handler dispatches this same SDK registry.
+    rex::ui::ProcessKeyEvent(event);
+  }
   void OnPostSetup() override {
     SetGuestFrameStats(SampleGuestFrameStats);InstallBenchmarkInput(*runtime());
     superman_returns::coop::Install(*runtime());
