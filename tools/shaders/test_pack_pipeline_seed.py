@@ -11,7 +11,7 @@ class PipelineSeedTests(unittest.TestCase):
         self.assertEqual((total,unique),(3,2))
         self.assertEqual(seed,HEADER.pack(b'CNPS',1,32,0)+a+different)
     def test_rejects_incompatible_and_partial_files(self):
-        for data in [b'',HEADER.pack(b'NOPE',1,32,0),HEADER.pack(b'CNPS',2,32,0),
+        for data in [b'',HEADER.pack(b'NOPE',1,32,0),HEADER.pack(b'CNPS',3,32,0),
                      HEADER.pack(b'CNPS',1,31,0),HEADER.pack(b'CNPS',1,32,0)+b'x']:
             with self.subTest(data=data),self.assertRaises(ValueError):pack_seed(data)
     def test_different_fields_with_same_key_are_not_dropped(self):

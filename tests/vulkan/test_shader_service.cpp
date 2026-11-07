@@ -1,5 +1,6 @@
 #include "../native/test_main.h"
 #include "../..//port/src/graphics/shaders/vulkan_shader_service.h"
+#include "vulkan_cache_audit.h"
 #include <cstring>
 #include <fstream>
 #include <thread>
@@ -161,6 +162,9 @@ SR_TEST(shader_library_returns_ready_without_a_compiler_and_misses_use_runtime) 
     SR_CHECK_EQ(service.PrecompiledCount(),1u);SR_CHECK(service.LibraryDiagnostic().empty());
     auto key=service.Request(original,ShaderStage::kVertex);auto result=service.Poll(key);
     SR_CHECK(result.status==ShaderPoll::ready);SR_CHECK(bool(result.artifact));SR_CHECK_EQ(calls.load(),0u);
+    SR_CHECK(service.FindReadyByDigest(ShaderArtifactDigest(*result.artifact),ShaderStage::kVertex)==result.artifact);
+    SR_CHECK(!service.FindReadyByDigest(ShaderArtifactDigest(*result.artifact),ShaderStage::kPixel));
+    SR_CHECK(!service.FindReadyByDigest(123,ShaderStage::kVertex));SR_CHECK_EQ(calls.load(),0u);
     SR_CHECK_EQ(key,service.Request(original,ShaderStage::kVertex));original.back()=8;
     auto miss=service.Request(original,ShaderStage::kVertex);SR_CHECK(miss!=key);
     auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
@@ -168,6 +172,60 @@ SR_TEST(shader_library_returns_ready_without_a_compiler_and_misses_use_runtime) 
     SR_CHECK(service.Poll(miss).status==ShaderPoll::ready);SR_CHECK_EQ(calls.load(),1u);
   }
   std::filesystem::remove_all(directory);
+}
+SR_TEST(vulkan_shader_audit_distinguishes_disk_hit_compiler_calls_and_missing_proof) {
+  namespace audit=superman_returns::graphics::vulkan;
+  const auto root=std::filesystem::temp_directory_path()/std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+  const auto hits=audit::VulkanCacheAudit::shader_disk_hits.load();
+  const auto compiles=audit::VulkanCacheAudit::shader_compiler_invocations.load();
+  const auto unknown=audit::VulkanCacheAudit::shader_unknown_audits.load();
+  std::atomic<uint32_t> index=0;
+  {
+    VulkanShaderConfig config;config.cache=root;
+    VulkanShaderService service(config,[&](auto args,auto,std::stop_token,std::string&) {
+      const auto job=++index;auto wire=Wire();std::ofstream result(args.back(),std::ios::binary);
+      result.write(reinterpret_cast<const char*>(wire.data()),wire.size());result.close();
+      if(job!=3) {auto path=args.back();path+=".audit";std::ofstream file(path);file<<(job==1?"1 1 0\n":"1 0 2\n");}
+      return true;
+    });
+    for(uint8_t source:{1,2,3}) {
+      const auto key=service.Request({&source,1},ShaderStage::kVertex);
+      const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+      while(service.Poll(key).status==ShaderPoll::pending && std::chrono::steady_clock::now()<deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      SR_CHECK(service.Poll(key).status==ShaderPoll::ready);
+    }
+  }
+  SR_CHECK_EQ(audit::VulkanCacheAudit::shader_disk_hits.load(),hits+1);
+  SR_CHECK_EQ(audit::VulkanCacheAudit::shader_compiler_invocations.load(),compiles+2);
+  SR_CHECK_EQ(audit::VulkanCacheAudit::shader_unknown_audits.load(),unknown+1);
+  std::filesystem::remove_all(root);
+}
+SR_TEST(vulkan_shader_retry_keeps_each_process_attempt_and_its_compiler_proof) {
+  namespace audit=superman_returns::graphics::vulkan;
+  const auto root=std::filesystem::temp_directory_path()/std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+  const auto compiles=audit::VulkanCacheAudit::shader_compiler_invocations.load();
+  const auto failures=audit::VulkanCacheAudit::shader_process_failures.load();
+  const auto jobs=audit::VulkanCacheAudit::shader_jobs.load();std::atomic<uint32_t> attempt=0;
+  {
+    VulkanShaderConfig config;config.cache=root;
+    VulkanShaderService service(config,[&](auto args,auto,std::stop_token,std::string&) {
+      const auto call=++attempt;auto path=args.back();path+=".audit";
+      {std::ofstream file(path);file<<(call==1?"1 0 1\n":"1 1 0\n");}
+      if(call==1)return false;
+      auto wire=Wire();std::ofstream result(args.back(),std::ios::binary);
+      result.write(reinterpret_cast<const char*>(wire.data()),wire.size());return true;
+    });
+    const uint8_t source=4;const auto key=service.Request({&source,1},ShaderStage::kVertex);
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+    while(service.Poll(key).status==ShaderPoll::pending && std::chrono::steady_clock::now()<deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    SR_CHECK(service.Poll(key).status==ShaderPoll::ready);
+  }
+  SR_CHECK_EQ(audit::VulkanCacheAudit::shader_compiler_invocations.load(),compiles+1);
+  SR_CHECK_EQ(audit::VulkanCacheAudit::shader_process_failures.load(),failures+1);
+  SR_CHECK_EQ(audit::VulkanCacheAudit::shader_jobs.load(),jobs+2);
+  std::filesystem::remove_all(root);
 }
 SR_TEST(shader_library_requires_matching_library_and_shader_abi) {
   auto directory=std::filesystem::temp_directory_path()/std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());std::filesystem::create_directory(directory);

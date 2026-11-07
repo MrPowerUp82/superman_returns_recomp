@@ -27,6 +27,9 @@ int main() {
     f.motionCameraOnlyAccepted = true; // Explicit choice, not a claim of full motion.
     CHECK(ValidateDlssFrame(f) == DlssError::None);
     f.motionCameraOnlyAccepted = false;
+    f.motionPartialWithRejectionMask = true;
+    CHECK(ValidateDlssFrame(f) == DlssError::None);
+    f.motionPartialWithRejectionMask = false;
     f.motionIncludesCameraObjectsAndDeformation = true;
     f.depth = DlssDepth::Unknown;
     CHECK(ValidateDlssFrame(f) == DlssError::UnsupportedConventions);
@@ -43,6 +46,10 @@ int main() {
     f.preExposure = 0;
     CHECK(ValidateDlssFrame(f) == DlssError::InvalidScalars);
     f.preExposure = 1; f.renderWidth = 1920; f.renderHeight = 1080;
+    CHECK(ValidateDlssFrame(f) == DlssError::InvalidDimensions);
+    f.mode = DlssRequested::DLAA;
+    CHECK(ValidateDlssFrame(f) == DlssError::None);
+    f.renderWidth = 1280;
     CHECK(ValidateDlssFrame(f) == DlssError::InvalidDimensions);
 
     // SDK absence must never advertise support, produce a ticket, or apply Quality.

@@ -1,0 +1,276 @@
+diff --git a/include/rex/input/mnk/mnk_input_driver.h b/include/rex/input/mnk/mnk_input_driver.h
+--- a/include/rex/input/mnk/mnk_input_driver.h
++++ b/include/rex/input/mnk/mnk_input_driver.h
+@@ -58,6 +58,8 @@
+ 
+  private:
+   bool IsEnabled() const;
++  uint8_t BareBoundModifiers() const;
++  uint16_t SampleKeyboardButtons(uint8_t bare_bound) const;
+   void SetKeyState(uint16_t vk, bool down);
+   void EnqueueKeystroke(uint16_t vk_pad, bool down);
+ 
+@@ -75,6 +77,8 @@
+ 
+   std::mutex state_mutex_;
+   bool key_down_[256] = {};
++  // Resolved XInput buttons, never a union of independently released keys.
++  uint16_t pending_buttons_ = 0;
+ 
+   // Mouse delta tracking. Fractional because relative motion arrives in
+   // fractions of a pixel, and truncating each event drops slow movement.
+diff --git a/src/input/mnk/mnk_input_driver.cpp b/src/input/mnk/mnk_input_driver.cpp
+--- a/src/input/mnk/mnk_input_driver.cpp
++++ b/src/input/mnk/mnk_input_driver.cpp
+@@ -18,6 +18,7 @@
+ #include <rex/ui/window.h>
+ 
+ #include "../../system/write_tracking/include/mnk_bind_match.h"
++#include "../../system/write_tracking/include/mnk_button_edges.h"
+ 
+ #include <algorithm>
+ #include <cmath>
+@@ -126,7 +127,12 @@
+ }
+ 
+ void MnkInputDriver::DetachFromWindow() {
+-  rex::ui::Window* window = attached_window_;
++  rex::ui::Window* window;
++  {
++    std::lock_guard lock(state_mutex_);
++    pending_buttons_ = 0;
++    window = attached_window_;
++  }
+   if (!window) {
+     return;
+   }
+@@ -159,61 +165,7 @@
+                               });
+ }
+ 
+-void MnkInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
+-  // Disabled means no device at all, so it never occupies a guest user slot.
+-  if (!IsEnabled()) {
+-    return;
+-  }
+-  DeviceInfo info;
+-  info.id = kMnkDevice;
+-  info.name = "Keyboard and Mouse";
+-  info.synthetic = true;
+-  out.push_back(info);
+-}
+-
+-X_RESULT MnkInputDriver::GetDeviceCapabilities(DeviceId id, uint32_t flags,
+-                                               X_INPUT_CAPABILITIES* out_caps) {
+-  if (!IsEnabled() || id != kMnkDevice) {
+-    return X_ERROR_DEVICE_NOT_CONNECTED;
+-  }
+-  if (out_caps) {
+-    std::memset(out_caps, 0, sizeof(*out_caps));
+-    out_caps->type = 0x01;
+-    out_caps->sub_type = 0x01;
+-    out_caps->flags = 0;
+-    out_caps->gamepad.buttons = 0xFFFF;
+-    out_caps->gamepad.left_trigger = 0xFF;
+-    out_caps->gamepad.right_trigger = 0xFF;
+-    out_caps->gamepad.thumb_lx = static_cast<int16_t>(0x7FFF);
+-    out_caps->gamepad.thumb_ly = static_cast<int16_t>(0x7FFF);
+-    out_caps->gamepad.thumb_rx = static_cast<int16_t>(0x7FFF);
+-    out_caps->gamepad.thumb_ry = static_cast<int16_t>(0x7FFF);
+-    out_caps->vibration.left_motor_speed = 0xFFFF;
+-    out_caps->vibration.right_motor_speed = 0xFFFF;
+-  }
+-  return X_ERROR_SUCCESS;
+-}
+-
+-X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
+-  if (!IsEnabled() || id != kMnkDevice) {
+-    return X_ERROR_DEVICE_NOT_CONNECTED;
+-  }
+-
+-  // Mouse look is opt in. Without this gate, keyboard input alone would hide
+-  // and lock the cursor, breaking the ImGui overlays.
+-  QueueMouseCaptureUpdate(IsEnabled() && REXCVAR_GET(mnk_mouse) && IsMouseLookActive() &&
+-                          has_focus_ && is_active());
+-
+-  if (!is_active() || !has_focus_) {
+-    if (out_state) {
+-      std::memset(out_state, 0, sizeof(*out_state));
+-      out_state->packet_number = packet_number_;
+-    }
+-    return X_ERROR_SUCCESS;
+-  }
+-
+-  std::lock_guard lock(state_mutex_);
+-
++uint8_t MnkInputDriver::BareBoundModifiers() const {
+   // Modifiers bound on their own act as buttons (sr::mnk::BindPressed).
+   const std::string_view binds[] = {
+       REXCVAR_GET(keybind_a),
+@@ -242,8 +194,10 @@
+       REXCVAR_GET(keybind_start),
+       REXCVAR_GET(keybind_guide),
+   };
+-  const uint8_t bare_bound = sr::mnk::BareModifierBinds(binds);
+-
++  return sr::mnk::BareModifierBinds(binds);
++}
++
++uint16_t MnkInputDriver::SampleKeyboardButtons(uint8_t bare_bound) const {
+   uint16_t buttons = 0;
+   if (IsBindPressed(key_down_, REXCVAR_GET(keybind_a), bare_bound))
+     buttons |= X_INPUT_GAMEPAD_A;
+@@ -275,6 +229,80 @@
+     buttons |= X_INPUT_GAMEPAD_DPAD_LEFT;
+   if (IsBindPressed(key_down_, REXCVAR_GET(keybind_dpad_right), bare_bound))
+     buttons |= X_INPUT_GAMEPAD_DPAD_RIGHT;
++  return buttons;
++}
++
++void MnkInputDriver::EnumerateDevices(std::vector<DeviceInfo>& out) {
++  // Disabled means no device at all, so it never occupies a guest user slot.
++  {
++    std::lock_guard lock(state_mutex_);
++    if (!IsEnabled() || !is_active() || !has_focus_) {
++      pending_buttons_ = 0;
++    }
++  }
++  if (!IsEnabled()) {
++    return;
++  }
++  DeviceInfo info;
++  info.id = kMnkDevice;
++  info.name = "Keyboard and Mouse";
++  info.synthetic = true;
++  out.push_back(info);
++}
++
++X_RESULT MnkInputDriver::GetDeviceCapabilities(DeviceId id, uint32_t flags,
++                                               X_INPUT_CAPABILITIES* out_caps) {
++  if (!IsEnabled() || id != kMnkDevice) {
++    return X_ERROR_DEVICE_NOT_CONNECTED;
++  }
++  if (out_caps) {
++    std::memset(out_caps, 0, sizeof(*out_caps));
++    out_caps->type = 0x01;
++    out_caps->sub_type = 0x01;
++    out_caps->flags = 0;
++    out_caps->gamepad.buttons = 0xFFFF;
++    out_caps->gamepad.left_trigger = 0xFF;
++    out_caps->gamepad.right_trigger = 0xFF;
++    out_caps->gamepad.thumb_lx = static_cast<int16_t>(0x7FFF);
++    out_caps->gamepad.thumb_ly = static_cast<int16_t>(0x7FFF);
++    out_caps->gamepad.thumb_rx = static_cast<int16_t>(0x7FFF);
++    out_caps->gamepad.thumb_ry = static_cast<int16_t>(0x7FFF);
++    out_caps->vibration.left_motor_speed = 0xFFFF;
++    out_caps->vibration.right_motor_speed = 0xFFFF;
++  }
++  return X_ERROR_SUCCESS;
++}
++
++X_RESULT MnkInputDriver::GetDeviceState(DeviceId id, X_INPUT_STATE* out_state) {
++  if (!IsEnabled()) {
++    std::lock_guard lock(state_mutex_);
++    pending_buttons_ = 0;
++    return X_ERROR_DEVICE_NOT_CONNECTED;
++  }
++  if (id != kMnkDevice) {
++    return X_ERROR_DEVICE_NOT_CONNECTED;
++  }
++
++  // Mouse look is opt in. Without this gate, keyboard input alone would hide
++  // and lock the cursor, breaking the ImGui overlays.
++  QueueMouseCaptureUpdate(IsEnabled() && REXCVAR_GET(mnk_mouse) && IsMouseLookActive() &&
++                          has_focus_ && is_active());
++
++  std::lock_guard lock(state_mutex_);
++  if (!is_active() || !has_focus_) {
++    pending_buttons_ = 0;
++    if (out_state) {
++      std::memset(out_state, 0, sizeof(*out_state));
++      out_state->packet_number = packet_number_;
++    }
++    return X_ERROR_SUCCESS;
++  }
++
++  const uint8_t bare_bound = BareBoundModifiers();
++  const uint16_t current_buttons = SampleKeyboardButtons(bare_bound);
++  const uint16_t buttons = out_state
++      ? sr::mnk::ConsumeButtonEdges(pending_buttons_, current_buttons, true)
++      : current_buttons;
+ 
+   uint8_t lt = IsBindPressed(key_down_, REXCVAR_GET(keybind_left_trigger), bare_bound) ? 0xFF : 0;
+   uint8_t rt = IsBindPressed(key_down_, REXCVAR_GET(keybind_right_trigger), bare_bound) ? 0xFF : 0;
+@@ -372,16 +400,21 @@
+   if (!mouse_capture_update_queued_.compare_exchange_strong(already_queued, true)) {
+     return;
+   }
+-  std::lock_guard lock(state_mutex_);
+-  if (!attached_window_) {
+-    mouse_capture_update_queued_.store(false, std::memory_order_relaxed);
+-    return;
+-  }
+-  // Deferred, not CallInUIThread: running inline would re-enter state_mutex_.
+-  attached_window_->app_context().CallInUIThreadDeferred([this] {
++  rex::ui::WindowedAppContext* context;
++  {
++    std::lock_guard lock(state_mutex_);
++    if (!attached_window_) {
++      mouse_capture_update_queued_.store(false, std::memory_order_relaxed);
++      return;
++    }
++    context = &attached_window_->app_context();
++  }
++  // SDL's notification can synchronously enter its event watcher. Never hold
++  // state_mutex_ here: focus/close events acquire it from the UI thread.
++  if (!context->CallInUIThreadDeferred([this] {
+     mouse_capture_update_queued_.store(false, std::memory_order_relaxed);
+     ApplyMouseCaptureFromUIThread();
+-  });
++  })) mouse_capture_update_queued_.store(false, std::memory_order_relaxed);
+ }
+ 
+ void MnkInputDriver::ApplyMouseCaptureFromUIThread() {
+@@ -451,18 +484,26 @@
+ }
+ 
+ void MnkInputDriver::OnKeyDown(rex::ui::KeyEvent& e) {
+-  if (!IsEnabled() || !has_focus_)
+-    return;
+-  std::lock_guard lock(state_mutex_);
+-  uint16_t vk = static_cast<uint16_t>(e.virtual_key());
++  std::lock_guard lock(state_mutex_);
++  const bool accepting = IsEnabled() && has_focus_ && is_active();
++  if (!IsEnabled() || !has_focus_) {
++    pending_buttons_ = 0;
++    return;
++  }
++  const uint16_t vk = static_cast<uint16_t>(e.virtual_key());
+   SetKeyState(vk, true);
++  // Resolve the complete live chord now. Latching individual keys would invent
++  // Shift+Up if Shift and Up were tapped separately before the next guest poll.
++  sr::mnk::ObserveButtonEdges(pending_buttons_,
++                            SampleKeyboardButtons(BareBoundModifiers()), accepting);
+ }
+ 
+ void MnkInputDriver::OnKeyUp(rex::ui::KeyEvent& e) {
+-  if (!IsEnabled())
+-    return;
+-  std::lock_guard lock(state_mutex_);
+-  uint16_t vk = static_cast<uint16_t>(e.virtual_key());
++  std::lock_guard lock(state_mutex_);
++  if (!IsEnabled() || !has_focus_ || !is_active()) {
++    pending_buttons_ = 0;
++  }
++  const uint16_t vk = static_cast<uint16_t>(e.virtual_key());
+   SetKeyState(vk, false);
+ }
+ 
+@@ -536,6 +577,7 @@
+   {
+     std::lock_guard lock(state_mutex_);
+     std::memset(key_down_, 0, sizeof(key_down_));
++    pending_buttons_ = 0;
+     mouse_dx_ = 0.0f;
+     mouse_dy_ = 0.0f;
+   }

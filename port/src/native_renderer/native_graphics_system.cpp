@@ -52,6 +52,7 @@
 #include "idle_yield.h"
 #include "vblank_policy.h"
 #include "wait_escape_policy.h"
+#include "../graphics/presentation_cadence.h"
 #include "sdk_compat.h"
 #if SR_NATIVE_RENDERER_BUILD
 #include "native_renderer.h"
@@ -64,8 +65,7 @@ REXCVAR_DEFINE_INT32(sr_native_fps_limit, 0, "Superman Returns Native",
                      "Native pacing target (30 = original; 60/120 experimental; "
                      "0 + vsync=false = Canary unlocked pacing; 0 + vsync=true = 60 Hz vblank). "
                      "Does not change simulation deltas")
-    .range(0, 1000)
-    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+    .range(0, 1000);
 REXCVAR_DEFINE_BOOL(sr_native_gpu_trace, false, "Superman Returns Native", "Debug: log native GPU packets/registers");
 REXCVAR_DEFINE_STRING(sr_native_gpu_luid, "", "Superman Returns Native",
                      "Launcher GPU identity (16 hexadecimal digits); empty uses d3d12_adapter");
@@ -194,6 +194,9 @@ rex::ui::GraphicsProvider* D3D12NativeGraphicsSystem::provider() const { return 
 
 rex::X_STATUS D3D12NativeGraphicsSystem::SetupPresentation(rex::ui::WindowedAppContext* app_context) {
   if (presenter_) return X_STATUS_SUCCESS;
+  // Reuse the SDK's UI presenter and triple mailbox. FIFO/interval-1 waits
+  // belong to that thread, never to the worker publishing guest frontbuffers.
+  rex::cvar::SetFlagByName("host_present_from_non_ui_thread", "false");
   const bool vulkan=native_api_==graphics::NativeApi::kVulkan;
   if(vulkan) {
 #if SR_VULKAN_GAME
@@ -305,9 +308,10 @@ rex::X_STATUS D3D12NativeGraphicsSystem::SetupGuestGpu(rex::runtime::FunctionDis
 
 void D3D12NativeGraphicsSystem::Shutdown() {
   g_active_system.store(nullptr);
-  SignalGpuProgress();
   running_ = false;
+  SignalGpuProgress();
   if (write_event_) write_event_->Set();
+  if (cp_wake_) cp_wake_->Set();
   if (command_thread_) {
     command_thread_->Wait(0, 0, 0, nullptr);
     command_thread_.reset();
@@ -451,11 +455,17 @@ void D3D12NativeGraphicsSystem::VsyncThreadMain() {
   // or simulation deltas. Positive project FPS choices retain their units.
   uint64_t freq = rex::chrono::Clock::guest_tick_frequency();
   int32_t fps = REXCVAR_GET(sr_native_fps_limit);
-  const bool vsync=rex::cvar::Query<bool>("vsync");
-  const auto cadence=SelectNativeVblankCadence(fps,vsync,REXCVAR_GET(sr_native_unlocked_vblank_hz));
+  bool vsync=rex::cvar::Query<bool>("vsync");
+  auto cadence=SelectNativeVblankCadence(fps,vsync,REXCVAR_GET(sr_native_unlocked_vblank_hz));
+  const auto display_cadence = superman_returns::graphics::EvaluateDisplayCadence(
+      fps, superman_returns::graphics::QueryHostDisplayRefreshRate());
   REXLOG_INFO("native graphics: Canary pacing target={} vsync={} unlocked={} vblank_hz={} "
+              "display_hz={} cadence={} ratio={:.2f} "
               "scanline_counter=advancing; guest timebase and simulation deltas unchanged",
-              fps,vsync,cadence.unlocked,cadence.hz);
+              fps,vsync,cadence.unlocked,cadence.hz,
+              display_cadence.display_hz,
+              superman_returns::graphics::CadenceModeToString(display_cadence.mode),
+              display_cadence.ratio);
   auto mark_vblank=[this] {
     rex::system::X_VIDEO_MODE mode;
     rex::kernel::xboxkrnl::VdQueryVideoMode(&mode);
@@ -469,6 +479,23 @@ void D3D12NativeGraphicsSystem::VsyncThreadMain() {
   uint64_t interval = std::max(uint64_t(1), freq / cadence.hz);
   VblankPacer pacer(rex::chrono::Clock::QueryGuestTickCount(), interval);
   while (running_) {
+    // Host pacing and the guest's synchronization cadence must change together
+    // when the native settings panel changes the target during a session.
+    const int32_t selected_fps=REXCVAR_GET(sr_native_fps_limit);
+    const bool selected_vsync=rex::cvar::Query<bool>("vsync");
+    const auto selected=SelectNativeVblankCadence(selected_fps,selected_vsync,
+        REXCVAR_GET(sr_native_unlocked_vblank_hz));
+    if(selected.hz!=cadence.hz || selected.unlocked!=cadence.unlocked) {
+      cadence=selected;fps=selected_fps;vsync=selected_vsync;
+      interval=std::max(uint64_t(1),freq/cadence.hz);
+      pacer=VblankPacer(rex::chrono::Clock::QueryGuestTickCount(),interval);
+      const auto live_disp = superman_returns::graphics::EvaluateDisplayCadence(
+          fps, superman_returns::graphics::QueryHostDisplayRefreshRate());
+      REXLOG_INFO("native graphics: live pacing target={} vsync={} vblank_hz={} display_hz={} cadence={} ratio={:.2f}",
+          fps,vsync,cadence.hz,live_disp.display_hz,
+          superman_returns::graphics::CadenceModeToString(live_disp.mode),
+          live_disp.ratio);
+    }
     if(cadence.unlocked) {
       mark_vblank();
       rex::thread::Sleep(std::chrono::microseconds(1000000u/cadence.hz));

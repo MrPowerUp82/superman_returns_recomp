@@ -5,21 +5,36 @@
 #include "../immediate.h"
 #include "../frame_loop.h"
 #include "../frame_generation_policy.h"
+#include "../vulkan_cache_audit.h"
+#include "../../presentation_pacing.h"
+#include "../../graphics_options_runtime.h"
 #include "../../../native_renderer/native_renderer.h"
 #include "../../../native_renderer/hang_watchdog.h"
 #include "../../../title_benchmark.h"
 #include "../../texture_mods/texture_mods_runtime.h"
 #include <rex/ui/surface_win.h>
 #include <rex/logging.h>
+#include <rex/cvar.h>
 #include <algorithm>
 #include <atomic>
 #include <map>
 #include <mutex>
 #include <chrono>
 #include <thread>
+#include <windows.h>
 namespace superman_returns::graphics::vulkan {
 namespace {
 void Report(const Error& e) {REXLOG_ERROR("native Vulkan: {}: {} (VkResult {})",e.operation,e.message,int(e.result));}
+// RCDATA 4 is portable SRVPSO metadata. Driver cache bytes stay local/device-bound.
+std::span<const uint8_t> EmbeddedPipelineSeed() {
+  const auto module=GetModuleHandleW(nullptr);
+  const auto resource=FindResourceW(module,MAKEINTRESOURCEW(4),MAKEINTRESOURCEW(10));
+  if(!resource)return {};
+  const auto handle=LoadResource(module,resource);
+  const auto* data=handle?static_cast<const uint8_t*>(LockResource(handle)):nullptr;
+  const auto size=SizeofResource(module,resource);
+  return data?std::span<const uint8_t>(data,size):std::span<const uint8_t>{};
+}
 struct HostTexture {
   guest::ResourceId id=0;guest::LinearTexture pixels;
   bool repeated=false,linear=true;
@@ -32,6 +47,7 @@ struct Host {
   // waited for it, about 95% of the frame on Intel UHD).
   std::atomic<GameFrame*> ready_game{nullptr};
   NativeProviderConfig config;
+  uint64_t graphics_epoch=0;
   std::unique_ptr<shaders::VulkanShaderService> shaders;
   std::unique_ptr<GameFrame> game;
   std::unique_ptr<ResourceStore> resources;
@@ -52,6 +68,7 @@ struct Host {
     if(!context.OpenDevice(surface,config.gpu_uuid,e,&features,true,config.frame_generation.enabled,config.global_resources)) return false;
     if(!(context.selected.queues[context.graphics_family].flags&VK_QUEUE_COMPUTE_BIT)) {e={"Game queue",VK_ERROR_FEATURE_NOT_PRESENT,"Graphics queue must also support compute resolves"};return false;}
     config.shaders.compiler_workers=2;config.shaders.abi=config.global_resources?shaders::ShaderAbi::kGlobal:shaders::ShaderAbi::kPortable;
+    config.shaders.audit_log=[](const std::string& line){REXLOG_INFO("{}",line);};
     shaders=std::make_unique<shaders::VulkanShaderService>(config.shaders,WindowsShaderProcess());
     REXLOG_INFO("native Vulkan: {} precompiled shaders from {}",shaders->PrecompiledCount(),config.shaders.library.string());
     if(!shaders->LibraryDiagnostic().empty()) REXLOG_WARN("native Vulkan: pre-shader library unavailable: {}; compiling misses at runtime",shaders->LibraryDiagnostic());
@@ -61,11 +78,55 @@ struct Host {
       texture_mods::ApplyTextureMods(result);  // dump, PNG replacement, costume skins
       return true;};
     game=std::make_unique<GameFrame>(context,gpu_mutex,std::move(lookup),std::move(decode));
+    game->output_extent=[] {
+      const auto request=SharedGraphicsOptions()->Snapshot();
+      constexpr uint32_t widths[]{960,1280,1600,1920,2560,3840},heights[]{540,720,900,1080,1440,2160};
+      const auto row=size_t(request.requested[6]);return VkExtent2D{widths[row],heights[row]};
+    };
     game->compilation_progress=[] {native::HangWatchdogBeat();};
     benchmark::SetGpuName(context.selected.name);
     if(benchmark::Active()) game->Renderer().EnableUiCut([](bool scene) {benchmark::NoteRendererFrame(scene);});
     resources=std::make_unique<ResourceStore>(context);compositor=std::make_unique<FrontbufferCompositor>(context);immediate=std::make_unique<ImmediateRenderer>(context);
-    return game->Initialize(config.driver_cache,e,config.global_resources) && compositor->Initialize(e) && immediate->Initialize(e);
+    const bool cache_enabled=rex::cvar::Query<bool>("sr_native_pipeline_cache");
+    if(!game->Initialize(cache_enabled?config.driver_cache:std::filesystem::path{},e,config.global_resources) || !compositor->Initialize(e) || !immediate->Initialize(e)) return false;
+    REXLOG_INFO("native Vulkan: pipeline cache={} descriptions={} prewarm={}",cache_enabled,
+        cache_enabled?config.driver_cache.string()+(config.global_resources?".global.descriptions":".descriptions"):std::string("disabled"),cache_enabled);
+    if(cache_enabled) {
+      Error prewarm;
+      if(!config.global_resources) {
+        const auto embedded=EmbeddedPipelineSeed();
+        if(!embedded.empty() && !game->Renderer().ImportPipelineSeed(embedded,prewarm))Report(prewarm);
+      }
+      if(!game->Renderer().PrewarmObserved(*shaders,prewarm))Report(prewarm);
+      if(!game->Renderer().PrewarmUtilities(prewarm)) {e=prewarm;return false;}
+      if(!compositor->Prewarm(prewarm))Report(prewarm);
+      if(!immediate->Prewarm(prewarm))Report(prewarm);
+    }
+    benchmark::SetCacheAuditProvider(+[] {
+      if(VulkanCacheAudit::opaque_frame_generation.load())
+        REXLOG_WARN("native cache audit: vulkan_uninstrumented_scope feature=frame_generation");
+      if(VulkanCacheAudit::shader_active_jobs.load())
+        REXLOG_WARN("native cache audit: vulkan_inflight_shader_jobs count={}",VulkanCacheAudit::shader_active_jobs.load());
+      REXLOG_INFO("native cache audit: vulkan_totals runtime_attempts={} runtime_failures={} "
+          "startup_attempts={} startup_failures={} pipeline_hits={} description_misses={} "
+          "library_hits={} memory_hits={} shader_misses={} shader_jobs={} process_failures={} "
+          "compiler_invocations={} disk_hits={} unknown_audits={} not_ready={}",
+          VulkanCacheAudit::pipeline_attempts.load(),VulkanCacheAudit::pipeline_failures.load(),
+          VulkanCacheAudit::startup_attempts.load(),VulkanCacheAudit::startup_failures.load(),
+          VulkanCacheAudit::pipeline_hits.load(),VulkanCacheAudit::description_misses.load(),
+          VulkanCacheAudit::shader_library_hits.load(),VulkanCacheAudit::shader_memory_hits.load(),
+          VulkanCacheAudit::shader_misses.load(),VulkanCacheAudit::shader_jobs.load(),
+          VulkanCacheAudit::shader_process_failures.load(),VulkanCacheAudit::shader_compiler_invocations.load(),
+          VulkanCacheAudit::shader_disk_hits.load(),VulkanCacheAudit::shader_unknown_audits.load(),VulkanCacheAudit::shader_not_ready.load());
+      return benchmark::CacheAuditCounts{VulkanCacheAudit::frames.load(),VulkanCacheAudit::draws.load(),
+          VulkanCacheAudit::pipeline_attempts.load(),VulkanCacheAudit::shader_compiler_invocations.load(),
+          VulkanCacheAudit::shader_misses.load()+VulkanCacheAudit::shader_not_ready.load()+
+              VulkanCacheAudit::shader_unknown_audits.load()+VulkanCacheAudit::shader_jobs.load()+
+              VulkanCacheAudit::description_misses.load()};
+    });
+    VulkanCacheAudit::opaque_frame_generation=config.frame_generation.enabled;
+    graphics_epoch=SharedGraphicsOptions()->BeginBackend(NativeApi::kVulkan);
+    return true;
   }
   bool Prepare(VkCommandBuffer command,uint64_t serial,Error& e) {
     if(!resources->BeginSubmission(command,serial,e)) return false;
@@ -156,7 +217,7 @@ public:
   }
 protected:
   SurfacePaintConnectResult ConnectOrReconnectPaintingToSurfaceFromUIThread(rex::ui::Surface& surface,uint32_t width,uint32_t height,bool was_paintable,bool& implicit_vsync) override {
-    implicit_vsync=false;std::lock_guard lock(host_->gpu_mutex);Error e;
+    implicit_vsync=host_->config.vsync;std::lock_guard lock(host_->gpu_mutex);Error e;
     auto& window=static_cast<rex::ui::Win32HwndSurface&>(surface);
     if(!host_->context.device) {
       if(!host_->Initialize(window,e)) {host_->initialization_error=e;Report(e);return SurfacePaintConnectResult::kFailure;}
@@ -197,6 +258,16 @@ protected:
     RefreshContext context(is8);if(!callback(context) || !context.output.image) return false;mailbox_[index]=std::move(context.output);return true;
   }
   PaintResult PaintAndPresentImpl(bool ui) override {
+    const bool requested_vsync=rex::cvar::Query<bool>("vsync");
+    if(requested_vsync!=host_->config.vsync) {
+      host_->config.vsync=requested_vsync;requested_extent_={};
+      return PaintResult::kNotPresentedConnectionOutdated;
+    }
+    // Wait before acquiring the mailbox, so a producer can replace stale output
+    // while this existing presenter thread waits. No GPU lock is held here.
+    const uint32_t consumed_fps=ParsePresentationTarget(rex::cvar::GetFlagByName("sr_native_fps_limit"));
+    const auto graphics_request=SharedGraphicsOptions()->Snapshot();
+    timing_.Wait(consumed_fps);
     uint32_t index;GuestOutputProperties properties{};auto consumer=ConsumeGuestOutput(index,&properties,nullptr);Mailbox source;if(index!=UINT32_MAX) source=mailbox_[index];consumer.unlock();
     const bool pending=bool(pending_original_.image);
     if(pending) {source=pending_original_;properties.display_aspect_ratio_x=pending_aspect_x_;properties.display_aspect_ratio_y=pending_aspect_y_;}
@@ -225,6 +296,15 @@ protected:
     bool generated=false;
     FrameWork work;
     work.queue_mutex=&host_->gpu_mutex;  // DrawGame locks it only around recording, submit, present and retire
+    work.presentation=[&](uint64_t begin,uint64_t end,VkResult result) {
+      const bool accepted=result==VK_SUCCESS || result==VK_SUBOPTIMAL_KHR;
+      const char* kind=generated?"generated":(source.source_serial!=last_presented_source_?"real":"repeat");
+      timing_.Record("vulkan",source.source_serial,kind,begin,end,result,accepted);
+      if(accepted && !generated) {
+        last_presented_source_=source.source_serial;
+        PublishGraphicsReport(graphics_request,source.image,consumed_fps);
+      }
+    };
     work.prepare=[&](VkCommandBuffer command,uint64_t serial,Error& error) {
       if(!host_->Prepare(command,serial,error)) return false;
 #if SR_HAS_LSFG
@@ -270,6 +350,28 @@ protected:
     Report(e);return e.result==VK_ERROR_DEVICE_LOST?PaintResult::kGpuLostResponsible:PaintResult::kNotPresented;
   }
 private:
+  void PublishGraphicsReport(const GraphicsOptionsSnapshot& request,const std::shared_ptr<TextureResource>& image,uint32_t consumed_fps) {
+    if(!image || !host_->graphics_epoch) return;
+    GraphicsBackendReport report;report.request_revision=request.request_revision;report.frame=++graphics_report_frame_;
+    for(auto& feature:report.features) feature={false,false,"This option has no Vulkan replay consumer"};
+    for(size_t row=0;row<4;++row) report.features[row].reason="DXR lighting integration is available only in the Direct3D 12 renderer";
+    report.features[4].reason="The DLSS adapter requires Direct3D 12";
+    report.features[5]={true,true,"Changing graphics API requires restart"};report.applied[5]=1;
+    constexpr uint32_t widths[]{960,1280,1600,1920,2560,3840},heights[]{540,720,900,1080,1440,2160};
+    for(int i=0;i<6;++i) if(image->extent.width==widths[i] && image->extent.height==heights[i]) {
+      report.features[6]={true,true,"Output image size; guest replay resolution is preserved"};report.applied[6]=i;break;
+    }
+    constexpr uint32_t fps[]{0,30,60,120};
+    for(int i=0;i<4;++i) if(consumed_fps==fps[i]) {
+      report.features[7]={true,true,"Presentation pacing; the guest retains its own simulation timing"};report.applied[7]=i;break;
+    }
+    report.features[8].reason="Vulkan scene FXAA has no replay consumer";
+    report.features[9].reason="Vulkan preserves captured guest MSAA; a live override is unavailable";
+    report.features[10].reason="Vulkan preserves captured guest target dimensions; internal scaling is unavailable";
+    if(!report.features[6].implemented || report.applied[6]!=request.requested[6])
+      report.failure="Requested output resolution has not reached a presented Vulkan image";
+    SharedGraphicsOptions()->PublishBackend(host_->graphics_epoch,report);
+  }
   void ReportPresentationStats() {
     const auto now=std::chrono::steady_clock::now();
     if(!stats_started_) {stats_started_=true;stats_time_=now;stats_real_=generation_policy_.real();stats_generated_=generation_policy_.generated();stats_repeat_=generation_policy_.repeated();return;}
@@ -284,6 +386,7 @@ private:
   }
   std::shared_ptr<Host> host_;std::array<Mailbox,kGuestOutputMailboxSize> mailbox_;std::once_flag async_started_;
   FrameGenerationPolicy generation_policy_;
+  PresentationTiming timing_;uint64_t last_presented_source_=0,graphics_report_frame_=0;
   Mailbox pending_original_;uint32_t pending_aspect_x_=1280,pending_aspect_y_=720;
 #if SR_HAS_LSFG
   std::unique_ptr<FrameGenerationSession> generation_;

@@ -27,14 +27,36 @@
 
 namespace superman_returns::graphics::d3d12 {
 
+#if SR_HAS_DLSS
+static NVSDK_NGX_PerfQuality_Value NgxQuality(DlssRequested mode) {
+    switch(mode) {
+        case DlssRequested::Balanced:return NVSDK_NGX_PerfQuality_Value_Balanced;
+        case DlssRequested::Performance:return NVSDK_NGX_PerfQuality_Value_MaxPerf;
+        case DlssRequested::DLAA:return NVSDK_NGX_PerfQuality_Value_DLAA;
+        default:return NVSDK_NGX_PerfQuality_Value_MaxQuality;
+    }
+}
+static DlssApplied AppliedMode(DlssRequested mode) {
+    switch(mode) {
+        case DlssRequested::Quality:return DlssApplied::Quality;
+        case DlssRequested::Balanced:return DlssApplied::Balanced;
+        case DlssRequested::Performance:return DlssApplied::Performance;
+        case DlssRequested::DLAA:return DlssApplied::DLAA;
+        default:return DlssApplied::Off;
+    }
+}
+#endif
+
 DlssError ValidateDlssFrame(const DlssFrameContract& f) {
-    // This adapter deliberately supports fixed-resolution SR only, never DLAA.
     if (!f.renderWidth || !f.renderHeight || !f.outputWidth || !f.outputHeight ||
-        f.renderWidth >= f.outputWidth || f.renderHeight >= f.outputHeight ||
+        (f.mode == DlssRequested::DLAA ?
+          (f.renderWidth != f.outputWidth || f.renderHeight != f.outputHeight) :
+          (f.renderWidth >= f.outputWidth || f.renderHeight >= f.outputHeight)) ||
         f.outputWidth > 16384 || f.outputHeight > 16384)
         return DlssError::InvalidDimensions;
     if (!f.conventionsVerified || !f.colorBeforeHud || !f.rasterJitterApplied ||
-        (!f.motionIncludesCameraObjectsAndDeformation && !f.motionCameraOnlyAccepted))
+        (!f.motionIncludesCameraObjectsAndDeformation && !f.motionCameraOnlyAccepted &&
+         !f.motionPartialWithRejectionMask))
         return DlssError::UnverifiedTemporalInputs;
     if ((f.depth != DlssDepth::Forward && f.depth != DlssDepth::Reversed) ||
         f.motion != DlssMotion::CurrentToPreviousPixels)
@@ -190,12 +212,13 @@ DlssResult DlssSuperResolution::QueryOptimalSettings(std::uint32_t width, std::u
     DlssOptimalSettings settings{};
     settings.outputWidth = width; settings.outputHeight = height;
     const auto result = NGX_DLSS_GET_OPTIMAL_SETTINGS(p.parameters, width, height,
-        NVSDK_NGX_PerfQuality_Value_MaxQuality, &settings.renderWidth, &settings.renderHeight,
+        NgxQuality(p.status.requested), &settings.renderWidth, &settings.renderHeight,
         &settings.maxWidth, &settings.maxHeight, &settings.minWidth, &settings.minHeight,
         &settings.recommendedSharpness);
     if (NVSDK_NGX_FAILED(result)) return p.Result(DlssError::SdkFailure, result);
-    if (!settings.renderWidth || !settings.renderHeight || settings.renderWidth >= width ||
-        settings.renderHeight >= height || !settings.minWidth || !settings.minHeight ||
+    if (!settings.renderWidth || !settings.renderHeight || (p.status.requested==DlssRequested::DLAA ?
+          (settings.renderWidth!=width || settings.renderHeight!=height) :
+          (settings.renderWidth>=width || settings.renderHeight>=height)) || !settings.minWidth || !settings.minHeight ||
         settings.minWidth > settings.renderWidth || settings.minHeight > settings.renderHeight ||
         settings.maxWidth < settings.renderWidth || settings.maxHeight < settings.renderHeight ||
         !std::isfinite(settings.recommendedSharpness))
@@ -224,17 +247,24 @@ DlssResult DlssSuperResolution::Evaluate(const DlssEvaluation& e) {
     // NotifySubmitted establishes queue order without forcing a CPU/GPU wait.
     if (p.unsubmittedTicket) return p.Result(DlssError::SubmissionRequired);
     if (p.submissions.size() >= 64) return p.Result(DlssError::GpuPending);
-    if (p.status.requested != DlssRequested::Quality) return reject(DlssError::NotRequested);
+    if (p.status.requested == DlssRequested::Off) return reject(DlssError::NotRequested);
     if (!p.initialized || p.teardownOnly || !p.parameters || p.status.support != DlssSupport::Supported)
         return reject(DlssError::NotInitialized);
     const auto& f = e.frame;
+    if(f.mode!=p.status.requested) return reject(DlssError::NotRequested);
     if (const auto error = ValidateDlssFrame(f); error != DlssError::None) return reject(error);
-    if (f.renderWidth != p.optimal.renderWidth || f.renderHeight != p.optimal.renderHeight ||
+    if (f.renderWidth < p.optimal.minWidth || f.renderHeight < p.optimal.minHeight ||
+        f.renderWidth > p.optimal.maxWidth || f.renderHeight > p.optimal.maxHeight ||
         f.outputWidth != p.optimal.outputWidth || f.outputHeight != p.optimal.outputHeight)
         return reject(DlssError::InvalidDimensions);
     if (!e.commands || !e.color || !e.output || !e.depth || !e.motion ||
         e.color == e.output || e.color == e.depth || e.color == e.motion ||
         e.output == e.depth || e.output == e.motion || e.depth == e.motion)
+        return reject(DlssError::InvalidResources);
+    if(f.motionPartialWithRejectionMask && (!e.rejectionMask ||
+        !p.Texture(e.rejectionMask,f.renderWidth,f.renderHeight,false) ||
+        e.rejectionMask->GetDesc().Format!=DXGI_FORMAT_R8_UNORM ||
+        e.rejectionMaskState!=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE))
         return reject(DlssError::InvalidResources);
     Microsoft::WRL::ComPtr<ID3D12Device> listDevice;
     if (e.commands->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT ||
@@ -261,7 +291,8 @@ DlssResult DlssSuperResolution::Evaluate(const DlssEvaluation& e) {
     if (e.colorState != input || e.depthState != input || e.motionState != input ||
         e.outputState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
         return reject(DlssError::InvalidResourceStates);
-    if (p.feature && (f.depth != p.featureContract.depth || f.hdr != p.featureContract.hdr ||
+    if (p.feature && (f.renderWidth != p.featureContract.renderWidth || f.renderHeight != p.featureContract.renderHeight ||
+        f.mode != p.featureContract.mode || f.depth != p.featureContract.depth || f.hdr != p.featureContract.hdr ||
         f.motionJittered != p.featureContract.motionJittered || color != p.colorFormat ||
         depth != p.depthFormat || motion != p.motionFormat))
         return reject(DlssError::RequiresShutdown);
@@ -271,7 +302,7 @@ DlssResult DlssSuperResolution::Evaluate(const DlssEvaluation& e) {
         NVSDK_NGX_DLSS_Create_Params create{};
         create.Feature.InWidth = f.renderWidth; create.Feature.InHeight = f.renderHeight;
         create.Feature.InTargetWidth = f.outputWidth; create.Feature.InTargetHeight = f.outputHeight;
-        create.Feature.InPerfQualityValue = NVSDK_NGX_PerfQuality_Value_MaxQuality;
+        create.Feature.InPerfQualityValue = NgxQuality(f.mode);
         create.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes |
                                       NVSDK_NGX_DLSS_Feature_Flags_AutoExposure;
         if (f.hdr) create.InFeatureCreateFlags |= NVSDK_NGX_DLSS_Feature_Flags_IsHDR;
@@ -288,6 +319,7 @@ DlssResult DlssSuperResolution::Evaluate(const DlssEvaluation& e) {
     NVSDK_NGX_D3D12_DLSS_Eval_Params eval{};
     eval.Feature.pInColor = e.color; eval.Feature.pInOutput = e.output;
     eval.pInDepth = e.depth; eval.pInMotionVectors = e.motion;
+    eval.pInBiasCurrentColorMask = e.rejectionMask;
     eval.InJitterOffsetX = f.jitterX; eval.InJitterOffsetY = f.jitterY;
     eval.InMVScaleX = f.mvScaleX; eval.InMVScaleY = f.mvScaleY;
     eval.InRenderSubrectDimensions.Width = f.renderWidth;
@@ -305,7 +337,7 @@ DlssResult DlssSuperResolution::Evaluate(const DlssEvaluation& e) {
     p.unsubmittedGeneration = p.generation;
     // A newer recording does not undo an already confirmed frame in this
     // generation. Otherwise continuous rendering reports Pending forever.
-    if(p.status.applied!=DlssApplied::Quality) p.status.applied=DlssApplied::PendingGpu;
+    if(p.status.applied!=AppliedMode(p.status.requested)) p.status.applied=DlssApplied::PendingGpu;
     return p.Result(DlssError::None, result, p.status.pendingTicket);
 #endif
 }
@@ -354,9 +386,9 @@ DlssResult DlssSuperResolution::ConfirmExecution(std::uint64_t ticket, ID3D12Fen
         p.Invalidate();
         return p.Result(DlssError::DeviceRemoved);
     }
-    if (submitted->generation == p.generation && p.status.requested == DlssRequested::Quality) {
+    if (submitted->generation == p.generation && p.status.requested != DlssRequested::Off) {
         p.status.completedTicket = std::max(p.status.completedTicket, ticket);
-        p.status.applied = DlssApplied::Quality;
+        p.status.applied = AppliedMode(p.status.requested);
         if (p.status.pendingTicket == ticket) p.status.pendingTicket = 0;
     }
     p.submissions.erase(submitted);

@@ -1,4 +1,5 @@
 #include "vulkan_shader_service.h"
+#include "../vulkan/vulkan_cache_audit.h"
 #include <algorithm>
 #include <condition_variable>
 #include <cstring>
@@ -56,9 +57,13 @@ std::vector<std::string> ValidateShaderPair(const CompiledShader& vs,const Compi
   return errors;
 }
 struct VulkanShaderService::Impl {
-  struct Job {ShaderStage stage;std::vector<uint8_t> container;ShaderResult result;};
+  struct Job {ShaderStage stage;std::vector<uint8_t> container;ShaderResult result;bool from_library=false;};
   VulkanShaderConfig config;ShaderProcess process;mutable std::mutex mutex;std::condition_variable cv;std::map<ShaderKey,Job> jobs;std::deque<ShaderKey> queue;bool stop=false;std::vector<std::jthread> threads;
   size_t precompiled_count=0;std::string library_diagnostic;
+  std::map<std::pair<uint64_t,ShaderStage>,std::vector<std::shared_ptr<const CompiledShader>>> ready_by_digest;
+  void IndexReady(const std::shared_ptr<const CompiledShader>& artifact) {
+    if(artifact)ready_by_digest[{ShaderArtifactDigest(*artifact),artifact->stage}].push_back(artifact);
+  }
   Impl(VulkanShaderConfig c,ShaderProcess p):config(std::move(c)),process(std::move(p)) {
     LoadLibrary();
     for(uint32_t i=0;i<std::clamp(config.compiler_workers,1u,4u);++i) threads.emplace_back([this](std::stop_token token){Run(token);});
@@ -85,10 +90,11 @@ struct VulkanShaderService::Impl {
           if(found->second.stage==stage && std::equal(container.begin(),container.end(),found->second.container.begin(),found->second.container.end())) throw std::runtime_error("Duplicate shader library entry");
           if(!++key) key=1;
         }
-        loaded.emplace(key,Job{stage,{container.begin(),container.end()},{ShaderPoll::ready,std::move(artifact),{}}});
+        loaded.emplace(key,Job{stage,{container.begin(),container.end()},{ShaderPoll::ready,std::move(artifact),{}},true});
       }
       if(!r.Done()) throw std::runtime_error("Trailing shader library data");
       jobs=std::move(loaded);precompiled_count=count;
+      for(const auto& [key,job]:jobs)IndexReady(job.result.artifact);
     } catch(const std::exception& e) {library_diagnostic=e.what();}
   }
   ~Impl() {{std::lock_guard lock(mutex);stop=true;}for(auto& thread:threads) thread.request_stop();cv.notify_all();for(auto& thread:threads) thread.join();}
@@ -97,12 +103,14 @@ struct VulkanShaderService::Impl {
     for(;;) {
       ShaderKey key;ShaderStage stage;std::vector<uint8_t> container;
       {std::unique_lock lock(mutex);cv.wait(lock,[&]{return stop || token.stop_requested() || !queue.empty();});if(stop || token.stop_requested()) return;key=queue.front();queue.pop_front();auto& j=jobs.at(key);stage=j.stage;container=j.container;}
+      ++vulkan::VulkanCacheAudit::shader_active_jobs;
       ShaderResult result;result.status=ShaderPoll::failed;
       try {
         auto directory=config.cache/(config.abi==ShaderAbi::kGlobal?"runtime_requests_global":"runtime_requests")/std::to_string(key);std::filesystem::create_directories(directory);
         auto raw=directory/(stage==ShaderStage::kVertex?"shader.vs.bin":"shader.ps.bin"),output=directory/"result.bin";
         {std::ofstream file(raw,std::ios::binary|std::ios::trunc);if(!file.write(reinterpret_cast<const char*>(container.data()),container.size())) throw std::runtime_error("Cannot write captured shader container");}
         std::error_code ignored;std::filesystem::remove(output,ignored);
+        auto audit_path=output;audit_path+=".audit";std::filesystem::remove(audit_path,ignored);
         // -B: concurrent workers must not race writing the scripts' __pycache__.
         std::vector<std::filesystem::path> args{config.python,"-B",config.script,"--container",raw,"--stage",stage==ShaderStage::kVertex?"vs":"ps","--cache",config.cache,"--emitter",config.emitter,"--common",config.common,"--dxc",config.dxc};
         if(config.abi==ShaderAbi::kGlobal) {args.emplace_back("--profile");args.emplace_back("global");}
@@ -110,15 +118,34 @@ struct VulkanShaderService::Impl {
         // A shader that fails to translate still writes a failure result. A
         // process that dies without one is retried: a transient fault must not
         // stop the game (seen once in a package smoke test, not reproducible).
+        auto audit_attempt=[&] {
+          // Supplemental text metadata preserves the SVR3 result ABI. Legacy
+          // scripts/runners without this proof are unknown, never zero.
+          std::ifstream audit(audit_path);uint32_t schema=0,hit=0,runs=0;std::string trailing;
+          if(audit>>schema>>hit>>runs && schema==1 && hit<=1 && runs<=2 && !(hit && runs) && !(audit>>trailing)) {
+            if(hit)++vulkan::VulkanCacheAudit::shader_disk_hits;
+            vulkan::VulkanCacheAudit::shader_compiler_invocations+=runs;
+            if(config.audit_log)config.audit_log("native cache audit: vulkan_shader_job key="+std::to_string(key)+
+                " disk_hit="+std::to_string(hit)+" compiler_invocations="+std::to_string(runs));
+          } else {
+            ++vulkan::VulkanCacheAudit::shader_unknown_audits;
+            if(config.audit_log)config.audit_log("native cache audit: vulkan_shader_job_unknown key="+std::to_string(key));
+          }
+        };
         bool ran=false;
         for(int attempt=0;attempt<3 && !ran && process && !token.stop_requested();++attempt) {
+          std::filesystem::remove(output,ignored);std::filesystem::remove(audit_path,ignored);
+          ++vulkan::VulkanCacheAudit::shader_jobs;
           result.diagnostic.clear();ran=process(args,config.timeout,token,result.diagnostic);
+          if(!ran)++vulkan::VulkanCacheAudit::shader_process_failures;
+          audit_attempt();
           if(!ran && std::filesystem::is_regular_file(output)) break;
         }
         if(!ran) {if(result.diagnostic.empty()) result.diagnostic="Shader compiler process failed";}
         else {auto artifact=std::make_shared<CompiledShader>();if(DecodeShaderResult(ReadFile(output),stage,*artifact,result.diagnostic,config.abi)) {result.status=ShaderPoll::ready;result.artifact=std::move(artifact);}}
       } catch(const std::exception& e) {result.diagnostic=e.what();}
-      {std::lock_guard lock(mutex);jobs.at(key).result=std::move(result);}
+      {std::lock_guard lock(mutex);if(result.status==ShaderPoll::ready)IndexReady(result.artifact);jobs.at(key).result=std::move(result);}
+      --vulkan::VulkanCacheAudit::shader_active_jobs;
     }
   }
 };
@@ -131,14 +158,34 @@ ShaderKey VulkanShaderService::Request(std::span<const uint8_t> bytes,ShaderStag
   // A hash collision never aliases a different container or stage.
   for(;;) {
     auto found=impl_->jobs.find(hash);if(found==impl_->jobs.end()) break;
-    if(found->second.stage==stage && std::equal(bytes.begin(),bytes.end(),found->second.container.begin(),found->second.container.end())) return hash;
+    if(found->second.stage==stage && std::equal(bytes.begin(),bytes.end(),found->second.container.begin(),found->second.container.end())) {
+      if(found->second.from_library)++vulkan::VulkanCacheAudit::shader_library_hits;
+      else ++vulkan::VulkanCacheAudit::shader_memory_hits;
+      return hash;
+    }
     if(!++hash) hash=1;
   }
+  ++vulkan::VulkanCacheAudit::shader_misses;
+  if(impl_->config.audit_log)impl_->config.audit_log("native cache audit: vulkan_shader_miss key="+std::to_string(hash));
   impl_->jobs.emplace(hash,Impl::Job{stage,{bytes.begin(),bytes.end()},{}});impl_->queue.push_back(hash);impl_->cv.notify_one();return hash;
 }
 ShaderResult VulkanShaderService::Poll(ShaderKey key) const {
-  std::lock_guard lock(impl_->mutex);auto found=impl_->jobs.find(key);if(found==impl_->jobs.end()) return {ShaderPoll::failed,{},"Unknown/empty captured shader"};return found->second.result;
+  std::lock_guard lock(impl_->mutex);auto found=impl_->jobs.find(key);
+  if(found==impl_->jobs.end()) {++vulkan::VulkanCacheAudit::shader_not_ready;return {ShaderPoll::failed,{},"Unknown/empty captured shader"};}
+  if(found->second.result.status!=ShaderPoll::ready)++vulkan::VulkanCacheAudit::shader_not_ready;
+  return found->second.result;
 }
 size_t VulkanShaderService::PrecompiledCount() const {return impl_->precompiled_count;}
 const std::string& VulkanShaderService::LibraryDiagnostic() const {return impl_->library_diagnostic;}
+std::shared_ptr<const CompiledShader> VulkanShaderService::FindReadyByDigest(uint64_t digest,ShaderStage stage) const {
+  std::lock_guard lock(impl_->mutex);std::shared_ptr<const CompiledShader> result;
+  const auto found=impl_->ready_by_digest.find({digest,stage});
+  if(found==impl_->ready_by_digest.end())return {};
+  for(const auto& artifact:found->second) {
+    if(!artifact || artifact->abi!=impl_->config.abi)continue;
+    if(result && result->words!=artifact->words)return {};
+    result=artifact;
+  }
+  return result;
+}
 } // namespace superman_returns::graphics::shaders

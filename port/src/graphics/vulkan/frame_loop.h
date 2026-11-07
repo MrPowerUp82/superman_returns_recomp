@@ -12,6 +12,8 @@ struct FrameWork {
   // DrawGame holds it only during retire, prepare/paint, submit and present; never during a fence
   // or swapchain image wait (a vblank under FIFO). Null = no lock.
   std::mutex* queue_mutex = nullptr;
+  // Actual QueuePresent entry/return timestamps; invoked outside queue_mutex.
+  std::function<void(uint64_t,uint64_t,VkResult)> presentation;
 };
 class FrameLoop {
 public:

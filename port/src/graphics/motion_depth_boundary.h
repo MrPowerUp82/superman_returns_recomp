@@ -6,6 +6,16 @@ struct MotionDepthBoundaryState {
   uintptr_t captured_depth=0;
 };
 struct MotionCapturePair {uintptr_t color=0,depth=0;};
+inline bool CanCaptureMotionSceneDepth(bool continuous,bool camera_published,
+                                      uintptr_t depth,uintptr_t scene_depth) {
+  // The audited camera draw may follow moving geometry in this same epoch.
+  // Capture is provisional; publication still requires CanSeal below.
+  return depth && (!continuous || !camera_published || scene_depth==depth);
+}
+inline bool CanSealMotionSceneDepth(bool continuous,bool camera_published,
+                                   uintptr_t depth,uintptr_t scene_depth) {
+  return depth && (!continuous || (camera_published && scene_depth==depth));
+}
 inline bool MatchesRetainedMotionCapturePair(MotionCapturePair retained,MotionCapturePair current) {
   if(!current.color || !current.depth) return false;
   if(!retained.color && !retained.depth) return true;

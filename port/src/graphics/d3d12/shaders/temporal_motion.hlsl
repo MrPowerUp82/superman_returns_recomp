@@ -26,14 +26,25 @@ struct MotionPixel {
     uint validity : SV_Target1;
 };
 MotionPixel MotionPS(RasterVertex v) {
+    // Private, explicit readback-only mode. Two bytes remain exact in RG16F;
+    // original draw order chooses the last equal-depth replayed triangle.
+    // It does not execute the original PS or establish opacity/actor identity.
+    if (coverageEnabled == 2u) {
+        MotionPixel diagnostic;
+        diagnostic.velocity = float2(coverageId & 255u, (coverageId >> 8u) & 255u);
+        diagnostic.validity = 1u;
+        return diagnostic;
+    }
     // A mismatching audited owner must leave previous replay outputs intact.
     // Zero-ID draws disable filtering and retain legacy ordered invalidation.
-    if (coverageEnabled && coverage.Load(int3(uint2(v.position.xy), 0)) != coverageId)
+    const uint owner = coverageEnabled ? coverage.Load(int3(uint2(v.position.xy), 0)) : 0u;
+    if (coverageEnabled && (owner & 0x3fffffffu) != coverageId)
         discard;
     MotionPixel result;
     result.velocity = 0;
     result.validity = 0;
-    if (!correspondenceValid || !all(isfinite(v.previousClip)) || v.previousClip.w <= 0)
+    if ((coverageEnabled && (owner & 0x40000000u) != 0u) ||
+        !correspondenceValid || !all(isfinite(v.previousClip)) || v.previousClip.w <= 0)
         return result;
     const float2 currentUV = v.position.xy / dimensions - currentJitter / dimensions;
     const float2 previousUV = (v.previousClip.xy / v.previousClip.w) * float2(.5, -.5)

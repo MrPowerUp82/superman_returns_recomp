@@ -2,6 +2,7 @@
 using System.IO;
 using System.Globalization;
 using System.Text;
+using System.Threading;
 
 namespace SupermanReturnsLauncher;
 
@@ -34,6 +35,14 @@ public sealed class LauncherSettings
     // kingdom_come (skin painted over the Superman Returns suit).
     public string Costume { get; set; } = "default";
     private static readonly string[] Costumes = { "default", "2", "kingdom_come" };
+    public int RtShadows { get; set; }
+    public int ShadowSoftness { get; set; } = 1;
+    public int CharacterShadows { get; set; }
+    public int RtReflections { get; set; }
+    public int Dlss { get; set; }
+    private readonly HashSet<string> _loadedKeys = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly HashSet<string> MigratedKeys = new(new[] { "rt_shadows", "shadow_softness", "character_shadows", "rt_reflections", "dlss" }, StringComparer.OrdinalIgnoreCase);
+    private Dictionary<string,string> _saved = new(StringComparer.OrdinalIgnoreCase);
     public bool FrameGeneration { get; set; }
     public string FrameGenerationDll { get; set; } = "";
 
@@ -48,8 +57,14 @@ public sealed class LauncherSettings
             var idx = line.IndexOf('=');
             if (idx <= 0) continue;
             var value = line[(idx + 1)..].Trim();
+            s._loadedKeys.Add(line[..idx].Trim());
             switch (line[..idx].Trim().ToLowerInvariant())
             {
+                case "rt_shadows": s.RtShadows = ValidChoice(value, 0, 0, 1); break;
+                case "shadow_softness": s.ShadowSoftness = ValidChoice(value, 1, 1, 2); break;
+                case "character_shadows": s.CharacterShadows = ValidChoice(value, 0, 0, 1); break;
+                case "rt_reflections": s.RtReflections = ValidChoice(value, 0, 0, 1); break;
+                case "dlss": s.Dlss = ValidChoice(value, 0, 0, 1, 2, 3, 4); break;
                 case "language": s.Language = value; break;
                 case "game_exe": s.GameExe = value; break;
                 case "game_data": s.GameData = value; break;
@@ -74,24 +89,72 @@ public sealed class LauncherSettings
                 case "frame_generation_dll": s.FrameGenerationDll = value; break;
             }
         }
+        s._saved = s.CurrentValues();
         return s;
     }
 
-    public void Save(string path)
+    private Dictionary<string,string> CurrentValues()
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
-        var lines = new[] { "# Superman Returns â€” launcher", $"language={Language}", $"game_exe={GameExe}", $"game_data={GameData}",
+        return SettingsLines().Select(line => line.Split('=', 2)).Where(parts => parts.Length == 2)
+            .ToDictionary(parts => parts[0], parts => parts[1], StringComparer.OrdinalIgnoreCase);
+    }
+
+    private string[] SettingsLines()
+    {
+        return new[] { "# Superman Returns — launcher", $"language={Language}", $"game_exe={GameExe}", $"game_data={GameData}",
             $"resolution={Resolution}", $"display_mode={DisplayMode}", $"gpu={Gpu}", $"gpu_luid={GpuLuid}",
             $"vsync={VSync.ToString().ToLowerInvariant()}", $"fps_limit={FpsLimit}", $"render_scale={RenderScale}",
             $"texture_filter={TextureFilter}", $"antialiasing={Antialiasing}", $"shadow_quality={ShadowQuality}",
             $"msaa={Msaa}", $"input={InputMode}", $"renderer={Renderer}", $"graphics_api={GraphicsApi}",
             $"skip_intro={SkipIntro.ToString().ToLowerInvariant()}", $"costume={Costume}",
-            $"coop={Coop.ToString().ToLowerInvariant()}",
+            $"coop={Coop.ToString().ToLowerInvariant()}", $"rt_shadows={RtShadows}", $"shadow_softness={ShadowSoftness}",
+            $"character_shadows={CharacterShadows}", $"rt_reflections={RtReflections}", $"dlss={Dlss}",
             $"frame_generation={FrameGeneration.ToString().ToLowerInvariant()}", $"frame_generation_dll={FrameGenerationDll}" };
-        var temporary = path + ".tmp";
-        File.WriteAllLines(temporary, lines, new UTF8Encoding(false));
-        File.Move(temporary, path, true);
     }
+
+    public void Save(string path)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
+        using var fileLock = AcquireSettingsLock(path + ".lock");
+        var wanted = CurrentValues();
+        var remaining = new Dictionary<string,string>(wanted, StringComparer.OrdinalIgnoreCase);
+        var output = new List<string>();
+        foreach (var raw in File.Exists(path) ? File.ReadAllLines(path) : Array.Empty<string>())
+        {
+            var equal = raw.IndexOf('=');
+            var key = equal > 0 ? raw[..equal].Trim() : "";
+            if (!wanted.TryGetValue(key, out var value)) { output.Add(raw); continue; }
+            var dirty = !_saved.TryGetValue(key, out var previous) || previous != value;
+            if (!dirty) output.Add(raw);
+            else if (remaining.ContainsKey(key)) output.Add(key + "=" + value);
+            remaining.Remove(key);
+        }
+        foreach (var (key, value) in remaining)
+        {
+            // Leave untouched migration fields absent until the game has read its legacy file.
+            if (MigratedKeys.Contains(key) && !_loadedKeys.Contains(key) &&
+                (!_saved.TryGetValue(key, out var old) || old == value) && IsMigrationDefault(key, value)) continue;
+            output.Add(key + "=" + value);
+        }
+        var temporary = path + ".tmp." + Environment.ProcessId;
+        File.WriteAllLines(temporary, output, new UTF8Encoding(false));
+        File.Move(temporary, path, true);
+        _saved = wanted;
+        foreach (var line in output) { var equal = line.IndexOf('='); if (equal > 0) _loadedKeys.Add(line[..equal].Trim()); }
+    }
+
+    private static FileStream AcquireSettingsLock(string path)
+    {
+        for (var attempt = 0; ; ++attempt)
+        {
+            try { return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
+            catch (IOException) when (attempt < 40) { Thread.Sleep(10); }
+        }
+    }
+
+    private static bool IsMigrationDefault(string key, string value) => value == (key == "shadow_softness" ? "1" : "0");
+    private bool HasExplicitMigrationValue(string key, string value) => _loadedKeys.Contains(key) ||
+        !IsMigrationDefault(key, value) || (_saved.TryGetValue(key, out var old) && old != value);
 
     private static int ValidChoice(string value, int fallback, params int[] choices) =>
         int.TryParse(value, out var number) && choices.Contains(number) ? number : fallback;
@@ -133,6 +196,11 @@ public sealed class LauncherSettings
             $"--sr_native_shadow_quality={(vulkan ? 1 : ValidChoice(ShadowQuality, 1, 1, 2, 4))}",
             $"--sr_native_msaa_samples={(vulkan ? 1 : ValidChoice(Msaa, 1, 1, 4, 8))}"
         };
+        if (HasExplicitMigrationValue("rt_shadows", RtShadows.ToString())) result.Add($"--sr_rt_shadows={(RtShadows == 1).ToString().ToLowerInvariant()}");
+        if (HasExplicitMigrationValue("shadow_softness", ShadowSoftness.ToString())) result.Add($"--sr_shadow_softness={(ShadowSoftness == 2 ? 2 : 1)}");
+        if (HasExplicitMigrationValue("character_shadows", CharacterShadows.ToString())) result.Add($"--sr_character_shadows={(CharacterShadows == 1).ToString().ToLowerInvariant()}");
+        if (HasExplicitMigrationValue("rt_reflections", RtReflections.ToString())) result.Add($"--sr_rt_reflections={(RtReflections == 1).ToString().ToLowerInvariant()}");
+        if (!coop && HasExplicitMigrationValue("dlss", Dlss.ToString())) result.Add("--sr_dlss=" + (Dlss switch { 1 => "quality", 2 => "balanced", 3 => "performance", 4 => "dlaa", _ => "off" }));
         // An empty "--flag=" makes the engine's argument parser take the next argument
         // as its value, so the LUID is passed only when a GPU was chosen.
         if (!string.IsNullOrWhiteSpace(GpuLuid)) result.Add($"--sr_native_gpu_luid={GpuLuid.Trim()}");
@@ -157,7 +225,7 @@ public sealed class LauncherSettings
 
     public string BuildArguments() => string.Join(' ', BuildArgumentList());
 
-    public ProcessStartInfo CreateLaunch(string baseDirectory, bool benchmark = false)
+    public ProcessStartInfo CreateLaunch(string baseDirectory, bool benchmark = false, string? settingsPath = null)
     {
         var coop = Coop && !benchmark;
         if (benchmark && !UsesVulkan && Renderer == "xenos")
@@ -175,6 +243,7 @@ public sealed class LauncherSettings
         var logDir = Path.Combine(Path.GetDirectoryName(exe)!, "logs");
         Directory.CreateDirectory(logDir);
         var start = new ProcessStartInfo(exe) { WorkingDirectory = Path.GetDirectoryName(exe)!, UseShellExecute = false };
+        if (!string.IsNullOrWhiteSpace(settingsPath)) start.Environment["SR_LAUNCHER_SETTINGS"] = Path.GetFullPath(settingsPath);
         if (coop) {
             // A launcher session always uses real controllers, even when started
             // from a developer shell that has the probe's environment enabled.

@@ -11,6 +11,7 @@ class ImmediateRenderer {
 public:
   ImmediateRenderer(Context& c):c_(c),descriptors_(c),pipelines_(c) {}
   bool Initialize(Error&);
+  bool Prewarm(Error&);
   bool SetBatch(ResourceStore&,std::span<const UIVertex>,std::span<const uint16_t>,Error&);
   bool Draw(VkCommandBuffer,const TargetPass&,ResourceStore&,float width,float height,const UIDraw&,Error&);
   void Retire(uint64_t serial) {descriptors_.Retire(serial);pipelines_.Retire(serial);}

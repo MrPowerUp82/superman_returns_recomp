@@ -50,6 +50,9 @@ struct PsoRecord {
     uint32_t format = 0;
     uint32_t offset = 0;
   } elements[kMaxElements];
+  // CNPS v2: the base PS hash alone cannot identify specialized bytecode.
+  uint32_t pixel_variant = 0;  // 0 original, 1 RT shadow, 2 motion coverage, 3 both
+  uint32_t pipeline_kind = 0;  // 0 guest raster, 1 post-VS clip streamout (own GS/SO)
 };
 
 class PipelineCache {
@@ -57,6 +60,7 @@ class PipelineCache {
   // Shader bytecode lookup: returns false if the shader is unavailable.
   using ShaderLookup = bool (*)(uint64_t hash, bool vertex, const void** data, size_t* size);
   using SemanticName = const char* (*)(uint32_t usage);
+  using VariantLookup = bool (*)(uint64_t hash, uint32_t variant, const void** data, size_t* size);
 
   ~PipelineCache();
 
@@ -67,15 +71,25 @@ class PipelineCache {
   // them) with alpha to coverage on/off as `foliage_a2c` allows, so pipelines
   // captured under any MSAA/foliage setting serve the current one.
   void Start(ID3D12Device* device, ID3D12RootSignature* root_signature, ShaderLookup shaders,
-             SemanticName semantic, uint32_t msaa_samples, bool foliage_a2c);
-  // A precompiled (or in-flight) pipeline for `key`: waits for an in-flight
-  // one. Returns false if the key is unknown to the cache.
+             SemanticName semantic, uint32_t msaa_samples, bool foliage_a2c,
+             VariantLookup variants = nullptr);
+  // A precompiled pipeline for `key`: waits for known queued/in-flight work.
+  // Ready objects stay cached for all aliases of the same description.
   bool Take(uint64_t key, Microsoft::WRL::ComPtr<ID3D12PipelineState>& out);
   // Same, looked up by the full description (generated variants have no
   // renderer key). `record.key` is ignored.
   bool TakeByDesc(const PsoRecord& record, Microsoft::WRL::ComPtr<ID3D12PipelineState>& out);
   // Content hash of a record's description (every field except the key).
   static uint64_t DescHash(const PsoRecord& r);
+  // Instrument every non-precompile Create*PipelineState attempt in the
+  // renderer, including utility/motion variants. Cumulative process total.
+  static void RecordRuntimeCreate();
+  static uint64_t RuntimeCreates();
+  // Capture/diagnostic probe pipelines; excluded from gameplay RuntimeCreates().
+  static void RecordDiagnosticCreate();
+  static uint64_t DiagnosticCreates();
+  // Call before a measured route when startup work must be fully finished.
+  bool WaitForStartup(uint32_t timeout_ms = 210000);
   // Records a pipeline the renderer created itself (new to the cache).
   void Record(const PsoRecord& record);
   // Asynchronous compilation during play (EXP-053): queues `record` ahead of
@@ -99,6 +113,7 @@ class PipelineCache {
   ID3D12RootSignature* root_signature_ = nullptr;
   ShaderLookup shaders_ = nullptr;
   SemanticName semantic_ = nullptr;
+  VariantLookup variants_ = nullptr;
   std::filesystem::path path_;
   std::mutex mutex_;
   std::condition_variable cv_;
@@ -106,6 +121,10 @@ class PipelineCache {
   size_t next_ = 0;
   std::unordered_set<uint64_t> known_;    // keys in the local file or embedded set
   std::unordered_map<uint64_t, uint64_t> by_desc_;  // DescHash -> key of a queued record
+  std::unordered_map<uint64_t, uint64_t> aliases_;  // renderer key -> canonical cache key
+  std::unordered_set<uint64_t> ambiguous_keys_;  // use exact description for settings collisions
+  std::unordered_set<uint64_t> persisted_desc_;  // no repeated append for equivalent aliases
+  std::unordered_set<uint64_t> scheduled_;  // queued or in-flight, until terminal result
   std::unordered_set<uint64_t> pending_;  // being compiled right now
   std::deque<PsoRecord> urgent_;          // requested during play (CompileAsync)
   std::unordered_set<uint64_t> urgent_keys_, failed_;
@@ -119,6 +138,9 @@ class PipelineCache {
   std::thread save_thread_;
   std::atomic<bool> stop_{false};
   uint64_t compiled_ = 0;
+  uint64_t attempted_ = 0, shader_missing_ = 0, driver_failed_ = 0;
+  uint64_t key_hits_ = 0, desc_hits_ = 0, key_misses_ = 0, desc_misses_ = 0;
+  uint64_t unavailable_ = 0, waited_ = 0;
   double compile_ms_ = 0.0;
   std::chrono::steady_clock::time_point start_time_{};
 };

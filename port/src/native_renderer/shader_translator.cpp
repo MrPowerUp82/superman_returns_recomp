@@ -1,4 +1,5 @@
 #include "shader_translator.h"
+#include "shader_library.h"
 #include "../graphics/rt_shadow_shader.h"
 #include "../graphics/pixel_coverage_shader.h"
 
@@ -55,6 +56,8 @@ namespace superman_returns::native {
 namespace {
 
 namespace fs = std::filesystem;
+
+std::atomic<uint64_t> g_compile_started{0}, g_compile_failed{0}, g_disk_hits{0}, g_fetch_not_ready{0};
 
 struct Tools {
   bool ok = false;
@@ -124,11 +127,22 @@ Tools FindTools(bool rt_shadow = false,bool pixel_coverage = false) {
   std::vector<uint8_t> common_bytes;
   ReadFile(t.common, common_bytes);
   std::error_code ec;
-  uint64_t parts[4] = {XXH3_64bits(common_bytes.data(), common_bytes.size()),
-                       uint64_t(fs::file_size(t.translator, ec)),
-                       uint64_t(fs::file_size(t.dxc, ec)),
-                       uint64_t(fs::file_size(t.dxc.parent_path() / "dxcompiler.dll", ec))};
-  const std::string fingerprint = fmt::format("{:08x}", uint32_t(XXH3_64bits(parts, sizeof(parts))));
+  uint64_t parts[6] = {XXH3_64bits(common_bytes.data(), common_bytes.size())};
+  size_t part = 1;
+  for (const auto& path : {t.translator, t.dxc, t.dxc.parent_path() / "dxcompiler.dll",
+                           t.dxc.parent_path() / "dxil.dll"}) {
+    std::vector<uint8_t> bytes;
+    if (!ReadFile(path, bytes) || bytes.empty()) {
+      t.why = "cannot fingerprint shader tool: " + path.string();
+      return t;
+    }
+    parts[part++] = XXH3_64bits(bytes.data(), bytes.size());
+  }
+  // Includes the fixed command-line/include contract, independently of file
+  // sizes. Same-size tool replacements must invalidate the DXIL cache too.
+  constexpr char contract[] = "sr-dxil-v2:CONAN_RECOMP:HV2021:all-resources-bound:strip-debug:sm6";
+  parts[5] = XXH3_64bits(contract, sizeof(contract) - 1);
+  const std::string fingerprint = fmt::format("v2-{:016x}", XXH3_64bits(parts, sizeof(parts)));
 
   fs::path root;
   const std::string cache_cvar = REXCVAR_GET(sr_native_shader_cache_dir);
@@ -148,7 +162,9 @@ Tools FindTools(bool rt_shadow = false,bool pixel_coverage = false) {
   t.cache = root / fingerprint;
   if (rt_shadow) {
     const auto patch = graphics::RtShadowShaderCacheIdentity();
-    t.cache /= fmt::format("rt-shadow-v1-{:016X}", XXH3_64bits(patch.data(), patch.size()));
+    // v3 contract includes standalone visibility, independently of old fade
+    // multiplication. Actual emitted prefix/anchors/call remain fingerprinted.
+    t.cache /= fmt::format("rt-shadow-v3-{:016X}", XXH3_64bits(patch.data(), patch.size()));
   }
   if (pixel_coverage) {
     const auto patch = graphics::PixelCoverageShaderCacheIdentity();
@@ -276,7 +292,7 @@ class Impl {
   }
 
   TranslateState Fetch(uint64_t hash, bool vertex, std::vector<uint8_t>& dxil) {
-    if (!enabled_) return TranslateState::kUnknown;
+    if (!enabled_) { ++g_fetch_not_ready; return TranslateState::kUnknown; }
     const uint64_t key = Key(hash, vertex);
     std::unique_lock<std::mutex> lock(mutex_);
     auto it = entries_.find(key);
@@ -286,9 +302,11 @@ class Impl {
       std::vector<uint8_t> bytes;
       lock.unlock();
       if (ReadFile(DxilPath(hash, vertex), bytes) && !bytes.empty()) {
+        ++g_disk_hits;
         dxil = std::move(bytes);
         return TranslateState::kReady;
       }
+      ++g_fetch_not_ready;
       return TranslateState::kUnknown;
     }
     Entry& e = it->second;
@@ -318,6 +336,7 @@ class Impl {
     }
     Entry& fin = entries_[key];
     if (fin.state == TranslateState::kReady && fin.dxil) dxil = *fin.dxil;
+    if (fin.state != TranslateState::kReady) ++g_fetch_not_ready;
     return fin.state;
   }
 
@@ -328,14 +347,35 @@ class Impl {
 
   TranslateState FetchNonBlocking(uint64_t hash, std::vector<uint8_t>& dxil) {
     dxil.clear();
-    if (!enabled_) return TranslateState::kUnknown;
+    if (!enabled_) { ++g_fetch_not_ready; return TranslateState::kUnknown; }
     std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
-    if (!lock.owns_lock()) return TranslateState::kPending;
+    if (!lock.owns_lock()) { ++g_fetch_not_ready; return TranslateState::kPending; }
     const auto it = entries_.find(Key(hash, false));
-    if (it == entries_.end()) return TranslateState::kUnknown;
+    if (it == entries_.end()) { ++g_fetch_not_ready; return TranslateState::kUnknown; }
     const Entry& e = it->second;
     if (e.state == TranslateState::kReady && e.dxil) dxil = *e.dxil;
+    if (e.state != TranslateState::kReady || !e.dxil) ++g_fetch_not_ready;
     return e.state;
+  }
+
+  TranslateState WaitReady(uint64_t hash, bool vertex, std::vector<uint8_t>& dxil,
+                           uint32_t timeout_ms) {
+    dxil.clear();
+    if (!enabled_) return TranslateState::kUnknown;
+    const uint64_t key = Key(hash, vertex);
+    std::unique_lock<std::mutex> lock(mutex_);
+    auto status = [&] {
+      const auto found = entries_.find(key);
+      return found == entries_.end() ? TranslateState::kUnknown : found->second.state;
+    };
+    done_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&] {
+      return stop_ || status() != TranslateState::kPending;
+    });
+    auto found = entries_.find(key);
+    if (found == entries_.end()) return TranslateState::kUnknown;
+    if (found->second.state == TranslateState::kReady && found->second.dxil)
+      dxil = *found->second.dxil;
+    return found->second.state;
   }
 
  private:
@@ -371,17 +411,20 @@ class Impl {
       const auto start = std::chrono::steady_clock::now();
       std::string reason;
       std::vector<uint8_t> dxil;
-      bool ok;
+      bool ok, compiled = false;
       // Variant disk I/O always belongs to this worker. Fetch only observes
       // in-memory state, even on a warm cache or while the worker owns mutex_.
       if ((rt_shadow_ || pixel_coverage_) && ReadFile(DxilPath(hash, vertex), dxil) && !dxil.empty()) {
+        ++g_disk_hits;
         ok = true;
       } else if ((rt_shadow_ || pixel_coverage_) && fs::exists(FailedPath(hash, vertex))) {
         reason = "cached shader specialization failure";
         ok = false;
       } else {
+        compiled = true;
         ok = Translate(hash, vertex, container, dxil, reason);
       }
+      if (compiled && !ok) ++g_compile_failed;
       const double ms = std::chrono::duration<double, std::milli>(
                             std::chrono::steady_clock::now() - start).count();
       {
@@ -402,7 +445,7 @@ class Impl {
           REXLOG_WARN("runtime shaders: {} failed: {}", Stem(hash, vertex), reason);
         }
         if (done <= 3 || (done % 25) == 0) {
-          REXLOG_INFO("runtime shaders: {} translated, {} failed, {} queued, avg {:.0f} ms",
+          REXLOG_INFO("runtime shaders: {} ready, {} failed, {} queued, avg {:.0f} ms",
                       translated_, failed_, high_.size() + low_.size() + active_,
                       translated_ ? total_ms_ / translated_ : 0.0);
         }
@@ -413,6 +456,9 @@ class Impl {
 
   bool Translate(uint64_t hash, bool vertex, const std::vector<uint8_t>& container,
                  std::vector<uint8_t>& dxil, std::string& reason) {
+    ++g_compile_started;
+    REXLOG_INFO("native cache audit: shader_compile hash={:016X} stage={} variant={}",
+                hash, vertex ? "vs" : "ps", rt_shadow_ ? (pixel_coverage_ ? 3 : 1) : pixel_coverage_ ? 2 : 0);
     const std::string stem = Stem(hash, vertex);
     const fs::path tmp = tools_.cache / "tmp";
     const fs::path bin = tmp / (stem + ".bin");
@@ -446,6 +492,14 @@ class Impl {
     }
     std::vector<uint8_t> src;
     ReadFile(hlsl, src);
+    if (pixel_coverage_) {
+      std::string specialized;
+      if (!graphics::SpecializePixelCoverageShader(hash,
+              std::string_view(reinterpret_cast<const char*>(src.data()), src.size()), specialized, reason)) {
+        WriteFailed(hash, vertex, reason); cleanup(); return false;
+      }
+      src.assign(specialized.begin(), specialized.end());
+    }
     if (rt_shadow_) {
       std::string specialized;
       if (!graphics::SpecializeRtShadowShader(hash,
@@ -454,14 +508,6 @@ class Impl {
         WriteFailed(hash, vertex, reason);
         cleanup();
         return false;
-      }
-      src.assign(specialized.begin(), specialized.end());
-    }
-    if (pixel_coverage_) {
-      std::string specialized;
-      if (!graphics::SpecializePixelCoverageShader(hash,
-              std::string_view(reinterpret_cast<const char*>(src.data()), src.size()), specialized, reason)) {
-        WriteFailed(hash, vertex, reason); cleanup(); return false;
       }
       src.assign(specialized.begin(), specialized.end());
     }
@@ -549,6 +595,13 @@ Impl& PixelCoverageInstance() {
   return *impl;
 }
 
+std::atomic<Impl*> g_rt_coverage_instance{nullptr};
+Impl& RtCoverageInstance() {
+  static Impl* impl=[] {auto* value=new Impl(true,true);
+    g_rt_coverage_instance.store(value,std::memory_order_release);return value;}();
+  return *impl;
+}
+
 }  // namespace
 
 ShaderTranslator& ShaderTranslator::Get() {
@@ -563,6 +616,8 @@ void ShaderTranslator::Offer(uint64_t hash, bool vertex, const uint8_t* containe
   if (!vertex) {
     OfferRtShadowVariant(hash, container, size);
     OfferPixelCoverageVariant(hash, container, size);
+    if(graphics::IsRtShadowShader(hash) && graphics::IsPixelCoverageShader(hash))
+      RtCoverageInstance().Offer(hash,false,container,size);
   }
 }
 
@@ -579,6 +634,7 @@ TranslateState ShaderTranslator::FetchRtShadowVariant(uint64_t hash, std::vector
   dxil.clear();
   if (!graphics::IsRtShadowShader(hash)) return TranslateState::kUnknown;
   Impl* impl = g_rt_shadow_instance.load(std::memory_order_acquire);
+  if (!impl) ++g_fetch_not_ready;
   return impl ? impl->FetchNonBlocking(hash, dxil) : TranslateState::kUnknown;
 }
 
@@ -590,11 +646,60 @@ TranslateState ShaderTranslator::FetchPixelCoverageVariant(uint64_t hash,std::ve
   dxil.clear();
   if(!graphics::IsPixelCoverageShader(hash)) return TranslateState::kUnknown;
   Impl* impl=g_pixel_coverage_instance.load(std::memory_order_acquire);
+  if (!impl) ++g_fetch_not_ready;
+  return impl ? impl->FetchNonBlocking(hash,dxil) : TranslateState::kUnknown;
+}
+
+TranslateState ShaderTranslator::FetchRtCoverageVariant(uint64_t hash,std::vector<uint8_t>& dxil) {
+  dxil.clear();auto* impl=g_rt_coverage_instance.load(std::memory_order_acquire);
   return impl ? impl->FetchNonBlocking(hash,dxil) : TranslateState::kUnknown;
 }
 
 bool ShaderTranslator::LoadCached(uint64_t hash, bool vertex, std::vector<uint8_t>& dxil) {
   return Instance().LoadCached(hash, vertex, dxil);
+}
+
+ShaderPrewarmResult ShaderTranslator::PrewarmVariants(const ShaderLibrary& library,
+    bool rt_shadow, bool pixel_coverage, uint32_t timeout_ms) {
+  ShaderPrewarmResult result;
+  struct Task { uint64_t hash; Impl* impl; };
+  std::vector<Task> tasks;
+  for (const auto& shader : library.shaders()) {
+    if (shader.vertex) continue;
+    auto offer = [&](Impl& impl) {
+      impl.Offer(shader.container_hash, false, shader.container.data(), shader.container.size());
+      tasks.push_back({shader.container_hash, &impl});
+      ++result.offered;
+    };
+    if (rt_shadow && graphics::IsRtShadowShader(shader.container_hash)) offer(RtShadowInstance());
+    if (pixel_coverage && graphics::IsPixelCoverageShader(shader.container_hash)) offer(PixelCoverageInstance());
+    if(rt_shadow && pixel_coverage && graphics::IsRtShadowShader(shader.container_hash) &&
+        graphics::IsPixelCoverageShader(shader.container_hash)) offer(RtCoverageInstance());
+  }
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+  for (const auto& task : tasks) {
+    std::vector<uint8_t> bytes;
+    const auto remaining = std::max<int64_t>(0, std::chrono::duration_cast<std::chrono::milliseconds>(
+        deadline - std::chrono::steady_clock::now()).count());
+    const auto state = task.impl->WaitReady(task.hash, false, bytes, uint32_t(remaining));
+    if (state == TranslateState::kReady && !bytes.empty()) ++result.ready;
+    else if (state == TranslateState::kPending) ++result.pending;
+    else ++result.failed;
+  }
+  REXLOG_INFO("native cache audit: shader_prewarm offered={} ready={} failed={} pending={}",
+              result.offered, result.ready, result.failed, result.pending);
+  return result;
+}
+
+bool ShaderTranslator::LoadPrewarmedVariant(uint64_t hash, uint32_t variant, std::vector<uint8_t>& dxil) {
+  Impl* impl = variant == 1 ? g_rt_shadow_instance.load(std::memory_order_acquire) :
+      variant == 2 ? g_pixel_coverage_instance.load(std::memory_order_acquire) :
+      variant == 3 ? g_rt_coverage_instance.load(std::memory_order_acquire) : nullptr;
+  return impl && impl->WaitReady(hash, false, dxil, 210000) == TranslateState::kReady && !dxil.empty();
+}
+
+ShaderTranslationAudit ShaderTranslator::AuditSnapshot() {
+  return {g_compile_started.load(), g_compile_failed.load(), g_disk_hits.load(), g_fetch_not_ready.load()};
 }
 
 }  // namespace superman_returns::native

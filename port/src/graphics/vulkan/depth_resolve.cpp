@@ -1,4 +1,5 @@
 #include "depth_resolve.h"
+#include "vulkan_cache_audit.h"
 #include "depth_resolve_shader.h"
 #include "edram_alias_shader.h"
 #include <algorithm>
@@ -19,7 +20,7 @@ DepthResolver::~DepthResolver() {
   if(layout_) c_.f.vkDestroyPipelineLayout(c_.device,layout_,nullptr);
   if(descriptors_) c_.f.vkDestroyDescriptorSetLayout(c_.device,descriptors_,nullptr);
 }
-bool DepthResolver::Initialize(Error& e) {
+bool DepthResolver::Initialize(Error& e,bool startup) {
   if(layout_ || descriptors_) return Fail(e,"Helper already initialized");
   VkDescriptorSetLayoutBinding bindings[]{
     {0,VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,1,VK_SHADER_STAGE_COMPUTE_BIT,nullptr},
@@ -32,11 +33,17 @@ bool DepthResolver::Initialize(Error& e) {
   VkShaderModule module{};VkShaderModuleCreateInfo s{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};s.codeSize=sizeof(depth_resolve_shader);s.pCode=depth_resolve_shader;
   if(!Check(c_.f.vkCreateShaderModule(c_.device,&s,nullptr,&module),"Depth resolve shader",e)) return false;
   VkComputePipelineCreateInfo p{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};p.layout=layout_;p.stage={VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};p.stage.stage=VK_SHADER_STAGE_COMPUTE_BIT;p.stage.module=module;p.stage.pName="CSMain";
-  auto result=c_.f.vkCreateComputePipelines(c_.device,VK_NULL_HANDLE,1,&p,nullptr,&pipeline_);c_.f.vkDestroyShaderModule(c_.device,module,nullptr);
+  auto create=[&](VkPipeline& pipeline) {
+    if(startup)++VulkanCacheAudit::startup_attempts;else ++VulkanCacheAudit::pipeline_attempts;
+    const auto status=c_.f.vkCreateComputePipelines(c_.device,VK_NULL_HANDLE,1,&p,nullptr,&pipeline);
+    if(status!=VK_SUCCESS) {if(startup)++VulkanCacheAudit::startup_failures;else ++VulkanCacheAudit::pipeline_failures;}
+    return status;
+  };
+  auto result=create(pipeline_);c_.f.vkDestroyShaderModule(c_.device,module,nullptr);
   if(!Check(result,"Depth resolve pipeline",e)) return false;
   s.codeSize=sizeof(edram_alias_shader);s.pCode=edram_alias_shader;
   if(!Check(c_.f.vkCreateShaderModule(c_.device,&s,nullptr,&module),"EDRAM alias shader",e)) return false;
-  p.stage.module=module;result=c_.f.vkCreateComputePipelines(c_.device,VK_NULL_HANDLE,1,&p,nullptr,&alias_pipeline_);c_.f.vkDestroyShaderModule(c_.device,module,nullptr);
+  p.stage.module=module;result=create(alias_pipeline_);c_.f.vkDestroyShaderModule(c_.device,module,nullptr);
   return Check(result,"EDRAM alias pipeline",e);
 }
 bool DepthResolver::RecordAlias(VkCommandBuffer command,TargetId destination,const AliasPlan& plan,TargetStore& targets,ResourceStore& resources,ImageState& state,Error& e,AliasOptions options) {

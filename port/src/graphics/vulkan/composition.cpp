@@ -17,6 +17,12 @@ bool FrontbufferCompositor::Initialize(Error& e) {
   pixel_.requirements.sampled_images=32;pixel_.requirements.samplers=32;pixel_.requirements.storage_buffers=1;pixel_.requirements.descriptor_sets=3;pixel_.requirements.fragment_input_components=2;vertex_.requirements.vertex_output_components=2;
   return descriptors_.Initialize(e) && pipelines_.Initialize(descriptors_.Layouts(),{},e);
 }
+bool FrontbufferCompositor::Prewarm(Error& e) {
+  guest::DrawPacket draw;draw.registers[0x104]=15;draw.registers[0x201]=1|(1<<16);
+  for(auto format:{VK_FORMAT_R8G8B8A8_UNORM,VK_FORMAT_B8G8R8A8_UNORM,VK_FORMAT_R8G8B8A8_SRGB,VK_FORMAT_B8G8R8A8_SRGB})
+    if(!pipelines_.PrewarmBuiltin(draw,format,vertex_,&pixel_,e))return false;
+  return true;
+}
 std::shared_ptr<CompositionDraw> FrontbufferCompositor::Prepare(VkCommandBuffer command,const TargetPass& pass,std::shared_ptr<TextureResource> source,ResourceStore& resources,ImageState& state,std::span<const uint32_t,256> gamma,bool gamma_enabled,uint32_t aspect_x,uint32_t aspect_y,Error& e) {
   if(!command || !source || !source->state || source->view_type!=VK_IMAGE_VIEW_TYPE_2D || pass.color_count!=1 || pass.depth_format!=VK_FORMAT_UNDEFINED || !resources.CurrentSerial()) {e={"Frontbuffer composition",VK_ERROR_INITIALIZATION_FAILED,"Invalid image, submission or target"};return {};}
   auto result=std::make_shared<CompositionDraw>();result->rectangle=PlanPresentRect(pass.extent,aspect_x,aspect_y);

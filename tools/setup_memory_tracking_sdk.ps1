@@ -82,7 +82,11 @@ function Get-CanonicalSdkContent($SelectedPatches = $patches) {
       }
     }
   } finally {
-    [Environment]::SetEnvironmentVariable('GIT_INDEX_FILE',$savedIndex,'Process')
+    # Use the same PowerShell environment provider used for assignment above.
+    # Mixing provider writes with .NET restoration can leave a stale temp index
+    # visible to a second setup invocation in the same PowerShell process.
+    if ($null -eq $savedIndex) { Remove-Item Env:GIT_INDEX_FILE -ErrorAction SilentlyContinue }
+    else { $env:GIT_INDEX_FILE = $savedIndex }
     [IO.File]::Delete($indexPath)
     [IO.File]::Delete($indexPath + '.lock')
   }
@@ -125,6 +129,33 @@ $manifest = $null
 if (Test-Path -LiteralPath $manifestPath) { $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json }
 $sharedFiles = @(Get-ChildItem -LiteralPath $shared -File -Recurse)
 $allowed = @('.sr-memory-tracking.json')
+# Optional native presentation overlay is disjoint from memory/XMA patches.
+# Validate its exact versioned content before granting either path exemption.
+$pacingOverlayPaths=@()
+if(Test-Path -LiteralPath (Join-Path $Checkout '.sr-presentation-pacing.json')) {
+  & (Join-Path $PSScriptRoot 'setup_presentation_pacing_sdk.ps1') -Checkout $Checkout -VerifyOnly
+  if(-not $?) {throw 'Presentation SDK overlay verification failed'}
+  $pacingOverlayPaths=@('src/ui/d3d12/d3d12_presenter.cpp','include/rex/ui/presentation_pacing.h')
+  $allowed+=@('.sr-presentation-pacing.json','include/rex/ui/presentation_pacing.h')
+}
+# The MnK overlay intentionally builds on the MnK part of patch 0001. Verify
+# its versioned hashes first, then reconstruct the full chain in a fresh index.
+# Only those exact final files replace the base diff comparison below.
+$keyboardOverlayPaths=@()
+$keyboardOverlay=$null
+if(Test-Path -LiteralPath (Join-Path $Checkout '.sr-keyboard-poll-edge.json')) {
+  & (Join-Path $PSScriptRoot 'setup_keyboard_poll_edge_sdk.ps1') -Checkout $Checkout -VerifyOnly
+  if(-not $?) {throw 'Keyboard SDK overlay verification failed'}
+  $overlayPath=Join-Path $PSScriptRoot 'patches/rexglue/v0.10.0/0004-mnk-button-poll-edges.patch'
+  $keyboardOverlayPaths=@('include/rex/input/mnk/mnk_input_driver.h','src/input/mnk/mnk_input_driver.cpp')
+  $keyboardOverlay=[pscustomobject]@{path=$overlayPath;paths=$keyboardOverlayPaths}
+  $allowed+=@('.sr-keyboard-poll-edge.json')
+}
+function Without-KeyboardOverlayDiff([string]$Text) {
+  return (([regex]::Split($Text,'(?m)(?=^diff --git )') | Where-Object {
+    $_ -and -not ($_ -match '^diff --git a/(.+) b/[^\r\n]+' -and $keyboardOverlayPaths -contains $Matches[1])
+  }) -join '').TrimEnd()
+}
 foreach ($file in $sharedFiles) {
   $key = 'src/system/write_tracking/' + $file.FullName.Substring($shared.Length + 1).Replace([char]92, [char]47)
   Assert-SdkPath $key
@@ -135,7 +166,7 @@ foreach ($path in ((Invoke-SdkGit -Arguments @('ls-files','--others','--exclude-
   if ($path -and $allowed -notcontains $path) { throw "Unrecognized SDK build input: $path; nothing overwritten" }
 }
 foreach ($key in ((Invoke-SdkGit -Arguments @('diff','HEAD','--name-only','--no-ext-diff','--ignore-submodules=all')) -split "`n")) {
-  if ($key -and -not $patchedPaths.ContainsKey($key)) {
+  if ($key -and -not $patchedPaths.ContainsKey($key) -and $pacingOverlayPaths -notcontains $key -and $keyboardOverlayPaths -notcontains $key) {
     throw "SDK has unknown local changes: $key; nothing overwritten"
   }
 }
@@ -143,7 +174,12 @@ $pending = @()
 $upgrades = @{}
 foreach ($patch in $patches) {
   $diff = (Invoke-SdkGit -Arguments (@('diff','HEAD','--binary','--no-ext-diff','--no-textconv','--no-color','--no-renames','--src-prefix=a/','--dst-prefix=b/','--unified=3','--abbrev=7','--ignore-submodules=all','--') + $patch.paths)).Replace("`r`n", "`n").TrimEnd()
-  if ($diff -cne $patch.text) {
+  $expectedDiff = $patch.text
+  if ($keyboardOverlay) {
+    $diff = Without-KeyboardOverlayDiff $diff
+    $expectedDiff = Without-KeyboardOverlayDiff $expectedDiff
+  }
+  if ($diff -cne $expectedDiff) {
     if ($diff) {
       $previous = Join-Path $PSScriptRoot ('patches/rexglue/v0.10.0/previous/' + (Split-Path $patch.path -Leaf))
       if (-not (Test-Path -LiteralPath $previous) -or
@@ -160,7 +196,11 @@ foreach ($patch in $patches) {
     $pending += $patch
   }
 }
-$canonical = Get-CanonicalSdkContent
+if ($keyboardOverlay -and ($pending.Count -or $upgrades.Count)) {
+  throw 'Keyboard overlay requires the exact current base patches; remove no files or edits automatically'
+}
+$canonical = if ($keyboardOverlay) { Get-CanonicalSdkContent @($patches + $keyboardOverlay) }
+  else { Get-CanonicalSdkContent }
 $beforeCanonical = $null
 if ($upgrades.Count) {
   $beforePatches = @($patches | ForEach-Object {
@@ -177,6 +217,7 @@ foreach ($patch in $patches) {
       elseif ($pending -contains $patch) { $canonical.original[$key] } else { $canonical.patched[$key] }
   }
 }
+foreach ($key in $keyboardOverlayPaths) { $expectedBefore[$key] = $canonical.patched[$key] }
 Assert-CanonicalSdkContent $expectedBefore
 $installed = [ordered]@{}
 $copyFiles = @()
@@ -217,6 +258,7 @@ foreach ($patch in $patches) {
     $installed[$key] = Hash (Join-Path $Checkout $key)
   }
 }
+foreach ($key in $keyboardOverlayPaths) { $installed[$key] = Hash (Join-Path $Checkout $key) }
 Assert-CanonicalSdkContent $canonical.patched
 $patchHash = $patchHashes[$patchNames[0]]
 if ($VerifyOnly) {

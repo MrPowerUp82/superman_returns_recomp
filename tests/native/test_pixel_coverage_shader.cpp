@@ -1,6 +1,7 @@
 #include "test_main.h"
 #include "../../port/src/graphics/pixel_coverage_shader.h"
 
+#include "../../port/src/graphics/rt_shadow_shader.h"
 #include <array>
 #include <filesystem>
 #include <fstream>
@@ -8,16 +9,22 @@
 
 using namespace superman_returns::graphics;
 namespace {
-constexpr std::array<uint64_t, 6> kPs{0x559F422BEF5E5714ull, 0x220353EB37491B13ull, 0xE6C740EAC16B70D4ull, 0x3EF6A4A3C740ADB1ull, 0xE83A13DF3297C6CBull, 0x71CB82D791DE8E77ull};
-constexpr std::array<uint64_t, 6> kVs{0x4F17209D364D5B51ull, 0x18B4F69400B7F0AFull, 0xC20921D0DBBD2F1Full, 0xC687EB65D635C5D7ull, 0xC687EB65D635C5D7ull, 0xA5232A3184AA617Cull};
+constexpr std::array<uint64_t, 14> kPs{0x559F422BEF5E5714ull, 0x220353EB37491B13ull, 0xE6C740EAC16B70D4ull, 0x3EF6A4A3C740ADB1ull, 0xE83A13DF3297C6CBull, 0x71CB82D791DE8E77ull,
+  0xA828328313FF36B9ull,0x1A6669D4867145BCull,0xFC11F956CA7B42A2ull,
+  0xADAF9F96B596F6EFull,0x3A7A1A60DE39C81Full,0xF2BB7B6551646033ull,0x04CC5C7EC9FDFD7Eull,0xC66813A81FDBD7C7ull};
+constexpr std::array<uint64_t, 14> kVs{0x4F17209D364D5B51ull, 0x18B4F69400B7F0AFull, 0xC20921D0DBBD2F1Full, 0xC687EB65D635C5D7ull, 0xC687EB65D635C5D7ull, 0xA5232A3184AA617Cull,
+  0x8E5232F5E5E6760Eull,0x8E5232F5E5E6760Eull,0x8E5232F5E5E6760Eull,
+  0x1023A9B52C1407C1ull,0x1023A9B52C1407C1ull,0x1023A9B52C1407C1ull,0x9A62E7C65051447Aull,0x315E6843ECE68A00ull};
 constexpr std::string_view kOutput = "out float4 oC0 : SV_Target0)";
 constexpr std::string_view kExtra = ",\n\tout uint srCoverageId : SV_Target1";
-constexpr std::string_view kAssignment = "\n\tsrCoverageId = g_SrPixelCoverageId;\n\t";
+constexpr std::string_view kAssignment = "\n\tsrCoverageId = g_SrPixelCoverageId & 0x3fffffffu;\n\tif ((g_SrPixelCoverageId & 0x80000000u) != 0u && oC0.w != 1.0) srCoverageId |= 0x40000000u;\n\t";
 constexpr std::string_view kOutputScale = "oC0 *= g_ColorOutputScale[0];\n\t";
 
 std::string Source(uint64_t hash, bool scaled = false) {
   constexpr const char* names[]{"559F422BEF5E5714.ps.hlsl","220353EB37491B13.ps.hlsl",
-      "E6C740EAC16B70D4.ps.hlsl","3EF6A4A3C740ADB1.ps.hlsl","E83A13DF3297C6CB.ps.hlsl","71CB82D791DE8E77.ps.hlsl"};
+      "E6C740EAC16B70D4.ps.hlsl","3EF6A4A3C740ADB1.ps.hlsl","E83A13DF3297C6CB.ps.hlsl","71CB82D791DE8E77.ps.hlsl",
+      "A828328313FF36B9.ps.hlsl","1A6669D4867145BC.ps.hlsl","FC11F956CA7B42A2.ps.hlsl",
+      "ADAF9F96B596F6EF.ps.hlsl","3A7A1A60DE39C81F.ps.hlsl","F2BB7B6551646033.ps.hlsl","04CC5C7EC9FDFD7E.ps.hlsl","C66813A81FDBD7C7.ps.hlsl"};
   const char* name=nullptr;
   for(size_t i=0;i<kPs.size();++i) if(hash==kPs[i]) name=names[i];
   SR_CHECK(name!=nullptr);if(!name)return {};
@@ -246,7 +253,7 @@ SR_TEST(pixel_coverage_cache_identity_contains_version_and_actual_emitted_patch)
   SR_CHECK(prefix_end != std::string::npos);
   if (prefix_end == std::string::npos) return;
   const auto identity = PixelCoverageShaderCacheIdentity();
-  SR_CHECK(identity.find("pixel-coverage-structural-audit-v2") != std::string_view::npos);
+  SR_CHECK(identity.find("pixel-coverage-structural-audit-v5-opaque-alpha") != std::string_view::npos);
   SR_CHECK(identity.find(std::string_view(output).substr(0, prefix_end)) != std::string_view::npos);
   SR_CHECK(identity.find(kExtra) != std::string_view::npos);
   SR_CHECK(identity.find(kAssignment) != std::string_view::npos);
@@ -260,4 +267,40 @@ SR_TEST(pixel_coverage_cape_accepts_only_the_original_pixel_position_branch) {
     Replace(changed,"float4 r5 = \n#ifdef CONAN_RECOMP",std::string("float4 r5 = \n")+std::string(replacement));
     Reject(0x71CB82D791DE8E77ull,changed);
   }
+}
+
+SR_TEST(pixel_coverage_vfx_preserves_depth_and_marks_only_contributing_alpha) {
+  const auto root=std::filesystem::path(__FILE__).parent_path().parent_path().parent_path();
+  for(auto hash:{0x201C30CD5C58A1BCull,0x5C1E60F40BD1DC6Eull}) {
+    const char* file=hash==0x201C30CD5C58A1BCull ? "201C30CD5C58A1BC.ps.hlsl" : "5C1E60F40BD1DC6E.ps.hlsl";
+    std::ifstream stream(root/"artifacts/shaders/hlsl"/file,std::ios::binary);
+    SR_CHECK(stream.good());std::string source{std::istreambuf_iterator<char>(stream),{}};
+    std::string output,error;
+    SR_CHECK(SpecializePixelCoverageShader(hash,source,output,error));
+    SR_CHECK(output.find("oC0.w > 0.001")!=std::string::npos);
+    SR_CHECK(output.find("InterlockedOr(g_SrReactiveMask[uint2(iPos.xy)], 1u, ignored)")!=std::string::npos);
+    SR_CHECK(output.find("SV_Target1")!=std::string::npos);
+    if(hash==0x201C30CD5C58A1BCull) SR_CHECK(output.find("out float oDepth : SV_Depth")!=std::string::npos);
+    SR_CHECK(IsPixelCoverageShaderPair(0x0408D37D5D96E869ull,hash));
+  }
+}
+
+SR_TEST(pixel_coverage_composes_with_rt_for_every_audited_intersection) {
+  size_t count=0;
+  for(uint64_t hash:kPs) {
+    if(!IsRtShadowShader(hash)) continue;
+    ++count;std::string coverage,combined,error;
+    SR_CHECK(SpecializePixelCoverageShader(hash,Source(hash),coverage,error));
+    SR_CHECK(SpecializeRtShadowShader(hash,coverage,combined,error));
+    SR_CHECK(combined.find(kAssignment)!=std::string::npos);
+    SR_CHECK(combined.find("g_SrRtShadowStandalone")!=std::string::npos);
+  }
+  SR_CHECK(count>=2);
+}
+SR_TEST(pixel_coverage_observed_instanced_pairs_only_add_original_pixel_ownership) {
+  SR_CHECK(IsPixelCoverageShaderPair(0xDF1EB50388CC2563ull,0xADAF9F96B596F6EFull));
+  SR_CHECK(IsPixelCoverageShaderPair(0xDF1EB50388CC2563ull,0xF2BB7B6551646033ull));
+  SR_CHECK(IsPixelCoverageShaderPair(0xEA88A5BB6930F942ull,0xA828328313FF36B9ull));
+  SR_CHECK(!IsPixelCoverageShaderPair(0xDF1EB50388CC2563ull,0xA828328313FF36B9ull));
+  SR_CHECK(!IsPixelCoverageShaderPair(0xEA88A5BB6930F942ull,0xF2BB7B6551646033ull));
 }

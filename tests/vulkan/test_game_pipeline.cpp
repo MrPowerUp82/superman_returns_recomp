@@ -1,10 +1,66 @@
 #include "game_pipeline.h"
+#include "vulkan_pipeline_seed.h"
+#include "vulkan_cache_audit.h"
 #include "test_main.h"
+#include <fstream>
+#include <cstring>
 using namespace superman_returns::graphics::vulkan;
 namespace guest=superman_returns::graphics::guest;
 namespace shaders=superman_returns::graphics::shaders;
+
+SR_TEST(vulkan_pipeline_seed_roundtrip_is_abi_scoped_and_contains_only_normalized_words) {
+  std::vector<std::vector<uint64_t>> keys{{1,3,0,1,0,2,0,15,1,0,0,0,37,0,0,0,UINT64_MAX,123,456}};
+  auto bytes=SerializeVulkanPipelineSeed(1,keys);
+  std::vector<std::vector<uint64_t>> decoded;std::string error;
+  SR_CHECK(ParseVulkanPipelineSeed(bytes,1,decoded,error));SR_CHECK(decoded==keys);
+  SR_CHECK(!ParseVulkanPipelineSeed(bytes,2,decoded,error));SR_CHECK(decoded.empty());
+  bytes.back()^=1;SR_CHECK(!ParseVulkanPipelineSeed(bytes,1,decoded,error));
+  bytes.pop_back();SR_CHECK(!ParseVulkanPipelineSeed(bytes,1,decoded,error));
+}
+
+SR_TEST(vulkan_pipeline_seed_rejects_empty_invalid_and_unbounded_records) {
+  SR_CHECK(SerializeVulkanPipelineSeed(0,{}).empty());
+  SR_CHECK(SerializeVulkanPipelineSeed(1,{{1,2}}).empty());
+  SR_CHECK(SerializeVulkanPipelineSeed(1,{std::vector<uint64_t>(2049)}).empty());
+}
+SR_TEST(vulkan_embedded_seed_merges_without_losing_local_records_or_order) {
+  std::vector<uint64_t> a(19,1),b(19,2),c(19,3);
+  std::vector<std::vector<uint64_t>> local{a,b,a};std::string error;
+  auto bytes=SerializeVulkanPipelineSeed(1,{b,c,c});
+  SR_CHECK(MergeVulkanPipelineSeed(bytes,1,local,error));
+  SR_CHECK((local==std::vector<std::vector<uint64_t>>{a,b,c}));
+  SR_CHECK(MergeVulkanPipelineSeed(bytes,1,local,error));
+  SR_CHECK_EQ(local.size(),3u);
+}
+SR_TEST(vulkan_embedded_seed_validation_failure_preserves_every_local_record) {
+  const std::vector<std::vector<uint64_t>> original{std::vector<uint64_t>(19,7)};
+  auto bytes=SerializeVulkanPipelineSeed(1,{std::vector<uint64_t>(19,8)});
+  std::string error;auto local=original;
+  SR_CHECK(!MergeVulkanPipelineSeed(bytes,2,local,error));SR_CHECK(local==original);
+  bytes.back()^=1;
+  SR_CHECK(!MergeVulkanPipelineSeed(bytes,1,local,error));SR_CHECK(local==original);
+}
+SR_TEST(vulkan_embedded_seed_capacity_failure_is_atomic) {
+  std::vector<std::vector<uint64_t>> local;
+  for(uint64_t i=0;i<8192;++i){local.emplace_back(19,0);local.back()[0]=i;}
+  const auto original=local;std::string error;
+  auto extra=std::vector<uint64_t>(19,0);extra[0]=8192;
+  SR_CHECK(!MergeVulkanPipelineSeed(SerializeVulkanPipelineSeed(1,{extra}),1,local,error));
+  SR_CHECK(local==original);
+}
+SR_TEST(vulkan_shipped_seed_has_decodable_normalized_states) {
+  const auto path=std::filesystem::path(__FILE__).parent_path()/"../../port/assets/vulkan_pipeline_seed.bin";
+  std::ifstream file(path,std::ios::binary|std::ios::ate);SR_CHECK(bool(file));if(!file)return;
+  const auto size=file.tellg();SR_CHECK(size>0);if(size<=0)return;
+  std::vector<uint8_t> bytes(size_t(size),uint8_t{});file.seekg(0);
+  SR_CHECK(bool(file.read(reinterpret_cast<char*>(bytes.data()),bytes.size())));
+  std::vector<std::vector<uint64_t>> records;std::string error;
+  SR_CHECK(ParseVulkanPipelineSeed(bytes,1,records,error));SR_CHECK_EQ(records.size(),308u);
+  for(const auto& key:records){GamePipelinePlan plan;TargetPass pass;Error e;SR_CHECK(DecodeGamePipelineSeed(key,plan,pass,e));}
+}
 namespace {
 uint32_t layout_calls=0,layout_sets=0,layout_push_count=0,pipeline_calls=0;
+VkResult pipeline_result=VK_SUCCESS;
 VkPushConstantRange layout_push{};
 VkResult VKAPI_CALL PipelineLayout(VkDevice,const VkPipelineLayoutCreateInfo* info,const VkAllocationCallbacks*,VkPipelineLayout* out) {
   ++layout_calls;layout_sets=info->setLayoutCount;layout_push_count=info->pushConstantRangeCount;
@@ -13,7 +69,14 @@ VkResult VKAPI_CALL PipelineLayout(VkDevice,const VkPipelineLayoutCreateInfo* in
 }
 VkResult VKAPI_CALL PipelineCache(VkDevice,const VkPipelineCacheCreateInfo*,const VkAllocationCallbacks*,VkPipelineCache* out) {*out=reinterpret_cast<VkPipelineCache>(2);return VK_SUCCESS;}
 VkResult VKAPI_CALL PipelineShader(VkDevice,const VkShaderModuleCreateInfo*,const VkAllocationCallbacks*,VkShaderModule* out) {*out=reinterpret_cast<VkShaderModule>(3);return VK_SUCCESS;}
-VkResult VKAPI_CALL GraphicsPipeline(VkDevice,VkPipelineCache,uint32_t,const VkGraphicsPipelineCreateInfo*,const VkAllocationCallbacks*,VkPipeline* out) {++pipeline_calls;*out=reinterpret_cast<VkPipeline>(4);return VK_SUCCESS;}
+VkResult VKAPI_CALL GraphicsPipeline(VkDevice,VkPipelineCache,uint32_t,const VkGraphicsPipelineCreateInfo*,const VkAllocationCallbacks*,VkPipeline* out) {++pipeline_calls;if(pipeline_result==VK_SUCCESS)*out=reinterpret_cast<VkPipeline>(4);return pipeline_result;}
+VkResult VKAPI_CALL SeedRenderPass(VkDevice,const VkRenderPassCreateInfo*,const VkAllocationCallbacks*,VkRenderPass* out) {*out=reinterpret_cast<VkRenderPass>(5);return VK_SUCCESS;}
+VkResult VKAPI_CALL SeedDriverData(VkDevice,VkPipelineCache,size_t* size,void* data) {
+  if(!data){*size=32;return VK_SUCCESS;}
+  const uint32_t words[8]{32,VK_PIPELINE_CACHE_HEADER_VERSION_ONE};
+  std::memcpy(data,words,sizeof(words));*size=sizeof(words);return VK_SUCCESS;
+}
+void VKAPI_CALL FreeSeedRenderPass(VkDevice,VkRenderPass,const VkAllocationCallbacks*) {}
 void VKAPI_CALL FreePipelineLayout(VkDevice,VkPipelineLayout,const VkAllocationCallbacks*) {}
 void VKAPI_CALL FreePipelineCache(VkDevice,VkPipelineCache,const VkAllocationCallbacks*) {}
 void VKAPI_CALL FreePipelineShader(VkDevice,VkShaderModule,const VkAllocationCallbacks*) {}
@@ -23,7 +86,43 @@ Dispatch PipelineDispatch() {
   Dispatch f;f.vkCreatePipelineLayout=PipelineLayout;f.vkDestroyPipelineLayout=FreePipelineLayout;
   f.vkCreatePipelineCache=PipelineCache;f.vkDestroyPipelineCache=FreePipelineCache;
   f.vkCreateShaderModule=PipelineShader;f.vkDestroyShaderModule=FreePipelineShader;
-  f.vkCreateGraphicsPipelines=GraphicsPipeline;f.vkDestroyPipeline=FreePipeline;f.vkDeviceWaitIdle=PipelineIdle;return f;
+  f.vkCreateGraphicsPipelines=GraphicsPipeline;f.vkDestroyPipeline=FreePipeline;f.vkDeviceWaitIdle=PipelineIdle;
+  f.vkCreateRenderPass=SeedRenderPass;f.vkDestroyRenderPass=FreeSeedRenderPass;return f;
+}
+void GlobalPipelineDevice(Context& c);
+shaders::CompiledShader PipelineArtifact(shaders::ShaderStage stage,shaders::ShaderAbi abi);
+SR_TEST(vulkan_pipeline_seed_reconstructs_fixed_state_and_vertex_layout_without_handles) {
+  guest::DrawPacket draw;draw.registers[0x104]=15;draw.registers[0x201]=1|(1<<16);
+  draw.registers[0x200]=2|4|(3<<4);draw.depth_bias=-5;draw.slope_bias=.75f;
+  draw.attributes={{2,8,0x2c23a5,0,0}};guest::VertexStream stream;stream.stream=2;stream.stride=24;draw.streams={stream};
+  TargetPass pass;pass.color_count=1;pass.formats[0]=VK_FORMAT_R8G8B8A8_UNORM;pass.depth_format=VK_FORMAT_D24_UNORM_S8_UINT;
+  shaders::CompiledShader vs;vs.inputs={{0,"float2"}};GamePipelinePlan original,decoded;Error e;TargetPass compatible;
+  SR_CHECK(PlanGamePipeline(draw,pass,vs,original,e));original.key.push_back(123);original.key.push_back(456);
+  SR_CHECK(DecodeGamePipelineSeed(original.key,decoded,compatible,e));
+  SR_CHECK(decoded.key==original.key);SR_CHECK(compatible.render_pass==VK_NULL_HANDLE);
+  SR_CHECK_EQ(decoded.bindings[0].binding,2u);SR_CHECK_EQ(decoded.bindings[0].stride,24u);
+  SR_CHECK_EQ(decoded.attributes[0].offset,8u);SR_CHECK_EQ(decoded.raster.depthBiasConstantFactor,-5.f);
+  SR_CHECK_EQ(decoded.raster.depthBiasSlopeFactor,.75f);SR_CHECK_EQ(compatible.depth_format,pass.depth_format);
+  auto broken=original.key;broken[11]=0x7f800000;
+  SR_CHECK(!DecodeGamePipelineSeed(broken,decoded,compatible,e));
+  broken=original.key;broken.erase(broken.begin()+18);SR_CHECK(!DecodeGamePipelineSeed(broken,decoded,compatible,e));
+}
+
+SR_TEST(vulkan_builtin_prewarm_reuses_pipeline_and_counts_failed_runtime_attempts) {
+  Context c(PipelineDispatch());GlobalPipelineDevice(c);c.properties.limits.maxColorAttachments=4;
+  VkDescriptorSetLayout layout{};Error e;GamePipelineStore store(c);
+  SR_CHECK(store.Initialize({&layout,1},{},e,shaders::ShaderAbi::kGlobal));
+  auto vs=PipelineArtifact(shaders::ShaderStage::kVertex,shaders::ShaderAbi::kGlobal);
+  auto ps=PipelineArtifact(shaders::ShaderStage::kPixel,shaders::ShaderAbi::kGlobal);
+  guest::DrawPacket draw;TargetPass pass;pass.color_count=1;pass.formats[0]=VK_FORMAT_R8G8B8A8_UNORM;
+  const auto startup=VulkanCacheAudit::startup_attempts.load(),runtime=VulkanCacheAudit::pipeline_attempts.load();
+  SR_CHECK(store.PrewarmBuiltin(draw,pass.formats[0],vs,&ps,e));
+  SR_CHECK_EQ(VulkanCacheAudit::startup_attempts.load(),startup+1);
+  SR_CHECK(bool(store.Acquire(draw,pass,vs,&ps,1,e)));
+  SR_CHECK_EQ(VulkanCacheAudit::pipeline_attempts.load(),runtime);
+  pipeline_result=VK_ERROR_OUT_OF_DEVICE_MEMORY;draw.registers[0x201]=6;
+  SR_CHECK(!store.Acquire(draw,pass,vs,&ps,1,e));pipeline_result=VK_SUCCESS;
+  SR_CHECK_EQ(VulkanCacheAudit::pipeline_attempts.load(),runtime+1);SR_CHECK_EQ(store.stats().failed,1u);
 }
 void GlobalPipelineDevice(Context& c) {
   c.device=reinterpret_cast<VkDevice>(1);
@@ -40,6 +139,73 @@ shaders::CompiledShader PipelineArtifact(shaders::ShaderStage stage,shaders::Sha
   if(abi==shaders::ShaderAbi::kGlobal) shader.requirements.storage_buffer_dynamic_indexing=true;
   return shader;
 }
+}
+SR_TEST(vulkan_observed_descriptions_persist_and_prewarm_from_ready_library_only) {
+  const auto directory=std::filesystem::temp_directory_path()/std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+  std::filesystem::create_directory(directory);const auto cache=directory/"driver.cache";
+  auto dispatch=PipelineDispatch();dispatch.vkGetPipelineCacheData=SeedDriverData;
+  Context c(dispatch);GlobalPipelineDevice(c);c.properties.limits.maxColorAttachments=4;
+  auto vs=PipelineArtifact(shaders::ShaderStage::kVertex,shaders::ShaderAbi::kGlobal);
+  auto ps=PipelineArtifact(shaders::ShaderStage::kPixel,shaders::ShaderAbi::kGlobal);
+  VkDescriptorSetLayout layout{};Error e;guest::DrawPacket draw;
+  TargetPass pass;pass.color_count=1;pass.formats[0]=VK_FORMAT_R8G8B8A8_UNORM;
+  {
+    GamePipelineStore first(c);SR_CHECK(first.Initialize({&layout,1},cache,e,shaders::ShaderAbi::kGlobal));
+    SR_CHECK(bool(first.Acquire(draw,pass,vs,&ps,1,e)));SR_CHECK(first.CheckpointCache(e));
+  }
+  auto descriptions=cache;descriptions+=".descriptions";SR_CHECK(std::filesystem::is_regular_file(descriptions));
+  auto word=[](std::vector<uint8_t>& bytes,uint32_t value){for(unsigned i=0;i<4;++i)bytes.push_back(uint8_t(value>>(8*i)));};
+  auto wire=[&](const shaders::CompiledShader& shader) {
+    std::vector<uint8_t> bytes;
+    for(uint32_t value:{0x33525653u,2u,1u,uint32_t(shader.stage)})word(bytes,value);
+    for(unsigned i=0;i<12;++i)word(bytes,0);word(bytes,0);word(bytes,0);word(bytes,uint32_t(shader.words.size()*4));
+    for(auto value:shader.words)word(bytes,value);return bytes;
+  };
+  std::vector<uint8_t> body;
+  for(const auto* shader:{&vs,&ps}) {
+    const auto result=wire(*shader);
+    word(body,uint32_t(shader->stage));word(body,24);word(body,uint32_t(result.size()));word(body,0);
+    body.insert(body.end(),24,uint8_t(shader->stage));body.insert(body.end(),result.begin(),result.end());
+  }
+  std::vector<uint8_t> library{'S','R','V','K','L','I','B',0};word(library,2);word(library,2);
+  const auto checksum=VulkanSeedChecksum(body);word(library,uint32_t(checksum));word(library,uint32_t(checksum>>32));
+  library.insert(library.end(),body.begin(),body.end());
+  shaders::VulkanShaderConfig config;config.cache=directory/"shaders";config.library=directory/"test.srvk";config.abi=shaders::ShaderAbi::kGlobal;
+  {std::ofstream file(config.library,std::ios::binary);file.write(reinterpret_cast<const char*>(library.data()),library.size());}
+  {
+    shaders::VulkanShaderService service(config,{});SR_CHECK_EQ(service.PrecompiledCount(),2u);
+    GamePipelineStore second(c);SR_CHECK(second.Initialize({&layout,1},cache,e,shaders::ShaderAbi::kGlobal));
+    const auto fresh=directory/"fresh.cache";
+    std::ifstream input(descriptions,std::ios::binary|std::ios::ate);
+    const auto length=input.tellg();std::vector<uint8_t> bytes(size_t(length),uint8_t{});
+    input.seekg(0);SR_CHECK(bool(input.read(reinterpret_cast<char*>(bytes.data()),bytes.size())));
+    {
+      GamePipelineStore cold(c);SR_CHECK(cold.Initialize({&layout,1},fresh,e,shaders::ShaderAbi::kGlobal));
+      SR_CHECK(cold.ImportDescriptionSeed(bytes,e));
+      const auto attempts=VulkanCacheAudit::pipeline_attempts.load();
+      SR_CHECK(cold.PrewarmObserved(service,e));SR_CHECK_EQ(cold.stats().prewarmed,1u);
+      SR_CHECK(bool(cold.Acquire(draw,pass,vs,&ps,1,e)));
+      SR_CHECK_EQ(VulkanCacheAudit::pipeline_attempts.load(),attempts);
+      SR_CHECK(cold.CheckpointCache(e));
+    }
+    {
+      GamePipelineStore disabled(c);SR_CHECK(disabled.Initialize({&layout,1},{},e,shaders::ShaderAbi::kGlobal));
+      SR_CHECK(!disabled.ImportDescriptionSeed(bytes,e));
+      SR_CHECK(disabled.PrewarmObserved(service,e));SR_CHECK_EQ(disabled.stats().prewarmed,0u);
+    }
+    const auto runtime=VulkanCacheAudit::pipeline_attempts.load();
+    SR_CHECK(second.PrewarmObserved(service,e));SR_CHECK_EQ(second.stats().prewarmed,1u);
+    SR_CHECK(bool(second.Acquire(draw,pass,vs,&ps,1,e)));
+    SR_CHECK_EQ(VulkanCacheAudit::pipeline_attempts.load(),runtime);
+  }
+  {
+    shaders::VulkanShaderConfig missing;missing.cache=directory/"empty";missing.abi=shaders::ShaderAbi::kGlobal;
+    shaders::VulkanShaderService service(missing,{});
+    GamePipelineStore third(c);SR_CHECK(third.Initialize({&layout,1},cache,e,shaders::ShaderAbi::kGlobal));
+    SR_CHECK(!third.PrewarmObserved(service,e));SR_CHECK_EQ(third.stats().prewarm_failed,1u);
+    SR_CHECK(bool(third.Acquire(draw,pass,vs,&ps,1,e))); // fallback remains available
+  }
+  std::filesystem::remove_all(directory);
 }
 SR_TEST(game_pipeline_global_layout_requires_optin_and_declares_draw_push_constants) {
   Context c(PipelineDispatch());GlobalPipelineDevice(c);Error e;

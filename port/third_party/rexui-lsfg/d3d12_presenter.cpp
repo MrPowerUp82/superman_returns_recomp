@@ -17,6 +17,7 @@
 
 #include "presentation.h"
 #include "presenter_factory.h"
+#include "../../src/graphics/presentation_pacing.h"
 
 #include <rex/assert.h>
 #include <rex/cvar.h>
@@ -354,7 +355,7 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
   if (paint_context_.swap_chain) {
     if (was_paintable && paint_context_.swap_chain_width == new_swap_chain_width &&
         paint_context_.swap_chain_height == new_swap_chain_height) {
-      is_vsync_implicit_out = false;
+      is_vsync_implicit_out = rex::cvar::Query<bool>("vsync");
       return SurfacePaintConnectResult::kSuccessUnchanged;
     }
     paint_context_.AwaitSwapChainUsageCompletion();
@@ -482,7 +483,7 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
         provider_.OffsetRTVDescriptor(rtv_heap_start, PaintContext::kRTVIndexSwapChainBuffer0 + i));
   }
 
-  is_vsync_implicit_out = false;
+  is_vsync_implicit_out = rex::cvar::Query<bool>("vsync");
   return SurfacePaintConnectResult::kSuccess;
 }
 
@@ -561,6 +562,8 @@ void D3D12Presenter::PaintContext::DestroySwapChain() {
 }
 
 Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawers) {
+  auto& sr_timing=superman_returns::graphics::ThreadPresentationTiming();
+  sr_timing.Wait(superman_returns::graphics::ParsePresentationTarget(rex::cvar::GetFlagByName("sr_native_fps_limit")));
   static bool sr_logged_bridge = false;
   if (!sr_logged_bridge) {
     sr_logged_bridge = true;
@@ -1168,14 +1171,22 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
   // fullscreen is ever used in, the allow tearing flag must not be passed in
   // fullscreen, but DXGI fullscreen is largely unneeded with the flip
   // presentation model used in Direct3D 12).
-  UINT sr_present_flags = DXGI_PRESENT_RESTART |
-      (paint_context_.swap_chain_allows_tearing ? DXGI_PRESENT_ALLOW_TEARING : 0);
+  const bool sr_vsync=rex::cvar::Query<bool>("vsync");
+  UINT sr_present_flags = sr_vsync?0u:(DXGI_PRESENT_RESTART |
+      (paint_context_.swap_chain_allows_tearing ? DXGI_PRESENT_ALLOW_TEARING : 0));
   HRESULT present_result;
   if (!sr::lsfg::TryPresent(this, device, provider_.GetDirectQueue(),
           paint_context_.swap_chain.Get(), back_buffer, sr_source_serial,
           guest_output_resource && guest_output_properties.IsActive(),
           sr_present_flags, present_result)) {
-    present_result = paint_context_.swap_chain->Present(0, sr_present_flags);
+    const auto sr_entry=superman_returns::graphics::PresentationNowNs();
+    present_result = paint_context_.swap_chain->Present(sr_vsync?1:0, sr_present_flags);
+    const auto sr_return=superman_returns::graphics::PresentationNowNs();
+    static thread_local uint64_t sr_last_source=0;
+    const bool sr_accepted=present_result==S_OK;
+    sr_timing.Record("d3d12",sr_source_serial,sr_source_serial==sr_last_source?"repeat":"real",
+        sr_entry,sr_return,present_result,sr_accepted);
+    if(sr_accepted) sr_last_source=sr_source_serial;
   }
   // Even if presentation has failed, work might have been enqueued anyway
   // internally before the failure according to Jesse Natalie from the DirectX

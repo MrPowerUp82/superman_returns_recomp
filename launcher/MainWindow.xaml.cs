@@ -30,7 +30,7 @@ public partial class MainWindow : Window
         ApplyLanguage();
         PopulateChoices();
         ApplySettingsToUi();
-        foreach (var box in new[] { RendererBox, ApiBox, ResolutionBox, DisplayModeBox, InputBox, GpuBox, RenderScaleBox, AaBox, FilterBox, FpsBox, CostumeBox, ShadowBox, MsaaBox })
+        foreach (var box in new[] { RendererBox, ApiBox, ResolutionBox, DisplayModeBox, InputBox, GpuBox, RenderScaleBox, AaBox, FilterBox, FpsBox, CostumeBox, ShadowBox, MsaaBox, DlssBox, RtShadowsBox, RtQualityBox, CharacterShadowsBox, ReflectionsBox })
             box.SelectionChanged += (_, _) => UpdateSummary();
         VSyncBox.Checked += (_, _) => UpdateSummary();
         SkipIntroBox.Checked += (_, _) => UpdateSummary();
@@ -82,8 +82,13 @@ public partial class MainWindow : Window
         SetChoices(DisplayModeBox, new("Fullscreen", T("Borderless")), new("Windowed", T("Windowed")));
         SetChoices(InputBox, new("KeyboardMouse", T("KeyboardMouse")), new("Controller", T("Controller")));
         SetChoices(CostumeBox, new("default", T("DefaultCostume")), new("2", "Golden Age"), new("kingdom_come", T("KingdomCome")));
-        SetChoices(RenderScaleBox, new("50", T("Scale50")), new("75", T("Scale75")), new("100", "100% — 720p original"), new("125", "125% — 900p"), new("150", "150% — 1080p"), new("200", "200% — 1440p"), new("300", "300% — 2160p"), new("400", "400% — 2880p"));
+        SetChoices(RenderScaleBox, new("50", "50%"), new("75", "75%"), new("100", "100%"), new("125", "125%"), new("150", "150%"), new("200", "200%"), new("300", "300%"), new("400", "400%"));
         SetChoices(AaBox, new("Off", T("Off")), new("FXAA", "FXAA"));
+        SetChoices(DlssBox, new("0", T("Off")), new("1", "Quality"), new("2", "Balanced"), new("3", "Performance"), new("4", "DLAA"));
+        SetChoices(RtShadowsBox, new("0", T("Off")), new("1", T("On")));
+        SetChoices(RtQualityBox, new("1", T("Low")), new("2", T("High")));
+        SetChoices(CharacterShadowsBox, new("0", T("Off")), new("1", T("On")));
+        SetChoices(ReflectionsBox, new("0", T("Off")), new("1", T("On")));
         SetChoices(FilterBox, new("Original", T("OriginalFilter")), new("Anisotropic2x", T("Anisotropic2")), new("Anisotropic4x", T("Anisotropic4")), new("Anisotropic8x", T("Anisotropic8")), new("Anisotropic16x", T("Anisotropic16")));
         SetChoices(FpsBox, new("0", T("Uncapped")), new("30", "30 FPS — original"), new("60", "60 FPS — experimental"), new("120", "120 FPS — experimental"));
         SetChoices(ShadowBox, new("1", "Original"), new("2", "2×"), new("4", "4×"));
@@ -97,6 +102,9 @@ public partial class MainWindow : Window
         Select(RendererBox, _settings.Renderer); Select(ApiBox, _settings.GraphicsApi); SkipIntroBox.IsChecked = _settings.SkipIntro;
         Select(ResolutionBox, _settings.Resolution); Select(DisplayModeBox, _settings.DisplayMode);
         Select(InputBox, _settings.InputMode); Select(CostumeBox, _settings.Costume); Select(RenderScaleBox, _settings.RenderScale);
+        Select(DlssBox, _settings.Dlss.ToString()); Select(RtShadowsBox, _settings.RtShadows.ToString());
+        Select(RtQualityBox, _settings.ShadowSoftness.ToString()); Select(CharacterShadowsBox, _settings.CharacterShadows.ToString());
+        Select(ReflectionsBox, _settings.RtReflections.ToString());
         Select(AaBox, _settings.Antialiasing); Select(FilterBox, _settings.TextureFilter);
         Select(FpsBox, _settings.FpsLimit); Select(ShadowBox, _settings.ShadowQuality); Select(MsaaBox, _settings.Msaa);
         var adapters = GpuBox.Items.Cast<GpuAdapter>().ToArray();
@@ -116,6 +124,9 @@ public partial class MainWindow : Window
             _settings.InputMode = Value(InputBox); _settings.RenderScale = Value(RenderScaleBox);
             _settings.FrameGeneration = FrameGenerationBox.IsChecked == true;
         }
+        _settings.Dlss = int.Parse(Value(DlssBox)); _settings.RtShadows = int.Parse(Value(RtShadowsBox));
+        _settings.ShadowSoftness = int.Parse(Value(RtQualityBox)); _settings.CharacterShadows = int.Parse(Value(CharacterShadowsBox));
+        _settings.RtReflections = int.Parse(Value(ReflectionsBox));
         _settings.SkipIntro = SkipIntroBox.IsChecked == true;
         _settings.Resolution = Value(ResolutionBox); _settings.DisplayMode = Value(DisplayModeBox);
         _settings.Costume = Value(CostumeBox);
@@ -170,7 +181,7 @@ public partial class MainWindow : Window
         try
         {
             ReadSettings();
-            var start = _settings.CreateLaunch(AppContext.BaseDirectory, benchmark);
+            var start = _settings.CreateLaunch(AppContext.BaseDirectory, benchmark, _settingsPath);
             _settings.Save(_settingsPath);
             Process.Start(start);
             Close();

@@ -99,8 +99,8 @@ inline bool CaptureObservedClothMotionIdentity(uint64_t shader,
   // Reject ambiguous REAL descriptors before replacing dynamic identities.
   // Otherwise a static key could collide with a local canonical role number.
   TemporalFetchSignature actual_fetch;
-  if(!CaptureTemporalVertexFetch(metadata,resources,actual_fetch) ||
-     !CaptureTemporalVertexFetch(metadata,canonical,result.fetch)) return false;
+  if(!CaptureTemporalVertexFetch(metadata,resources,actual_fetch,cmd.dynamic_vertex_fetch) ||
+     !CaptureTemporalVertexFetch(metadata,canonical,result.fetch,cmd.dynamic_vertex_fetch)) return false;
   output=result;return true;
 }
 }

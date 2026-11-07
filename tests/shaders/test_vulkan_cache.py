@@ -24,7 +24,9 @@ class CacheTests(unittest.TestCase):
    root=Path(tmp);raw=root/'test.vs.bin';raw.write_bytes(b'container');tools=self.setup_tools(root)
    with patch('compile_vulkan.subprocess.run',side_effect=self.runner) as runner:
     first=compile_shader(raw,'vs',root,tools);self.assertEqual(first.status,'ready');self.assertEqual(runner.call_count,2)
+    self.assertFalse(first.cache_hit);self.assertEqual(first.compiler_invocations,2)
     second=compile_shader(raw,'vs',root,tools);self.assertEqual(second.status,'ready');self.assertEqual(runner.call_count,2)
+    self.assertTrue(second.cache_hit);self.assertEqual(second.compiler_invocations,0)
     first.binary_path.write_bytes(b'DXBC');compile_shader(raw,'vs',root,tools);self.assertEqual(runner.call_count,4)
     first.metadata_path.unlink();compile_shader(raw,'vs',root,tools);self.assertEqual(runner.call_count,6)
  def test_compiler_timeout_is_reported(self):
@@ -32,6 +34,7 @@ class CacheTests(unittest.TestCase):
    root=Path(tmp);raw=root/'test.ps.bin';raw.write_bytes(b'a');tools=self.setup_tools(root)
    with patch('compile_vulkan.subprocess.run',side_effect=subprocess.TimeoutExpired('emitter',60)):
     r=compile_shader(raw,'ps',root,tools);self.assertEqual(r.status,'failed');self.assertIn('timeout',r.diagnostic.lower())
+    self.assertFalse(r.cache_hit);self.assertEqual(r.compiler_invocations,1)
  def test_unicode_paths_are_passed_as_arguments(self):
   with tempfile.TemporaryDirectory(prefix='Métrô espaço ') as tmp:
    root=Path(tmp);raw=root/'nome 日本.vs.bin';raw.write_bytes(b'a');tools=self.setup_tools(root)

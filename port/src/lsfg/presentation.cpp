@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "presentation.h"
+#include "../graphics/presentation_pacing.h"
 #include "win32_interop.h"
 #include "lsfg-vk-backend/lsfgvk.hpp"
 #include "lsfg-vk-common/vulkan/command_buffer.hpp"
@@ -124,9 +125,18 @@ class Session {
     // loss rather than falling back to Present on a modified/rotated buffer.
     try {
       DrawGenerated(backbuffer);
-      UINT pair_flags = flags & ~DXGI_PRESENT_RESTART;
+      const bool vsync=rex::cvar::Query<bool>("vsync");
+      UINT pair_flags = vsync?0u:(flags & ~DXGI_PRESENT_RESTART);
+      auto present=[&](const char* kind) {
+        const auto entry=superman_returns::graphics::PresentationNowNs();
+        const auto status=swapchain->Present(vsync?1:0,pair_flags);
+        const auto returned=superman_returns::graphics::PresentationNowNs();
+        superman_returns::graphics::ThreadPresentationTiming().Record("d3d12",serial,kind,
+            entry,returned,status,status==S_OK);
+        return status;
+      };
       auto generated_time = Clock::now();
-      result = swapchain->Present(0, pair_flags);
+      result = present("generated");
       if (FAILED(result) || result == DXGI_STATUS_OCCLUDED) return true;
       ++generated_frames_;
       ComPtr<ID3D12Resource> restored;
@@ -138,7 +148,7 @@ class Session {
       auto half = std::chrono::duration<double>(std::clamp(interval * 0.5, 0.001, 0.05));
       std::this_thread::sleep_until(generated_time +
           std::chrono::duration_cast<Clock::duration>(half));
-      result = swapchain->Present(0, pair_flags);
+      result = present("real");
       if (real_frames_ % 60 == 0)
         REXLOG_INFO("LSFG counters: real={}, generated={}, pairs={}, source interval={} ms",
             real_frames_, generated_frames_, generated_frames_, interval * 1000.0);

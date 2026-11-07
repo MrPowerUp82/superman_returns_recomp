@@ -81,6 +81,12 @@ public:
   bool fetch_complete(uint32_t slot) const {
     return slot < fetch_written_masks_.size() && fetch_written_masks_[slot] == 0x3Fu;
   }
+  void WriteRegister(uint32_t index, uint32_t value) { Write(index, value); }
+  void WriteBigEndianRange(uint32_t first_reg, const uint8_t* big_endian_words, uint32_t dword_count) {
+    WriteRange(first_reg, big_endian_words, dword_count);
+  }
+  void SetBinMaskLo(uint32_t v) { bin_mask_ = (bin_mask_ & 0xFFFFFFFF00000000ull) | v; }
+  void SetBinMaskHi(uint32_t v) { bin_mask_ = (uint64_t(v) << 32) | (bin_mask_ & 0xFFFFFFFFull); }
 
   uint64_t packets = 0;
   uint64_t dwords = 0;

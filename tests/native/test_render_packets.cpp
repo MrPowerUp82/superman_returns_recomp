@@ -4,12 +4,39 @@
 #include "../../port/src/graphics/guest/render_packet.h"
 #include "../../port/src/native_renderer/pm4_mirror.h"
 #include "../../port/src/native_renderer/game_profile.h"
+#include "../../port/src/native_renderer/packet_sink_policy.h"
+#include "../../port/src/graphics/temporal_class_coverage.h"
+#include "../../port/src/graphics/hybrid_reflection_contract.h"
+#include "../../port/src/graphics/pipeline_creation_audit.h"
 #include "test_main.h"
 SR_TEST(packet_check_cadence_limits_debug_capture) {
   using superman_returns::graphics::guest::IsCaptureFrame;
   SR_CHECK(IsCaptureFrame(0,120));SR_CHECK(!IsCaptureFrame(119,120));
   SR_CHECK(IsCaptureFrame(120,120));SR_CHECK(IsCaptureFrame(7,1));
   SR_CHECK(IsCaptureFrame(7,0));
+}
+SR_TEST(work_batch_shared_ranges_deduplicate_repeated_descriptors) {
+  using namespace superman_returns::graphics::guest;
+  auto batch = std::make_shared<WorkBatch>();
+  uint8_t fake_guest[0x200]{};
+  fake_guest[0x40] = 0xAB;
+  fake_guest[0x41] = 0xCD;
+  for (int i = 0; i < 64; ++i) {
+    batch->AppendSharedRange(fake_guest, 0x40, 0x28);
+  }
+  SR_CHECK_EQ(batch->shared_ranges.size(), 1u);
+  SR_CHECK_EQ(batch->bytes.size(), 0x28u);
+  WorkCmd cmd;
+  cmd.range_first = 0;
+  cmd.range_count = 0;
+  CapturedMemory mem;
+  std::string err;
+  SR_CHECK(CapturedMemory::CaptureOwned(batch, cmd, mem, err));
+  auto span = mem.Read(0x40, 2);
+  SR_CHECK_EQ(span.size(), 2u);
+  SR_CHECK_EQ(span[0], 0xABu);
+  SR_CHECK_EQ(span[1], 0xCDu);
+
 }
 #include <bit>
 #include <algorithm>
@@ -961,4 +988,215 @@ SR_TEST(coalesced_capture_ranges_preserve_unambiguous_and_overlay_reads) {
   SR_CHECK_EQ(span.size(), 8u);
   SR_CHECK_EQ(span[0], 1u);
   SR_CHECK_EQ(span[7], 8u);
+}
+
+SR_TEST(packet_sink_policy_disposition_matrix) {
+  using namespace superman_returns::native;
+  using namespace superman_returns::graphics::guest;
+
+  {
+    auto d = EvaluatePacketSinkFailure(true, true, Op::kDraw, false, true);
+    SR_CHECK_EQ(static_cast<uint8_t>(d.stage), static_cast<uint8_t>(PacketFailureStage::None));
+    SR_CHECK(!d.skip_command && !d.quarantine_sink && !d.notify_cancel && !d.fatal_abort);
+  }
+  {
+    auto d = EvaluatePacketSinkFailure(false, true, Op::kDraw, false, true);
+    SR_CHECK_EQ(static_cast<uint8_t>(d.stage), static_cast<uint8_t>(PacketFailureStage::Decode));
+    SR_CHECK(d.skip_command);
+    SR_CHECK(!d.quarantine_sink);
+    SR_CHECK(!d.notify_cancel);
+    SR_CHECK(!d.fatal_abort);
+  }
+  {
+    auto d = EvaluatePacketSinkFailure(false, true, Op::kDraw, false, false);
+    SR_CHECK_EQ(static_cast<uint8_t>(d.stage), static_cast<uint8_t>(PacketFailureStage::Decode));
+    SR_CHECK(!d.skip_command);
+    SR_CHECK(d.quarantine_sink);
+    SR_CHECK(d.notify_cancel);
+    SR_CHECK(d.fatal_abort);
+  }
+  {
+    auto d = EvaluatePacketSinkFailure(false, true, Op::kSwap, false, true);
+    SR_CHECK_EQ(static_cast<uint8_t>(d.stage), static_cast<uint8_t>(PacketFailureStage::Decode));
+    SR_CHECK(!d.skip_command);
+    SR_CHECK(d.quarantine_sink);
+    SR_CHECK(d.notify_cancel);
+    SR_CHECK(!d.fatal_abort);
+  }
+  {
+    auto d = EvaluatePacketSinkFailure(true, false, Op::kDraw, false, true);
+    SR_CHECK_EQ(static_cast<uint8_t>(d.stage), static_cast<uint8_t>(PacketFailureStage::Sink));
+    SR_CHECK(!d.skip_command);
+    SR_CHECK(d.quarantine_sink);
+    SR_CHECK(d.notify_cancel);
+    SR_CHECK(!d.fatal_abort);
+  }
+  {
+    auto d = EvaluatePacketSinkFailure(true, false, Op::kDraw, false, false);
+    SR_CHECK_EQ(static_cast<uint8_t>(d.stage), static_cast<uint8_t>(PacketFailureStage::Sink));
+    SR_CHECK(d.quarantine_sink);
+    SR_CHECK(d.notify_cancel);
+    SR_CHECK(d.fatal_abort);
+  }
+}
+
+SR_TEST(packet_sink_recoverable_decode_fault_injection_draw_skipped) {
+  using namespace superman_returns::native;
+  using namespace superman_returns::graphics::guest;
+
+  uint64_t packet_errors = 0;
+  uint64_t packets_delivered = 0;
+  uint64_t swaps_delivered = 0;
+  bool sink_quarantined = false;
+  uint32_t cancel_invocations = 0;
+
+  auto cancel_sink = [&]() { ++cancel_invocations; };
+  auto sink = [&](RenderPacket&& packet, std::string&) -> bool {
+    if (std::holds_alternative<SwapPacket>(packet)) ++swaps_delivered;
+    ++packets_delivered;
+    return true;
+  };
+
+  struct SimulatedCmd {
+    Op op;
+    bool inject_decode_fault;
+    uint64_t command_serial;
+  };
+  SimulatedCmd commands[] = {
+      {Op::kDraw, false, 1},
+      {Op::kDraw, true, 2},
+      {Op::kDraw, false, 3},
+      {Op::kSwap, false, 4},
+  };
+
+  for (const auto& cmd : commands) {
+    if (sink_quarantined) break;
+    bool decode_ok = !cmd.inject_decode_fault;
+    std::string error = decode_ok ? "" : "simulated malformed packet decode failure";
+    RenderPacket packet;
+    if (decode_ok) {
+      if (cmd.op == Op::kSwap) {
+        packet = SwapPacket{10, 1, {}};
+      } else {
+        packet = DrawPacketOwner(DrawPacket{});
+      }
+    }
+    bool sink_ok = true;
+    if (decode_ok) sink_ok = sink(std::move(packet), error);
+
+    auto disposition = EvaluatePacketSinkFailure(decode_ok, sink_ok, cmd.op, false, true);
+    if (disposition.stage != PacketFailureStage::None) {
+      ++packet_errors;
+      if (disposition.notify_cancel) cancel_sink();
+      if (disposition.quarantine_sink) sink_quarantined = true;
+      SR_CHECK(!disposition.fatal_abort);
+    }
+  }
+
+  SR_CHECK_EQ(packet_errors, 1u);
+  SR_CHECK(!sink_quarantined);
+  SR_CHECK_EQ(cancel_invocations, 0u);
+  SR_CHECK_EQ(packets_delivered, 3u);
+  SR_CHECK_EQ(swaps_delivered, 1u);
+}
+
+SR_TEST(packet_sink_backend_fault_injection_quarantine_and_cancel) {
+  using namespace superman_returns::native;
+  using namespace superman_returns::graphics::guest;
+
+  uint64_t packet_errors = 0;
+  uint64_t sink_invocations = 0;
+  bool sink_quarantined = false;
+  uint32_t cancel_invocations = 0;
+  bool fatal_aborted = false;
+
+  auto cancel_sink = [&]() { ++cancel_invocations; };
+  auto sink = [&](RenderPacket&&, std::string& err) -> bool {
+    ++sink_invocations;
+    if (sink_invocations == 2) {
+      err = "simulated GPU device lost";
+      return false;
+    }
+    return true;
+  };
+
+  struct SimulatedCmd {
+    Op op;
+    uint64_t command_serial;
+  };
+  SimulatedCmd commands[] = {
+      {Op::kDraw, 1},
+      {Op::kDraw, 2},
+      {Op::kDraw, 3},
+      {Op::kSwap, 4},
+  };
+
+  for (const auto& cmd : commands) {
+    if (sink_quarantined) continue;
+    bool decode_ok = true;
+    std::string error;
+    RenderPacket packet;
+    if (cmd.op == Op::kSwap) {
+      packet = SwapPacket{10, 1, {}};
+    } else {
+      packet = DrawPacketOwner(DrawPacket{});
+    }
+    bool sink_ok = sink(std::move(packet), error);
+    auto disposition = EvaluatePacketSinkFailure(decode_ok, sink_ok, cmd.op, false, true);
+    if (disposition.stage != PacketFailureStage::None) {
+      ++packet_errors;
+      if (disposition.notify_cancel) cancel_sink();
+      if (disposition.quarantine_sink) sink_quarantined = true;
+      if (disposition.fatal_abort) fatal_aborted = true;
+    }
+  }
+
+  SR_CHECK_EQ(packet_errors, 1u);
+  SR_CHECK(sink_quarantined);
+  SR_CHECK_EQ(cancel_invocations, 1u);
+  SR_CHECK(!fatal_aborted);
+  SR_CHECK_EQ(sink_invocations, 2u);
+}
+
+SR_TEST(AUD01_temporal_class_coverage_tracks_per_class_acceptance) {
+  using namespace superman_returns::graphics;
+  SR_CHECK(ClassifyTemporalMotionSource(false, false, 0, GeometryHistoryProof::kStaticWorldInputs) == TemporalMotionClass::StaticWorld);
+  SR_CHECK(ClassifyTemporalMotionSource(true, false, 0, GeometryHistoryProof::kVerifiedInstance) == TemporalMotionClass::SkinnedCharacter);
+  SR_CHECK(ClassifyTemporalMotionSource(false, true, 0, GeometryHistoryProof::kVerifiedInstance) == TemporalMotionClass::DynamicCloth);
+  SR_CHECK(ClassifyTemporalMotionSource(false, false, 4, GeometryHistoryProof::kVerifiedInstance) == TemporalMotionClass::VehicleBatch);
+  SR_CHECK(ClassifyTemporalMotionSource(false, false, 1, GeometryHistoryProof::kVerifiedInstance) == TemporalMotionClass::RigidAsset);
+  SR_CHECK(ClassifyTemporalMotionSource(false, false, 2, GeometryHistoryProof::kVerifiedInstance) == TemporalMotionClass::RigidCommon);
+  SR_CHECK(ClassifyTemporalMotionSource(false, false, 0, GeometryHistoryProof::kUnknown) == TemporalMotionClass::Unqualified);
+  TemporalClassCoverageStats s;
+  s.Record(TemporalMotionClass::StaticWorld, 100, GeometryHistoryStatus::kMatch);
+  s.Record(TemporalMotionClass::SkinnedCharacter, 50, GeometryHistoryStatus::kAmbiguous);
+  s.Record(TemporalMotionClass::DynamicCloth, 30, GeometryHistoryStatus::kMissing);
+  s.Record(TemporalMotionClass::RigidAsset, 20, GeometryHistoryStatus::kUnverifiedIdentity);
+  SR_CHECK_EQ(s.TotalDraws(), 4u);
+  SR_CHECK_EQ(s.TotalMatchedDraws(), 1u);
+  SR_CHECK_EQ(s[TemporalMotionClass::StaticWorld].matched_vertices, 100u);
+  SR_CHECK_EQ(s[TemporalMotionClass::SkinnedCharacter].rejected_ambiguous, 1u);
+  SR_CHECK_EQ(s[TemporalMotionClass::DynamicCloth].rejected_missing, 1u);
+  SR_CHECK_EQ(s[TemporalMotionClass::RigidAsset].rejected_unverified, 1u);
+}
+SR_TEST(AUD02_hybrid_reflection_contract_gates_dxr_and_attenuates_roughness) {
+  using namespace superman_returns::graphics;
+  auto e = EvaluateHybridReflectionContract(true, false, 0.25f, true);
+  SR_CHECK(e.ray_query_allowed && !e.fallback_to_environment);
+  SR_CHECK(e.reflection_weight > 0.74f && e.reflection_weight < 0.76f);
+  SR_CHECK(!EvaluateHybridReflectionContract(false, false, 0.f, true).ray_query_allowed);
+  SR_CHECK(!EvaluateHybridReflectionContract(true, true, 0.f, true).ray_query_allowed);
+  SR_CHECK(EvaluateHybridReflectionContract(true, false, 0.f, false).fallback_to_environment);
+  SR_CHECK(EvaluateHybridReflectionContract(true, false, 2.f, true).reflection_weight == 0.f);
+  SR_CHECK(EvaluateHybridReflectionContract(true, false, -1.f, true).reflection_weight == 1.f);
+}
+SR_TEST(AUD04_diagnostic_pipeline_creates_do_not_count_as_gameplay_runtime) {
+  using namespace superman_returns::graphics;
+  const auto rt = RuntimePipelineCreates(), dg = DiagnosticPipelineCreates();
+  RecordDiagnosticPipelineCreate();
+  SR_CHECK_EQ(RuntimePipelineCreates(), rt);
+  SR_CHECK_EQ(DiagnosticPipelineCreates(), dg + 1);
+  RecordRuntimePipelineCreate();
+  SR_CHECK_EQ(RuntimePipelineCreates(), rt + 1);
+  SR_CHECK_EQ(DiagnosticPipelineCreates(), dg + 1);
 }

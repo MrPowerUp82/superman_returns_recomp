@@ -46,6 +46,12 @@ public:
   GlobalBindingStats TakeBindingStats() {return global_?global_->TakeStats():GlobalBindingStats{};}
   const GamePipelineStore::Stats& PipelineStats() const {return pipelines_.stats();}
   bool CheckpointCache(Error& e) {return pipelines_.CheckpointCache(e);}
+  bool ImportPipelineSeed(std::span<const uint8_t> bytes,Error& e) {return pipelines_.ImportDescriptionSeed(bytes,e);}
+  bool PrewarmObserved(shaders::VulkanShaderService& service,Error& e) {return pipelines_.PrewarmObserved(service,e);}
+  bool PrewarmUtilities(Error& e) {
+    if(depth_ready_)return true;
+    depth_ready_=depth_resolver_.Initialize(e,true);return depth_ready_;
+  }
   void EnableProfile(bool on) {profiling_=on;if(global_)global_->EnableProfile(on);}
   RecordProfile TakeProfile() {auto p=profile_;profile_={};return p;}
   DescriptorStore::CacheStats TakeDescriptorStats() {return descriptors_.TakeCacheStats();}

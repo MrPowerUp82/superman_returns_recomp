@@ -1,5 +1,7 @@
 #include "graphics_options.h"
 #include <stdexcept>
+#include <algorithm>
+#include <cmath>
 
 namespace superman_returns::graphics {
 GraphicsGuestPauseSample ReadGraphicsGuestPause(const GraphicsGuestRead32& read) {
@@ -40,7 +42,7 @@ MenuInputSample SampleGraphicsGamepad(const GraphicsGamepadState& pad) {
 namespace {
 bool ValidValue(size_t row, int value) {
   return row < kGraphicsOptionCount && value >= 0 &&
-      value <= (row == static_cast<size_t>(GraphicsOption::kShadowSoftness) ? 2 : 1);
+      value <= GraphicsOptionMaximum(static_cast<GraphicsOption>(row));
 }
 bool CanOpen(const GuestPauseContract& pause) {
   return pause.session && pause.guest_paused && pause.graphics_entry_selected &&
@@ -68,7 +70,7 @@ bool GraphicsOptions::Request(GraphicsOption option, int value) {
   const auto& support = state_.features[row];
   if(option==GraphicsOption::kShadowSoftness &&
      (!value || state_.applied[static_cast<size_t>(GraphicsOption::kRtShadows)]!=1)) return false;
-  if (value && !(support.implemented && support.capable)) return false;
+  if ((value || row>=6) && !GraphicsOptionRequiresRestart(option) && !(support.implemented && support.capable)) return false;
   if (state_.requested[row] == value &&
       (state_.pending() || state_.applied[row] == value)) return true;
   state_.requested[row] = value;
@@ -105,9 +107,11 @@ bool GraphicsOptions::PublishBackend(uint64_t epoch, const GraphicsBackendReport
   state_.failure = report.failure;
   bool unapplied=false;
   for(size_t row=0;row<kGraphicsOptionCount;++row) {
+    if((state_.requested[4]>0 && (row==8 || row==9)) ||
+       GraphicsOptionRequiresRestart(static_cast<GraphicsOption>(row)) ||
+       (row>=5 && !state_.features[row].implemented)) continue;
     if((row==static_cast<size_t>(GraphicsOption::kShadowSoftness) ||
-        row==static_cast<size_t>(GraphicsOption::kCharacterShadows) ||
-        row==static_cast<size_t>(GraphicsOption::kRtReflections)) && !state_.applied[0]) continue;
+        row==static_cast<size_t>(GraphicsOption::kCharacterShadows)) && !state_.applied[0]) continue;
     unapplied|=state_.applied[row]!=state_.requested[row];
   }
   if (!state_.pending() && unapplied && state_.failure.empty())
@@ -115,18 +119,51 @@ bool GraphicsOptions::PublishBackend(uint64_t epoch, const GraphicsBackendReport
   return true;
 }
 
+GraphicsRenderExtent ComputeGraphicsRenderExtent(uint32_t base_width,uint32_t base_height,
+    float multiplier,uint32_t min_width,uint32_t min_height,uint32_t max_width,uint32_t max_height) {
+  GraphicsRenderExtent result;
+  if(!base_width || !base_height || !std::isfinite(multiplier) || multiplier<=0 || multiplier>4) return result;
+  result.scale=std::min(float(base_width)/1280.f,float(base_height)/720.f)*multiplier;
+  result.width=std::max(1u,uint32_t(std::lround(double(1280)*result.scale)));
+  result.height=std::max(1u,uint32_t(std::lround(double(720)*result.scale)));
+  result.in_range=result.width>=min_width && result.height>=min_height &&
+      result.width<=max_width && result.height<=max_height;
+  return result;
+}
+int GraphicsOptionMinimum(GraphicsOption option) {
+  return option==GraphicsOption::kShadowSoftness ? 1 : 0;
+}
+int GraphicsOptionMaximum(GraphicsOption option) {
+  constexpr int maximum[]{1,2,1,1,4,1,5,3,1,2,7};
+  const auto row=static_cast<size_t>(option);
+  return row<kGraphicsOptionCount ? maximum[row] : -1;
+}
+bool GraphicsOptionRequiresRestart(GraphicsOption option) { return option==GraphicsOption::kApi; }
 std::string_view GraphicsOptionLabel(GraphicsOption option) {
   constexpr std::array<std::string_view, kGraphicsOptionCount> labels{
-      "RT Shadows", "Shadow Softness", "Character Shadows", "RT Reflections", "DLSS Super Resolution"};
-  const auto row = static_cast<size_t>(option);
-  return row < labels.size() ? labels[row] : "Unknown";
+      "RT Shadows", "Shadow Quality", "Character Shadows", "RT Reflections", "NVIDIA DLSS",
+      "Graphics API", "Output Resolution", "FPS Limit", "FXAA", "MSAA", "Internal Scale"};
+  const auto row=static_cast<size_t>(option);
+  return row<labels.size() ? labels[row] : "Unknown";
 }
-
 std::string_view GraphicsValueLabel(GraphicsOption option, int value) {
-  if (!ValidValue(static_cast<size_t>(option),value)) return "Invalid";
-  if (!value) return "Off";
-  if (option == GraphicsOption::kShadowSoftness) return value == 1 ? "Low" : "High";
-  return option == GraphicsOption::kDlss ? "Quality" : "On";
+  if(!ValidValue(static_cast<size_t>(option),value)) return "Invalid";
+  static constexpr std::string_view dlss[]{"Off","Quality","Balanced","Performance","DLAA"};
+  static constexpr std::string_view api[]{"Direct3D 12","Vulkan"};
+  static constexpr std::string_view resolution[]{"960x540","1280x720","1600x900","1920x1080","2560x1440","3840x2160"};
+  static constexpr std::string_view fps[]{"Unlimited","30","60","120"};
+  static constexpr std::string_view msaa[]{"Off","4x","8x"};
+  static constexpr std::string_view scale[]{"50%","75%","100%","125%","150%","200%","300%","400%"};
+  switch(option) {
+    case GraphicsOption::kDlss: return dlss[value];
+    case GraphicsOption::kApi: return api[value];
+    case GraphicsOption::kResolution: return resolution[value];
+    case GraphicsOption::kFpsLimit: return fps[value];
+    case GraphicsOption::kMsaa: return msaa[value];
+    case GraphicsOption::kRenderScale: return scale[value];
+    case GraphicsOption::kShadowSoftness: return value==0 ? "Off" : value==1 ? "Low" : "High";
+    default: return value ? "On" : "Off";
+  }
 }
 
 GraphicsOptionsMenu::GraphicsOptionsMenu(std::shared_ptr<GraphicsOptions> options)
@@ -200,10 +237,9 @@ void GraphicsOptionsMenu::AdjustLocked(int direction) {
   const auto snapshot = options_->Snapshot();
   const auto row = state_.selected;
   const auto option = static_cast<GraphicsOption>(row);
-  if((option==GraphicsOption::kShadowSoftness || option==GraphicsOption::kCharacterShadows ||
-     option==GraphicsOption::kRtReflections) && snapshot.applied[0]!=1) return;
+  if((option==GraphicsOption::kShadowSoftness || option==GraphicsOption::kCharacterShadows) && snapshot.applied[0]!=1) return;
   auto next = snapshot.requested[row] + (direction > 0 ? 1 : -1);
-  if (direction < 0 && !(snapshot.features[row].implemented && snapshot.features[row].capable))
+  if (direction < 0 && !GraphicsOptionRequiresRestart(option) && !(snapshot.features[row].implemented && snapshot.features[row].capable))
     next = 0;
   // Clamp at endpoints: Left never accidentally switches Off to On.
   if (ValidValue(row,next)) options_->Request(option,next);

@@ -24,6 +24,9 @@ public:
   void StartAsync(OutputCallback output);
   void StopAsync();
   std::function<void()> compilation_progress;
+  // Called by the recording thread at its final immutable snapshot boundary.
+  // Empty preserves captured guest output; platform code owns preference state.
+  std::function<VkExtent2D()> output_extent;
   GameRenderer& Renderer() {return renderer_;}
 private:
   bool WaitShaders(const std::vector<guest::RenderPacket>&,Error&);

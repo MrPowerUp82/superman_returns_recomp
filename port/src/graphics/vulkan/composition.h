@@ -10,6 +10,7 @@ class FrontbufferCompositor {
 public:
   explicit FrontbufferCompositor(Context& c):c_(c),descriptors_(c),pipelines_(c) {}
   bool Initialize(Error&);
+  bool Prewarm(Error&);
   std::shared_ptr<CompositionDraw> Prepare(VkCommandBuffer,const TargetPass&,std::shared_ptr<TextureResource>,ResourceStore&,ImageState&,std::span<const uint32_t,256> gamma,bool gamma_enabled,uint32_t aspect_x,uint32_t aspect_y,Error&);
   void Record(VkCommandBuffer,const CompositionDraw&);
   void Retire(uint64_t serial) {descriptors_.Retire(serial);pipelines_.Retire(serial);}

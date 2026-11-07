@@ -130,3 +130,25 @@ SR_TEST(tracking_allocation_registry_does_not_grow_with_reuse) {
   }
   SR_CHECK_EQ(sr::tracking::WriteTrackingTestAccess::Allocations(state), 0u);
 }
+
+SR_TEST(tracking_page_fault_release_does_not_invalidate_unrelated_pages_in_shared_allocation) {
+  WriteTrackingState state;
+  const auto gen = state.Allocate(0x100000, 0x4000000);
+  SR_CHECK(gen != 0);
+  SR_CHECK(state.MarkCovered({0x100000, 0x1000}));
+  SR_CHECK(state.MarkCovered({0x200000, 0x1000}));
+  const auto before_a = state.Sample({0x100000, 0x1000});
+  const auto before_b = state.Sample({0x200000, 0x1000});
+  SR_CHECK(before_a.coverage == RexTrackingCoverage::Complete);
+  SR_CHECK(before_b.coverage == RexTrackingCoverage::Complete);
+  state.ReleaseCoverage(0x100000, 0x1000);
+  const auto after_a = state.Sample({0x100000, 0x1000});
+  const auto after_b = state.Sample({0x200000, 0x1000});
+  SR_CHECK(after_a.invalidation_epoch > before_a.invalidation_epoch);
+  SR_CHECK(after_a.coverage == RexTrackingCoverage::Unknown);
+  SR_CHECK(after_b.coverage == RexTrackingCoverage::Complete);
+  SR_CHECK_EQ(after_b.invalidation_epoch, before_b.invalidation_epoch);
+  SR_CHECK(state.MarkCovered({0x100000, 0x1000}));
+  SR_CHECK(state.Sample({0x100000, 0x1000}).coverage == RexTrackingCoverage::Complete);
+  // Let's keep the closing brace below:
+}

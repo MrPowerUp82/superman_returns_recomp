@@ -38,11 +38,23 @@ std::span<const uint8_t> FindUnambiguousCapture(std::span<const CaptureRange> ra
   return {};
 }
 std::span<const uint8_t> CapturedMemory::ReadUnambiguous(uint32_t address,uint32_t length) const {
-  return FindUnambiguousCapture(Ranges(),Bytes(),address,length);
+  auto direct=FindUnambiguousCapture(Ranges(),Bytes(),address,length);
+  if(!direct.empty()) return direct;
+  const auto shared=SharedRanges();
+  if(shared.empty()) return {};
+  const uint64_t end=uint64_t(address)+length;
+  for(const auto& r:Ranges()) {
+    const uint64_t r_end=uint64_t(r.address)+r.length;
+    if(address<r_end && end>r.address) return {};
+  }
+  return FindUnambiguousCapture(shared,Bytes(),address,length);
 }
 std::span<const CaptureRange> CapturedMemory::Ranges() const {
   if(batch_) return std::span<const CaptureRange>(batch_->ranges).subspan(range_first_,range_count_);
   return snapshot_?std::span<const CaptureRange>(snapshot_->ranges):std::span<const CaptureRange>{};
+}
+std::span<const CaptureRange> CapturedMemory::SharedRanges() const {
+  return batch_?std::span<const CaptureRange>(batch_->shared_ranges):std::span<const CaptureRange>{};
 }
 std::span<const uint8_t> CapturedMemory::Bytes() const {
   if(batch_) return {batch_->bytes.data(),batch_->bytes.size()};
@@ -57,6 +69,15 @@ bool CapturedMemory::Capture(const WorkBatch &batch, const WorkCmd &cmd,
   }
   try {
     uint64_t total_bytes = 0;
+    for (const auto &range : batch.shared_ranges) {
+      if (uint64_t(range.address) + range.length > (uint64_t(1) << 32) ||
+          uint64_t(range.offset) + range.length > batch.bytes.size() ||
+          total_bytes + range.length > UINT32_MAX) {
+        error = "Captured memory range exceeds address or byte bounds";
+        return false;
+      }
+      total_bytes += range.length;
+    }
     for (uint64_t i = cmd.range_first;
          i < uint64_t(cmd.range_first) + cmd.range_count; ++i) {
       const auto &range = batch.ranges[size_t(i)];
@@ -72,7 +93,14 @@ bool CapturedMemory::Capture(const WorkBatch &batch, const WorkCmd &cmd,
     // Allocate once instead of repeatedly reallocating and copying all prior
     // ranges. Keep capture order so overlapping reads still prefer the latest.
     snapshot->bytes.reserve(size_t(total_bytes));
-    snapshot->ranges.reserve(cmd.range_count);
+    snapshot->ranges.reserve(batch.shared_ranges.size() + cmd.range_count);
+    for (const auto &range : batch.shared_ranges) {
+      auto offset = uint32_t(snapshot->bytes.size());
+      snapshot->bytes.insert(
+          snapshot->bytes.end(), batch.bytes.begin() + range.offset,
+          batch.bytes.begin() + size_t(range.offset) + range.length);
+      snapshot->ranges.push_back({range.address, range.length, offset});
+    }
     for (uint64_t i = cmd.range_first;
          i < uint64_t(cmd.range_first) + cmd.range_count; ++i) {
       const auto &range = batch.ranges[size_t(i)];
@@ -98,6 +126,13 @@ bool CapturedMemory::CaptureOwned(std::shared_ptr<const WorkBatch> batch,const W
     error="Command capture range exceeds batch";return false;
   }
   uint64_t total=0;
+  for(const auto& range:batch->shared_ranges) {
+    if(uint64_t(range.address)+range.length>(uint64_t{1}<<32) ||
+       uint64_t(range.offset)+range.length>batch->bytes.size() || total+range.length>UINT32_MAX) {
+      error="Captured memory range exceeds address or byte bounds";return false;
+    }
+    total+=range.length;
+  }
   for(uint64_t i=cmd.range_first;i<uint64_t(cmd.range_first)+cmd.range_count;++i) {
     const auto& range=batch->ranges[size_t(i)];
     if(uint64_t(range.address)+range.length>(uint64_t{1}<<32) ||
@@ -124,6 +159,14 @@ std::span<const uint8_t> CapturedMemory::Read(uint32_t address,
       if (offset <= i->length && length <= uint64_t(i->length) - offset)
         return Bytes()
             .subspan(size_t(i->offset + offset), length);
+    }
+    const auto shared = SharedRanges();
+    for (auto i = shared.rbegin(); i != shared.rend(); ++i) {
+      if (address < i->address)
+        continue;
+      auto offset = uint64_t(address) - i->address;
+      if (offset <= i->length && length <= uint64_t(i->length) - offset)
+        return Bytes().subspan(size_t(i->offset + offset), length);
     }
   }
   throw std::out_of_range("Guest bytes absent from captured command");

@@ -24,6 +24,7 @@ add_executable(sr_native_tests
     test_benchmark_input.cpp
     test_descriptor_recycling.cpp
     test_buffer_srv_cache.cpp
+    test_slot_srv_cache.cpp
     test_buffer_heap_layout.cpp
     test_buffer_tracking_policy.cpp
     test_command_batch_policy.cpp
@@ -37,6 +38,9 @@ add_executable(sr_native_tests
     test_checked_guest_memory.cpp
     test_idle_yield.cpp
     test_vblank_policy.cpp
+    test_presentation_pacing.cpp
+    test_graphics_milestone5.cpp
+    test_motion_pipeline_records.cpp
     test_wait_escape_policy.cpp
     test_guest_render_scheduler.cpp
     test_guest_sleep_profile.cpp
@@ -63,6 +67,7 @@ add_executable(sr_native_tests
     test_shadow_caster_geometry.cpp
     test_ray_shadow_execution.cpp
     test_temporal_geometry_history.cpp
+    test_object_motion_frame.cpp
     test_temporal_vertex_fetch.cpp
     test_static_world_shader_dependencies.cpp
     test_scene_color_boundary.cpp
@@ -74,6 +79,8 @@ add_executable(sr_native_tests
     test_scene_resolution_mapping.cpp
     test_observed_instance_lifetimes.cpp
     test_observed_skinned_motion.cpp
+    test_observed_rigid_motion.cpp
+    test_observed_vehicle_batch.cpp
     test_observed_cloth_motion.cpp
     test_observed_skinned_part_key.cpp
     test_rt_shadow_shader.cpp
@@ -168,6 +175,9 @@ else()
 endif()
 
 enable_testing()
+add_executable(sr_mnk_button_edge_tests main.cpp test_mnk_button_edges.cpp)
+target_compile_features(sr_mnk_button_edge_tests PRIVATE cxx_std_20)
+add_test(NAME sr_mnk_button_edge_tests COMMAND sr_mnk_button_edge_tests)
 if(WIN32 AND SR_NATIVE_GPU_TESTS)
   add_test(NAME sr_d3d12_texture_updates_gpu COMMAND sr_d3d12_texture_updates_gpu)
   set_tests_properties(sr_d3d12_texture_updates_gpu PROPERTIES TIMEOUT 60)

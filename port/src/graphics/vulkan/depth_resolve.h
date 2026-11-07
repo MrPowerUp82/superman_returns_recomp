@@ -6,7 +6,7 @@ class DepthResolver {
 public:
   explicit DepthResolver(Context& c):c_(c) {}
   ~DepthResolver();
-  bool Initialize(Error&);
+  bool Initialize(Error&,bool startup=false);
   bool Record(VkCommandBuffer,const ResolvePlan&,guest::ResourceId raw_destination,TargetStore&,ResourceStore&,ImageState&,Error&);
   bool RecordAlias(VkCommandBuffer,TargetId,const AliasPlan&,TargetStore&,ResourceStore&,ImageState&,Error&,AliasOptions={});
   void Retire(uint64_t serial) {pending_.Retire(serial);}

@@ -2,15 +2,25 @@
 // dxc -T cs_6_0 -E DepthMotion -O3 -WX -Fh dlss_depth_motion_cs.h -Vn kDlssDepthMotionCS dlss_inputs.hlsl
 // dxc -T ps_6_0 -E Composite -O3 -WX -Fh dlss_composite_ps.h -Vn kDlssCompositePS dlss_inputs.hlsl
 //
-// Own implementation. Motion comes from depth and the camera only: objects and
-// deformation get the motion of a static point at their depth.
+// The explicit legacy mode reconstructs camera motion. Object mode consumes
+// exact post-VS velocities and uses camera fallback only after CPU qualification
+// of every scene contributor. Invalid surface reprojections are never silently
+// interpreted as static points; only untouched clear-depth pixels use camera.
 Texture2D<float> g_Depth : register(t0);
+Texture2D<float2> g_ObjectMotion : register(t1);
+Texture2D<uint> g_ObjectValidity : register(t2);
+Texture2D<uint> g_Reactivity : register(t3);
 RWTexture2D<float2> g_Motion : register(u0);
 RWTexture2D<float> g_DepthOut : register(u1);
+RWTexture2D<float> g_Rejection : register(u2);
 cbuffer DepthMotionConstants : register(b0) {
   row_major float4x4 g_InverseCurrent;
   row_major float4x4 g_Previous;
   float2 g_Size;
+  uint g_ObjectMotionEnabled;
+  float g_CurrentJitterX;
+  float g_CurrentJitterY;
+  float g_DepthClear;
 };
 
 [numthreads(8, 8, 1)]
@@ -18,9 +28,11 @@ void DepthMotion(uint3 id : SV_DispatchThreadID) {
   if (id.x >= uint(g_Size.x) || id.y >= uint(g_Size.y)) return;
   const float depth = g_Depth.Load(int3(id.xy, 0));
   g_DepthOut[id.xy] = depth;
-  const float2 pixel = float2(id.xy) + 0.5;
+  const float2 pixel = float2(id.xy) + 0.5 -
+      (g_ObjectMotionEnabled ? float2(g_CurrentJitterX, g_CurrentJitterY) : 0.0);
   const float2 ndc = float2(pixel.x / g_Size.x * 2.0 - 1.0, 1.0 - pixel.y / g_Size.y * 2.0);
   float2 motion = float2(0.0, 0.0);
+  bool rejectHistory = false;
   const float4 world = mul(g_InverseCurrent, float4(ndc, depth, 1.0));
   if (abs(world.w) > 1e-6) {
     const float4 clip = mul(g_Previous, float4(world.xyz / world.w, 1.0));
@@ -30,7 +42,18 @@ void DepthMotion(uint3 id : SV_DispatchThreadID) {
       motion = previous_pixel - pixel;
     }
   }
-  g_Motion[id.xy] = all(isfinite(motion)) ? motion : float2(0.0, 0.0);
+  if (g_ObjectMotionEnabled) {
+    if (g_ObjectValidity.Load(int3(id.xy, 0)) != 0)
+      motion = g_ObjectMotion.Load(int3(id.xy, 0));
+    else if (depth != g_DepthClear) {
+      motion = 0.0; // Invalid object reprojection, not static-camera evidence.
+      rejectHistory = true;
+    }
+  }
+  if(g_ObjectMotionEnabled && g_Reactivity.Load(int3(id.xy,0))!=0) rejectHistory=true;
+  const bool validNumber = all(isfinite(motion)) && all(abs(motion) <= 65504.0);
+  g_Motion[id.xy] = validNumber ? motion : float2(0.0, 0.0);
+  g_Rejection[id.xy] = rejectHistory || !validNumber ? 1.0 : 0.0;
 }
 
 // Pixels that changed after the scene filter (the HUD) keep the normal image.

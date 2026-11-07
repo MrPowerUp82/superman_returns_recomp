@@ -1,13 +1,81 @@
 #include "temporal_motion.h"
+#include "../pipeline_creation_audit.h"
+#include "../motion_pipeline_records.h"
 #include "shaders/temporal_motion_VS.h"
 #include "shaders/temporal_motion_PS.h"
 #include <wrl/client.h>
 #include <array>
 #include <cmath>
 #include <limits>
+#include <algorithm>
+#include <condition_variable>
+#include <cstdio>
+#include <fstream>
+#include <mutex>
+#include <thread>
 
 namespace superman_returns::graphics::d3d12 {
 using Microsoft::WRL::ComPtr;
+namespace {
+class RasterJournal {
+ public:
+  ~RasterJournal() {
+    Close();
+  }
+  void Close() {
+    {std::lock_guard lock(mutex_);stop_=true;}
+    cv_.notify_all();if(worker_.joinable())worker_.join();
+  }
+  std::vector<MotionPipelineRecord> Open(const std::filesystem::path& path) {
+    Close();stop_=false;dirty_=false;records_.clear();path_.clear();
+    if(path.empty())return {};
+    path_=path;
+    std::ifstream input(path,std::ios::binary|std::ios::ate);
+    if(input) {
+      const auto length=input.tellg();
+      if(length<0 || length>16+128*24) {path_.clear();return {};}
+      std::vector<uint8_t> bytes(size_t(length),uint8_t{});
+      input.seekg(0);
+      if(!input.read(reinterpret_cast<char*>(bytes.data()),std::streamsize(bytes.size())) ||
+         !ParseMotionPipelineRecords(bytes,records_)) {
+        std::fprintf(stderr,"native cache audit: invalid temporal raster journal; preserving file\n");
+        path_.clear();return {};
+      }
+    }
+    worker_=std::thread([this]{Run();});return records_;
+  }
+  void Record(const MotionPipelineRecord& record) {
+    if(path_.empty())return;
+    {std::lock_guard lock(mutex_);
+      if(records_.size()>=128 || std::find(records_.begin(),records_.end(),record)!=records_.end())return;
+      records_.push_back(record);dirty_=true;
+    }
+    cv_.notify_one();
+  }
+ private:
+  void Run() {
+    for(;;) {
+      std::vector<MotionPipelineRecord> snapshot;
+      {std::unique_lock lock(mutex_);cv_.wait(lock,[&]{return stop_ || dirty_;});
+        if(!dirty_ && stop_)return;snapshot=records_;dirty_=false;
+      }
+      const auto bytes=SerializeMotionPipelineRecords(snapshot);
+      std::error_code ec;
+      if(!path_.parent_path().empty())std::filesystem::create_directories(path_.parent_path(),ec);
+      auto pending=path_;pending+=L".pending";
+      std::ofstream file(pending,std::ios::binary|std::ios::trunc);
+      file.write(reinterpret_cast<const char*>(bytes.data()),std::streamsize(bytes.size()));file.close();
+      if(ec || file.fail() || !MoveFileExW(pending.c_str(),path_.c_str(),
+          MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))
+        std::fprintf(stderr,"native cache audit: temporal raster journal write failed\n");
+    }
+  }
+  std::filesystem::path path_;
+  std::vector<MotionPipelineRecord> records_;
+  std::mutex mutex_;std::condition_variable cv_;std::thread worker_;
+  bool stop_=false,dirty_=false;
+};
+}
 struct TemporalMotion::Impl {
   struct Slot {
     ComPtr<ID3D12Resource> velocity, validity, depth, coverage;
@@ -24,6 +92,7 @@ struct TemporalMotion::Impl {
     int32_t bias;
     float slope, clamp;
     DXGI_FORMAT depth;
+    D3D12_COMPARISON_FUNC depth_func;
     bool operator==(const RasterKey&) const = default;
   };
   struct CachedPipeline {
@@ -32,6 +101,8 @@ struct TemporalMotion::Impl {
   };
   std::array<CachedPipeline,kMaxRasterStates> pipelines;
   uint32_t pipeline_count = 0;
+  RasterJournal journal;
+  bool prewarming = true;
   std::array<Slot, kFrameSlots> slots;
   TemporalMotionOutputs outputs{};
   const char* error = "";
@@ -59,8 +130,10 @@ struct TemporalMotion::Impl {
   }
   HRESULT PipelineFor(const MotionGeometry& raster, DXGI_FORMAT depth,
                       ID3D12PipelineState*& result) {
+    if(raster.invalidator_depth_func<D3D12_COMPARISON_FUNC_NEVER || raster.invalidator_depth_func>D3D12_COMPARISON_FUNC_ALWAYS)
+      return Fail("Invalid invalidator depth comparison");
     const RasterKey key{raster.cull_mode,raster.front_counter_clockwise,raster.depth_bias,
-                        raster.slope_scaled_depth_bias,raster.depth_bias_clamp,depth};
+                        raster.slope_scaled_depth_bias,raster.depth_bias_clamp,depth,raster.correspondence_valid ? D3D12_COMPARISON_FUNC_EQUAL : raster.invalidator_depth_func};
     for (uint32_t i=0;i<pipeline_count;++i) if (pipelines[i].key==key) {
       result=pipelines[i].state.Get(); return S_OK;
     }
@@ -89,15 +162,22 @@ struct TemporalMotion::Impl {
     p.RasterizerState.DepthClipEnable = TRUE;
     p.DepthStencilState.DepthEnable = TRUE;
     p.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-    p.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_EQUAL;
+    // Matches require EQUAL. Invalidators use the caller's original visibility
+    // comparison, so transparent foreground rejects history while occluded
+    // background cannot erase a visible object's valid correspondence.
+    p.DepthStencilState.DepthFunc = key.depth_func;
     p.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     p.NumRenderTargets = 2;
     p.RTVFormats[0] = DXGI_FORMAT_R16G16_FLOAT; p.RTVFormats[1] = DXGI_FORMAT_R8_UINT;
     p.DSVFormat = depth; p.SampleDesc.Count = 1;
     auto& cached=pipelines[pipeline_count];
+    RecordRuntimePipelineCreate();
     const HRESULT hr=device->CreateGraphicsPipelineState(&p,IID_PPV_ARGS(&cached.state));
     if (FAILED(hr)) return Fail("Temporal raster graphics PSO creation failed",hr);
     cached.key=key; ++pipeline_count; result=cached.state.Get();
+    if(!prewarming)journal.Record({uint32_t(key.cull),uint32_t(key.front_ccw),
+        uint32_t(key.bias),std::bit_cast<uint32_t>(key.slope),std::bit_cast<uint32_t>(key.clamp),
+        PackMotionPipelineDepth(uint32_t(key.depth),uint32_t(key.depth_func))});
     return S_OK;
   }
 };
@@ -105,14 +185,14 @@ struct TemporalMotion::Impl {
 TemporalMotion::TemporalMotion() : impl_(std::make_unique<Impl>()) {}
 TemporalMotion::~TemporalMotion() = default;
 
-HRESULT TemporalMotion::Initialize(ID3D12Device* device) {
+HRESULT TemporalMotion::Initialize(ID3D12Device* device, const std::filesystem::path& observed_cache) {
   auto& m = *impl_;
   m.outputs = {};
   if (m.initialized) return m.Fail("Initialize may only succeed once", E_UNEXPECTED);
   if (!device) return m.Fail("Initialize requires a device");
   // A failed Initialize has never recorded GPU work, so a retry can discard its
   // partial cache. A successful instance cannot be reinitialized while in flight.
-  m.pipelines={}; m.pipeline_count=0;
+  m.pipelines={}; m.pipeline_count=0;m.prewarming=true;
   m.device = device;
   m.vrs = D3D12_VARIABLE_SHADING_RATE_TIER_NOT_SUPPORTED;
   D3D12_FEATURE_DATA_D3D12_OPTIONS6 options{};
@@ -145,10 +225,27 @@ HRESULT TemporalMotion::Initialize(ID3D12Device* device) {
   if (FAILED(hr)) return m.Fail("Temporal root signature serialization failed",hr);
   hr = device->CreateRootSignature(0,blob->GetBufferPointer(),blob->GetBufferSize(),IID_PPV_ARGS(&m.root));
   if (FAILED(hr)) return m.Fail("Temporal root signature creation failed",hr);
-  for (auto format : {DXGI_FORMAT_D32_FLOAT,DXGI_FORMAT_D24_UNORM_S8_UINT}) {
+  for (auto format : {DXGI_FORMAT_D32_FLOAT,DXGI_FORMAT_D24_UNORM_S8_UINT})
+  for (auto cull : {D3D12_CULL_MODE_NONE,D3D12_CULL_MODE_FRONT,D3D12_CULL_MODE_BACK})
+  for (bool front : {false,true})
+  for (uint32_t comparison=1;comparison<=8;++comparison) {
+    MotionGeometry raster;raster.cull_mode=cull;raster.front_counter_clockwise=front;
+    raster.correspondence_valid=false;raster.invalidator_depth_func=D3D12_COMPARISON_FUNC(comparison);
     ID3D12PipelineState* unused=nullptr;
-    hr=m.PipelineFor({},format,unused);
+    hr=m.PipelineFor(raster,format,unused);
     if (FAILED(hr)) return hr;
+  }
+  const auto observed=m.journal.Open(observed_cache);
+  for(auto records:{std::span<const MotionPipelineRecord>(kObservedMotionPipelineSeed),std::span<const MotionPipelineRecord>(observed)})
+  for(const auto& record:records) {
+    MotionGeometry raster;raster.cull_mode=D3D12_CULL_MODE(record.cull);
+    raster.front_counter_clockwise=bool(record.front);raster.depth_bias=std::bit_cast<int32_t>(record.bias);
+    raster.slope_scaled_depth_bias=std::bit_cast<float>(record.slope);
+    raster.depth_bias_clamp=std::bit_cast<float>(record.clamp);
+    raster.correspondence_valid=false;raster.invalidator_depth_func=D3D12_COMPARISON_FUNC(MotionPipelineDepthTest(record.depth));
+    ID3D12PipelineState* unused=nullptr;
+    hr=m.PipelineFor(raster,DXGI_FORMAT(record.depth&0xffffu),unused);
+    if(FAILED(hr))return hr;
   }
   for (auto& slot : m.slots) {
     D3D12_DESCRIPTOR_HEAP_DESC h{};
@@ -163,7 +260,7 @@ HRESULT TemporalMotion::Initialize(ID3D12Device* device) {
     hr = device->CreateDescriptorHeap(&h,IID_PPV_ARGS(&slot.coverage_srv));
     if (FAILED(hr)) return m.Fail("Temporal slot coverage SRV heap creation failed",hr);
   }
-  m.initialized = true; m.error = "";
+  m.prewarming=false;m.initialized = true; m.error = "";
   return S_OK;
 }
 
@@ -206,6 +303,8 @@ HRESULT TemporalMotion::Render(ID3D12GraphicsCommandList* list,
       !(d.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) ||
       (d.Format != DXGI_FORMAT_R24G8_TYPELESS && d.Format != DXGI_FORMAT_R32_TYPELESS))
     return m.Fail("Depth must be matching single-sample R24G8_TYPELESS or R32_TYPELESS depth texture");
+  if (in.diagnostic_draw_ids && in.coverage)
+    return m.Fail("Diagnostic triangle IDs must not consume original-PS ownership");
   if (in.coverage) {
     if (!m.SameDevice(in.coverage)) return m.Fail("Coverage must belong to the initialized device");
     const auto mask=in.coverage->GetDesc();
@@ -218,6 +317,9 @@ HRESULT TemporalMotion::Render(ID3D12GraphicsCommandList* list,
   if (geometry.size() > kMaxDraws) return m.Fail("Temporal draw budget exceeded");
   uint64_t vertices = 0;
   for (const auto& g : geometry) {
+    if (in.diagnostic_draw_ids && (g.coverage_id || !g.correspondence_valid ||
+        g.previousClip != g.currentClip || g.previous_offset != g.current_offset))
+      return m.Fail("Diagnostic triangle IDs require unmasked current-as-previous EQUAL-depth replay");
     if (g.coverage_id && !in.coverage)
       return m.Fail("Positive coverage IDs require the current frame's audited coverage texture");
     vertices += g.vertex_count;
@@ -327,8 +429,8 @@ HRESULT TemporalMotion::Render(ID3D12GraphicsCommandList* list,
     const D3D12_RECT scissor=g.scissor_enabled ? g.scissor : rect;
     list->RSSetScissorRects(1,&scissor);
     constants.valid = g.correspondence_valid ? 1 : 0;
-    constants.coverage_enabled = in.coverage && g.coverage_id ? 1 : 0;
-    constants.coverage_id = g.coverage_id;
+    constants.coverage_enabled = in.diagnostic_draw_ids ? 2 : in.coverage && g.coverage_id ? 1 : 0;
+    constants.coverage_id = in.diagnostic_draw_ids ? uint32_t(draw) : g.coverage_id;
     list->SetGraphicsRoot32BitConstants(2,9,&constants,0);
     list->SetGraphicsRootShaderResourceView(0,g.currentClip->GetGPUVirtualAddress()+g.current_offset);
     auto* previous = g.correspondence_valid ? g.previousClip : g.currentClip;

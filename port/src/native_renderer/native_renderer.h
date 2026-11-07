@@ -33,6 +33,7 @@
 #include "../graphics/guest/shader_constant_cache.h"
 #include "descriptor_recycling.h"
 #include "buffer_srv_cache.h"
+#include "slot_srv_cache.h"
 #include "d3d12_buffer_heap_pool.h"
 #include "d3d12_texture_updates.h"
 #include "cpu_bundle.h"
@@ -69,6 +70,9 @@
 #include "../graphics/ray_shadow_execution.h"
 #include "../graphics/rt_shadow_shader.h"
 #include "../graphics/temporal_geometry_history.h"
+#include "../graphics/temporal_class_coverage.h"
+#include "../graphics/object_motion_frame.h"
+#include "../graphics/d3d12/visible_ray_scene.h"
 #include "../graphics/temporal_vertex_fetch.h"
 #include "../graphics/static_world_shader_dependencies.h"
 #include "../graphics/d3d12/post_vertex_clip_capture.h"
@@ -277,6 +281,8 @@ class Renderer : public NativeFrontend {
     std::vector<std::pair<uint32_t, uint32_t>> clean;  // [begin, end) while dirty
     uint64_t invalidation_stamp = 0;
     uint32_t watch_seq = 0, checked_seq = 0;  // physical write watch
+    uint64_t last_checked_batch = ~0ull;
+    uint64_t last_checked_invalidation_stamp = 0;
     bool watched = false;
     BufferContent content;
     // Write-tracking proof that the bytes still hash to content.value; while
@@ -435,6 +441,7 @@ class Renderer : public NativeFrontend {
     uint32_t edram_tiles = 0;
     uint64_t last_write = 0;
     uint64_t motion_write_frame=0,motion_write_serial=0; // Opt-in actual draw stamps; never bind stamps.
+    uint64_t motion_lifetime=0;
   };
   HostSurface* GetSurface(uint8_t* base, uint32_t surface_object, bool depth,
                           uint32_t min_width = 0, uint32_t min_height = 0);
@@ -453,6 +460,7 @@ class Renderer : public NativeFrontend {
     uint32_t layers = 1;
     bool stacked_volume = false;   // host Texture3D for validated stacked color resolves
     uint64_t motion_source_frame=0,motion_source_serial=0,motion_source_resource=0;
+    uint64_t motion_lifetime=0,motion_write_serial=0,motion_write_frame=0;
     bool motion_full_color_copy=false;
     float scale = 1.0f;              // host pixels per guest pixel (source surface)
     bool shadow = false;             // resolved from a shadow map target
@@ -592,11 +600,17 @@ class Renderer : public NativeFrontend {
   std::unique_ptr<graphics::d3d12::RayTracingScene> rt_capture_scene_;
   std::unique_ptr<graphics::d3d12::DlssSuperResolution> dlss_;
   // Same layout as DepthMotionConstants in dlss_inputs.hlsl.
-  struct DlssMotionConstants {float inverse_current[16],previous[16],width,height;};
+  struct DlssMotionConstants {
+    float inverse_current[16],previous[16],width,height;
+    uint32_t object_motion;float jitter_x,jitter_y,depth_clear;
+  };
   struct DlssSlot {
-    Microsoft::WRL::ComPtr<ID3D12Resource> color,output,motion,depth;
+    Microsoft::WRL::ComPtr<ID3D12Resource> color,output,motion,depth,rejection;
     D3D12_RESOURCE_STATES color_state{},output_state{},motion_state{},depth_state{};
+    D3D12_RESOURCE_STATES rejection_state{};
+    uint32_t rejection_uav=0;
     uint32_t color_srv=0,output_srv=0,depth_in_srv=0,motion_uav=0,depth_uav=0;
+    uint32_t object_motion_srv=0,object_validity_srv=0,reactivity_srv=0;
     uint64_t ticket=0,fence_value=0;
     bool submitted=false;
   };
@@ -616,6 +630,13 @@ class Renderer : public NativeFrontend {
   void BeginDlssFrame();
   void RecordDlssFrame();
   uint64_t graphics_options_epoch_=0;
+  void ApplyGraphicsFrameOptions();
+  void AppendGraphicsHostReport(graphics::GraphicsBackendReport& report) const;
+  uint64_t graphics_host_attempt_revision_=UINT64_MAX;
+  graphics::GraphicsValues graphics_host_applied_{};
+  std::string graphics_host_failure_;
+  int graphics_dlss_mode_=-1;
+  bool fxaa_scene_applied_=false;
   bool ray_tracing_capable_=false;
   bool rt_shadow_wave_capable_=false,rt_shadow_requested_=false,rt_shadow_built_=false;
   bool rt_shadow_attempted_=false,rt_shadow_draw_active_=false,rt_shadow_counter_recorded_=false;
@@ -626,6 +647,28 @@ class Renderer : public NativeFrontend {
   const std::vector<uint8_t>* rt_shadow_variant_=nullptr;
   bool rt_shadow_character_built_=false;
   std::unique_ptr<graphics::d3d12::RayTracingScene> rt_shadow_scene_;
+  std::unique_ptr<graphics::d3d12::VisibleRayScene> visible_ray_scene_;
+  struct VisibleRayTicket {uint64_t fence=0,frame=0,revision=0;graphics::GraphicsValues requested{};};
+  VisibleRayTicket visible_ray_tickets_[3]{},visible_ray_applied_{};
+  bool visible_ray_requested_=false,visible_ray_built_=false,visible_ray_recorded_=false,visible_ray_characters_built_=false;
+  uint64_t visible_ray_previous_frame_=0,visible_ray_recorded_frames_=0;
+  uint32_t visible_ray_suppressed_shadow_draws_=0;
+  Microsoft::WRL::ComPtr<ID3D12Resource> visible_ray_counter_readback_[3],visible_ray_timing_readback_;
+  Microsoft::WRL::ComPtr<ID3D12QueryHeap> visible_ray_timing_heap_;
+  uint64_t visible_ray_timestamp_frequency_=0;
+  std::array<float,3> visible_ray_light_{};
+  bool visible_ray_light_valid_=false,visible_ray_light_conflict_=false;
+  graphics::Matrix4 object_motion_final_camera_{},visible_ray_previous_camera_{},visible_ray_inverse_{};
+  Microsoft::WRL::ComPtr<ID3D12Resource> visible_ray_color_[3];
+  D3D12_RESOURCE_STATES visible_ray_color_state_[3]{};
+  void BeginVisibleRayFrame();
+  void BuildVisibleRayScene();
+  void RecordVisibleRayFrame(HostSurface& target);
+  void BeforeVisibleRaySubmit();
+  Microsoft::WRL::ComPtr<ID3D12Resource> visible_ray_shadow_predicate_[3];
+  uint64_t* visible_ray_shadow_enable_[3]{};
+  std::vector<uint8_t*> visible_ray_standalone_flags_;
+  bool visible_ray_predicated_=false,visible_ray_submission_split_=false,visible_ray_unpatched_receiver_=false;
   Microsoft::WRL::ComPtr<ID3D12Resource> rt_shadow_counter_[3],rt_shadow_counter_readback_[3],rt_shadow_zero_;
   D3D12_RESOURCE_STATES rt_shadow_counter_state_[3]{D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
       D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
@@ -636,11 +679,11 @@ class Renderer : public NativeFrontend {
   void RecordRayShadowCounter();
   void HarvestRayShadowExecution();
   struct MotionRaster {
-    uint64_t shader=0;
+    uint64_t shader=0,pixel_shader=0,color_serial=0;
     uint32_t coverage_id=0;
     uint32_t depth_control=0,blend_control=0,color_control=0,color_mask=0;
     D3D12_CULL_MODE cull=D3D12_CULL_MODE_NONE;
-    bool front_ccw=false,opaque=false,full_viewport=false,stencil_enabled=false,z_write=false;
+    bool front_ccw=false,opaque=false,full_viewport=false,stencil_enabled=false,z_write=false,ray_opaque=false;
     int32_t depth_bias=0;float slope_bias=0;
     D3D12_RECT scissor{};
   } current_motion_raster_;
@@ -655,12 +698,36 @@ class Renderer : public NativeFrontend {
   std::unique_ptr<graphics::d3d12::TemporalMotion> motion_static_candidate_;
   std::unique_ptr<graphics::d3d12::TemporalMotion> motion_observed_skin_attribution_;
   std::unique_ptr<graphics::d3d12::TemporalMotion> motion_observed_cloth_attribution_;
+  std::unique_ptr<graphics::d3d12::TemporalMotion> motion_observed_rigid_attribution_;
+  std::unique_ptr<graphics::d3d12::TemporalMotion> motion_visible_draw_attribution_;
   graphics::TemporalGeometryHistory motion_history_;
+  graphics::ObjectMotionFrame object_motion_frame_;
+  graphics::MotionColorLineage object_motion_lineage_;
+  graphics::MotionSceneTicket object_motion_ticket_;
+  graphics::MotionContentVersion object_motion_hdr_;
+  bool motion_continuous_=false,object_motion_requested_=false,object_motion_previous_=false;
+  bool object_motion_output_ready_=false,object_motion_full_cover_=false;
+  graphics::Matrix4 object_motion_previous_camera_{},object_motion_camera_{};
+  bool object_motion_depth_reversed_=false;
+  uint64_t object_motion_previous_camera_frame_=0;
+  uint64_t object_motion_lifetime_=0,object_motion_reports_=0,object_motion_applied_=0;
+  Microsoft::WRL::ComPtr<ID3D12Resource> object_motion_depth_[3];
+  D3D12_RESOURCE_STATES object_motion_depth_state_[3]{};
+  graphics::MotionContentVersion MotionVersion(const HostSurface& surface) const;
+  void InvalidateObjectMotionColor(HostSurface& surface);
+  struct MotionReactiveSlot {
+    Microsoft::WRL::ComPtr<ID3D12Resource> mask;
+    D3D12_RESOURCE_STATES state=D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    uint32_t uav=0;
+  } motion_reactive_[3];
+  bool EnsureMotionReactivity();
+  bool ObjectMotionInputsReady(const HostSurface& scene);
   std::vector<MotionRaster> motion_rasters_;
   std::vector<MotionReadback> motion_readbacks_;
   std::unordered_map<uint64_t,Microsoft::WRL::ComPtr<ID3D12PipelineState>> motion_clip_pipelines_;
   uint32_t motion_capture_phase_=0;
   uint32_t motion_signature_reports_=0;
+  std::array<uint32_t,18> motion_candidate_reports_{};
   std::array<uint32_t,2> motion_owner_reports_{};
   uint32_t motion_cloth_reports_=0;
   std::array<uint32_t,4> motion_uploaded_vs_bools_{};
@@ -668,8 +735,12 @@ class Renderer : public NativeFrontend {
   struct MotionColorSource {
     uint64_t resource=0,source=0,frame=0,serial=0;
     uint32_t descriptor=0,guest_base=0;bool full_copy=false;
+    graphics::MotionContentVersion version;
   } motion_color_sources_[3];
   uint64_t motion_color_serial_=0;
+  int64_t motion_live_capture_swap_=-1;
+  uint64_t motion_live_capture_frame_=0;
+  bool CaptureObjectMotionFrame() const;
   uint32_t motion_color_reports_=0;
   bool motion_capture_active_=false,motion_scene_finished_=false,motion_capture_done_=false;
   graphics::SceneRasterJitter motion_frame_jitter_;
@@ -678,6 +749,10 @@ class Renderer : public NativeFrontend {
   bool motion_camera_valid_=false,motion_camera_conflict_=false,motion_previous_camera_bad_=false;
   bool motion_pre_hud_pending_=false;
   std::array<uint32_t,16> motion_camera_words_{};
+  bool motion_common_camera_valid_=false;
+  uint64_t motion_common_camera_domain_=0;
+  std::array<uint32_t,6> motion_common_camera_fixup_{};
+  std::vector<uint8_t> motion_rigid_sources_; // Parallel to history/raster samples: 1 asset, 2 common.
   std::array<uint32_t,6> motion_clip_fixup_{}; // Exact uploaded ScreenXform + HalfPixelOffset bits.
   Microsoft::WRL::ComPtr<ID3D12Resource> motion_depth_snapshot_;
   Microsoft::WRL::ComPtr<ID3D12Resource> motion_coverage_[3];
@@ -685,6 +760,7 @@ class Renderer : public NativeFrontend {
   D3D12_RESOURCE_STATES motion_coverage_state_[3]{D3D12_RESOURCE_STATE_RENDER_TARGET,
       D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_RENDER_TARGET};
   std::unordered_map<uint64_t,std::vector<uint8_t>> motion_coverage_shaders_;
+  std::unordered_map<uint64_t,std::vector<uint8_t>> motion_ray_shaders_;
   std::unordered_set<uint64_t> motion_coverage_failed_shaders_;
   const std::vector<uint8_t>* motion_coverage_shader_=nullptr;
   bool motion_coverage_draw_active_=false,motion_coverage_bound_=false,motion_coverage_cleared_=false;
@@ -740,10 +816,12 @@ class Renderer : public NativeFrontend {
   // EDRAM same-base reinterpretation (edram_alias.hlsl), one PSO per format.
   Microsoft::WRL::ComPtr<ID3D12RootSignature> alias_root_signature_;
   std::unordered_map<uint32_t, Microsoft::WRL::ComPtr<ID3D12PipelineState>> alias_pipelines_;
+  ID3D12PipelineState* GetAliasPipeline(DXGI_FORMAT format,uint32_t samples);
+  ID3D12PipelineState* GetFxaaPipeline(DXGI_FORMAT format);
   bool ReinterpretSurface(HostSurface& dst, HostSurface& src);
   // FXAA graphics option (EXP-045): applied to the "Upscale" pass target when
   // the HUD pass starts, so the HUD stays sharp.
-  void ApplyFxaa(HostSurface& target);
+  bool ApplyFxaa(HostSurface& target);
   // SSAO graphics option (EXP-045): after the opaque scene, before End Tiling.
   void CaptureCamera();
   void ApplySsao();
@@ -958,7 +1036,9 @@ class Renderer : public NativeFrontend {
   // Per fetch slot: a few recent fetch constants and their SRV indices this
   // frame. Games often alternate A->B->A in the same slot; a one-entry cache
   // needlessly re-ran the full texture lookup on every alternation.
-  struct SlotCache {
+  using SlotCache = SlotSrvCache;
+  SlotSrvCache slot_cache_[16];
+  struct LegacySlotCacheUnused {
     struct SrvEntry {
       uint32_t fetch[6] = {};
       uint32_t srv = 0;
@@ -973,7 +1053,7 @@ class Renderer : public NativeFrontend {
     uint64_t sampler_key = 0;
     uint32_t sampler_index = 0;
     bool sampler_valid = false;
-  } slot_cache_[16];
+  };
   // Drops the cached bindings whose fetch base is `dest_base`; ~0u drops all.
   void InvalidateSlotBindings(uint32_t dest_base);
   // Title benchmark: draws after the scene filter are skipped (sr_benchmark).

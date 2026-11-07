@@ -72,6 +72,19 @@ void WriteTrackingState::Release(uint32_t address, uint32_t length) {
   // Partial/mismatched release cannot certify a new identity for the residual.
 }
 
+void WriteTrackingState::ReleaseCoverage(uint32_t address, uint32_t length) {
+  std::lock_guard lock(mutex_);
+  const RexTrackingRange range{address, length};
+  if (!Valid(range)) { LoseDomain(); return; }
+  const auto epoch = NextSequence();
+  const uint32_t first = range.physical_address / kPageSize;
+  const uint32_t last = (range.physical_address + range.length - 1) / kPageSize;
+  for (uint32_t p = first; p <= last; ++p) {
+    pages_[p].epoch = epoch; pages_[p].covered = false;
+    PublishPage(p, epoch);
+  }
+}
+
 void WriteTrackingState::Invalidate(uint32_t address, uint32_t length) {
   std::lock_guard lock(mutex_);
   InvalidateLocked({address, length});

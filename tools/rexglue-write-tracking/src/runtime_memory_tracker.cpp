@@ -73,6 +73,10 @@ struct Monitor {
       p += info.region_size;
     }
   }
+  void ReleaseCoverage(uint32_t address, uint32_t length) {
+    state.ReleaseCoverage(address, length);
+    ++stats.coverage_losses;
+  }
   void Invalidate(uint32_t address, uint32_t length) {
     state.Invalidate(address, length);
     ++stats.coverage_losses;
@@ -248,14 +252,14 @@ void Unwatch(RexTrackingSession session, RexTrackingWatch id) {
   auto* m = Find(session); if (!m) return;
   auto it = m->watches.find(id); if (it == m->watches.end()) return;
   for (const auto r : it->second.ranges) {
-    m->Invalidate(r.physical_address, r.length);
+    // Release coverage per page only when its last watch is removed; below.
     for (uint32_t p = r.physical_address / kPage; p <= (r.physical_address + r.length - 1) / kPage; ++p) {
       if (m->references[p]) --m->references[p];
-      if (!m->references[p]) for (auto& view : m->views) {
+      if (!m->references[p]) { m->ReleaseCoverage(p * kPage, kPage); for (auto& view : m->views) {
         if (p < view.owned.size() && view.owned[p]) {
           if (!rex::memory::Protect(view.host + size_t(p) * kPage, kPage, rex::memory::PageAccess::kReadWrite)) {
-            ++m->stats.protection_failures;
-          } else view.owned[p] = false;
+            ++m->stats.protection_failures; m->Invalidate(p * kPage, kPage);
+          } else view.owned[p] = false; }
         }
       }
     }
@@ -411,7 +415,7 @@ bool TrackingFault(rex::memory::Memory* memory, void* address, bool write) {
     if (fault < base || fault - base >= view.length) continue;
     const uint32_t page = uint32_t(fault - base) / kPage;
     if (!view.owned[page]) return false;
-    m.Invalidate(page * kPage, kPage);  // Publish loss BEFORE the store can resume.
+    m.ReleaseCoverage(page * kPage, kPage);  // Publish loss BEFORE the store can resume.
     if (v == 0) ++m.stats.physical_faults; else ++m.stats.guest_faults;
     view.owned[page] = false;
     if (!rex::memory::Protect(view.host + size_t(page) * kPage, kPage, rex::memory::PageAccess::kReadWrite)) {

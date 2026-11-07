@@ -13,11 +13,13 @@
 namespace superman_returns::graphics {
 
 enum class GraphicsOption : uint8_t {
-  kRtShadows, kShadowSoftness, kCharacterShadows, kRtReflections, kDlss, kCount
+  kRtShadows, kShadowSoftness, kCharacterShadows, kRtReflections, kDlss,
+  kApi, kResolution, kFpsLimit, kFxaa, kMsaa, kRenderScale, kCount
 };
 constexpr size_t kGraphicsOptionCount = static_cast<size_t>(GraphicsOption::kCount);
 // Boolean rows: 0 Off, 1 On. Softness preference: 1 Low, 2 High (0 is inactive backend only).
-// DLSS: 0 Off, 1 Quality. These are requests, never proof of SDK/DXR execution.
+// DLSS: 0 Off, 1 Quality, 2 Balanced, 3 Performance, 4 DLAA.
+// Appended rows use the value labels below; all arrays contain intent or attested output.
 using GraphicsValues = std::array<int, kGraphicsOptionCount>;
 struct GraphicsFeatureSupport {
   bool implemented = false;
@@ -35,7 +37,7 @@ struct GraphicsOptionsSnapshot {
   NativeApi api = NativeApi::kD3D12;
   uint64_t backend_epoch = 0, request_revision = 0, completed_revision = 0;
   uint64_t applied_frame = 0;
-  GraphicsValues requested{0,1,0,0,0}, applied{};
+  GraphicsValues requested{0,1,0,0,0,0,1,0,0,0,2}, applied{};
   std::array<GraphicsFeatureSupport, kGraphicsOptionCount> features{};
   std::string failure;
   bool pending() const { return request_revision != completed_revision; }
@@ -67,6 +69,17 @@ class GraphicsOptions {
   GraphicsOptionsSnapshot state_;
 };
 
+struct GraphicsRenderExtent {
+  float scale=1;
+  uint32_t width=1280,height=720;
+  bool in_range=false;
+};
+// Multiplier of the selected API/DLSS base size, in the guest's 1280x720 coordinates.
+GraphicsRenderExtent ComputeGraphicsRenderExtent(uint32_t base_width,uint32_t base_height,
+    float multiplier,uint32_t min_width,uint32_t min_height,uint32_t max_width,uint32_t max_height);
+int GraphicsOptionMinimum(GraphicsOption option);
+int GraphicsOptionMaximum(GraphicsOption option);
+bool GraphicsOptionRequiresRestart(GraphicsOption option);
 std::string_view GraphicsOptionLabel(GraphicsOption option);
 std::string_view GraphicsValueLabel(GraphicsOption option, int value);
 

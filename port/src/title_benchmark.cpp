@@ -5,6 +5,8 @@
 #include <cstdlib>
 #include <chrono>
 #include <ctime>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -43,10 +45,48 @@ REXCVAR_DEFINE_DOUBLE(sr_benchmark_warmup_s, 5.0, "Superman Returns",
 REXCVAR_DEFINE_DOUBLE(sr_benchmark_measure_s, 60.0, "Superman Returns",
                       "Diagnostic: benchmark measurement seconds")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_STRING(sr_benchmark_cache_route, "title", "Superman Returns",
+    "Diagnostic cache evidence route token for the title benchmark")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
+REXCVAR_DEFINE_STRING(sr_native_cache_audit_commands, "", "Superman Returns",
+    "Diagnostic: consume begin/end route tokens from this command file during gameplay");
 
 namespace superman_returns::benchmark {
 namespace {
 using SteadyClock = std::chrono::steady_clock;
+std::atomic<CacheAuditProvider> cache_audit_provider{nullptr};
+
+// Independent of the title clock; the harness separately proves the gameplay route.
+void PollObservedCacheRoute() {
+  const auto path=REXCVAR_GET(sr_native_cache_audit_commands);if(path.empty())return;
+  static auto next=SteadyClock::time_point{};
+  const auto now=SteadyClock::now();if(now<next)return;next=now+std::chrono::milliseconds(100);
+  static CacheAuditProvider provider=nullptr;static CacheAuditCounts before{};static std::string route;
+  std::ifstream file(std::filesystem::u8path(path));if(!file)return;
+  std::string command,name,extra;file>>command>>name>>extra;file.close();
+  std::error_code error;std::filesystem::remove(std::filesystem::u8path(path),error);
+  if(error || name.empty() || !extra.empty() || name.size()>96 ||
+      name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")!=std::string::npos)return;
+  if(command=="begin") {
+    if(provider) {REXLOG_WARN("native cache audit: route_invalid name={} reason=nested_begin",route);provider=nullptr;}
+    auto current=cache_audit_provider.load(std::memory_order_acquire);
+    if(!current) {REXLOG_WARN("native cache audit: route_invalid name={} reason=missing_provider",name);return;}
+    route=name;provider=current;before=provider();
+    REXLOG_INFO("native cache audit: route_begin name={}",route);
+  } else if(command=="end" && provider && name==route) {
+    const auto after=provider();
+    const bool valid=cache_audit_provider.load(std::memory_order_acquire)==provider &&
+        after.frames>before.frames && after.draws>before.draws &&
+        after.pso_runtime_creates>=before.pso_runtime_creates &&
+        after.shader_runtime_compiles>=before.shader_runtime_compiles && after.shader_misses>=before.shader_misses;
+    if(valid) REXLOG_INFO("native cache audit: route_end name={} frames={} draws={} pso_runtime_creates={} shader_runtime_compiles={} shader_misses={} valid=1",
+        route,after.frames-before.frames,after.draws-before.draws,after.pso_runtime_creates-before.pso_runtime_creates,
+        after.shader_runtime_compiles-before.shader_runtime_compiles,after.shader_misses-before.shader_misses);
+    else REXLOG_WARN("native cache audit: route_invalid name={} reason=provider_or_counter_failure",route);
+    provider=nullptr;route.clear();
+  }
+}
 
 struct State {
   std::mutex mutex;
@@ -55,6 +95,9 @@ struct State {
   Result result;
   std::string gpu_name;
   bool finished = false;
+  CacheAuditProvider audit_provider = nullptr;
+  CacheAuditCounts audit_begin{};
+  std::string audit_name;
 };
 State& GetState() {
   static State state;
@@ -127,6 +170,23 @@ void Finish(State& s) {
   r.reason = s.clock->reason();
   r.stats = ComputeStats(s.clock->frame_ms());
   r.settings_text = SettingsText(s.gpu_name);
+  if(s.audit_provider) {
+    const auto after=s.audit_provider();
+    const auto& before=s.audit_begin;
+    const bool monotonic=after.frames>=before.frames && after.draws>=before.draws &&
+        after.pso_runtime_creates>=before.pso_runtime_creates &&
+        after.shader_runtime_compiles>=before.shader_runtime_compiles && after.shader_misses>=before.shader_misses;
+    if(monotonic) {
+      REXLOG_INFO("native cache audit: route_end name={} frames={} draws={} pso_runtime_creates={} "
+                  "shader_runtime_compiles={} shader_misses={} valid={}",s.audit_name,
+          after.frames-before.frames,after.draws-before.draws,
+          after.pso_runtime_creates-before.pso_runtime_creates,
+          after.shader_runtime_compiles-before.shader_runtime_compiles,
+          after.shader_misses-before.shader_misses,r.valid?1:0);
+    } else {
+      REXLOG_WARN("native cache audit: route_invalid name={} reason=counter_reset",s.audit_name);
+    }
+  }
   SaveResult(r, ResultDirectory(), Stamp(), s.clock->frame_ms());
   REXLOG_INFO("benchmark: {} avg_fps={:.1f} min_fps={:.1f} low1_fps={:.1f} low01_fps={:.1f} frames={} seconds={:.1f}{}{} | {} | {}",
               r.valid ? "valid" : "invalid", r.stats.avg_fps, r.stats.min_fps, r.stats.low1_fps,
@@ -145,6 +205,9 @@ void Finish(State& s) {
 }  // namespace
 
 bool Active() { return REXCVAR_GET(sr_benchmark); }
+void SetCacheAuditProvider(CacheAuditProvider provider) {
+  cache_audit_provider.store(provider,std::memory_order_release);
+}
 
 void NoteStartup() {
 #if defined(_WIN32)
@@ -156,6 +219,7 @@ void NoteStartup() {
 void NoteRendererFrame(bool scene_drawn) { scene_latch.Note(scene_drawn); }
 
 void OnGuestPresent() {
+  PollObservedCacheRoute();
   static std::atomic<bool> moved{false};
   if (REXCVAR_GET(sr_window_offscreen) && !moved.exchange(true)) MoveWindowsOffscreen();
   if (!Active()) return;
@@ -175,6 +239,19 @@ void OnGuestPresent() {
     const Phase before = s.clock->phase();
     s.clock->OnFrame(t, scene_latch.Consume());
     s.result.phase = s.clock->phase();
+    if(s.clock->phase()==Phase::Measuring && before!=Phase::Measuring) {
+      s.audit_provider=cache_audit_provider.load(std::memory_order_acquire);
+      if(s.audit_provider) {
+        s.audit_name=REXCVAR_GET(sr_benchmark_cache_route);
+        if(s.audit_name.empty())s.audit_name="title";
+        for(auto& c:s.audit_name)if(!((c>='a'&&c<='z') || (c>='A'&&c<='Z') ||
+            (c>='0'&&c<='9') || c=='_' || c=='-' || c=='.'))c='_';
+        s.audit_begin=s.audit_provider();
+        REXLOG_INFO("native cache audit: route_begin name={}",s.audit_name);
+      } else {
+        REXLOG_WARN("native cache audit: missing_route_provider; zero misses cannot be certified");
+      }
+    }
     if (s.clock->phase() != before && s.clock->phase() != Phase::Done)
       REXLOG_INFO("benchmark: phase {} at {:.1f} s", int(s.clock->phase()), t);
     if (s.clock->phase() == Phase::Done) {

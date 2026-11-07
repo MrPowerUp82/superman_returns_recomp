@@ -97,11 +97,24 @@ struct WorkBatch {
   std::vector<WorkCmd> cmds;
   std::vector<uint8_t, DefaultInitAllocator<uint8_t>> bytes;
   std::vector<CaptureRange> ranges;
+  std::vector<CaptureRange> shared_ranges;
+  void AppendSharedRange(const uint8_t* base, uint32_t address, uint32_t length) {
+    if (!length) return;
+    for (const auto& r : shared_ranges) {
+      if (r.address <= address && uint64_t(address) + length <= uint64_t(r.address) + r.length) {
+        return;
+      }
+    }
+    const uint32_t offset = uint32_t(bytes.size());
+    bytes.insert(bytes.end(), base + address, base + address + length);
+    shared_ranges.push_back({address, length, offset});
+  }
   std::vector<StreamPlan> streams;
   void Clear() {
     cmds.clear();
     bytes.clear();
     ranges.clear();
+    shared_ranges.clear();
     streams.clear();
   }
 };
@@ -128,6 +141,7 @@ private:
   std::shared_ptr<const WorkBatch> batch_;
   uint32_t range_first_=0,range_count_=0;
   std::span<const CaptureRange> Ranges() const;
+  std::span<const CaptureRange> SharedRanges() const;
   std::span<const uint8_t> Bytes() const;
 };
 constexpr bool IsCaptureFrame(uint64_t frame,uint32_t every) {

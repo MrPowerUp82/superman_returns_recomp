@@ -65,11 +65,13 @@ cbuffer SrRtShadowDraw : register(b3, space4)
     uint g_SrRtShadowSamples;
     uint g_SrRtShadowMask;
     uint g_SrRtReflectEnabled;
-    uint2 g_SrRtShadowPadding;
+    uint g_SrRtShadowStandalone;
+    uint g_SrRtShadowPadding;
 };
 
 float SrRtShadowOcclusion(float3 world, float original, float fade, float2 pixel)
 {
+    if(g_SrRtShadowStandalone != 0) return 0.0;
     float lightLength2 = dot(g_SrRtShadowLight, g_SrRtShadowLight);
     [branch] if (g_SrRtShadowEnabled == 0 ||
         !all(isfinite(world)) || !all(isfinite(pixel)) ||
@@ -126,6 +128,7 @@ float SrRtShadowOcclusion(float3 world, float original, float fade, float2 pixel
 // environment sample instead of supplying the reflected color.
 float SrRtEnvVisibility(float3 world, float3 direction)
 {
+    if(g_SrRtShadowStandalone != 0) return 1.0;
     float length2 = dot(direction, direction);
     [branch] if (g_SrRtReflectEnabled == 0 || !all(isfinite(world)) ||
         !all(isfinite(direction)) || !isfinite(length2) || length2 < 1e-12)

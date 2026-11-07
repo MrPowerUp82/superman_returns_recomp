@@ -46,6 +46,15 @@
       <TextBlock Text="{DynamicResource Costume}"/><ComboBox x:Name="CostumeBox" AutomationProperties.Name="{DynamicResource Costume}"/>
      </StackPanel>
     </UniformGrid>
+    <Expander Header="{DynamicResource TemporalGraphics}" Margin="0,0,0,12">
+     <StackPanel Margin="0,10,0,0">
+      <TextBlock Text="{DynamicResource GraphicsIntentNote}" TextWrapping="Wrap" Foreground="{StaticResource Muted}"/>
+      <UniformGrid Columns="2">
+       <StackPanel Margin="0,0,12,0"><TextBlock Text="NVIDIA DLSS"/><ComboBox x:Name="DlssBox"/><TextBlock Text="{DynamicResource RtShadows}"/><ComboBox x:Name="RtShadowsBox"/><TextBlock Text="{DynamicResource RtShadowQuality}"/><ComboBox x:Name="RtQualityBox"/></StackPanel>
+       <StackPanel Margin="12,0,0,0"><TextBlock Text="{DynamicResource CharacterShadows}"/><ComboBox x:Name="CharacterShadowsBox"/><TextBlock Text="{DynamicResource RtReflections}"/><ComboBox x:Name="ReflectionsBox"/></StackPanel>
+      </UniformGrid>
+     </StackPanel>
+    </Expander>
     <TextBlock x:Name="FpsNote" Foreground="{StaticResource Muted}" TextWrapping="Wrap" FontSize="12" Margin="0,0,0,10"/>
     <CheckBox x:Name="FrameGenerationBox" Content="{DynamicResource FrameGeneration}" AutomationProperties.Name="{DynamicResource FrameGenerationAccessible}"/>
     <TextBlock Text="{DynamicResource FrameGenerationNote}" Foreground="{StaticResource Muted}" TextWrapping="Wrap" FontSize="12" Margin="0,0,0,8"/>

@@ -19,6 +19,11 @@ struct CompiledShader {
   std::vector<ShaderLocation> inputs,outputs;
   std::vector<uint32_t> words;
 };
+inline uint64_t ShaderArtifactDigest(const CompiledShader& shader) {
+  uint64_t hash=14695981039346656037ull;
+  for(auto word:shader.words)hash=(hash^word)*1099511628211ull;
+  return hash;
+}
 bool DecodeShaderResult(std::span<const uint8_t>,ShaderStage,CompiledShader&,std::string&,ShaderAbi expected=ShaderAbi::kPortable);
 std::vector<std::string> ValidateShaderPair(const CompiledShader&,const CompiledShader&);
 struct ShaderResult {
@@ -33,6 +38,7 @@ struct VulkanShaderConfig {
   // Local, game-derived SPIR-V library; misses still use the runtime compiler.
   std::filesystem::path library;
   ShaderAbi abi=ShaderAbi::kPortable;
+  std::function<void(const std::string&)> audit_log;
 };
 // Platform runner receives individual arguments, never a shell command.
 using ShaderProcess=std::function<bool(std::span<const std::filesystem::path>,std::chrono::milliseconds,std::stop_token,std::string&)>;
@@ -44,6 +50,8 @@ public:
   ShaderResult Poll(ShaderKey) const;
   size_t PrecompiledCount() const;
   const std::string& LibraryDiagnostic() const;
+  // Does not request or compile anything. Rejects ambiguous digest collisions.
+  std::shared_ptr<const CompiledShader> FindReadyByDigest(uint64_t,ShaderStage) const;
   VulkanShaderService(const VulkanShaderService&)=delete;
   VulkanShaderService& operator=(const VulkanShaderService&)=delete;
 private:

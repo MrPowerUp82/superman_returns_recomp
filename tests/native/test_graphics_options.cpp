@@ -90,7 +90,7 @@ SR_TEST(graphics_options_rejects_false_on_and_reports_failed_apply) {
   SR_CHECK(!options.Snapshot().pending());
   SR_CHECK_EQ(options.Snapshot().applied[D], 0);
   SR_CHECK(!options.Snapshot().failure.empty());
-  SR_CHECK(!options.Request(Dlss, 2));
+  SR_CHECK(!options.Request(Dlss, 5));
   SR_CHECK(!options.Request(static_cast<GraphicsOption>(99), 1));
 }
 

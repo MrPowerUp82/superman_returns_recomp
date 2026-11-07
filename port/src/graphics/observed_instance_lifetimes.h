@@ -34,12 +34,22 @@ struct ObservedClothSelection {
 
 // Immutable frontend observation carried with a draw to the worker. This is
 // provenance for diagnostics, not a GeometryHistoryProof or actor class.
+struct ObservedVehicleBatchSelection {
+    uint64_t instance_key=0,generation_key=0,palette_signature=0;
+    uint32_t members=0,rows=0;
+    bool source_route_observed=false;
+};
 struct ObservedRenderInvocation {
     ObservedInstanceToken token;
     uint32_t render = 0, vtable = 0;
     uint32_t packet = 0, packet_word16 = 0; // Observed only; no lifetime/part identity.
     ObservedPartSelection part;
     ObservedClothSelection cloth;
+    // Immutable owner+128 snapshot, only after live-token/dispatch validation.
+    // Guest row-vector affine storage; not shader dot-row storage.
+    std::array<uint32_t,16> rigid_owner_world{};
+    bool rigid_owner_world_observed = false;
+    ObservedVehicleBatchSelection vehicle_batch;
 };
 
 // Observations only: Create follows a normal constructor return; Destroy

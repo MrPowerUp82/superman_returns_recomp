@@ -1,6 +1,8 @@
 #include "game_pipeline.h"
 #include "triangle.h"
 #include "device_requirements.h"
+#include "vulkan_pipeline_seed.h"
+#include "vulkan_cache_audit.h"
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -58,7 +60,7 @@ VkFormat VertexFormat(uint32_t t) {
   default:return VK_FORMAT_UNDEFINED;
   }
 }
-uint64_t ShaderDigest(const shaders::CompiledShader& s) {uint64_t h=14695981039346656037ull;for(auto word:s.words) {h^=word;h*=1099511628211ull;}return h;}
+uint64_t ShaderDigest(const shaders::CompiledShader& s) {return shaders::ShaderArtifactDigest(s);}
 std::vector<uint32_t> CacheHeader(const Context& c) {
   std::vector<uint32_t> header{0x33435053,1,c.properties.vendorID,c.properties.deviceID,c.properties.driverVersion};
   for(uint32_t i=0;i<4;++i) {uint32_t word;std::memcpy(&word,c.properties.pipelineCacheUUID+i*4,4);header.push_back(word);}return header;
@@ -131,6 +133,49 @@ bool PlanGamePipeline(const guest::DrawPacket& draw,const TargetPass& pass,const
   for(auto& a:out.attributes) {out.key.push_back(a.location);out.key.push_back(a.binding);out.key.push_back(a.format);out.key.push_back(a.offset);}
   result=std::move(out);e={};return true;
 }
+bool DecodeGamePipelineSeed(const GamePipelineKey& key,GamePipelinePlan& out,TargetPass& pass,Error& e) {
+  if(key.size()<19 || key.size()>2048 || key[0]!=1 || key[2]>1 || key[8]>4)
+    return Fail(e,"Invalid normalized Vulkan seed key");
+  for(size_t i=1;i<16;++i)if(key[i]>UINT32_MAX)return Fail(e,"Oversized normalized Vulkan state");
+  guest::DrawPacket draw;
+  switch(VkPrimitiveTopology(key[1])) {
+    case VK_PRIMITIVE_TOPOLOGY_POINT_LIST:draw.primitive=guest::Primitive::kPoints;break;
+    case VK_PRIMITIVE_TOPOLOGY_LINE_LIST:draw.primitive=guest::Primitive::kLines;break;
+    case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP:draw.primitive=guest::Primitive::kLineStrip;break;
+    case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST:draw.primitive=guest::Primitive::kTriangles;break;
+    case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP:draw.primitive=guest::Primitive::kTriangleStrip;break;
+    default:return Fail(e,"Unsupported normalized Vulkan topology");
+  }
+  draw.indexed=true;draw.primitive_restart=bool(key[2]);
+  draw.registers[0x201]=uint32_t(key[3]);draw.registers[0x205]=uint32_t(key[4]);
+  draw.registers[0x200]=uint32_t(key[5]);draw.registers[0x10d]=uint32_t(key[6]);draw.registers[0x104]=uint32_t(key[7]);
+  draw.depth_bias=std::bit_cast<int32_t>(uint32_t(key[10]));draw.slope_bias=std::bit_cast<float>(uint32_t(key[11]));
+  if(!std::isfinite(draw.slope_bias))return Fail(e,"Nonfinite normalized Vulkan depth bias");
+  pass.owns_handles=false;pass.color_count=uint32_t(key[8]);pass.depth_format=VkFormat(key[9]);pass.extent={1,1};
+  for(size_t i=0;i<4;++i)pass.formats[i]=VkFormat(key[12+i]);
+  shaders::CompiledShader empty;
+  if(!PlanGamePipeline(draw,pass,empty,out,e) || uint64_t(out.topology)!=key[1] || uint64_t(out.restart)!=key[2])
+    return Fail(e,"Inconsistent normalized Vulkan state");
+  if(!std::equal(key.begin(),key.begin()+16,out.key.begin()))return Fail(e,"Noncanonical normalized Vulkan state");
+  size_t at=16;
+  while(at<key.size()-2 && key[at]!=UINT64_MAX) {
+    if(at+1>=key.size()-2 || key[at]>31 || key[at+1]>UINT32_MAX || out.bindings.size()>=32 ||
+        std::any_of(out.bindings.begin(),out.bindings.end(),[&](auto& b){return b.binding==key[at];}))
+      return Fail(e,"Invalid normalized Vulkan bindings");
+    out.bindings.push_back({uint32_t(key[at]),uint32_t(key[at+1]),VK_VERTEX_INPUT_RATE_VERTEX});at+=2;
+  }
+  if(at>=key.size()-2 || key[at++]!=UINT64_MAX || (key.size()-2-at)%4)
+    return Fail(e,"Truncated normalized Vulkan attributes");
+  while(at<key.size()-2) {
+    for(size_t i=0;i<4;++i)if(key[at+i]>UINT32_MAX)return Fail(e,"Oversized normalized Vulkan attribute");
+    if(out.attributes.size()>=256 || !key[at+2] ||
+        std::none_of(out.bindings.begin(),out.bindings.end(),[&](auto& b){return b.binding==key[at+1];}) ||
+        std::any_of(out.attributes.begin(),out.attributes.end(),[&](auto& a){return a.location==key[at];}))
+      return Fail(e,"Invalid normalized Vulkan attributes");
+    out.attributes.push_back({uint32_t(key[at]),uint32_t(key[at+1]),VkFormat(key[at+2]),uint32_t(key[at+3])});at+=4;
+  }
+  out.key=key;e={};return true;
+}
 GamePipeline::~GamePipeline() {if(handle) context->f.vkDestroyPipeline(context->device,handle,nullptr);}
 bool GamePipelineMemo::Matches(const guest::DrawPacket& d,const TargetPass& pass,const Shader& vs,const Shader& ps) const {
   if(!pipeline_) return false;
@@ -196,6 +241,20 @@ bool GamePipelineStore::CheckpointCache(Error& e) {
   std::filesystem::rename(temporary,cache_path_,ec);const bool replaced=!ec;
 #endif
   if(!replaced) {std::filesystem::remove(temporary,ec);return Fail(e,"Cannot replace driver cache checkpoint");}
+  if(descriptions_writable_ && !descriptions_path_.empty()) {
+    auto encoded=SerializeVulkanPipelineSeed(uint32_t(abi_),observed_);
+    if(encoded.empty())return Fail(e,"Vulkan description seed exceeds bounded format");
+    auto pending=descriptions_path_;pending+=".tmp";
+    std::ofstream seed(pending,std::ios::binary|std::ios::trunc);
+    seed.write(reinterpret_cast<const char*>(encoded.data()),encoded.size());seed.close();
+    if(seed.fail())return Fail(e,"Cannot write Vulkan description seed");
+#if defined(_WIN32)
+    if(!MoveFileExW(pending.c_str(),descriptions_path_.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))
+      return Fail(e,"Cannot publish Vulkan description seed");
+#else
+    std::filesystem::rename(pending,descriptions_path_,ec);if(ec)return Fail(e,"Cannot publish Vulkan description seed");
+#endif
+  }
   cache_dirty_=false;return true;
 }
 bool GamePipelineStore::Initialize(std::span<const VkDescriptorSetLayout> layouts,const std::filesystem::path& path,Error& e,shaders::ShaderAbi abi) {
@@ -219,7 +278,92 @@ bool GamePipelineStore::Initialize(std::span<const VkDescriptorSetLayout> layout
   if(!initial.empty()) {uint32_t fields[4];std::memcpy(fields,initial.data(),16);if(fields[0]<32 || fields[0]>initial.size() || fields[1]!=VK_PIPELINE_CACHE_HEADER_VERSION_ONE || fields[2]!=c_.properties.vendorID || fields[3]!=c_.properties.deviceID || std::memcmp(initial.data()+16,c_.properties.pipelineCacheUUID,16)) initial.clear();}
   VkPipelineCacheCreateInfo cache{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};cache.initialDataSize=initial.size();cache.pInitialData=initial.data();
   if(!Check(c_.f.vkCreatePipelineCache(c_.device,&cache,nullptr,&driver_cache_),"Vulkan driver pipeline cache",e)) return false;
-  abi_=abi;cache_path_=path;e={};return true;
+  abi_=abi;cache_path_=path;
+  if(!path.empty()) {
+    descriptions_path_=path;descriptions_path_+=".descriptions";
+    std::ifstream file(descriptions_path_,std::ios::binary|std::ios::ate);
+    if(file) {
+      const auto length=file.tellg();std::string reason;
+      if(length<0 || length>64*1024*1024)descriptions_writable_=false;
+      else {
+        std::vector<uint8_t> bytes(size_t(length),uint8_t{});file.seekg(0);
+        descriptions_writable_=bool(file.read(reinterpret_cast<char*>(bytes.data()),bytes.size())) &&
+            ParseVulkanPipelineSeed(bytes,uint32_t(abi_),observed_,reason);
+      }
+      if(!descriptions_writable_)c_.Log("Vulkan description seed rejected; preserving original: "+reason);
+    }
+  }
+  e={};return true;
+}
+bool GamePipelineStore::ImportDescriptionSeed(std::span<const uint8_t> bytes,Error& e) {
+  if(!layout_ || cache_path_.empty())return Fail(e,"Vulkan description cache is disabled/uninitialized");
+  const auto before=observed_;
+  std::string reason;
+  if(!MergeVulkanPipelineSeed(bytes,uint32_t(abi_),observed_,reason)) {
+    e={"Vulkan description seed",VK_ERROR_INITIALIZATION_FAILED,std::move(reason)};return false;
+  }
+  if(observed_!=before)cache_dirty_=true;
+  c_.Log("Vulkan embedded description seed: local="+std::to_string(before.size())+
+      " merged="+std::to_string(observed_.size())+" abi="+std::to_string(uint32_t(abi_)));
+  e={};return true;
+}
+bool GamePipelineStore::CompatiblePass(TargetPass& pass,Error& e) {
+  if(pass.color_count>4 || (!pass.color_count && pass.depth_format==VK_FORMAT_UNDEFINED))
+    return Fail(e,"Prewarm pass has no attachments");
+  std::vector<VkAttachmentDescription> attachments;
+  std::array<VkAttachmentReference,4> colors{};
+  for(auto& ref:colors)ref={VK_ATTACHMENT_UNUSED,VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+  VkAttachmentReference depth{VK_ATTACHMENT_UNUSED,VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+  auto add=[&](VkFormat format,bool is_depth,uint32_t slot) {
+    VkAttachmentDescription attachment{};attachment.format=format;attachment.samples=VK_SAMPLE_COUNT_1_BIT;
+    attachment.loadOp=VK_ATTACHMENT_LOAD_OP_LOAD;attachment.storeOp=VK_ATTACHMENT_STORE_OP_STORE;
+    attachment.stencilLoadOp=is_depth?VK_ATTACHMENT_LOAD_OP_LOAD:VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachment.stencilStoreOp=is_depth?VK_ATTACHMENT_STORE_OP_STORE:VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachment.initialLayout=attachment.finalLayout=is_depth?VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    const VkAttachmentReference ref{uint32_t(attachments.size()),attachment.initialLayout};
+    if(is_depth)depth=ref;else colors[slot]=ref;attachments.push_back(attachment);
+  };
+  for(uint32_t i=0;i<pass.color_count;++i)if(pass.formats[i]!=VK_FORMAT_UNDEFINED)add(pass.formats[i],false,i);
+  if(pass.depth_format!=VK_FORMAT_UNDEFINED)add(pass.depth_format,true,0);
+  VkSubpassDescription sub{};sub.pipelineBindPoint=VK_PIPELINE_BIND_POINT_GRAPHICS;
+  sub.colorAttachmentCount=pass.color_count;sub.pColorAttachments=colors.data();
+  sub.pDepthStencilAttachment=pass.depth_format==VK_FORMAT_UNDEFINED?nullptr:&depth;
+  VkRenderPassCreateInfo create{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+  create.attachmentCount=uint32_t(attachments.size());create.pAttachments=attachments.data();
+  create.subpassCount=1;create.pSubpasses=&sub;
+  pass.context=&c_;pass.owns_handles=true;
+  return Check(c_.f.vkCreateRenderPass(c_.device,&create,nullptr,&pass.render_pass),"Create prewarm compatible render pass",e);
+}
+bool GamePipelineStore::PrewarmObserved(shaders::VulkanShaderService& service,Error& e) {
+  uint64_t failures=0;const auto before=stats_.prewarmed;
+  for(const auto& key:observed_) {
+    if(pipelines_.contains(key))continue;
+    GamePipelinePlan plan;TargetPass pass;Error failure;
+    bool valid=DecodeGamePipelineSeed(key,plan,pass,failure);
+    auto vs=valid?service.FindReadyByDigest(key[key.size()-2],shaders::ShaderStage::kVertex):nullptr;
+    auto ps=valid && key.back()?service.FindReadyByDigest(key.back(),shaders::ShaderStage::kPixel):nullptr;
+    if(!valid || !vs || (key.back() && !ps) || !Validate(*vs,ps.get(),failure) ||
+        !ValidateGamePipelineFeatures(plan,pass.color_count,c_.properties.limits,c_.enabled_features,failure) ||
+        !CompatiblePass(pass,failure) || !CreatePipeline(plan,pass,*vs,ps.get(),0,failure,true)) {
+      ++failures;++stats_.prewarm_failed;
+      c_.Log("Vulkan description prewarm failed: "+(failure.message.empty()?std::string("ready SRVK artifact missing/ambiguous"):failure.message));
+    }
+  }
+  c_.Log("Vulkan description prewarm: observed="+std::to_string(observed_.size())+
+      " ready="+std::to_string(stats_.prewarmed-before)+" failed="+std::to_string(failures));
+  if(failures)return Fail(e,"Some observed Vulkan pipelines could not be prewarmed");
+  e={};return true;
+}
+bool GamePipelineStore::PrewarmBuiltin(const guest::DrawPacket& draw,VkFormat format,
+    const shaders::CompiledShader& vs,const shaders::CompiledShader* ps,Error& e) {
+  TargetPass pass;pass.color_count=1;pass.formats[0]=format;pass.extent={1,1};
+  GamePipelinePlan plan;
+  if(!Validate(vs,ps,e) || !PlanGamePipeline(draw,pass,vs,plan,e) ||
+      !ValidateGamePipelineFeatures(plan,pass.color_count,c_.properties.limits,c_.enabled_features,e))return false;
+  plan.key.push_back(ShaderDigest(vs));plan.key.push_back(ps?ShaderDigest(*ps):0);
+  if(pipelines_.contains(plan.key))return true;
+  if(!CompatiblePass(pass,e))return false;
+  return bool(CreatePipeline(plan,pass,vs,ps,0,e,true));
 }
 bool GamePipelineStore::Validate(const shaders::CompiledShader& vs,const shaders::CompiledShader* ps,Error& e) const {
   if(!layout_ || !ValidSpirv(vs.words) || (ps && !ValidSpirv(ps->words))) return Fail(e,"Pipeline layout/serial/shaders invalid");
@@ -244,7 +388,7 @@ std::shared_ptr<GamePipeline> GamePipelineStore::Acquire(const guest::DrawPacket
 }
 std::shared_ptr<GamePipeline> GamePipelineStore::Acquire(const guest::DrawPacket& d,const TargetPass& pass,const std::shared_ptr<const shaders::CompiledShader>& vs,const std::shared_ptr<const shaders::CompiledShader>& ps,uint64_t serial,Error& e) {
   if(!vs || !serial) {Fail(e,"Pipeline layout/serial/shaders invalid");return {};}
-  if(memo_.Matches(d,pass,vs,ps)) {++stats_.memo_hits;pending_.Hold(serial,memo_.pipeline());e={};return memo_.pipeline();}
+  if(memo_.Matches(d,pass,vs,ps)) {++stats_.memo_hits;++VulkanCacheAudit::pipeline_hits;pending_.Hold(serial,memo_.pipeline());e={};return memo_.pipeline();}
   // Retained artifacts keep their addresses unique for the cache lifetime.
   auto key=std::pair{vs.get(),ps.get()};auto found=validated_.find(key);
   if(found==validated_.end()) {
@@ -259,7 +403,12 @@ std::shared_ptr<GamePipeline> GamePipelineStore::AcquireValidated(const guest::D
   ++stats_.plans;GamePipelinePlan plan;if(!PlanGamePipeline(d,pass,vs,plan,e)) return {};
   if(!ValidateGamePipelineFeatures(plan,pass.color_count,c_.properties.limits,c_.enabled_features,e)) return {};
   plan.key.push_back(vs_digest);plan.key.push_back(ps_digest);
-  if(auto found=pipelines_.find(plan.key);found!=pipelines_.end()) {pending_.Hold(serial,found->second);return found->second;}
+  if(auto found=pipelines_.find(plan.key);found!=pipelines_.end()) {++stats_.hits;++VulkanCacheAudit::pipeline_hits;pending_.Hold(serial,found->second);return found->second;}
+  ++VulkanCacheAudit::description_misses;
+  return CreatePipeline(plan,pass,vs,ps,serial,e);
+}
+std::shared_ptr<GamePipeline> GamePipelineStore::CreatePipeline(const GamePipelinePlan& plan,const TargetPass& pass,
+    const shaders::CompiledShader& vs,const shaders::CompiledShader* ps,uint64_t serial,Error& e,bool startup) {
   for(auto& a:plan.attributes) {VkFormatProperties props{};c_.f.vkGetPhysicalDeviceFormatProperties(c_.physical,a.format,&props);if(!(props.bufferFeatures&VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT)) {Fail(e,"Vertex format unsupported by device");return {};}}
   VkShaderModule modules[2]{};auto release=[&]{for(auto m:modules) if(m) c_.f.vkDestroyShaderModule(c_.device,m,nullptr);};
   VkPipelineShaderStageCreateInfo stages[2]{};std::array<std::string,2> entries;uint32_t stage_count=ps?2:1;
@@ -271,7 +420,19 @@ std::shared_ptr<GamePipeline> GamePipelineStore::AcquireValidated(const guest::D
   VkPipelineColorBlendStateCreateInfo blend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};blend.attachmentCount=pass.color_count;blend.pAttachments=plan.colors.data();
   VkDynamicState dynamic[]{VK_DYNAMIC_STATE_VIEWPORT,VK_DYNAMIC_STATE_SCISSOR,VK_DYNAMIC_STATE_BLEND_CONSTANTS,VK_DYNAMIC_STATE_STENCIL_REFERENCE};VkPipelineDynamicStateCreateInfo dyn{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};dyn.dynamicStateCount=4;dyn.pDynamicStates=dynamic;
   VkGraphicsPipelineCreateInfo info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};info.stageCount=stage_count;info.pStages=stages;info.pVertexInputState=&vertex;info.pInputAssemblyState=&assembly;info.pViewportState=&viewport;info.pRasterizationState=&plan.raster;info.pMultisampleState=&samples;info.pDepthStencilState=&plan.depth;info.pColorBlendState=&blend;info.pDynamicState=&dyn;info.layout=layout_;info.renderPass=pass.render_pass;
-  auto p=std::make_shared<GamePipeline>();p->context=&c_;p->bindings=plan.bindings;auto status=c_.f.vkCreateGraphicsPipelines(c_.device,driver_cache_,1,&info,nullptr,&p->handle);release();if(!Check(status,"Create game graphics pipeline",e)) return {};
-  pipelines_[plan.key]=p;cache_dirty_=true;++stats_.created;pending_.Hold(serial,p);e={};return p;
+  auto p=std::make_shared<GamePipeline>();p->context=&c_;p->bindings=plan.bindings;
+  ++stats_.attempts;
+  if(startup)++VulkanCacheAudit::startup_attempts;else ++VulkanCacheAudit::pipeline_attempts;
+  auto status=c_.f.vkCreateGraphicsPipelines(c_.device,driver_cache_,1,&info,nullptr,&p->handle);release();
+  if(!Check(status,"Create game graphics pipeline",e)) {
+    ++stats_.failed;if(startup)++VulkanCacheAudit::startup_failures;else ++VulkanCacheAudit::pipeline_failures;return {};
+  }
+  pipelines_[plan.key]=p;cache_dirty_=true;++stats_.created;
+  if(startup)++stats_.prewarmed;
+  if(!startup && !descriptions_path_.empty() && std::find(observed_.begin(),observed_.end(),plan.key)==observed_.end()) {
+    if(observed_.size()<8192)observed_.push_back(plan.key);
+    else c_.Log("Vulkan description seed capacity reached; runtime miss remains observable");
+  }
+  if(serial)pending_.Hold(serial,p);e={};return p;
 }
 }

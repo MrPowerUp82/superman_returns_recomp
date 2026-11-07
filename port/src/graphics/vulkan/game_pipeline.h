@@ -15,6 +15,7 @@ struct GamePipelinePlan {
   std::vector<VkVertexInputAttributeDescription> attributes;
 };
 bool PlanGamePipeline(const guest::DrawPacket&,const TargetPass&,const shaders::CompiledShader&,GamePipelinePlan&,Error&);
+bool DecodeGamePipelineSeed(const GamePipelineKey&,GamePipelinePlan&,TargetPass&,Error&);
 std::string ShaderEntryPoint(const shaders::CompiledShader&,Error&);
 bool ValidateGamePipelineFeatures(const GamePipelinePlan&,uint32_t color_count,const VkPhysicalDeviceLimits&,const VkPhysicalDeviceFeatures&,Error&);
 struct GamePipeline {
@@ -57,17 +58,29 @@ public:
   VkPipelineLayout Layout() const {return layout_;}
   // Call on the recording thread, serialized with Acquire on the same store.
   bool CheckpointCache(Error&);
+  bool ImportDescriptionSeed(std::span<const uint8_t>,Error&);
+  // SRVPSO descriptions use only ready artifacts; never request a translation.
+  bool PrewarmObserved(shaders::VulkanShaderService&,Error&);
+  bool PrewarmBuiltin(const guest::DrawPacket&,VkFormat,const shaders::CompiledShader&,
+                     const shaders::CompiledShader*,Error&);
   void Retire(uint64_t serial) {pending_.Retire(serial);}
-  struct Stats {uint64_t plans=0,memo_hits=0,created=0;};  // PlanGamePipeline runs, draws answered by the memo, pipelines created (all cumulative)
+  struct Stats {uint64_t plans=0,memo_hits=0,created=0,attempts=0,failed=0,hits=0,
+      prewarmed=0,prewarm_failed=0;};
   const Stats& stats() const {return stats_;}
 private:
   bool Validate(const shaders::CompiledShader&,const shaders::CompiledShader*,Error&) const;
   std::shared_ptr<GamePipeline> AcquireValidated(const guest::DrawPacket&,const TargetPass&,const shaders::CompiledShader&,const shaders::CompiledShader*,uint64_t vs_digest,uint64_t ps_digest,uint64_t submission,Error&);
+  std::shared_ptr<GamePipeline> CreatePipeline(const GamePipelinePlan&,const TargetPass&,
+      const shaders::CompiledShader&,const shaders::CompiledShader*,uint64_t,Error&,bool startup=false);
+  bool CompatiblePass(TargetPass&,Error&);
   struct ShaderPair {std::shared_ptr<const shaders::CompiledShader> vs,ps;uint64_t vs_digest=0,ps_digest=0;};
   std::map<std::pair<const shaders::CompiledShader*,const shaders::CompiledShader*>,ShaderPair> validated_;
   Context& c_;VkPipelineLayout layout_=VK_NULL_HANDLE;VkPipelineCache driver_cache_=VK_NULL_HANDLE;
   shaders::ShaderAbi abi_=shaders::ShaderAbi::kPortable;
   std::filesystem::path cache_path_;std::map<GamePipelineKey,std::shared_ptr<GamePipeline>> pipelines_;SubmissionResources pending_;
+  std::filesystem::path descriptions_path_;
+  std::vector<GamePipelineKey> observed_;
+  bool descriptions_writable_=true;
   bool cache_dirty_=false;
   GamePipelineMemo memo_;Stats stats_;
 };

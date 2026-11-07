@@ -74,6 +74,13 @@ inline bool CaptureStaticWorldShaderDependencies(
       clip_first_row = 4;
       world_texcoord = 4;
       break;
+    // Effect-capable rigid families: local XYZ/W1 is dotted directly with
+    // c233..236. Burn/freeze/transparency affect varyings, never oPos.
+    // Both export world XYZ/W from c0..3 through TEXCOORD1.xzyw.
+    case 0x8E5232F5E5E6760Eull:
+    case 0x1023A9B52C1407C1ull:
+      clip_first_row = 233;
+      break;
     default:
       return false;
   }

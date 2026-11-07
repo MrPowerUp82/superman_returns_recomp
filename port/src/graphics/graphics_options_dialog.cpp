@@ -164,16 +164,17 @@ void GraphicsOptionsDialog::OnDraw(ImGuiIO& io) {
     draw->AddRectFilledMultiColor(at(.5f,.131f),at(.94f,.185f),band,band_clear,band_clear,band);
     centered(32,.158f,IM_COL32(236,242,250,255),"GRAPHICS OPTIONS");
 
-    static constexpr const char* labels[]{"RT SHADOWS","SHADOW SOFTNESS","CHARACTER SHADOWS","RT REFLECTIONS","NVIDIA DLSS"};
+    const size_t first=menu.selected<4 ? 0 : std::min(menu.selected-3,kGraphicsOptionCount-7);
+    centered(17,.242f,IM_COL32(190,205,225,255),"REQUESTED SETTINGS  |  UP / DOWN TO SCROLL");
     const ImU32 bright=IM_COL32(226,233,243,255), dim=IM_COL32(120,138,165,255);
-    for (size_t row=0;row<kGraphicsOptionCount;++row) {
+    for (size_t row=first;row<std::min(first+7,kGraphicsOptionCount);++row) {
       const auto option = static_cast<GraphicsOption>(row);
       const auto& support = options.features[row];
-      const bool available = support.implemented && support.capable;
+      const bool available = GraphicsOptionRequiresRestart(option) || (support.implemented && support.capable);
       const bool softness = option==GraphicsOption::kShadowSoftness;
-      const bool inactive = (softness || option==GraphicsOption::kCharacterShadows || option==GraphicsOption::kRtReflections) && !options.applied[0];
+      const bool inactive = (softness || option==GraphicsOption::kCharacterShadows) && !options.applied[0];
       const bool selected = row==menu.selected;
-      const float y=.36f+row*.0553f;
+      const float y=.305f+(row-first)*.052f;
       const ImVec2 min=at(.02f,y-.0245f), max=at(.98f,y+.0245f);
       if(selected) {
         const ImU32 solid=IM_COL32(58,102,158,235), clear=IM_COL32(58,102,158,0), line=IM_COL32(150,185,225,220);
@@ -184,18 +185,18 @@ void GraphicsOptionsDialog::OnDraw(ImGuiIO& io) {
         draw->AddLine(ImVec2(min.x,max.y),max,line,scale);
       }
       const float row_top=at(0,y).y-font->CalcTextSizeA(27*scale,FLT_MAX,0,"A").y*.5f;
-      text(27,ImVec2(at(.103f,0).x,row_top),available ? bright : dim,labels[row]);
-      // Only the renderer's report is printed as the value, never the request.
-      const int shown=inactive ? options.requested[row] : options.applied[row];
+      text(24,ImVec2(at(.075f,0).x,row_top),available ? bright : dim,std::string(GraphicsOptionLabel(option)).c_str());
+      // Explicitly labelled requests; actual execution is shown separately below.
+      const int shown=options.requested[row];
       const auto value=UpperValue(option,shown);
-      text(27,ImVec2(at(.545f,0).x,row_top),available && !inactive ? bright : dim,value.c_str());
+      text(24,ImVec2(at(.57f,0).x,row_top),available && !inactive ? bright : dim,value.c_str());
       if(clicked(min,max) && !selected) menu_->Select(row);
       if(selected) {
-        const int low=softness ? 1 : 0, high=softness ? 2 : 1;
-        const bool can_left=options.requested[row]>low && !inactive;
+        const int low=GraphicsOptionMinimum(option), high=GraphicsOptionMaximum(option);
+        const bool can_left=options.requested[row]>low && !inactive && (available || row<5 || option==GraphicsOption::kFxaa);
         const bool can_right=available && options.requested[row]<high && !inactive;
         const float half=7*scale;
-        const ImVec2 left=at(.476f,y), right=at(.766f,y);
+        const ImVec2 left=at(.476f,y), right=at(.93f,y);
         draw->AddTriangleFilled(ImVec2(left.x-half,left.y),ImVec2(left.x+half,left.y-half),
                                 ImVec2(left.x+half,left.y+half),can_left ? bright : dim);
         draw->AddTriangleFilled(ImVec2(right.x+half,right.y),ImVec2(right.x-half,right.y+half),
@@ -209,14 +210,22 @@ void GraphicsOptionsDialog::OnDraw(ImGuiIO& io) {
     // Why the selected row cannot change; the reference has no such row because
     // every feature there is available.
     const auto& selected_support=options.features[menu.selected];
-    std::string status;
-    if(!selected_support.implemented || !selected_support.capable) status="Unavailable: "+selected_support.reason;
-    else if((menu.selected==size_t(GraphicsOption::kShadowSoftness) || menu.selected==size_t(GraphicsOption::kCharacterShadows) ||
-             menu.selected==size_t(GraphicsOption::kRtReflections)) && !options.applied[0])
-      status="Turn on RT Shadows to change this option.";
-    if(!options.failure.empty()) status+=(status.empty() ? "" : "\n")+options.failure;
-    if(!status.empty())
-      draw->AddText(font,18*scale,at(.103f,.665f),IM_COL32(190,205,225,255),status.c_str(),nullptr,width*.8f);
+    const auto selected=static_cast<GraphicsOption>(menu.selected);
+    std::string status="Requested: "+std::string(GraphicsValueLabel(selected,options.requested[menu.selected]));
+    status+=" | Applied: ";
+    status+=selected_support.implemented && selected_support.capable ?
+        std::string(GraphicsValueLabel(selected,options.applied[menu.selected])) : "Not confirmed";
+    if(GraphicsOptionRequiresRestart(selected)) status+="\nAPI changes require restart.";
+    else if(!selected_support.implemented || !selected_support.capable)
+      status+="\nUnavailable: "+selected_support.reason;
+    else if((selected==GraphicsOption::kShadowSoftness || selected==GraphicsOption::kCharacterShadows) && !options.applied[0])
+      status+="\nTurn on RT Shadows to change this option.";
+    else if(options.requested[menu.selected]!=options.applied[menu.selected])
+      status+="\nWaiting for backend confirmation.";
+    if(selected_support.implemented && selected_support.capable && !selected_support.reason.empty())
+      status+="\n"+selected_support.reason;
+    if(!options.failure.empty()) status+="\n"+options.failure;
+    draw->AddText(font,17*scale,at(.075f,.70f),IM_COL32(190,205,225,255),status.c_str(),nullptr,width*.85f);
 
     const auto back=font->CalcTextSizeA(26*scale,FLT_MAX,0,"BACK");
     const ImVec2 back_center=at(.969f,.883f);

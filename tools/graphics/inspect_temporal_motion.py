@@ -34,6 +34,7 @@ def read_raw(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('directory', type=Path)
+    parser.add_argument('--depth-format',choices=['d24','d32'],help='Explicit source depth format; copy footprints alone can be typeless')
     args = parser.parse_args()
     report = {'meaning': 'Partial motion experiment; unsupported objects/deformation unverified', 'captures': []}
     for path in sorted(args.directory.glob('*motion_velocity_*.raw')):
@@ -53,7 +54,7 @@ def main():
         report['captures'].append({'file': path.name, 'width': valid.shape[1], 'height': valid.shape[0],
             'diagnostic_upper_bound_only': path.name.startswith(('candidate_static_only_', 'candidate_matched_only_')),
             'unknown_geometry_omitted': path.name.startswith(('candidate_static_only_', 'candidate_matched_only_')),
-            'family_only_attribution': path.name.startswith(('observed_skin_', 'observed_cloth_')),
+            'family_only_attribution': path.name.startswith(('observed_skin_', 'observed_cloth_', 'observed_rigid_')),
             'valid_pixels': int(valid.sum()), 'coverage_fraction': float(valid.mean()),
             'moving_pixels_above_0_01': int((valid & (magnitude > .01)).sum()),
             'magnitude_percentiles': np.percentile(magnitude[valid], [0, 50, 95, 100]).tolist() if valid.any() else [],
@@ -72,6 +73,18 @@ def main():
             raise ValueError('Unexpected candidate color format')
         Image.fromarray(rgb).save(path.with_suffix('.png'))
         report['captures'].append({'file': path.name, 'format': fmt, 'boundary_verified': False})
+    if args.depth_format:
+        for capture in report['captures']:
+            if 'valid_pixels' not in capture: continue
+            path=args.directory/capture['file'].replace('motion_velocity_', 'motion_depth_')
+            if not path.exists(): continue
+            data=path.read_bytes();w,h,fmt,pitch=struct.unpack_from('<4I',data)
+            raw=np.ndarray((h,w),dtype='<u4',buffer=data,offset=16,strides=(pitch,4))
+            depth=(raw & 0xffffff).astype(np.float64)/16777215 if args.depth_format=='d24' else raw.view('<f4')
+            population=np.isfinite(depth) & (depth!=0)
+            capture['depth_source_format']=args.depth_format
+            capture['nonclear_depth_fraction']=float(population.mean())
+            capture['motion_coverage_of_nonclear_surface']=capture['valid_pixels']/max(1,int(population.sum()))
     destination = args.directory / 'inspection.json'
     destination.write_text(json.dumps(report, indent=2), encoding='utf-8')
     print(json.dumps(report, indent=2))

@@ -9,7 +9,7 @@ namespace {
 constexpr size_t kMaxSourceBytes = 1024 * 1024;
 constexpr std::string_view kOutput = "out float4 oC0 : SV_Target0)";
 constexpr std::string_view kExtra = ",\n\tout uint srCoverageId : SV_Target1";
-constexpr std::string_view kAssignment = "\n\tsrCoverageId = g_SrPixelCoverageId;\n\t";
+constexpr std::string_view kAssignment = "\n\tsrCoverageId = g_SrPixelCoverageId & 0x3fffffffu;\n\tif ((g_SrPixelCoverageId & 0x80000000u) != 0u && oC0.w != 1.0) srCoverageId |= 0x40000000u;\n\t";
 // The cape PS initializes its pixel-position register with this exact emitter
 // branch. Neither arm exits main or changes the fragment coverage tail.
 constexpr std::string_view kCapePixelPosition = "float4 r5 = \n" R"hlsl(#ifdef CONAN_RECOMP
@@ -23,6 +23,7 @@ constexpr std::string_view kLoadBuffers =
 constexpr std::string_view kLoadAddress =
     "#define SR_LOAD_FLOAT4(STAGE,OFFSET) vk::RawBufferLoad<float4>(g_PushConstants.STAGE ## ShaderConstants + (OFFSET), 0x10)";
 constexpr std::string_view kPrefix = R"hlsl(// SrPixelCoverage patch v1: original PS 559F/2203/E6C7/3EF6/E83A/71CB; capture only.
+RWTexture2D<uint> g_SrReactiveMask : register(u1, space6);
 cbuffer SrPixelCoverage : register(b4, space4)
 {
     uint g_SrPixelCoverageId;
@@ -114,17 +115,34 @@ const std::string& AuditedParameters() {
 }
 }  // namespace
 
+bool IsVfxReactiveShader(uint64_t hash) {
+  return hash==0x201C30CD5C58A1BCull || hash==0x5C1E60F40BD1DC6Eull;
+}
 bool IsPixelCoverageShader(uint64_t hash) {
-  return hash == 0x559F422BEF5E5714ull || hash == 0x220353EB37491B13ull ||
+  return IsVfxReactiveShader(hash) || hash == 0x559F422BEF5E5714ull || hash == 0x220353EB37491B13ull ||
          hash == 0xE6C740EAC16B70D4ull || hash == 0x3EF6A4A3C740ADB1ull || hash == 0xE83A13DF3297C6CBull ||
-         hash == 0x71CB82D791DE8E77ull;
+         hash == 0x71CB82D791DE8E77ull ||
+         hash == 0xA828328313FF36B9ull || hash == 0x1A6669D4867145BCull || hash == 0xFC11F956CA7B42A2ull ||
+         hash == 0xADAF9F96B596F6EFull || hash == 0x3A7A1A60DE39C81Full || hash == 0xF2BB7B6551646033ull ||
+         hash == 0x04CC5C7EC9FDFD7Eull || hash == 0xC66813A81FDBD7C7ull;
 }
 bool IsPixelCoverageShaderPair(uint64_t vs, uint64_t ps) {
-  return (vs == 0x4F17209D364D5B51ull && ps == 0x559F422BEF5E5714ull) ||
+  return (vs==0x0408D37D5D96E869ull && IsVfxReactiveShader(ps)) ||
+         (vs == 0x4F17209D364D5B51ull && ps == 0x559F422BEF5E5714ull) ||
          (vs == 0x18B4F69400B7F0AFull && ps == 0x220353EB37491B13ull) ||
          (vs == 0xC20921D0DBBD2F1Full && ps == 0xE6C740EAC16B70D4ull) ||
          (vs == 0xC687EB65D635C5D7ull && (ps == 0x3EF6A4A3C740ADB1ull || ps == 0xE83A13DF3297C6CBull)) ||
-         (vs == 0xA5232A3184AA617Cull && ps == 0x71CB82D791DE8E77ull);
+         (vs == 0xA5232A3184AA617Cull && ps == 0x71CB82D791DE8E77ull) ||
+         // Exact observed instanced pairs: ownership only. Their vertex
+         // correspondence still requires its own independently audited route.
+         (vs == 0xDF1EB50388CC2563ull && (ps == 0xADAF9F96B596F6EFull || ps == 0xF2BB7B6551646033ull)) ||
+         (vs == 0xEA88A5BB6930F942ull && ps == 0xA828328313FF36B9ull) ||
+         (vs == 0x9A62E7C65051447Aull && ps == 0x04CC5C7EC9FDFD7Eull) ||
+         (vs == 0x315E6843ECE68A00ull && ps == 0xC66813A81FDBD7C7ull) ||
+         (vs == 0x8E5232F5E5E6760Eull && (ps == 0xA828328313FF36B9ull ||
+             ps == 0x1A6669D4867145BCull || ps == 0xFC11F956CA7B42A2ull)) ||
+         (vs == 0x1023A9B52C1407C1ull && (ps == 0xADAF9F96B596F6EFull ||
+             ps == 0x3A7A1A60DE39C81Full || ps == 0xF2BB7B6551646033ull));
 }
 bool SpecializePixelCoverageShader(uint64_t hash, std::string_view source,
                                    std::string& output, std::string& error) {
@@ -151,8 +169,13 @@ bool SpecializePixelCoverageShader(uint64_t hash, std::string_view source,
       return reject("Token-splicing line continuation is not audited");
     normalized += static_cast<char>(c);
   }
-  for (std::string_view name : {"SrPixelCoverage", "srCoverageId", "g_SrPixelCoverageId"})
+  for (std::string_view name : {"SrPixelCoverage", "srCoverageId", "g_SrPixelCoverageId", "g_SrReactiveMask"})
     if (normalized.find(name) != kNone) return reject("Pixel coverage reserved symbol collision");
+  const bool vfx=IsVfxReactiveShader(hash),vfx_depth=hash==0x201C30CD5C58A1BCull;
+  const std::string depth_output="out float4 oC0 : SV_Target0,\n\tout float oDepth : SV_Depth)";
+  const std::string_view actual_output=vfx_depth ? std::string_view(depth_output) : kOutput;
+  std::string expected_parameters=AuditedParameters();
+  if(vfx_depth) expected_parameters+=",\n\tout float oDepth : SV_Depth";
   std::string code = normalized;
   if (!Mask(code)) return reject("Unterminated comment or string in HLSL source");
   std::vector<Token> tokens;
@@ -181,7 +204,7 @@ bool SpecializePixelCoverageShader(uint64_t hash, std::string_view source,
       if (value != "SV_Target0" || ++target_count != 1)
         return reject("Pixel coverage requires only the audited SV_Target0 output");
     }
-    if (lower.starts_with("sv_depth") || lower.starts_with("sv_coverage") || lower.starts_with("sv_innercoverage"))
+    if ((!vfx_depth && lower.starts_with("sv_depth")) || lower.starts_with("sv_coverage") || lower.starts_with("sv_innercoverage"))
       return reject("Pixel coverage rejects custom depth/coverage semantics");
     if (value == "register" && token(i + 1) == "(" && Lower(token(i + 2)) == "b4" &&
         token(i + 3) == "," && Lower(token(i + 4)) == "space4")
@@ -230,17 +253,17 @@ bool SpecializePixelCoverageShader(uint64_t hash, std::string_view source,
   if (parameters_end == kNone || token(parameters_end + 1) != "{")
     return reject("Pixel coverage main body is missing");
   const auto parameters_begin = tokens[main + 1].at + 1;
-  if (std::string_view(normalized).substr(parameters_begin, tokens[parameters_end].at - parameters_begin) != AuditedParameters())
+  if (std::string_view(normalized).substr(parameters_begin, tokens[parameters_end].at - parameters_begin) != expected_parameters)
     return reject("Pixel coverage complete input/output signature is not audited");
   size_t outputs = 0;
   for (size_t i = main + 2; i < parameters_end; ++i) {
     if (token(i) == "inout") return reject("Pixel coverage main has an unsupported inout parameter");
     if (token(i) == "out") ++outputs;
   }
-  if (outputs != 1) return reject("Pixel coverage main must have exactly the audited color output");
+  if (outputs != (vfx_depth ? 2u : 1u)) return reject("Pixel coverage main must have exactly the audited color output");
   const size_t body = parameters_end + 1, end = match[body];
-  if (end == kNone || !Unique(code, kOutput)) return reject("Pixel coverage output declaration is not audited");
-  const size_t declaration = code.find(kOutput), close = declaration + kOutput.size() - 1;
+  if (end == kNone || !Unique(code, actual_output)) return reject("Pixel coverage output declaration is not audited");
+  const size_t declaration = code.find(actual_output), close = declaration + actual_output.size() - 1;
   if (declaration < tokens[main].at || close != tokens[parameters_end].at)
     return reject("Pixel coverage output declaration must finish main's parameter list");
   const size_t cape_branch=hash==0x71CB82D791DE8E77ull && Unique(normalized,kCapePixelPosition)
@@ -267,7 +290,7 @@ bool SpecializePixelCoverageShader(uint64_t hash, std::string_view source,
 
   // Descending edits keep normalized source offsets valid. All original bytes,
   // including helper returns and the entire original fragment tail, survive.
-  normalized.insert(final_return, kAssignment);
+  normalized.insert(final_return, vfx ? "\n\tsrCoverageId = 0u;\n\tif (oC0.w > 0.001) { uint ignored; InterlockedOr(g_SrReactiveMask[uint2(iPos.xy)], 1u, ignored); }\n\t" : kAssignment);
   normalized.insert(close, kExtra);
   std::string result(kPrefix);
   result += normalized;
@@ -276,7 +299,7 @@ bool SpecializePixelCoverageShader(uint64_t hash, std::string_view source,
   return true;
 }
 std::string_view PixelCoverageShaderCacheIdentity() {
-  static const std::string identity = std::string("pixel-coverage-structural-audit-v2\n") +
+  static const std::string identity = std::string("pixel-coverage-structural-audit-v5-opaque-alpha\n") +
       std::string(kPrefix) + std::string(kOutput) + std::string(kExtra) +
       std::string(kAssignment) + std::string(kTail) + ScaledTail() + std::string(kCapePixelPosition) + AuditedParameters() +
       std::string(kLoadBuffers) + std::string(kLoadAddress);

@@ -390,3 +390,26 @@ SR_TEST(runtime_lifecycle_changes_generation) {
   SR_CHECK(f.Sample(old).coverage != RexTrackingCoverage::Complete);
   f.api->unwatch(f.session, old); f.api->unwatch(f.session, next);
 }
+
+SR_TEST(runtime_fault_or_unwatch_preserves_neighbor_coverage_in_same_allocation) {
+  Fixture f;
+  if (!f.session) return;
+  SR_CHECK(f.Allocate(65536));
+  const auto watch_a = f.Watch(0x04000000);
+  const auto watch_b = f.Watch(0x04002000);
+  const auto before_b = f.Sample(watch_b);
+  SR_CHECK(before_b.coverage == RexTrackingCoverage::Complete);
+  *f.memory.TranslatePhysical<volatile uint8_t*>(0x04000000) = 77;
+  SR_CHECK(f.Sample(watch_a).coverage != RexTrackingCoverage::Complete);
+  const auto after_fault_b = f.Sample(watch_b);
+  SR_CHECK(after_fault_b.coverage == RexTrackingCoverage::Complete);
+  SR_CHECK_EQ(after_fault_b.invalidation_epoch, before_b.invalidation_epoch);
+  f.api->unwatch(f.session, watch_a);
+  const auto after_unwatch_b = f.Sample(watch_b);
+  SR_CHECK(after_unwatch_b.coverage == RexTrackingCoverage::Complete);
+  const auto rewatched_a = f.Watch(0x04000000);
+  SR_CHECK(f.Sample(rewatched_a).coverage == RexTrackingCoverage::Complete);
+  f.api->unwatch(f.session, rewatched_a);
+  f.api->unwatch(f.session, watch_b);
+
+}

@@ -46,11 +46,17 @@ def main():
     for name in ('container','cache','emitter','common','dxc','result'):p.add_argument('--'+name,type=Path,required=True)
     p.add_argument('--stage',choices=('vs','ps'),required=True)
     p.add_argument('--profile',choices=('portable','global'),default='portable');a=p.parse_args()
+    audit='0 0 0\n'  # Missing proof is unknown, never a fabricated zero compile.
     try:
         compiled=compile_shader(a.container,a.stage,a.cache,Toolchain(a.emitter,a.common,a.dxc),profile=a.profile)
+        if hasattr(compiled,'cache_hit') and hasattr(compiled,'compiler_invocations'):
+            audit=f'1 {int(compiled.cache_hit)} {compiled.compiler_invocations}\n'
         data=ready(a.stage,compiled.binary_path.read_bytes(),a.profile) if compiled.status=='ready' else failure(a.stage,compiled.diagnostic,a.profile)
     except (OSError,ValueError,TypeError) as e:data=failure(a.stage,str(e),a.profile)
     a.result.parent.mkdir(parents=True,exist_ok=True);temporary=a.result.with_suffix('.pending')
+    audit_path=a.result.with_name(a.result.name+'.audit')
+    audit_pending=audit_path.with_name(audit_path.name+'.pending')
+    audit_pending.write_text(audit,encoding='ascii');os.replace(audit_pending,audit_path)
     temporary.write_bytes(data);os.replace(temporary,a.result)
     return 0
 if __name__=='__main__':raise SystemExit(main())

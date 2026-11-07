@@ -1,4 +1,5 @@
 #include "game_frame.h"
+#include "vulkan_cache_audit.h"
 #include <chrono>
 #include <cstdlib>
 #include <thread>
@@ -181,15 +182,33 @@ bool GameFrame::RecordFrame(std::vector<guest::RenderPacket>& packets_,const gue
   if(dump && !renderer_.DumpTargets(command_,e)) return fail();
   renderer_.FinishSubmission();
   auto source=renderer_.SelectFrontbuffer(swap,e);if(!source) return fail();
+  // Output resolution affects this immutable presentation snapshot, never guest
+  // pitches, resolve coordinates or vertex transforms. Internal replay scaling
+  // remains a separate unavailable capability until its consumer is implemented.
+  auto output_extent=source->extent;
+  const auto selected_extent=this->output_extent ? this->output_extent() : VkExtent2D{source->extent.width,source->extent.height};
+  const VkExtent3D requested_extent{selected_extent.width,selected_extent.height,1};
+  PFN_vkCmdBlitImage blit=nullptr;
+  VkFilter filter=VK_FILTER_NEAREST;
+  if(requested_extent.width && requested_extent.height &&
+      (requested_extent.width!=source->extent.width || requested_extent.height!=source->extent.height)) {
+    VkFormatProperties format{};c_.f.vkGetPhysicalDeviceFormatProperties(c_.physical,source->format,&format);
+    const auto required=VK_FORMAT_FEATURE_BLIT_SRC_BIT|VK_FORMAT_FEATURE_BLIT_DST_BIT;
+    if((format.optimalTilingFeatures&required)==required && c_.f.vkGetDeviceProcAddr) {
+      blit=reinterpret_cast<PFN_vkCmdBlitImage>(c_.f.vkGetDeviceProcAddr(c_.device,"vkCmdBlitImage"));
+      if(blit) output_extent=requested_extent;
+      if(format.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) filter=VK_FILTER_LINEAR;
+    }
+  }
   // A mailbox owns a snapshot, never an image that the next guest frame mutates.
   // In-flight submissions keep their snapshot referenced, so a snapshot held
   // only by this pool is free to overwrite.
   constexpr guest::ResourceId snapshot_id=UINT64_MAX-16;
   auto& resources=renderer_.Resources();
-  for(auto& snapshot:snapshots_) if(snapshot.use_count()==1 && snapshot->format==source->format && snapshot->extent.width==source->extent.width && snapshot->extent.height==source->extent.height) {output=snapshot;break;}
+  for(auto& snapshot:snapshots_) if(snapshot.use_count()==1 && snapshot->format==source->format && snapshot->extent.width==output_extent.width && snapshot->extent.height==output_extent.height) {output=snapshot;break;}
   if(!output) {
     resources.ForgetTexture(snapshot_id);
-    output=resources.ResolveTexture(snapshot_id,source->format,source->extent,1,1,false,renderer_.Images(),e);if(!output) return fail();
+    output=resources.ResolveTexture(snapshot_id,source->format,output_extent,1,1,false,renderer_.Images(),e);if(!output) return fail();
     resources.ForgetTexture(snapshot_id);
     std::erase_if(snapshots_,[](auto& s){return s.use_count()==1;});
     if(snapshots_.size()<4) snapshots_.push_back(output);
@@ -197,7 +216,12 @@ bool GameFrame::RecordFrame(std::vector<guest::RenderPacket>& packets_,const gue
   VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
   if(!renderer_.Images().Transition(command_,source->handle,range,ImageUsage::TransferSource(),e) || !renderer_.Images().Transition(command_,output->handle,range,ImageUsage::TransferDestination(),e)) return fail();
   VkImageCopy copy{};copy.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.dstSubresource=copy.srcSubresource;copy.extent=source->extent;
-  c_.f.vkCmdCopyImage(command_,source->handle,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,output->handle,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&copy);
+  if(blit) {
+    VkImageBlit region{};region.srcSubresource=copy.srcSubresource;region.dstSubresource=copy.dstSubresource;
+    region.srcOffsets[1]={int32_t(source->extent.width),int32_t(source->extent.height),1};
+    region.dstOffsets[1]={int32_t(output->extent.width),int32_t(output->extent.height),1};
+    blit(command_,source->handle,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,output->handle,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&region,filter);
+  } else c_.f.vkCmdCopyImage(command_,source->handle,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,output->handle,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&copy);
   if(!renderer_.Images().Transition(command_,source->handle,range,ImageUsage::Sampled(),e) || !renderer_.Images().Transition(command_,output->handle,range,ImageUsage::Sampled(),e)) return fail();
   if(timestamps_) {c_.f.vkCmdWriteTimestamp(command_,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,timestamps_,uint32_t(slot*2+1));}
   if(!Check(c_.f.vkEndCommandBuffer(upload_),"End game uploads",e) || !Check(c_.f.vkEndCommandBuffer(command_),"End game frame",e) || !Check(c_.f.vkResetFences(c_.device,1,&fence_),"Reset game fence",e)) return fail();
@@ -210,7 +234,7 @@ bool GameFrame::RecordFrame(std::vector<guest::RenderPacket>& packets_,const gue
     queue_ready=std::chrono::steady_clock::now();
     if(!Check(c_.f.vkQueueSubmit(c_.graphics_queue,1,&submit,fence_),"Submit game frame",e)) return fail();
   }
-  slot_submitted_[slot]=true;slot_serial_[slot]=serial_;
+  slot_submitted_[slot]=true;slot_serial_[slot]=serial_;++VulkanCacheAudit::frames;
   if(timestamps_) slot_swap_[slot]=swap.guest_swap;
   // Loading frames stage hundreds of MB; keeping two of them in flight can
   // exhaust a shared-memory iGPU. Finish such a frame before recording more.

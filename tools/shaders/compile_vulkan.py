@@ -17,6 +17,8 @@ class CompileResult:
  binary_path:Path|None=None
  metadata_path:Path|None=None
  diagnostic:str=''
+ cache_hit:bool=False
+ compiler_invocations:int=0
 
 def digest(data):return hashlib.sha256(data).hexdigest()
 def cache_key(container_bytes,stage,emitter_digest,common_digest,dxc_digest,arguments,contract,backend='vulkan'):
@@ -36,7 +38,8 @@ def valid_spirv(data):
  return magic==0x07230203 and 0x10000<=version<=0x10300 and bound>0 and reserved==0
 
 def compile_shader(container,stage,output_root,tools,*,profile='portable'):
- key=''
+ key='';invocations=0
+ def failed(reason):return CompileResult('failed',key,diagnostic=reason,compiler_invocations=invocations)
  try:
   if profile not in ('portable','global'):raise ValueError('Unknown Vulkan compiler profile: '+str(profile))
   backend='vulkan';abi=ABI;adapted_common=None
@@ -54,7 +57,7 @@ def compile_shader(container,stage,output_root,tools,*,profile='portable'):
   try:
    data=binary.read_bytes();m=json.loads(metadata.read_text(encoding='utf-8'))
    if m.get('schema')==1 and m.get('backend')==backend and m.get('abi')==abi and m.get('stage')==stage and m.get('cache_key')==key and m.get('binary_sha256')==digest(data) and valid_spirv(data):
-    return CompileResult('ready',key,binary,metadata)
+    return CompileResult('ready',key,binary,metadata,cache_hit=True)
   except (OSError,ValueError,TypeError):pass
   directory.mkdir(parents=True,exist_ok=True)
   with tempfile.TemporaryDirectory(prefix='compile-',dir=directory) as temp:
@@ -63,19 +66,21 @@ def compile_shader(container,stage,output_root,tools,*,profile='portable'):
    if adapted_common is not None:common=work/'shader_common.h';common.write_bytes(adapted_common)
    # No shell quoting: both Unicode and spaces remain one argument.
    try:
+    invocations+=1
     result=subprocess.run([str(Path(tools.emitter).resolve()),str(common.resolve()),str(work.resolve()),str(source.resolve())],capture_output=True,text=True,errors='replace',timeout=60)
-   except subprocess.TimeoutExpired:return CompileResult('failed',key,diagnostic='emitter timeout (60 seconds)')
+   except subprocess.TimeoutExpired:return failed('emitter timeout (60 seconds)')
    hlsl=work/('shader.'+stage+'.hlsl')
-   if result.returncode or not hlsl.exists():return CompileResult('failed',key,diagnostic='emitter: '+(result.stderr+result.stdout)[:8192])
+   if result.returncode or not hlsl.exists():return failed('emitter: '+(result.stderr+result.stdout)[:8192])
    compiled=work/'shader.spv'
    try:
+    invocations+=1
     result=subprocess.run([str(Path(tools.dxc).resolve()),*args,'-Qstrip_debug',str(hlsl.resolve()),'-Fo',str(compiled.resolve())],capture_output=True,text=True,errors='replace',timeout=120)
-   except subprocess.TimeoutExpired:return CompileResult('failed',key,diagnostic='DXC timeout (120 seconds)')
-   if result.returncode or not compiled.exists():return CompileResult('failed',key,diagnostic='DXC: '+(result.stderr+result.stdout)[:8192])
+   except subprocess.TimeoutExpired:return failed('DXC timeout (120 seconds)')
+   if result.returncode or not compiled.exists():return failed('DXC: '+(result.stderr+result.stdout)[:8192])
    data=compiled.read_bytes()
-   if not valid_spirv(data):return CompileResult('failed',key,diagnostic='DXC output is not Vulkan 1.1 SPIR-V')
+   if not valid_spirv(data):return failed('DXC output is not Vulkan 1.1 SPIR-V')
    m={'schema':1,'backend':backend,'abi':abi,'stage':stage,'cache_key':key,'fingerprints':fingerprints,'arguments':args,'contract':contract,'container_sha256':digest(raw),'binary_sha256':digest(data)}
    pending=work/'artifact.json';pending.write_text(json.dumps(m,sort_keys=True,indent=2),encoding='utf-8')
    os.replace(compiled,binary);os.replace(pending,metadata)
-  return CompileResult('ready',key,binary,metadata)
- except (OSError,ValueError,TypeError) as e:return CompileResult('failed',key,diagnostic=str(e))
+  return CompileResult('ready',key,binary,metadata,compiler_invocations=invocations)
+ except (OSError,ValueError,TypeError) as e:return failed(str(e))

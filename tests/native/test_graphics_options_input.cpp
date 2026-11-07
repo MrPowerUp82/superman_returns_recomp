@@ -56,7 +56,7 @@ SR_TEST(graphics_options_keyboard_and_gamepad_share_navigation_and_requests) {
   SR_CHECK_EQ(options->Snapshot().requested[0],0);
   menu.SetInput(MenuInputSource::kGamepad,{}); menu.TickInput();
   menu.SetInput(MenuInputSource::kKeyboard,{kMenuUp,true}); menu.TickInput();
-  SR_CHECK_EQ(menu.Snapshot().selected,4u);
+  SR_CHECK_EQ(menu.Snapshot().selected,kGraphicsOptionCount-1);
 }
 
 SR_TEST(graphics_options_revoked_pause_closes_and_retains_capture_until_neutral) {

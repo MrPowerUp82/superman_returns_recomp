@@ -204,5 +204,31 @@ var soloAgain = coopSettings.BuildArgumentList();
 Check(!soloAgain.Any(a => a.StartsWith("--sr_coop_")) && soloAgain.Contains("--sr_native_api=vulkan") &&
     soloAgain.Contains("--mnk_mode=true") && soloAgain.Contains("--sr_lsfg=true"),
     "disabling co-op restores solo graphics and input");
+// M5: the INI stores requests and merges only fields changed by this launcher.
+var sharedPath = Path.Combine(fixture, "shared-graphics.ini");
+File.WriteAllText(sharedPath, "# retained comment\nlanguage=pt-BR\ndlss=1\nrt_shadows=1\nfps_limit=60\nfuture_setting=keep\n");
+var firstWriter = LauncherSettings.Load(sharedPath);
+var secondWriter = LauncherSettings.Load(sharedPath);
+firstWriter.Dlss = 4; firstWriter.Save(sharedPath);
+secondWriter.Language = "en"; secondWriter.Save(sharedPath);
+var shared = LauncherSettings.Load(sharedPath);
+Check(shared.Dlss == 4 && shared.RtShadows == 1 && shared.Language == "en",
+    "launcher merges its changed field while retaining another writer's graphics requests");
+Check(File.ReadAllText(sharedPath).Contains("future_setting=keep") && File.ReadAllText(sharedPath).Contains("# retained comment"),
+    "launcher preserves unknown keys and comments in the shared INI");
+Check(!File.ReadAllText(sharedPath).Contains("applied") && !File.ReadAllText(sharedPath).Contains("capable"),
+    "launcher persists requested intent without claiming applied GPU execution");
+for (var mode = 0; mode <= 4; ++mode) {
+    shared.Dlss = mode; shared.Save(sharedPath);
+    Check(LauncherSettings.Load(sharedPath).Dlss == mode, $"DLSS requested mode {mode} survives restart");
+}
+shared.GameExe = settings.GameExe; shared.GameData = settings.GameData;
+Check(shared.CreateLaunch(fixture, settingsPath: sharedPath).Environment["SR_LAUNCHER_SETTINGS"] == Path.GetFullPath(sharedPath),
+    "launcher gives the game the exact shared INI path across different directories");
+var migrationPath = Path.Combine(fixture, "migration.ini");
+File.WriteAllText(migrationPath, "language=pt-BR\n");
+var migration = LauncherSettings.Load(migrationPath); migration.Save(migrationPath);
+Check(!File.ReadAllText(migrationPath).Contains("dlss=") && !migration.BuildArgumentList().Any(a => a.StartsWith("--sr_dlss=")),
+    "untouched launcher defaults leave legacy graphics fields available for game migration");
 Console.WriteLine($"{failed} failed checks");
 return failed == 0 ? 0 : 1;

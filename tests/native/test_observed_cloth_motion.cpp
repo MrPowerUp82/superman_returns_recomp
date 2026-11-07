@@ -12,6 +12,7 @@ struct Fixture {
   TemporalFetchResource index{0,100,8,4};
   uint32_t metadata[224][4]{};
   Fixture() {
+    cmd.dynamic_vertex_fetch=true;
     cmd.observed_render.token={0x20000,7};
     cmd.observed_render.render=0x82301510;cmd.observed_render.vtable=0x82021DA8;
     auto& c=cmd.observed_render.cloth;
@@ -36,6 +37,13 @@ struct Fixture {
     return CaptureObservedClothMotionIdentity(0xA5232A3184AA617Cull,batch,cmd,resources,index,metadata,out);
   }
 };
+}
+SR_TEST(cloth_motion_static_ia_ignores_unused_fetch_descriptors_without_weakening_mesh_proof) {
+  Fixture f;ObservedClothMotionIdentity out;
+  f.cmd.dynamic_vertex_fetch=false;f.metadata[0][0]=99;
+  SR_CHECK(f.Capture(out));
+  f.cmd.dynamic_vertex_fetch=true;SR_CHECK(!f.Capture(out));
+  f.cmd.dynamic_vertex_fetch=false;++f.batch.streams[2].stride;SR_CHECK(!f.Capture(out));
 }
 SR_TEST(cloth_motion_ring_rotation_preserves_slots_but_retains_actual_versions) {
   Fixture f;ObservedClothMotionIdentity first,second;

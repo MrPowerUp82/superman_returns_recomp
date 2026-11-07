@@ -10,6 +10,17 @@ bool ImmediateRenderer::Initialize(Error& e) {
   pixel_.requirements.sampled_images=32;pixel_.requirements.samplers=32;pixel_.requirements.storage_buffers=1;pixel_.requirements.descriptor_sets=3;pixel_.requirements.fragment_input_components=6;
   return descriptors_.Initialize(e) && pipelines_.Initialize(descriptors_.Layouts(),{},e);
 }
+bool ImmediateRenderer::Prewarm(Error& e) {
+  guest::DrawPacket draw;draw.inline_vertices=true;draw.inline_stride=sizeof(UIVertex);
+  draw.attributes={{0,0,0x2c23a5,0,0},{0,8,0x2c23a5,5,0},{0,16,0x1a2086,10,0}};
+  draw.registers[0x104]=15;draw.registers[0x201]=6|(7<<8)|(1<<16)|(7<<24);
+  for(auto primitive:{guest::Primitive::kLines,guest::Primitive::kTriangles}) {
+    draw.primitive=primitive;
+    for(auto format:{VK_FORMAT_R8G8B8A8_UNORM,VK_FORMAT_B8G8R8A8_UNORM,VK_FORMAT_R8G8B8A8_SRGB,VK_FORMAT_B8G8R8A8_SRGB})
+      if(!pipelines_.PrewarmBuiltin(draw,format,vertex_,&pixel_,e))return false;
+  }
+  return true;
+}
 bool ImmediateRenderer::SetBatch(ResourceStore& resources,std::span<const UIVertex> vertices,std::span<const uint16_t> indices,Error& e) {
   vertices_.reset();indices_.reset();vertex_count_=index_count_=0;
   if(vertices.empty() || vertices.size()>1048576 || indices.size()>4194304) {e={"UI batch",VK_ERROR_INITIALIZATION_FAILED,"Invalid UI vertex/index count"};return false;}

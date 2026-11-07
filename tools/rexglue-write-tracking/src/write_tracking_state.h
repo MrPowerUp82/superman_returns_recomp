@@ -15,6 +15,7 @@ class WriteTrackingState {
   WriteTrackingState();
   uint64_t Allocate(uint32_t address, uint32_t length);
   void Release(uint32_t address, uint32_t length);
+  void ReleaseCoverage(uint32_t address, uint32_t length);
   void Invalidate(uint32_t address, uint32_t length);
   void BeginWrite(uint32_t address, uint32_t length);
   void EndWrite(uint32_t address, uint32_t length);

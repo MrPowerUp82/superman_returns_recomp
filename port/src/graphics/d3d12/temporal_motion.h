@@ -5,6 +5,7 @@
 #include <d3d12.h>
 #include <cstdint>
 #include <memory>
+#include <filesystem>
 #include <span>
 
 namespace superman_returns::graphics::d3d12 {
@@ -21,7 +22,9 @@ struct MotionGeometry {
   uint32_t vertex_count = 0;
   bool correspondence_valid = false;
   // Previous may be null ONLY when correspondence_valid is false. In that case
-  // current geometry still draws, with zero velocity AND validity zero.
+  // current geometry still draws with its invalidator depth test, zero velocity AND validity
+  // zero. This conservatively clears background history for no-depth-write
+  // contributors; valid correspondence continues to require depth EQUAL.
   // Supply the original draw's raster state; omitted fields retain old defaults.
   D3D12_CULL_MODE cull_mode = D3D12_CULL_MODE_NONE;
   bool front_counter_clockwise = false;
@@ -32,7 +35,11 @@ struct MotionGeometry {
   // Audited original draw's coverage ID. Positive IDs require inputs.coverage
   // and filter replay to that owner. Zero ALWAYS uses legacy unmasked replay,
   // even with a map: opaque draws/unknown invalidators retain original order.
+  // Map bits0..29 are the ID; bit30 means the original PS observed mixed alpha.
+  // That owner writes validity0, clearing any background history beneath it.
   uint32_t coverage_id = 0;
+  // Original comparison for no-depth-write contributors; EQUAL for depth writers.
+  D3D12_COMPARISON_FUNC invalidator_depth_func = D3D12_COMPARISON_FUNC_ALWAYS;
 };
 struct TemporalMotionInputs {
   // Single-sample, one mip/layer, matching size, ALLOW_DEPTH_STENCIL texture:
@@ -45,10 +52,16 @@ struct TemporalMotionInputs {
   // LAST AUDITED writer, written by the ACTUAL audited original PS after its
   // alpha/discard/depth tests. Unsupported PS paths must unbind this MRT;
   // retained IDs need not identify the globally nearest/latest scene writer.
-  // Preserve original draw order, EQUAL and unmasked unknown invalidators.
+  // Preserve original draw order, EQUAL for matches and original visibility for invalidators.
   // Zero denotes no audited writer. Keep contents immutable through the slot
   // fence; pointer/size alone cannot prove lineage.
   ID3D12Resource* coverage = nullptr;
+  // Explicit private readback diagnostic, default off. EQUAL-depth replay tags
+  // draw ordinal+1 as exact low/high bytes in RG16F, with an R8 coverage flag.
+  // These are triangle attribution IDs, NEVER motion or correspondence proof.
+  // Requires no coverage texture/IDs and current-as-previous valid geometry.
+  // Use a separate TemporalMotion instance; never feed its outputs to NGX/RT.
+  bool diagnostic_draw_ids = false;
 };
 struct TemporalMotionOutputs {
   ID3D12Resource* velocity = nullptr; // R16G16_FLOAT current->previous in render pixels.
@@ -65,7 +78,7 @@ class TemporalMotion {
   // This bounds submitted GPU work, not a module-owned vertex allocation.
   static constexpr uint32_t kMaxVertices = (64u * 1024 * 1024 / 16 / 3) * 3;
   static constexpr uint32_t kMaxDimension = 8192, kMaxPixels = 16 * 1024 * 1024;
-  // Lifetime cache limit, including the two default D32/D24 states. No eviction:
+  // Lifetime cache limit, including 24 prewarmed cull/front/D32/D24/EQUAL/ALWAYS states. No eviction:
   // queued PSOs remain alive across all slots. New combinations fail at capacity;
   // existing states still work. Scissor is dynamic and consumes no cache entry.
   static constexpr uint32_t kMaxRasterStates = 128;
@@ -73,7 +86,10 @@ class TemporalMotion {
   ~TemporalMotion();
   TemporalMotion(const TemporalMotion&) = delete;
   TemporalMotion& operator=(const TemporalMotion&) = delete;
-  HRESULT Initialize(ID3D12Device* device);
+  // Optional metadata journal replays previously observed raster/depth states
+  // before gameplay; no shader bytes are stored. Startup also prepares the
+  // 96 zero-bias cull/front/depth/invalidator combinations.
+  HRESULT Initialize(ID3D12Device* device, const std::filesystem::path& observed_cache = {});
   // Caller MUST wait for ALL GPU use of this slot before BeginFrame(slot 0..2),
   // and all slots before destruction. No internal fence or implicit waiting.
   // Resets only this slot. One successful Render per BeginFrame; failed input
@@ -90,13 +106,14 @@ class TemporalMotion {
   // the actual audited original PS; a guessed/CPU mask does not prove alpha or
   // discard behavior. This does not emulate translucency/custom coverage.
   // ID-zero geometry keeps legacy unmasked semantics, including unknown draws
-  // writing validity zero under EQUAL. Retain original replay order: audited
+  // writing validity zero under the selected depth comparison. Retain original replay order: audited
   // last-writer IDs are not a global nearest-surface oracle. Caller must still
   // exclude unsupported positive-validity sources. correspondence_valid=false
   // invalidates history and does NOT itself implement alpha/coverage semantics.
   // Cull must be NONE/FRONT/BACK, float biases finite, and enabled scissor must
   // satisfy 0<=left<=right<=width and 0<=top<=bottom<=height (empty is legal).
-  // Render sets its own full viewport/per-draw scissor, EQUAL/no writes, and clears
+  // Render sets its own full viewport/per-draw scissor, EQUAL for matches and
+  // the original comparison for invalidators (neither writes depth), and clears
   // both outputs. It clobbers graphics root signature/arguments, PSO, descriptor
   // heaps (binds its private coverage heap), OM RTV/DSV, IA topology,
   // viewport/scissor, predication,

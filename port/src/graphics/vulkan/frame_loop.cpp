@@ -1,4 +1,5 @@
 #include "frame_loop.h"
+#include "../presentation_pacing.h"
 #include <exception>
 namespace superman_returns::graphics::vulkan {
 FrameLoop::~FrameLoop() {
@@ -180,7 +181,11 @@ FrameOutcome FrameLoop::DrawGame(Context& c,Swapchain& s,const FrameWork& work,E
   present.swapchainCount = 1;
   present.pSwapchains = &s.handle;
   present.pImageIndices = &index;
+  const auto present_entry=PresentationNowNs();
   r = f.vkQueuePresentKHR(c.present_queue, &present);
+  const auto present_return=PresentationNowNs();
+  if(queue_lock.owns_lock()) queue_lock.unlock();
+  if(work.presentation) work.presentation(present_entry,present_return,r);
   cursor_ = (cursor_ + 1) % slots_.size();
   if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR)
     ++presented;

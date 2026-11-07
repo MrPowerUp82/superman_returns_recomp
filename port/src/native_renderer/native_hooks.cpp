@@ -342,7 +342,7 @@ bool NativeBulkConstantsEnabled() {
 bool TryNativeDrawSubmission(PPCContext& ctx,uint8_t* base,bool indexed) {
   static const bool enabled=[] {
     const auto* value=std::getenv("SR_NATIVE_XDK_DRAW_SUBMISSION");
-    return value && *value=='1';
+    return !value || !*value || *value!='0';
   }();
   if(!enabled || !native::Enabled() || !base) return false;
   const uint64_t dev=ctx.r3.u64;

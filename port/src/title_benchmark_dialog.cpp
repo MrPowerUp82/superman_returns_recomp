@@ -10,7 +10,6 @@
 #endif
 
 #include "title_benchmark.h"
-#include "graphics/graphics_options_dialog.h"
 
 namespace superman_returns::benchmark {
 namespace {
@@ -46,9 +45,6 @@ void ResultsDialog::OnDraw(ImGuiIO& io) {
   ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f), ImGuiCond_Always,
                           ImVec2(0.5f, 0.5f));
   ImGui::SetNextWindowBgAlpha(0.85f);
-  // Portuguese text needs accented glyphs.
-  ImFont* font = graphics::GraphicsOptionsFont();
-  if (font) ImGui::PushFont(font);
   ImGui::Begin("Benchmark - Superman Returns", nullptr,
                ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings);
   if (r.valid) ImGui::TextUnformatted("Resultado válido");
@@ -69,7 +65,6 @@ void ResultsDialog::OnDraw(ImGuiIO& io) {
   ImGui::PopTextWrapPos();
   const bool close = ImGui::Button("Fechar") || CloseKeyPressed();
   ImGui::End();
-  if (font) ImGui::PopFont();
   if (close && quit_) {
     REXLOG_INFO("benchmark: results closed, quitting");
     quitting_ = true;

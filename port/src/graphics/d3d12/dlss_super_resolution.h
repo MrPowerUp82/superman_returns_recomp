@@ -10,9 +10,9 @@ struct ID3D12Fence;
 
 namespace superman_returns::graphics::d3d12 {
 
-enum class DlssRequested { Off, Quality };
+enum class DlssRequested { Off, Quality, Balanced, Performance, DLAA };
 enum class DlssSupport { NotQueried, SdkUnavailable, InitializationFailed, Unsupported, Supported };
-enum class DlssApplied { Off, PendingGpu, Quality };
+enum class DlssApplied { Off, PendingGpu, Quality, Balanced, Performance, DLAA };
 enum class DlssDepth { Unknown, Forward, Reversed }; // Device depth [0,1], not linear/view-space Z.
 enum class DlssMotion { Unknown, CurrentToPreviousPixels }; // After multiplication by mvScaleX/Y.
 enum class DlssError {
@@ -33,6 +33,7 @@ struct DlssResult {
 // Caller attests semantic facts established from actual renderer data. These default
 // to unverified: a non-null depth/velocity texture is not evidence of correct contents.
 struct DlssFrameContract {
+    DlssRequested mode = DlssRequested::Quality;
     std::uint32_t renderWidth = 0, renderHeight = 0;
     std::uint32_t outputWidth = 0, outputHeight = 0;
     bool conventionsVerified = false;
@@ -41,6 +42,9 @@ struct DlssFrameContract {
     bool motionIncludesCameraObjectsAndDeformation = false;
     // Explicit choice to accept ghosting: vectors cover the camera only.
     bool motionCameraOnlyAccepted = false;
+    // Every unverified surface pixel is marked in the R8 current-color bias mask.
+    // Partial coverage is deliberately distinct from full object correspondence.
+    bool motionPartialWithRejectionMask = false;
     DlssDepth depth = DlssDepth::Unknown;
     DlssMotion motion = DlssMotion::Unknown;
     bool hdr = false;
@@ -67,9 +71,11 @@ struct DlssEvaluation {
     ID3D12Resource* output = nullptr;
     ID3D12Resource* depth = nullptr;
     ID3D12Resource* motion = nullptr;
+    ID3D12Resource* rejectionMask = nullptr;
     // Exact ALL_SUBRESOURCES states: NON_PIXEL_SHADER_RESOURCE for every input and
     // UNORDERED_ACCESS for output. No combined read states. SDK restores these states.
     std::uint32_t colorState = 0, outputState = 0, depthState = 0, motionState = 0;
+    std::uint32_t rejectionMaskState = 0;
     DlssFrameContract frame;
 };
 

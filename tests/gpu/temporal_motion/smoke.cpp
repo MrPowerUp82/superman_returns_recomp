@@ -1,4 +1,5 @@
 #include "temporal_motion.h"
+#include "shaders/dlss_depth_motion_cs.h"
 #include "fixture_vs.h"
 #include "fixture_ps.h"
 #include <d3d12sdklayers.h>
@@ -147,7 +148,7 @@ struct Depth {
   ComPtr<ID3D12PipelineState> pso;
   Depth(GPU& gpu, ID3D12Resource* clip, UINT64 offset, DXGI_FORMAT typeless, bool occlude = false,
         UINT width = W, UINT height = H, UINT samples = 1,
-        const MotionGeometry& raster = {}, bool record_coverage = false) {
+        const MotionGeometry& raster = {}, bool record_coverage = false, ID3D12Resource* predicate = nullptr) {
     const DXGI_FORMAT typed = typeless == DXGI_FORMAT_R24G8_TYPELESS
                                  ? DXGI_FORMAT_D24_UNORM_S8_UINT : DXGI_FORMAT_D32_FLOAT;
     D3D12_HEAP_PROPERTIES props{}; props.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -224,7 +225,9 @@ struct Depth {
       gpu.list->RSSetViewports(1, &vp); gpu.list->RSSetScissorRects(1, &sc);
       gpu.list->OMSetRenderTargets(record_coverage ? 1 : 0,record_coverage ? &color : nullptr,FALSE,&handle);
       gpu.list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+      if(predicate) gpu.list->SetPredication(predicate,0,D3D12_PREDICATION_OP_EQUAL_ZERO);
       gpu.list->DrawInstanced(3,1,0,0);
+      if(predicate) gpu.list->SetPredication(nullptr,0,D3D12_PREDICATION_OP_EQUAL_ZERO);
       if (occlude) {
         D3D12_RECT rect{0,0,LONG(width/2),LONG(height)};
         gpu.list->ClearDepthStencilView(handle, D3D12_CLEAR_FLAG_DEPTH, .25f, 0, 1, &rect);
@@ -285,6 +288,25 @@ struct Readback {
     return value;
   }
 };
+// Same-frame decision is written after recording draws, before queue submission.
+// A failed DXR stage leaves 1 and the original shadow draw executes unchanged.
+static void SameFrameShadowFallback(GPU& gpu) {
+  auto clips=gpu.Upload(Fullscreen());
+  auto predicate=gpu.Buffer(8,D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);
+  void* mapped=nullptr;D3D12_RANGE no_read{0,0};
+  Check(predicate->Map(0,&no_read,&mapped),"shadow predicate map");
+  for(bool success:{false,true}) {
+    uint64_t execute=1;std::memcpy(mapped,&execute,8);
+    Depth depth(gpu,clips.Get(),0,DXGI_FORMAT_R32_TYPELESS,false,W,H,1,{},false,predicate.Get());
+    if(success) {execute=0;std::memcpy(mapped,&execute,8);}
+    Readback read(gpu,depth.texture.Get(),D3D12_RESOURCE_STATE_DEPTH_READ);
+    gpu.Submit();
+    Require(std::abs(read.DepthValue(W/2,H/2)-(success?1.f:.5f))<1e-6f,
+        "same-frame predicate did not preserve fallback / suppress successful DXR shadow draw");
+  }
+  D3D12_RANGE no_write{0,0};predicate->Unmap(0,&no_write);
+  std::cout<<"PASS: same-frame late predicate suppresses successful DXR shadows; failure preserves raster draw\n";
+}
 static void Pixel(Readback& velocity, Readback& validity, UINT x, UINT y,
                   float dx, float dy, uint8_t valid = 1) {
   const auto v = velocity.Velocity(x,y);
@@ -295,6 +317,95 @@ static void Pixel(Readback& velocity, Readback& validity, UINT x, UINT y,
     throw std::runtime_error("motion pixel mismatch");
   }
 }
+// Exercises the actual shader shipped to NGX: legacy camera-only and masked
+// post-VS composition, including root-constant packing and signed RG16F pixels.
+static void DlssInputComposition(GPU& gpu) {
+  std::array<ComPtr<ID3D12Resource>,7> textures;
+  const DXGI_FORMAT formats[]{DXGI_FORMAT_R32_FLOAT,DXGI_FORMAT_R16G16_FLOAT,
+      DXGI_FORMAT_R8_UINT,DXGI_FORMAT_R32_UINT,DXGI_FORMAT_R16G16_FLOAT,DXGI_FORMAT_R32_FLOAT,DXGI_FORMAT_R8_UNORM};
+  ComPtr<ID3D12DescriptorHeap> views,rtvs;
+  D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+  hd.NumDescriptors=7;hd.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+  Check(gpu.device->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&views)),"DLSS input views");
+  hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;hd.NumDescriptors=4;hd.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+  Check(gpu.device->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&rtvs)),"DLSS input RTVs");
+  const auto view_step=gpu.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+  const auto rtv_step=gpu.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+  auto view=views->GetCPUDescriptorHandleForHeapStart();auto rtv=rtvs->GetCPUDescriptorHandleForHeapStart();
+  D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;
+  for(UINT i=0;i<7;++i) {
+    D3D12_RESOURCE_DESC desc{};desc.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width=W;desc.Height=H;desc.DepthOrArraySize=desc.MipLevels=1;desc.SampleDesc.Count=1;
+    desc.Format=formats[i];desc.Flags=i<4 ? D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET : D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    const auto state=i<4 ? D3D12_RESOURCE_STATE_RENDER_TARGET : D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    Check(gpu.device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,state,nullptr,IID_PPV_ARGS(&textures[i])),"DLSS input texture");
+    if(i<4) {
+      gpu.device->CreateRenderTargetView(textures[i].Get(),nullptr,rtv);
+      const float depth[]{.5f,0,0,0},velocity[]{5,-3,0,0},valid[]{1,0,0,0},zero[4]{};
+      gpu.list->ClearRenderTargetView(rtv,i==0 ? depth : i==1 ? velocity : i==2 ? valid : zero,0,nullptr);
+      if(i==2) {const D3D12_RECT left{0,0,LONG(W/2),LONG(H)};gpu.list->ClearRenderTargetView(rtv,zero,1,&left);}
+      D3D12_SHADER_RESOURCE_VIEW_DESC srv{};srv.Format=formats[i];srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
+      srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;srv.Texture2D.MipLevels=1;
+      gpu.device->CreateShaderResourceView(textures[i].Get(),&srv,view);
+      Barrier(gpu.list.Get(),textures[i].Get(),state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+      rtv.ptr+=rtv_step;
+    } else {
+      D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};uav.Format=formats[i];uav.ViewDimension=D3D12_UAV_DIMENSION_TEXTURE2D;
+      gpu.device->CreateUnorderedAccessView(textures[i].Get(),nullptr,&uav,view);
+    }
+    view.ptr+=view_step;
+  }
+  D3D12_DESCRIPTOR_RANGE ranges[2]{};
+  ranges[0].RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;ranges[0].NumDescriptors=4;
+  ranges[1].RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_UAV;ranges[1].NumDescriptors=3;
+  D3D12_ROOT_PARAMETER parameters[3]{};
+  for(UINT i=0;i<2;++i) {parameters[i].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;parameters[i].DescriptorTable={1,&ranges[i]};}
+  parameters[2].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;parameters[2].Constants.Num32BitValues=38;
+  D3D12_ROOT_SIGNATURE_DESC desc{};desc.NumParameters=3;desc.pParameters=parameters;
+  ComPtr<ID3DBlob> blob,error;ComPtr<ID3D12RootSignature> root;ComPtr<ID3D12PipelineState> pipeline;
+  Check(D3D12SerializeRootSignature(&desc,D3D_ROOT_SIGNATURE_VERSION_1,&blob,&error),"DLSS compose root");
+  Check(gpu.device->CreateRootSignature(0,blob->GetBufferPointer(),blob->GetBufferSize(),IID_PPV_ARGS(&root)),"DLSS compose signature");
+  D3D12_COMPUTE_PIPELINE_STATE_DESC compute{};compute.pRootSignature=root.Get();compute.CS={kDlssDepthMotionCS,sizeof(kDlssDepthMotionCS)};
+  Check(gpu.device->CreateComputePipelineState(&compute,IID_PPV_ARGS(&pipeline)),"DLSS compose pipeline");
+  struct Constants {float inverse[16]{},previous[16]{},width=float(W),height=float(H);uint32_t object=0;float jitter_x=.25f,jitter_y=-.375f,depth_clear=1;} constants;
+  static_assert(sizeof(Constants)==152);
+  for(UINT i=0;i<4;++i) constants.inverse[i*5]=constants.previous[i*5]=1;
+  constants.previous[3]=4.f/W; // Previous pixel is exactly two render pixels to the right.
+  for(UINT mode=0;mode<4;++mode) {
+    constants.object=mode ? 1 : 0;
+    if(mode==2) {
+      Barrier(gpu.list.Get(),textures[0].Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
+      const float clear[]{1,0,0,0};const D3D12_RECT left{0,0,LONG(W/2),LONG(H)};
+      gpu.list->ClearRenderTargetView(rtvs->GetCPUDescriptorHandleForHeapStart(),clear,1,&left);
+      Barrier(gpu.list.Get(),textures[0].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
+    if(mode==3) {
+      Barrier(gpu.list.Get(),textures[3].Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_RENDER_TARGET);
+      const float marker[]{65535.f,0,0,0};const D3D12_RECT right{LONG(W/2),0,LONG(W),LONG(H)};
+      auto owner_rtv=rtvs->GetCPUDescriptorHandleForHeapStart();owner_rtv.ptr+=3*rtv_step;
+      gpu.list->ClearRenderTargetView(owner_rtv,marker,1,&right);
+      Barrier(gpu.list.Get(),textures[3].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    }
+    ID3D12DescriptorHeap* heaps[]{views.Get()};gpu.list->SetDescriptorHeaps(1,heaps);
+    gpu.list->SetComputeRootSignature(root.Get());gpu.list->SetPipelineState(pipeline.Get());
+    auto gpu_view=views->GetGPUDescriptorHandleForHeapStart();gpu.list->SetComputeRootDescriptorTable(0,gpu_view);
+    gpu_view.ptr+=UINT64(view_step)*4;gpu.list->SetComputeRootDescriptorTable(1,gpu_view);
+    gpu.list->SetComputeRoot32BitConstants(2,38,&constants,0);gpu.list->Dispatch((W+7)/8,(H+7)/8,1);
+    Readback velocity(gpu,textures[4].Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    Readback depth(gpu,textures[5].Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+      Readback rejection(gpu,textures[6].Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    gpu.Submit();
+    std::cout<<"mask fixture mode="<<mode<<" left="<<unsigned(rejection.Valid(W/4,H/2))<<" right="<<unsigned(rejection.Valid(W*3/4,H/2))<<"\n";
+    Require(rejection.Valid(W/4,H/2)==(mode==1 ? 255 : 0) && rejection.Valid(W*3/4,H/2)==(mode==3 ? 255 : 0),"DLSS rejection mask must mark only unknown surface history");
+      const auto left=velocity.Velocity(W/4,H/2),right=velocity.Velocity(W*3/4,H/2);
+    Require(std::abs(left[0]-(mode==1 ? 0.f : 2.f))<.01f && std::abs(left[1])<.01f,"DLSS must not assign camera motion to invalid object reprojection");
+    Require(std::abs(right[0]-(mode ? 5.f : 2.f))<.01f && std::abs(right[1]-(mode ? -3.f : 0.f))<.01f,
+        "DLSS must use valid signed object vectors only in object mode");
+    Require(std::abs(depth.DepthValue(W*3/4,H/2)-.5f)<.0001f,"DLSS depth copy");
+  }
+  std::cout<<"PASS: DLSS input composition, signed object motion, camera fallback, jitter, depth and legacy mode\n";
+}
+
 static void NoOutputs(const TemporalMotion& motion) {
   const auto o = motion.Outputs();
   Require(!o.velocity && !o.validity && !o.width && !o.height, "stale successful outputs exposed");
@@ -484,28 +595,95 @@ static void ThreeSlots(GPU& gpu, TemporalMotion& motion) {
   std::cout << "PASS: three outstanding slots, retained inputs/descriptors, distinct outputs, fenced resize\n";
 }
 
+static void VisibleDrawAttribution(GPU& gpu, TemporalMotion& ordinary) {
+  TemporalMotion diagnostic;
+  Check(diagnostic.Initialize(gpu.device.Get()),diagnostic.LastError());
+  Check(diagnostic.BeginFrame(0),diagnostic.LastError());
+  auto current=gpu.Upload(Fullscreen());
+  auto previous=gpu.Upload(Shift(Fullscreen(),3,2));
+  auto hidden=Fullscreen();for(auto& vertex:hidden)vertex.z=.75f;
+  auto behind=gpu.Upload(hidden);
+  Depth depth(gpu,current.Get(),0,DXGI_FORMAT_R32_TYPELESS);
+  TemporalMotionInputs input{depth.texture.Get(),W,H};input.diagnostic_draw_ids=true;
+  MotionGeometry base{current.Get(),current.Get(),0,0,3,true};
+  auto invalid=base;invalid.correspondence_valid=false;
+  Require(FAILED(diagnostic.Render(gpu.list.Get(),input,{&invalid,1})),
+      "diagnostic accepted a non-EQUAL invalidator");
+  invalid=base;invalid.previousClip=previous.Get();
+  Require(FAILED(diagnostic.Render(gpu.list.Get(),input,{&invalid,1})),
+      "diagnostic accepted history rather than current-as-previous");
+  invalid=base;invalid.coverage_id=1;
+  Require(FAILED(diagnostic.Render(gpu.list.Get(),input,{&invalid,1})),
+      "diagnostic accepted original-PS ownership ID");
+  input.coverage=depth.texture.Get();
+  Require(FAILED(diagnostic.Render(gpu.list.Get(),input,{&base,1})),
+      "diagnostic accepted an ownership texture");
+  input.coverage=nullptr;
+  std::vector<MotionGeometry> draws(257,base);
+  for(size_t i=1;i<draws.size();++i) {
+    draws[i].scissor_enabled=true;draws[i].scissor={0,0,0,0};
+  }
+  draws[255].scissor={LONG(W/3),0,LONG(2*W/3),LONG(H)}; // ID256: low byte0, high byte1.
+  draws[256].scissor={LONG(W/2),0,LONG(W),LONG(H)}; // ID257 wins their overlap.
+  draws.push_back({behind.Get(),behind.Get(),0,0,3,true}); // ID258 must fail EQUAL.
+  Check(diagnostic.Render(gpu.list.Get(),input,draws),diagnostic.LastError());
+  auto tagged=diagnostic.Outputs();Readback ids(gpu,tagged.velocity),flags(gpu,tagged.validity);
+  gpu.Submit();
+  Pixel(ids,flags,2,12,1,0);
+  Pixel(ids,flags,W/3+1,12,0,1);
+  Pixel(ids,flags,W/2+1,12,1,1);
+  Pixel(ids,flags,W-2,12,1,1);
+  Check(diagnostic.BeginFrame(1),diagnostic.LastError());
+  Check(diagnostic.Render(gpu.list.Get(),input,{}),diagnostic.LastError());
+  tagged=diagnostic.Outputs();Readback empty_ids(gpu,tagged.velocity),empty_flags(gpu,tagged.validity);
+  gpu.Submit();Pixel(empty_ids,empty_flags,16,12,0,0,0);
+  // The ordinary instance and default input retain actual motion semantics.
+  Check(ordinary.BeginFrame(0),ordinary.LastError());
+  TemporalMotionInputs normal{depth.texture.Get(),W,H};
+  Require(!normal.diagnostic_draw_ids,"diagnostic mode must default off");
+  MotionGeometry motion{current.Get(),previous.Get(),0,0,3,true};
+  Check(ordinary.Render(gpu.list.Get(),normal,{&motion,1}),ordinary.LastError());
+  const auto output=ordinary.Outputs();Readback velocity(gpu,output.velocity),validity(gpu,output.validity);
+  gpu.Submit();Pixel(velocity,validity,16,12,3,2);
+  std::cout<<"PASS: private visible-draw IDs1/256/257, ordered overlap, EQUAL depth, empty clear and ordinary motion unchanged\n";
+}
+
 static void InvalidDrawOverwrites(GPU& gpu, TemporalMotion& motion) {
   Check(motion.BeginFrame(0),motion.LastError());
-  auto full=gpu.Upload(Fullscreen(),16);
-  auto previous=gpu.Upload(Shift(Fullscreen(),3,2),32);
+  auto background=Fullscreen();
+  for(auto& vertex:background) vertex.z=.75f;
+  auto full=gpu.Upload(background,16);
+  auto previous=gpu.Upload(Shift(background,3,2),32);
   Triangle triangle{{{-.5f,-.5f,.5f,1},{0,.75f,.5f,1},{.5f,-.5f,.5f,1}}};
   auto triangle_buffer=gpu.Upload(triangle,16);
   Depth depth(gpu,full.Get(),16,DXGI_FORMAT_R32_TYPELESS);
   TemporalMotionInputs in{depth.texture.Get(),W,H};
   std::array<MotionGeometry,2> geometry{{{full.Get(),previous.Get(),16,32,3,true},
                                       {triangle_buffer.Get(),nullptr,16,0,3}}};
+  geometry[1].invalidator_depth_func=D3D12_COMPARISON_FUNC_LESS;
   Require(!geometry[1].correspondence_valid, "default correspondence must be false");
   Check(motion.Render(gpu.list.Get(),in,geometry),motion.LastError());
   auto out=motion.Outputs(); Readback v(gpu,out.velocity), coverage(gpu,out.validity);
   gpu.Submit();
-  Pixel(v,coverage,16,12,0,0,0); // Skipping the unattested draw leaves stale valid motion here.
+  // A translucent/no-Z-write original at .5 passes LESS over background .75.
+  // Its invalidator must clear history although EQUAL would reject that replay.
+  Pixel(v,coverage,16,12,0,0,0);
   Pixel(v,coverage,2,12,3,2,1);
+  Check(motion.BeginFrame(0),motion.LastError());
+  for(auto& vertex:triangle) vertex.z=.9f;
+  auto hidden=gpu.Upload(triangle,16);geometry[1].currentClip=hidden.Get();
+  Check(motion.Render(gpu.list.Get(),in,geometry),motion.LastError());
+  out=motion.Outputs();Readback hidden_v(gpu,out.velocity),hidden_valid(gpu,out.validity);
+  gpu.Submit();Pixel(hidden_v,hidden_valid,16,12,3,2,1);
+  std::cout<<"PASS: occluded transparent background preserves visible foreground motion\n";
   Check(motion.BeginFrame(0),motion.LastError());
   MotionGeometry one{triangle_buffer.Get(),previous.Get(),16,32,3,true};
   Check(motion.Render(gpu.list.Get(),in,{&one,1}),motion.LastError());
   out=motion.Outputs(); Readback cleared(gpu,out.velocity), mask(gpu,out.validity);
-  gpu.Submit(); Pixel(cleared,mask,2,12,0,0,0); // Uncovered region must clear every frame.
-  std::cout << "PASS: unattested current geometry overwrites prior motion; uncovered regions clear\n";
+  gpu.Submit();
+  Pixel(cleared,mask,2,12,0,0,0); // Uncovered region must clear every frame.
+  Pixel(cleared,mask,16,12,0,0,0); // Matched geometry at .5 still requires EQUAL to .75.
+  std::cout << "PASS: no-Z-write invalidator clears background history at unequal depth; matches retain EQUAL\n";
 }
 
 static void RasterCase(GPU& gpu, TemporalMotion& motion, const char* name,
@@ -535,6 +713,33 @@ static void RasterCase(GPU& gpu, TemporalMotion& motion, const char* name,
     Pixel(velocity,valid,x,y,foreground ? -2.f : 3.f,foreground ? -1.f : 2.f);
   }
   std::cout << "PASS: original raster coverage/depth matched: " << name << '\n';
+}
+
+static void OpaqueAndMixedOwnerPixels(GPU& gpu,TemporalMotion& motion) {
+  Check(motion.BeginFrame(0),motion.LastError());
+  auto clips=gpu.Upload(Fullscreen()),back=gpu.Upload(Shift(Fullscreen(),3,2)),front=gpu.Upload(Shift(Fullscreen(),-2,-1));
+  Depth depth(gpu,clips.Get(),0,DXGI_FORMAT_R32_TYPELESS);
+  std::array<std::array<uint32_t,64>,H> data{};
+  for(UINT y=0;y<H;++y)for(UINT x=0;x<W;++x)data[y][x]=x<W/3?1u:x<2*W/3?0x40000001u:2u;
+  auto buffer=gpu.Upload(data);Barrier(gpu.list.Get(),buffer.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_SOURCE);
+  D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;
+  D3D12_RESOURCE_DESC desc{};desc.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;desc.Width=W;desc.Height=H;
+  desc.DepthOrArraySize=desc.MipLevels=1;desc.SampleDesc.Count=1;desc.Format=DXGI_FORMAT_R32_UINT;
+  ComPtr<ID3D12Resource> owners;
+  Check(gpu.device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&owners)),"owner flag texture");
+  D3D12_TEXTURE_COPY_LOCATION source{},target{};source.pResource=buffer.Get();source.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+  source.PlacedFootprint.Footprint={DXGI_FORMAT_R32_UINT,W,H,1,256};target.pResource=owners.Get();target.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+  gpu.list->CopyTextureRegion(&target,0,0,0,&source,nullptr);
+  Barrier(gpu.list.Get(),owners.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+  TemporalMotionInputs in{depth.texture.Get(),W,H};in.coverage=owners.Get();
+  const std::array<MotionGeometry,2> geometry{{{clips.Get(),back.Get(),0,0,3,true},{clips.Get(),front.Get(),0,0,3,true}}};
+  auto draws=geometry;draws[1].coverage_id=1;
+  Check(motion.Render(gpu.list.Get(),in,draws),motion.LastError());auto out=motion.Outputs();
+  Readback velocity(gpu,out.velocity),valid(gpu,out.validity);gpu.Submit();
+  Pixel(velocity,valid,W/6,H/2,-2,-1,1);
+  Pixel(velocity,valid,W/2,H/2,0,0,0);
+  Pixel(velocity,valid,5*W/6,H/2,3,2,1);
+  std::cout<<"PASS: opaque owner accepts motion; mixed owner clears background history; other owner preserves it\n";
 }
 
 static void RasterStates(GPU& gpu, TemporalMotion& motion) {
@@ -591,8 +796,10 @@ static void RasterBudget(GPU& gpu) {
   Depth depth(gpu,current.Get(),16,DXGI_FORMAT_R32_TYPELESS);
   TemporalMotionInputs in{depth.texture.Get(),W,H};
   MotionGeometry g{current.Get(),previous.Get(),16,32,3,true};
-  // Two defaults are already cached. The last new bias requests state #129.
-  std::vector<MotionGeometry> states(TemporalMotion::kMaxRasterStates-1,g);
+  // 2 depth formats * 3 culls * 2 winding choices * EQUAL/ALWAYS are prewarmed.
+  constexpr uint32_t prewarmed=2*3*2*8+3;
+  const uint32_t first_excess_bias=TemporalMotion::kMaxRasterStates-prewarmed+1;
+  std::vector<MotionGeometry> states(first_excess_bias,g);
   for (size_t i=0;i<states.size();++i) states[i].depth_bias=static_cast<int32_t>(i+1);
   Require(FAILED(bounded.Render(gpu.list.Get(),in,states)), "raster cache capacity not enforced");
   NoOutputs(bounded);
@@ -604,7 +811,7 @@ static void RasterBudget(GPU& gpu) {
   auto out=bounded.Outputs(); Readback v(gpu,out.velocity), valid(gpu,out.validity);
   gpu.Submit(); Pixel(v,valid,16,12,0,0);
   Check(bounded.BeginFrame(1),bounded.LastError());
-  g.depth_bias=static_cast<int32_t>(TemporalMotion::kMaxRasterStates-1);
+  g.depth_bias=static_cast<int32_t>(first_excess_bias);
   Require(FAILED(bounded.Render(gpu.list.Get(),in,{&g,1})), "cache limit lost across frame slots");
   NoOutputs(bounded);
   g.depth_bias=0;
@@ -678,6 +885,7 @@ static void VertexBudget(GPU& gpu, TemporalMotion& motion) {
 int main() {
   try {
     GPU gpu;
+    SameFrameShadowFallback(gpu);
     TemporalMotion motion;
     TemporalMotion uninitialized;
     Require(FAILED(uninitialized.BeginFrame(0)), "uninitialized BeginFrame accepted");
@@ -739,8 +947,11 @@ int main() {
     RasterBudget(gpu);
     Validation(gpu,motion);
     ThreeSlots(gpu,motion);
+    VisibleDrawAttribution(gpu,motion);
     InvalidDrawOverwrites(gpu,motion);
     gpu.Submit();
+    OpaqueAndMixedOwnerPixels(gpu,motion);
+    DlssInputComposition(gpu);
     std::cout << "PASS: temporal-motion production GPU backend; synthetic clip fixtures only, no gameplay/DLSS readiness claim\n";
     return 0;
   } catch(const std::exception& e) {

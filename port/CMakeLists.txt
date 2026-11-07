@@ -82,6 +82,7 @@ set(SUPERMANRETURNS_SOURCES
     src/guest_physical_allocation.cpp
     src/renderdoc_capture.cpp
     src/render_scale.cpp
+    src/graphics/single_instance_motion_hooks.cpp
     src/lsfg_settings.cpp
 )
 
@@ -239,9 +240,10 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
             src/graphics/d3d12/post_vertex_clip_capture.cpp
             src/graphics/d3d12/temporal_motion.cpp
             src/graphics/d3d12/ray_tracing_scene.cpp
+            src/graphics/d3d12/visible_ray_scene.cpp
             src/graphics/d3d12/dlss_super_resolution.cpp
             src/graphics/graphics_options.cpp
-            src/graphics/graphics_options_dialog.cpp
+            src/graphics/native_apt_menu.cpp
             src/graphics/graphics_options_runtime.cpp
             src/graphics/graphics_options_hooks.cpp
             src/graphics/graphics_preferences.cpp
@@ -276,6 +278,22 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
             ${SR_NATIVE_ROOT}/hang_watchdog.cpp
             ${SR_NATIVE_ROOT}/xxh3_avx2.cpp
         )
+        # Build a COPY/INSERT recipe from the owner's UI archive. Generated
+        # output stays in the build tree; no original UI payload is distributed.
+        find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        set(SR_NATIVE_UI_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../game/DATA/ui.AST")
+        set(SR_NATIVE_UI_RECIPE "${CMAKE_CURRENT_BINARY_DIR}/native_graphics_apt_recipe.h")
+        add_custom_command(OUTPUT "${SR_NATIVE_UI_RECIPE}"
+            COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/../tools/graphics/native_graphics_apt.py"
+                --source "${SR_NATIVE_UI_SOURCE}"
+                --output "${CMAKE_CURRENT_BINARY_DIR}/native_graphics_ui/ui.AST"
+                --recipe-header "${SR_NATIVE_UI_RECIPE}"
+            DEPENDS "${SR_NATIVE_UI_SOURCE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/../tools/graphics/native_graphics_apt.py"
+                "${CMAKE_CURRENT_SOURCE_DIR}/../tools/analysis/coop_apt_probe.py"
+            COMMENT "Preparing the game's native APT graphics menu")
+        target_sources(sr_native PRIVATE "${SR_NATIVE_UI_RECIPE}")
+        target_include_directories(sr_native PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
         set(SR_NATIVE_DEFINITIONS SR_HAS_NATIVE=1)
         if(SR_NATIVE STREQUAL "RENDERER")
             list(APPEND SR_NATIVE_DEFINITIONS SR_NATIVE_RENDERER_BUILD=1)
@@ -388,6 +406,29 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
             set_source_files_properties("${SR_NATIVE_PIPELINES_RC}" PROPERTIES
                 OBJECT_DEPENDS "${SR_RESOLVED_PIPELINE_SEED}")
             target_sources(superman_returns PRIVATE "${SR_NATIVE_PIPELINES_RC}")
+        endif()
+
+        # Portable Vulkan descriptions contain normalized state and digests,
+        # never a vendor/device-specific pipeline cache. Resource 4 is distinct
+        # from the D3D12 shader pack (2) and CNPS seed (3).
+        set(SR_VULKAN_PIPELINE_SEED "" CACHE FILEPATH "Observed portable Vulkan PSO seed (SRVPSO ABI 1)")
+        set(SR_RESOLVED_VULKAN_PIPELINE_SEED "${SR_VULKAN_PIPELINE_SEED}")
+        if(NOT SR_RESOLVED_VULKAN_PIPELINE_SEED AND SR_NATIVE_EMBED_PIPELINE_SEED)
+            if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/vulkan_pipeline_seed.bin")
+                set(SR_RESOLVED_VULKAN_PIPELINE_SEED "${CMAKE_CURRENT_SOURCE_DIR}/assets/vulkan_pipeline_seed.bin")
+            endif()
+        endif()
+        if(SR_NATIVE STREQUAL "RENDERER" AND SR_VULKAN_GAME AND SR_RESOLVED_VULKAN_PIPELINE_SEED)
+            if(NOT EXISTS "${SR_RESOLVED_VULKAN_PIPELINE_SEED}")
+                message(FATAL_ERROR "Vulkan pipeline seed missing: ${SR_RESOLVED_VULKAN_PIPELINE_SEED}")
+            endif()
+            enable_language(RC)
+            file(TO_CMAKE_PATH "${SR_RESOLVED_VULKAN_PIPELINE_SEED}" SR_VULKAN_PIPELINE_SEED_RC_PATH)
+            set(SR_VULKAN_PIPELINES_RC "${CMAKE_CURRENT_BINARY_DIR}/superman_returns_vulkan_pipelines.rc")
+            file(WRITE "${SR_VULKAN_PIPELINES_RC}" "4 RCDATA \"${SR_VULKAN_PIPELINE_SEED_RC_PATH}\"\n")
+            set_source_files_properties("${SR_VULKAN_PIPELINES_RC}" PROPERTIES
+                OBJECT_DEPENDS "${SR_RESOLVED_VULKAN_PIPELINE_SEED}")
+            target_sources(superman_returns PRIVATE "${SR_VULKAN_PIPELINES_RC}")
         endif()
 
         # Pre-shader library next to the executable (sr_native_preshaders): the

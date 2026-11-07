@@ -1,0 +1,227 @@
+diff --git a/src/ui/d3d12/d3d12_presenter.cpp b/src/ui/d3d12/d3d12_presenter.cpp
+index 306118e..03ef4a1 100644
+--- a/src/ui/d3d12/d3d12_presenter.cpp
++++ b/src/ui/d3d12/d3d12_presenter.cpp
+@@ -23,6 +23,7 @@
+ #include <rex/ui/d3d12/d3d12_provider.h>
+ #include <rex/ui/d3d12/d3d12_util.h>
+ #include <rex/ui/surface_win.h>
++#include <rex/ui/presentation_pacing.h>
+ 
+ #if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
+ #include <ffx_api/dx12/ffx_api_dx12.h>
+@@ -204,12 +205,14 @@ Surface::TypeFlags D3D12Presenter::GetSupportedSurfaceTypes() const {
+ 
+ bool D3D12Presenter::CaptureGuestOutput(RawImage& image_out) {
+   Microsoft::WRL::ComPtr<ID3D12Resource> guest_output_resource;
++  uint64_t sr_source_serial=0;
+   {
+     uint32_t guest_output_mailbox_index;
+     std::unique_lock<std::mutex> guest_output_consumer_lock(
+         ConsumeGuestOutput(guest_output_mailbox_index, nullptr, nullptr));
+     if (guest_output_mailbox_index != UINT32_MAX) {
+       guest_output_resource = guest_output_resources_[guest_output_mailbox_index].second;
++      sr_source_serial=guest_output_resources_[guest_output_mailbox_index].first;
+     }
+     // Incremented the reference count of the guest output resource - safe to
+     // leave the consumer critical section now.
+@@ -350,7 +353,7 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
+   if (paint_context_.swap_chain) {
+     if (was_paintable && paint_context_.swap_chain_width == new_swap_chain_width &&
+         paint_context_.swap_chain_height == new_swap_chain_height) {
+-      is_vsync_implicit_out = false;
++      is_vsync_implicit_out = rex::cvar::Query<bool>("vsync") && !superman_returns::graphics::PresentationLegacyMode();
+       return SurfacePaintConnectResult::kSuccessUnchanged;
+     }
+     paint_context_.AwaitSwapChainUsageCompletion();
+@@ -478,7 +481,7 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
+         provider_.OffsetRTVDescriptor(rtv_heap_start, PaintContext::kRTVIndexSwapChainBuffer0 + i));
+   }
+ 
+-  is_vsync_implicit_out = false;
++  is_vsync_implicit_out = rex::cvar::Query<bool>("vsync") && !superman_returns::graphics::PresentationLegacyMode();
+   return SurfacePaintConnectResult::kSuccess;
+ }
+ 
+@@ -555,6 +558,8 @@ void D3D12Presenter::PaintContext::DestroySwapChain() {
+ }
+ 
+ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawers) {
++  auto& sr_timing=superman_returns::graphics::ThreadPresentationTiming();
++  sr_timing.Wait(superman_returns::graphics::ParsePresentationTarget(rex::cvar::GetFlagByName("sr_native_fps_limit")));
+   // Begin the command list with the command allocator not currently potentially
+   // used on the GPU.
+   UINT64 current_paint_submission = paint_context_.paint_submission_tracker.GetCurrentSubmission();
+@@ -588,12 +593,14 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
+   GuestOutputProperties guest_output_properties;
+   GuestOutputPaintConfig guest_output_paint_config;
+   Microsoft::WRL::ComPtr<ID3D12Resource> guest_output_resource;
++  uint64_t sr_source_serial=0;
+   {
+     uint32_t guest_output_mailbox_index;
+     std::unique_lock<std::mutex> guest_output_consumer_lock(ConsumeGuestOutput(
+         guest_output_mailbox_index, &guest_output_properties, &guest_output_paint_config));
+     if (guest_output_mailbox_index != UINT32_MAX) {
+       guest_output_resource = guest_output_resources_[guest_output_mailbox_index].second;
++      sr_source_serial=guest_output_resources_[guest_output_mailbox_index].first;
+     }
+     // Incremented the reference count of the guest output resource - safe to
+     // leave the consumer critical section now as everything here either will be
+@@ -1155,9 +1162,17 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
+   // fullscreen is ever used in, the allow tearing flag must not be passed in
+   // fullscreen, but DXGI fullscreen is largely unneeded with the flip
+   // presentation model used in Direct3D 12).
+-  HRESULT present_result = paint_context_.swap_chain->Present(
+-      0, DXGI_PRESENT_RESTART |
+-             (paint_context_.swap_chain_allows_tearing ? DXGI_PRESENT_ALLOW_TEARING : 0));
++  const bool sr_vsync=rex::cvar::Query<bool>("vsync") && !superman_returns::graphics::PresentationLegacyMode();
++  const UINT sr_flags=sr_vsync?0u:(DXGI_PRESENT_RESTART |
++      (paint_context_.swap_chain_allows_tearing?DXGI_PRESENT_ALLOW_TEARING:0));
++  const auto sr_entry=superman_returns::graphics::PresentationNowNs();
++  HRESULT present_result = paint_context_.swap_chain->Present(sr_vsync?1:0,sr_flags);
++  const auto sr_return=superman_returns::graphics::PresentationNowNs();
++  static thread_local uint64_t sr_last_source=0;
++  const bool sr_accepted=present_result==S_OK;
++  sr_timing.Record("d3d12",sr_source_serial,sr_source_serial==sr_last_source?"repeat":"real",
++      sr_entry,sr_return,present_result,sr_accepted);
++  if(sr_accepted) sr_last_source=sr_source_serial;
+   // Even if presentation has failed, work might have been enqueued anyway
+   // internally before the failure according to Jesse Natalie from the DirectX
+   // Discord server.
+diff --git a/include/rex/ui/presentation_pacing.h b/include/rex/ui/presentation_pacing.h
+new file mode 100644
+--- /dev/null
++++ b/include/rex/ui/presentation_pacing.h
+@@ -0,0 +1,132 @@
++#pragma once
++#include <algorithm>
++#include <array>
++#include <chrono>
++#include <charconv>
++#include <cstdint>
++#include <cstdlib>
++#include <fstream>
++#include <memory>
++#include <ostream>
++#include <string_view>
++#include <thread>
++
++namespace superman_returns::graphics {
++inline uint32_t ParsePresentationTarget(std::string_view text) {
++  uint32_t hz=0;
++  const auto parsed=std::from_chars(text.data(),text.data()+text.size(),hz);
++  return parsed.ec==std::errc{} && parsed.ptr==text.data()+text.size()?std::min(hz,1000u):0;
++}
++// All times are monotonic host nanoseconds. A rational period avoids the
++// cumulative truncation of 1e9/60; missed slots keep the original phase.
++class PresentationDeadline {
++ public:
++  void Configure(uint32_t hz,uint64_t now) {
++    hz=std::min(hz,1000u);
++    if(hz_==hz && initialized_) return;
++    hz_=hz;deadline_=epoch_=now;slot_=0;skipped_=0;initialized_=true;
++    oversleep_={};samples_=cursor_=0;
++  }
++  uint64_t Remaining(uint64_t now) const {return hz_ && now<deadline_?deadline_-now:0;}
++  void Complete(uint64_t now) {
++    if(!hz_) return;
++    ++slot_;
++    // Rebase only after a backwards clock (steady_clock must not do this).
++    if(now<epoch_) {epoch_=now;slot_=1;}
++    const uint64_t elapsed=now-epoch_;
++    const uint64_t first_future=(elapsed/1000000000ull)*hz_+
++        ((elapsed%1000000000ull)*hz_)/1000000000ull+1;
++    if(first_future>slot_) {skipped_+=first_future-slot_;slot_=first_future;}
++    deadline_=epoch_+(slot_/hz_)*1000000000ull+
++        ((slot_%hz_)*1000000000ull)/hz_;
++    // Flooring a rational deadline can coincide with `now`.
++    if(deadline_<=now) {++slot_;++skipped_;deadline_=epoch_+(slot_/hz_)*1000000000ull+
++        ((slot_%hz_)*1000000000ull)/hz_;}
++  }
++  void ObserveSleep(uint64_t expected,uint64_t actual) {
++    oversleep_[cursor_]=actual>expected?std::min(actual-expected,uint64_t(1000000)):0;
++    cursor_=(cursor_+1)%oversleep_.size();samples_=std::min(samples_+1,oversleep_.size());
++  }
++  uint64_t WakeMargin() const {
++    if(!samples_) return 100000;
++    auto sorted=oversleep_;std::sort(sorted.begin(),sorted.begin()+samples_);
++    return std::clamp(sorted[(samples_-1)*95/100]+50000,uint64_t(100000),uint64_t(1000000));
++  }
++  uint64_t deadline() const {return deadline_;}
++  uint64_t skipped() const {return skipped_;}
++ private:
++  uint32_t hz_=0;
++  uint64_t epoch_=0,slot_=0,deadline_=0,skipped_=0;
++  bool initialized_=false;
++  std::array<uint64_t,32> oversleep_{};
++  size_t samples_=0,cursor_=0;
++};
++
++inline bool PresentationLegacyMode() {
++  static const bool legacy=[] {const char* mode=std::getenv("SR_PRESENTATION_LEGACY");return mode && std::string_view(mode)=="1";}();
++  return legacy;
++}
++inline uint64_t PresentationNowNs() {
++  return uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
++      std::chrono::steady_clock::now().time_since_epoch()).count());
++}
++
++class PresentationCsv {
++ public:
++  explicit PresentationCsv(std::ostream& stream):out_(stream) {
++    out_<<"clock_domain,backend,call,source_serial,kind,entry_ns,return_ns,api_ns,accepted_interval_ns,result,accepted,skipped_slots\n";
++  }
++  void Record(const char* backend,uint64_t source,uint64_t skipped,const char* kind,
++              uint64_t begin,uint64_t end,int64_t result,bool accepted) {
++    const uint64_t interval=have_accepted_ && end>=last_accepted_?end-last_accepted_:0;
++    out_<<"steady_cpu_api_return,"<<backend<<','<<++calls_<<','<<source<<','<<kind<<','
++        <<begin<<','<<end<<','<<(end>=begin?end-begin:0)<<','<<interval<<','<<result<<','
++        <<(accepted?1:0)<<','<<skipped<<'\n';
++    if(accepted) {last_accepted_=end;have_accepted_=true;}
++    // The title benchmark exits with std::_Exit: destructors never run.
++    // Persist every diagnostic row; the sink is opt-in and outside GPU locks.
++    out_.flush();
++  }
++ private:
++  std::ostream& out_;
++  uint64_t calls_=0,last_accepted_=0;
++  bool have_accepted_=false;
++};
++
++// One instance belongs to one existing presenter thread. The environment path
++// is opt-in and each benchmark run must choose a distinct output file.
++class PresentationTiming {
++ public:
++  PresentationTiming() {
++    const char* path=std::getenv("SR_PRESENTATION_CSV");
++    if(path && *path) {file_.open(path,std::ios::out|std::ios::trunc);if(file_) csv_=std::make_unique<PresentationCsv>(file_);}
++  }
++  void Wait(uint32_t hz) {
++    if(PresentationLegacyMode()) return;
++    uint64_t now=PresentationNowNs();deadline_.Configure(hz,now);
++    for(uint64_t remaining=deadline_.Remaining(now);remaining;remaining=deadline_.Remaining(now)) {
++      const uint64_t margin=deadline_.WakeMargin();
++      if(remaining>margin+100000) {
++        const uint64_t expected=now+remaining-margin;
++        std::this_thread::sleep_until(std::chrono::steady_clock::time_point(std::chrono::nanoseconds(expected)));
++        now=PresentationNowNs();deadline_.ObserveSleep(expected,now);
++      } else {std::this_thread::yield();now=PresentationNowNs();}
++    }
++    // Advance at paint start, allowing recording/Present to consume this slot.
++    // A blocked FIFO/interval-1 Present skips stale slots at the next call.
++    deadline_.Complete(now);
++  }
++  void Record(const char* backend,uint64_t source,const char* kind,uint64_t begin,
++              uint64_t end,int64_t result,bool accepted) {
++    if(csv_) csv_->Record(backend,source,deadline_.skipped(),kind,begin,end,result,accepted);
++  }
++ private:
++  PresentationDeadline deadline_;
++  std::ofstream file_;
++  std::unique_ptr<PresentationCsv> csv_;
++};
++inline PresentationTiming& ThreadPresentationTiming() {
++  static thread_local PresentationTiming timing;
++  return timing;
++}
++} // namespace superman_returns::graphics

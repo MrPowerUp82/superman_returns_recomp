@@ -37,6 +37,66 @@ address = 0x826595B8
 name = "XmaKickStarvedContext"
 registers = ["r26", "r31"]
 
+# Tagged native EA APT graphics calls. PauseGame native callback r4 is argument
+# count; r1 supplies its untouched stack. See docs/graphics-milestone-5-native-apt-design-2026-11-05.md.
+# Normal PauseGame calls return false and execute the complete original body.
+[[entrypoint.midasm_hook]]
+address = 0x822A0F38
+name = "SrNativeGraphicsAptCall"
+registers = ["r3", "r4", "r1"]
+return_on_true = true
+
+# Source-qualified count-one rigid submit, before the synchronous call and
+# immediately after return. Observational only; see
+# docs/graphics-milestone-1-single-instance-vehicle-design-2026-11-06.md.
+[[entrypoint.midasm_hook]]
+address = 0x8231027C
+name = "SrBeginSingleRigidPart"
+registers = ["r1", "r3", "r5", "r6", "r7", "r8", "r9", "r10", "r24", "r29", "r30"]
+
+[[entrypoint.midasm_hook]]
+address = 0x82310280
+name = "SrEndSingleRigidPart"
+registers = []
+
+# Exact queued vehicle member provenance. These observational callbacks leave
+# all guest registers/memory/control flow intact. Source/ABI and fail-closed
+# rules: docs/graphics-milestone-1-queued-vehicle-motion-design-2026-11-06.md.
+[[entrypoint.midasm_hook]]
+address = 0x82310C70
+name = "SrBeginVehicleQueue"
+registers = ["r1", "r4", "r6", "r14", "r23", "r29", "r30"]
+
+[[entrypoint.midasm_hook]]
+address = 0x82310C74
+name = "SrEndVehicleQueue"
+registers = []
+
+[[entrypoint.midasm_hook]]
+address = 0x82786F30
+name = "SrBeginVehicleAppend"
+registers = ["r1", "r3", "r4", "r5"]
+
+[[entrypoint.midasm_hook]]
+address = 0x82786FE8
+name = "SrEndVehicleAppend"
+registers = ["r1", "r30", "r31", "r27"]
+
+[[entrypoint.midasm_hook]]
+address = 0x82786E84
+name = "SrBeginVehicleFlush"
+registers = ["r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r31"]
+
+[[entrypoint.midasm_hook]]
+address = 0x82786E88
+name = "SrEndVehicleFlush"
+registers = ["r31"]
+
+[[entrypoint.midasm_hook]]
+address = 0x8261B58C
+name = "SrVehiclePaletteUpload"
+registers = ["r4", "r5", "r6"]
+
 # Targets found by the first validation pass but omitted from automatic
 # function discovery. Keep these in the manifest so normal codegen can run
 # without --force; their boundaries still need runtime verification.

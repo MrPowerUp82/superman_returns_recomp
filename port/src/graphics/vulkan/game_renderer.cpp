@@ -1,5 +1,6 @@
 #include "game_renderer.h"
 #include "resolve.h"
+#include "vulkan_cache_audit.h"
 #include "../guest/primitive_expansion.h"
 #include "../guest/shader_constant_policy.h"
 #include <algorithm>
@@ -348,7 +349,7 @@ bool GameRenderer::Draw(const guest::DrawPacket& draw,VkCommandBuffer command,Er
     c_.f.vkCmdDrawIndexed(command,draw.count,1,draw.first,draw.base_vertex,0);
   } else c_.f.vkCmdDraw(command,draw.count,1,draw.first,0);
   if(!merge_passes_) ClosePass();
-  targets_.MarkWritten(*pass);++stats_.draws;lap(RecordProfile::kCommands);e={};return true;
+  targets_.MarkWritten(*pass);++stats_.draws;++VulkanCacheAudit::draws;lap(RecordProfile::kCommands);e={};return true;
 }
 }
 

@@ -219,6 +219,7 @@ bool TryFlushFinalBlock(const uint8_t* base, uint32_t xma_context, uint32_t stre
       data.input_buffer_1_packet_count, data.input_buffer_read_offset,
       data.error_status);
   in.output_valid = (data.output_buffer_ptr != 0 && data.output_buffer_block_count > 0);
+  in.loop_count = data.loop_count;
 
   std::unique_lock<std::mutex> lock;
   if (context) {
@@ -228,6 +229,9 @@ bool TryFlushFinalBlock(const uint8_t* base, uint32_t xma_context, uint32_t stre
   }
 
   const auto decision = superman_returns::DecideXmaFinalFlush(in);
+  if (decision == superman_returns::XmaFlushDecision::LoopActive) {
+    ++superman_returns::GetGlobalXmaStabilityTelemetry().loop_flush_suppressions;
+  }
   if (decision != superman_returns::XmaFlushDecision::Flush) {
     const uint32_t n = g_declined.fetch_add(1) + 1;
     if (n <= 10) {
@@ -262,6 +266,7 @@ bool TryFlushFinalBlock(const uint8_t* base, uint32_t xma_context, uint32_t stre
   data.output_buffer_valid = 1;
   data.Store(const_cast<uint8_t*>(base) + xma_context);
 
+  ++superman_returns::GetGlobalXmaStabilityTelemetry().trailing_carry_flushes;
   const uint32_t n = g_flushed.fetch_add(1) + 1;
   if (n <= 20) {
     REXAPU_INFO(

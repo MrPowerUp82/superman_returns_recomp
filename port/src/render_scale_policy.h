@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <utility>
 
 namespace superman_returns::render_scale {
 
@@ -19,6 +20,14 @@ inline float NativeScale(double native_scale, int32_t guest_percent) {
   if (native_scale == 1.0 && guest_percent < 100)
     return float(std::clamp(guest_percent, 50, 100)) / 100.0f;
   return float(std::clamp(native_scale, 0.5, 4.0));
+}
+
+// Round both viewport edges exactly like surface/scissor coordinates. Rounding
+// the size alone would open seams between adjacent cells at fractional scales.
+inline std::pair<float,float> HostViewportAxis(float origin,float size,float scale) {
+  const float first=float(std::round(double(origin)*double(scale)));
+  const float last=float(std::round((double(origin)+double(size))*double(scale)));
+  return {first,last-first};
 }
 
 // D3D12 texture extents must never round to zero (e.g. a 1x1 resolve).

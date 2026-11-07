@@ -1,4 +1,5 @@
 #include "ray_tracing_scene.h"
+#include "../pipeline_creation_audit.h"
 #include "shaders/rt_scene_TraceRays.h"
 #include "shaders/rt_scene_TraceScene.h"
 #include "shaders/depth_receivers.h"
@@ -185,10 +186,13 @@ HRESULT RayTracingScene::Initialize(ID3D12Device* device) {
     D3D12_COMPUTE_PIPELINE_STATE_DESC pso{};
     pso.pRootSignature=root.Get(); pso.CS={rt_scene_TraceRays,sizeof(rt_scene_TraceRays)};
     ComPtr<ID3D12PipelineState> queries,scene,receivers;
+    RecordRuntimePipelineCreate();
     Check(device->CreateComputePipelineState(&pso,IID_PPV_ARGS(&queries)),"DXR TraceRays cs_6_5 pipeline creation failed");
     pso.CS={rt_scene_TraceScene,sizeof(rt_scene_TraceScene)};
+    RecordRuntimePipelineCreate();
     Check(device->CreateComputePipelineState(&pso,IID_PPV_ARGS(&scene)),"DXR TraceScene cs_6_5 pipeline creation failed");
     pso.CS={kDepthReceivers,sizeof(kDepthReceivers)};
+    RecordRuntimePipelineCreate();
     Check(device->CreateComputePipelineState(&pso,IID_PPV_ARGS(&receivers)),"DXR ProbeDepth cs_6_5 pipeline creation failed");
     impl_->device=device; impl_->device5=std::move(device5); impl_->root=std::move(root);
     impl_->query_pipeline=std::move(queries); impl_->scene_pipeline=std::move(scene);

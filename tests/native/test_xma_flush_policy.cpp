@@ -113,3 +113,67 @@ SR_TEST(xma_last_segment_means_no_next_node) {
   SR_CHECK(IsLastXmaSegment(0x40001000, 0));
   SR_CHECK(!IsLastXmaSegment(0x40001000, 0x40002000));
 }
+
+SR_TEST(xma_flush_policy_suppresses_flush_when_loop_active) {
+  ResetGlobalXmaStabilityTelemetry();
+  XmaFlushInputs in = EndOfStream();
+  in.loop_count = 0;
+  SR_CHECK(DecideXmaFinalFlush(in) == XmaFlushDecision::Flush);
+
+  in.loop_count = 1;
+  SR_CHECK(DecideXmaFinalFlush(in) == XmaFlushDecision::LoopActive);
+
+  in.loop_count = 255;
+  SR_CHECK(DecideXmaFinalFlush(in) == XmaFlushDecision::LoopActive);
+}
+
+SR_TEST(xma_stream_lifecycle_tracker_multi_transition_soak) {
+  XmaStreamLifecycleTracker tracker;
+  tracker.Reset();
+
+  const uint32_t kCycles = 1200;
+  for (uint32_t i = 0; i < kCycles; ++i) {
+    const uint32_t initial_loops = (i % 5 == 0) ? 0 : ((i % 5) + 1);
+    tracker.StartStream(initial_loops);
+
+    if (initial_loops > 0) {
+      SR_CHECK(tracker.state == XmaStreamLifecycleState::Looping);
+    } else {
+      SR_CHECK(tracker.state == XmaStreamLifecycleState::Active);
+    }
+
+    XmaFlushInputs in = EndOfStream();
+    in.input_exhausted = false;
+    in.loop_count = tracker.current_loop_count;
+    SR_CHECK(tracker.EvaluateFlushDecision(in) == (in.loop_count > 0 ? XmaFlushDecision::LoopActive : XmaFlushDecision::InputPending));
+
+    in.input_exhausted = true;
+    tracker.NotifyStarvation();
+
+    while (tracker.current_loop_count > 0) {
+      in.loop_count = tracker.current_loop_count;
+      SR_CHECK(tracker.EvaluateFlushDecision(in) == XmaFlushDecision::LoopActive);
+      SR_CHECK(tracker.carry_pending);
+      tracker.RecordStarvationRescue();
+      tracker.StepLoopBoundary();
+    }
+
+    if (i % 50 == 0) {
+      tracker.RecordBitOffsetClamp();
+      tracker.RecordInvalidBufferWriteGuard();
+    }
+
+    in.loop_count = 0;
+    SR_CHECK(tracker.EvaluateFlushDecision(in) == XmaFlushDecision::Flush);
+    SR_CHECK(!tracker.carry_pending);
+    tracker.NotifyExhaustion();
+    SR_CHECK(tracker.state == XmaStreamLifecycleState::Exhausted);
+  }
+
+  SR_CHECK(tracker.telemetry.context_transitions >= kCycles);
+  SR_CHECK(tracker.telemetry.loop_flush_suppressions > 0);
+  SR_CHECK_EQ(tracker.telemetry.trailing_carry_flushes, kCycles);
+  SR_CHECK(tracker.telemetry.starvation_rescues > 0);
+  SR_CHECK(tracker.telemetry.bit_offset_clamps > 0);
+  SR_CHECK(tracker.telemetry.invalid_buffer_write_guards > 0);
+}

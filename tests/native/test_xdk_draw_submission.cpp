@@ -148,3 +148,74 @@ SR_TEST(xdk_native_admission_reports_exact_unsupported_state_bits) {
   SR_CHECK(short_device.device_too_small);
   SR_CHECK(short_device.any());
 }
+
+SR_TEST(xdk_native_draw_direct_mirror_sync_matches_ring_scan_bit_for_bit) {
+  {
+    Pm4Mirror direct_methods;
+    direct_methods.WriteRegister(0x2102, 0x12345678u);
+    SR_CHECK_EQ(direct_methods.reg(0x2102), 0x12345678u);
+    const std::array<uint8_t, 8> be_words = {
+      0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88
+    };
+    direct_methods.WriteBigEndianRange(0x2200, be_words.data(), 2);
+    SR_CHECK_EQ(direct_methods.reg(0x2200), 0x11223344u);
+    SR_CHECK_EQ(direct_methods.reg(0x2201), 0x55667788u);
+    direct_methods.SetBinMaskLo(0x12345678u);
+    direct_methods.SetBinMaskHi(0x9ABCDEF0u);
+  }
+
+  for (bool indexed : {false, true}) {
+    std::array<uint8_t, 0x5700> device_direct{};
+    std::array<uint8_t, 16384> ring_direct{};
+    Pm4Mirror mirror_direct;
+
+    Put(device_direct, 0, (uint64_t{1} << 63) | 1, 8);
+    Put(device_direct, 8, uint64_t{1} << 62, 8);
+    Put(device_direct, 16, uint64_t{1} << 43, 8);
+    Put(device_direct, 24, 2, 8);
+    Put(device_direct, 48, ring_direct.size());
+
+    for (size_t i = 0; i < 8192; i += 4)
+      Put(device_direct, 0x700 + i, 0x3f800000u + uint32_t(i));
+    for (size_t i = 0; i < 384; i += 4)
+      Put(device_direct, 1024 + i, 0x00010000u + uint32_t(i));
+    for (size_t i = 0; i < 160; i += 4)
+      Put(device_direct, 9984 + i, 0x01020304u + uint32_t(i));
+
+    auto device_baseline = device_direct;
+    auto ring_baseline = ring_direct;
+    Pm4Mirror mirror_baseline;
+
+    XdkDrawArguments args{indexed, 4, 17, 23, 0, 0, 0};
+    if (indexed) {
+      args.index_header = 0xa0000000u;
+      args.index_address = 0xe0001000u;
+    }
+
+    const auto res_direct = SubmitNativeXdkDrawDirectToMirror(
+        device_direct, ring_direct, mirror_direct, args);
+    SR_CHECK(res_direct == XdkDrawResult::Submitted);
+
+    const auto res_baseline = SubmitNativeXdkDraw(
+        device_baseline, ring_baseline, args);
+    SR_CHECK(res_baseline == XdkDrawResult::Submitted);
+
+    const uint32_t written_size = ReadXdkWord(device_baseline, 40);
+    mirror_baseline.ScanCopy(nullptr, ring_baseline.data(), written_size);
+
+    SR_CHECK(device_direct == device_baseline);
+    SR_CHECK(ring_direct == ring_baseline);
+
+    for (uint32_t r = 0; r < Pm4Mirror::kRegisterCount; ++r) {
+      SR_CHECK_EQ(mirror_direct.reg(r), mirror_baseline.reg(r));
+    }
+    SR_CHECK_EQ(mirror_direct.vs_version, mirror_baseline.vs_version);
+    SR_CHECK_EQ(mirror_direct.ps_version, mirror_baseline.ps_version);
+    SR_CHECK(mirror_direct.FloatConstants(false) == mirror_baseline.FloatConstants(false));
+    SR_CHECK(mirror_direct.FloatConstants(true) == mirror_baseline.FloatConstants(true));
+    for (uint32_t slot = 0; slot < 16; ++slot) {
+      SR_CHECK_EQ(mirror_direct.fetch_version(slot), mirror_baseline.fetch_version(slot));
+      SR_CHECK_EQ(mirror_direct.fetch_complete(slot), mirror_baseline.fetch_complete(slot));
+    }
+  }
+}

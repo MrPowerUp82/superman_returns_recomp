@@ -1,6 +1,16 @@
 #include "test_main.h"
 #include "../../port/src/graphics/temporal_vertex_fetch.h"
 using namespace superman_returns::graphics;
+SR_TEST(temporal_ia_fetch_ignores_stale_shader_descriptors_but_retains_attribute_types) {
+  uint32_t metadata[224][4]{};metadata[80][0]=123;metadata[80][1]=456;metadata[80][2]=64;metadata[80][3]=7;
+  TemporalFetchSignature first{},second{};
+  SR_CHECK(CaptureTemporalVertexFetch(metadata,{},first,false));
+  metadata[80][0]=999;metadata[80][1]=1;metadata[80][2]=16;
+  SR_CHECK(CaptureTemporalVertexFetch(metadata,{},second,false));SR_CHECK(first==second);
+  metadata[80][3]=8;
+  SR_CHECK(CaptureTemporalVertexFetch(metadata,{},second,false));SR_CHECK(first!=second);
+  SR_CHECK(!CaptureTemporalVertexFetch(metadata,{},second,true));
+}
 SR_TEST(temporal_fetch_matches_reallocated_descriptor_only_for_same_proven_host_contents) {
   uint32_t metadata[224][4]{};metadata[80][0]=7;metadata[80][1]=16;metadata[80][2]=32;metadata[80][3]=9;
   TemporalFetchResource resource{7,123,4,18};TemporalFetchSignature first{},second{};

@@ -21,10 +21,9 @@
 #include "graphics/backend_selection.h"
 #include "native_renderer/native_bridge.h"
 #if SR_HAS_NATIVE
-#include "graphics/graphics_options_dialog.h"
+#include "graphics/native_apt_menu.h"
 #include "graphics/graphics_options_runtime.h"
 #include "graphics/graphics_settings.h"
-#include <imgui.h>
 #endif
 #if SR_HAS_TRACE_GPU
 #include "native_renderer/sr_graphics_system.h"
@@ -162,15 +161,11 @@ class SupermanReturnsApp : public rex::ReXApp {
 
   // Override virtual hooks for customization:
 #if SR_HAS_NATIVE
-  void OnConfigureFonts(ImFontAtlas* atlas) override {
-    const char* windows=std::getenv("WINDIR");
-    if(!windows) return;
-    const auto path=std::filesystem::path(windows)/"Fonts"/"arialbi.ttf";
-    if(std::filesystem::is_regular_file(path))
-      superman_returns::graphics::SetGraphicsOptionsFont(atlas->AddFontFromFileTTF(path.string().c_str(),22));
+  void OnPreLaunchModule() override {
+    if(rex::cvar::Query<std::string>("sr_renderer")=="native")
+      superman_returns::graphics::InstallNativeAptMenu(*runtime());
   }
   void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
-    graphics_dialog_=superman_returns::graphics::GraphicsOptionsDialog::Install(drawer);
     if(superman_returns::benchmark::Active())
       benchmark_dialog_=superman_returns::benchmark::ResultsDialog::Install(drawer,[] {superman_returns::benchmark::ExitNow(0);});
   }
@@ -179,8 +174,6 @@ class SupermanReturnsApp : public rex::ReXApp {
   }
   void OnShutdown() override {
     superman_returns::graphics::SynchronizeGraphicsSettings(true);
-    delete graphics_dialog_; // Persistent dialog never self-closes; drawer is still alive here.
-    graphics_dialog_=nullptr;
     delete benchmark_dialog_;
     benchmark_dialog_=nullptr;
   }
@@ -205,7 +198,6 @@ class SupermanReturnsApp : public rex::ReXApp {
   // void OnConfigurePaths(rex::PathConfig& paths) override {}
 #if SR_HAS_NATIVE
  private:
-  superman_returns::graphics::GraphicsOptionsDialog* graphics_dialog_=nullptr;
   superman_returns::benchmark::ResultsDialog* benchmark_dialog_=nullptr;
   std::filesystem::path graphics_preferences_path_;
 #endif

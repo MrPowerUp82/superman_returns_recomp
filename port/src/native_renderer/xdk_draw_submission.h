@@ -1,4 +1,5 @@
 #pragma once
+#include "pm4_mirror.h"
 #include <array>
 #include <bit>
 #include <cstdint>
@@ -448,5 +449,19 @@ inline XdkDrawResult SubmitNativeXdkDraw(std::span<uint8_t> device,
   const uint32_t next=old_write+uint32_t(size);
   for(unsigned i=0;i<4;++i)device[40+i]=uint8_t(next>>(24-i*8));
   return XdkDrawResult::Submitted;
+}
+
+inline XdkDrawResult SubmitNativeXdkDrawDirectToMirror(std::span<uint8_t> device,
+    std::span<uint8_t> ring,Pm4Mirror& mirror,const XdkDrawArguments& args,
+    XdkGuestMemoryView guest={},
+    XdkDrawRefusal* refusal=nullptr) {
+  const uint32_t old_write=device.size()>=44?ReadXdkWord(device,40):0;
+  const auto result=SubmitNativeXdkDraw(device,ring,args,guest,refusal);
+  if(result==XdkDrawResult::Submitted) {
+    const uint32_t next=ReadXdkWord(device,40);
+    const uint32_t size=next-old_write;
+    mirror.ScanCopy(guest.base,ring.data(),size);
+  }
+  return result;
 }
 }
