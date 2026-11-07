@@ -1,4 +1,4 @@
-namespace SupermanReturnsLauncher;
+ï»¿namespace SupermanReturnsLauncher;
 
 // Keep UI language separate from game arguments and the operating system culture.
 public static class LauncherText
@@ -44,7 +44,7 @@ public static class LauncherText
             ["InstalledDll"] = ("Lossless.dll instalada", "Installed Lossless.dll"),
             ["Browse"] = ("Procurar", "Browse"),
             ["TemporalGraphics"] = ("Ray tracing / NVIDIA DLSS", "Ray tracing / NVIDIA DLSS"),
-            ["GraphicsIntentNote"] = ("Preferências solicitadas; disponibilidade e estado aplicado aparecem no menu do jogo. Escala interna multiplica a resolução de saída ou a base recomendada pelo DLSS.", "Requested preferences; availability and applied state appear in the game menu. Internal scale multiplies output resolution or the DLSS recommended base."),
+            ["GraphicsIntentNote"] = ("PreferÃªncias solicitadas; disponibilidade e estado aplicado aparecem no menu do jogo. Escala interna multiplica a resoluÃ§Ã£o de saÃ­da ou a base recomendada pelo DLSS.", "Requested preferences; availability and applied state appear in the game menu. Internal scale multiplies output resolution or the DLSS recommended base."),
             ["RtShadows"] = ("Sombras RT", "RT Shadows"),
             ["RtShadowQuality"] = ("Qualidade das sombras RT", "RT Shadow Quality"),
             ["CharacterShadows"] = ("Sombras dos personagens", "Character Shadows"),

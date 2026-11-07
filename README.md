@@ -120,6 +120,11 @@ original. Detalhes e validação em
 O SDK dos milestones é preparado em `.tools/rexglue-object-motion-source`, com
 os patches de pacing e teclado. A variável `SR_MEMORY_SDK_CHECKOUT` permite
 escolher outro checkout isolado; [detalhes da seleção](docs/build-sdk-selection-2026-11-07.md).
+Com o corpus local preparado e `SR_EMBED_SHADERS=ON` (padrão), a build gera
+`superman_returns_shaders.srsl` e as bibliotecas Vulkan
+`superman_returns_vulkan.srvk` e `superman_returns_vulkan_global.srvk` ao lado do
+executável. O preparo inicial do corpus continua em `tools/shaders/build_corpus.ps1`.
+As builds de distribuição com `SR_EMBED_SHADERS=OFF` não incluem essas bibliotecas.
 
 Em 29/10, o D3D12 passou a verificar texturas intactas pelas épocas das páginas
 sem consultar os locks do runtime quando a prova do upload continua válida.

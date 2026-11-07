@@ -4,6 +4,7 @@
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
     <Nullable>enable</Nullable>
+    <CodePage>65001</CodePage>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>SupermanReturnsLauncher</AssemblyName>
     <RootNamespace>SupermanReturnsLauncher</RootNamespace>

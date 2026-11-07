@@ -434,7 +434,7 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
         # Pre-shader library next to the executable (sr_native_preshaders): the
         # original containers + their DXIL, how the renderer recognises shaders.
         get_filename_component(SR_NATIVE_CORPUS_DIR "${SR_NATIVE_SHADER_DIR}" DIRECTORY)
-        file(GLOB SR_NATIVE_RAW_FILES "${SR_NATIVE_CORPUS_DIR}/raw/*.bin")
+        file(GLOB SR_NATIVE_RAW_FILES CONFIGURE_DEPENDS "${SR_NATIVE_CORPUS_DIR}/raw/*.bin")
         if(NOT SR_NATIVE_EMBED_SHADERS)
             set(SR_NATIVE_RAW_FILES "")
         endif()
@@ -451,6 +451,42 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
                 COMMENT "Building the pre-shader library")
             add_custom_target(sr_preshaders ALL DEPENDS "${SR_NATIVE_PRESHADERS}")
             add_dependencies(superman_returns sr_preshaders)
+            if(WIN32 AND SR_VULKAN_GAME)
+                set(SR_VULKAN_PRESHADERS "${CMAKE_CURRENT_BINARY_DIR}/superman_returns_vulkan.srvk")
+                set(SR_VULKAN_GLOBAL_PRESHADERS "${CMAKE_CURRENT_BINARY_DIR}/superman_returns_vulkan_global.srvk")
+                file(GLOB SR_VULKAN_COMPILER_INPUTS CONFIGURE_DEPENDS
+                    "${CMAKE_CURRENT_SOURCE_DIR}/../tools/shaders/*.py"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/../tools/shaders/xenosrecomp/*.cpp"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/../tools/shaders/xenosrecomp/*.h")
+                file(GLOB_RECURSE SR_VULKAN_EMITTER_INPUTS CONFIGURE_DEPENDS
+                    "${CMAKE_CURRENT_SOURCE_DIR}/../tools/shaders/xenosrecomp/patches/*.patch"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/../.tools/xenosrecomp/src/XenosRecomp/*.cpp"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/../.tools/xenosrecomp/src/XenosRecomp/*.h")
+                get_filename_component(SR_VULKAN_DXC_DIR "${SR_VULKAN_DXC}" DIRECTORY)
+                file(GLOB SR_VULKAN_DXC_INPUTS CONFIGURE_DEPENDS "${SR_VULKAN_DXC_DIR}/*.dll")
+                add_custom_command(
+                    OUTPUT "${SR_VULKAN_PRESHADERS}" "${SR_VULKAN_GLOBAL_PRESHADERS}"
+                    COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File
+                        "${CMAKE_CURRENT_SOURCE_DIR}/../tools/build_vulkan_m2.ps1" -EmitterOnly
+                    COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/../tools/shaders/make_vulkan_preshaders.py"
+                        --corpus "${SR_NATIVE_CORPUS_DIR}/raw" --dxc "${SR_VULKAN_DXC}" --profile portable --out "${SR_VULKAN_PRESHADERS}"
+                    COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/../tools/shaders/make_vulkan_preshaders.py"
+                        --corpus "${SR_NATIVE_CORPUS_DIR}/raw" --dxc "${SR_VULKAN_DXC}" --profile global --out "${SR_VULKAN_GLOBAL_PRESHADERS}"
+                    DEPENDS ${SR_NATIVE_RAW_FILES} ${SR_VULKAN_COMPILER_INPUTS} ${SR_VULKAN_EMITTER_INPUTS}
+                        "${SR_VULKAN_DXC}" ${SR_VULKAN_DXC_INPUTS}
+                        "${CMAKE_CURRENT_SOURCE_DIR}/../tools/build_vulkan_m2.ps1"
+                    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."
+                    COMMENT "Building Vulkan portable/global pre-shader libraries"
+                    VERBATIM)
+                add_custom_target(sr_vulkan_preshaders ALL
+                    DEPENDS "${SR_VULKAN_PRESHADERS}" "${SR_VULKAN_GLOBAL_PRESHADERS}")
+                add_dependencies(superman_returns sr_vulkan_preshaders)
+                add_custom_command(TARGET superman_returns POST_BUILD
+                    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                        "${SR_VULKAN_PRESHADERS}" "${SR_VULKAN_GLOBAL_PRESHADERS}"
+                        "$<TARGET_FILE_DIR:superman_returns>"
+                    VERBATIM)
+            endif()
         endif()
     else()
         target_compile_definitions(superman_returns PRIVATE SR_HAS_NATIVE=0)

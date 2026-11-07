@@ -1,5 +1,14 @@
 # Correção da seleção do SDK no build.cmd
 
+## Integração dos pré-shaders Vulkan (design)
+
+A build normal já gera SRSL/DXIL, mas não dependia das bibliotecas SRVK que eram
+produzidas por um script separado. Adicionar outputs CMake explícitos para os
+perfis portable/global, usando o compilador de produção e os containers locais.
+O executável dependerá desses outputs e os instalará ao lado do binário. Manter
+o gate `SR_NATIVE_EMBED_SHADERS`: builds de distribuição OFF não devem incluir
+containers derivados do jogo. Falhas de tradução devem reprovar a build.
+
 O build.cmd usava implicitamente `.tools/rexglue-write-tracking-source`, enquanto
 a build dos milestones usa `.tools/rexglue-object-motion-source`. O checkout
 antigo contém alterações de codegen não reconhecidas pelo verificador canônico;
@@ -38,3 +47,25 @@ foram preservadas durante esta correção.
 
 Evidências adicionais: `incremental.log`, `incremental_result.json`,
 `unknown_sdk_call.log` e `unknown_sdk_result.json`, no mesmo diretório de logs.
+
+## Validação dos pré-shaders
+
+A build completa passou com geração dos dois perfis Vulkan e publicação do
+launcher. Os targets `sr_preshaders` e `sr_vulkan_preshaders` foram executados
+novamente com as dependências finais (containers, fontes/patches do emissor,
+contratos Python e DXC/DLLs); passaram. A execução seguinte retornou
+`ninja: no work to do.`
+
+Na pasta `port/out/build/win-amd64-release`:
+
+| Biblioteca | Bytes | Cobertura do corpus local |
+|---|---:|---:|
+| superman_returns_shaders.srsl | 5.023.116 | 241/241 |
+| superman_returns_vulkan.srvk | 10.525.048 | 241/241 |
+| superman_returns_vulkan_global.srvk | 14.777.328 | 241/241 |
+
+A inspeção validou ABI, checksum e containers, sem entradas ausentes ou chaves
+divergentes. Evidência em `logs/preshader_build_fix_20261107/libraries.json`,
+`build.log`, `targets.log`, `targets_incremental.log` e `validation.log`.
+Isso certifica as bibliotecas frente ao corpus conhecido, não zero PSOs runtime
+em todo o jogo. Os arquivos derivados do jogo continuam ignorados pelo Git.

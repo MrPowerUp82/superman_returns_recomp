@@ -1,4 +1,4 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><CodePage>65001</CodePage></PropertyGroup>
   <ItemGroup><Compile Include="../../launcher/LauncherSettings.cs" Link="LauncherSettings.cs" /><Compile Include="../../launcher/LauncherText.cs" Link="LauncherText.cs" /></ItemGroup>
 </Project>

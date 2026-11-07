@@ -2,6 +2,17 @@ using SupermanReturnsLauncher;
 
 int failed = 0;
 void Check(bool condition, string name) { Console.WriteLine($"{(condition ? "PASS" : "FAIL")} {name}"); if (!condition) failed++; }
+Check(LauncherText.Get("SettingsHeading", "pt-BR") == "Configure sua experi\u00eancia",
+    "Portuguese heading preserves UTF-8 accents in compiled strings");
+Check(LauncherText.Get("Renderer", "pt-BR") == "Motor de renderiza\u00e7\u00e3o",
+    "Portuguese labels preserve cedilla and tilde");
+Check(LauncherText.Get("Coop", "pt-BR") == "Cooperativo \u2014 2 jogadores (experimental)",
+    "co-op label preserves its Unicode dash");
+Check(LauncherText.Get("GraphicsIntentNote", "pt-BR").StartsWith("Prefer\u00eancias solicitadas;") &&
+    LauncherText.Get("GraphicsIntentNote", "pt-BR").Contains("resolu\u00e7\u00e3o de sa\u00edda"),
+    "previous ANSI fragment preserves Portuguese graphics text");
+Check(LauncherText.Strings.Values.All(t => !t.Portuguese.Contains('\ufffd') && !t.English.Contains('\ufffd')),
+    "translations contain no replacement characters");
 var settings = new LauncherSettings { GraphicsApi = "d3d12", RenderScale = "150", FpsLimit = "60", Antialiasing = "FXAA", TextureFilter = "Anisotropic8x" };
 var commandArgs = settings.BuildArguments();
 Check(new LauncherSettings().BuildArgumentList().Contains("--sr_native_fps_limit=0"), "new installs launch without the native 30 FPS limit");

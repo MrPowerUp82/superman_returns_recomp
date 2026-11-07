@@ -101,7 +101,7 @@ public sealed class LauncherSettings
 
     private string[] SettingsLines()
     {
-        return new[] { "# Superman Returns — launcher", $"language={Language}", $"game_exe={GameExe}", $"game_data={GameData}",
+        return new[] { "# Superman Returns â€” launcher", $"language={Language}", $"game_exe={GameExe}", $"game_data={GameData}",
             $"resolution={Resolution}", $"display_mode={DisplayMode}", $"gpu={Gpu}", $"gpu_luid={GpuLuid}",
             $"vsync={VSync.ToString().ToLowerInvariant()}", $"fps_limit={FpsLimit}", $"render_scale={RenderScale}",
             $"texture_filter={TextureFilter}", $"antialiasing={Antialiasing}", $"shadow_quality={ShadowQuality}",
