@@ -1,5 +1,6 @@
 #include "coop_second_camera.h"
 #include "coop_lua.h"
+#include "coop_camera_input_policy.h"
 
 #include <array>
 #include <atomic>
@@ -62,6 +63,53 @@ uint32_t Actor(PPCContext& ctx, uint8_t* base, uint32_t id) {
   ctx.r3.u64 = id;
   sub_821C23E0(ctx, base);
   return ctx.r3.u32;
+}
+CameraInputBinding InputBinding(uint8_t* base) {
+  if (!owner || !target_id || primary_owner != Word(base, kCameraGlobal) ||
+      Word(base, owner + 432) != target_id) return {};
+  const auto input = Word(base, kInputGlobal);
+  const auto slots = input && (Word(base, input + 8) >> 24) > 1 ? Word(base, input + 4) : 0;
+  if (!slots || Word(base, slots + 4) != target_id) return {};
+  return {primary_owner, owner, Word(base, slots), target_id, session_generation};
+}
+void RouteCamera(uint8_t* base, PPCRegister& camera, uint32_t port, uint32_t actor) {
+  const auto routed = CameraForInput(InputBinding(base), RuntimeCoopState(), camera.u32, port, actor);
+  if (routed != camera.u32) {
+    camera.u64 = routed;
+    static thread_local uint32_t routed_samples = 0;
+    if (++routed_samples <= 3)
+      REXLOG_INFO("coop camera input routed: port={} actor={} manager={:08X}", port, actor, routed);
+  }
+}
+void RouteLocomotionCamera(PPCRegister& camera, const PPCRegister& component) {
+  if (!storage.load(std::memory_order_acquire) || !(RuntimeCoopState() & 1)) return;
+  auto* base = rex::system::kernel_state()->memory()->virtual_membase();
+  const auto interface = Word(base, component.u32 + 100);
+  const auto table = interface ? Word(base, interface) : 0;
+  // 821AA4F8 resolves the port using InputManager and interface +4 (actor).
+  if (!table || Word(base, table + 108) != 0x821AA4F8) return;
+  const auto actor = Word(base, interface + 4);
+  if (actor) RouteCamera(base, camera, 1, Word(base, actor + 88));
+}
+void SelectLocomotionCamera(PPCContext& ctx, uint8_t* base, uint32_t actor) {
+  const auto query = Word(base, Word(base, actor) + 36);
+  if (!query) return;
+  ctx.r3.u64 = actor;
+  ctx.r4.u64 = 0x41435452;  // ACTR
+  REX_CALL_INDIRECT_FUNC(query);
+  const auto brain = ctx.r3.u32 ? Word(base, ctx.r3.u32 + 96) : 0;
+  const auto locomotion = brain ? Word(base, brain + 4) : 0;
+  const auto get_type = locomotion ? Word(base, Word(base, locomotion) + 4) : 0;
+  if (!get_type) return;
+  ctx.r3.u64 = locomotion;
+  REX_CALL_INDIRECT_FUNC(get_type);
+  const auto desired = CameraModeForLocomotion(ctx.r3.u32);
+  if (!desired || Word(base, owner + 4896) == *desired) return;
+  const auto previous = Word(base, owner + 4896);
+  ctx.r3.u64 = owner;
+  sub_82174758(ctx, base);
+  REXLOG_INFO("coop second camera locomotion: target={} previous={} mode={}",
+              target_id, previous, Word(base, owner + 4896));
 }
 }  // namespace
 
@@ -130,12 +178,12 @@ void UpdateSecondCamera(PPCContext& ctx, uint8_t* base, uint32_t primary, double
     return;
   }
   if (target_id != p2_id) {
-    // SetCameraHomeEntity eagerly resets both on-foot and flight controllers.
-    // Flight reset (8217CEC8 -> 82160D70) copies 288 bytes from its parameter
+    // SetCameraHomeEntity eagerly resets both flight and on-foot controllers.
+    // On-foot reset (8217CEC8 -> 82160D70) copies 288 bytes from its parameter
     // array without a null check. Construct alongside the primary manager's
     // startup parameter loading, and still gate binding on actual availability.
-    const uint32_t foot = Word(base, owner + 544 + 1344);
-    const uint32_t flight = Word(base, owner + 2032 + 240);
+    const uint32_t flight = Word(base, owner + 544 + 1344);
+    const uint32_t foot = Word(base, owner + 2032 + 240);
     if (!foot || !flight) {
       if (!waiting_logged) REXLOG_INFO("coop second camera waiting for parameters: foot={:08X} flight={:08X}", foot, flight);
       waiting_logged = true;
@@ -162,6 +210,7 @@ void UpdateSecondCamera(PPCContext& ctx, uint8_t* base, uint32_t primary, double
     REXLOG_INFO("coop second camera created: owner={:08X} primary={:08X} target={}", owner, primary, target_id);
   }
   if (!std::isfinite(dt) || dt <= 0 || dt > 0.25) return;
+  SelectLocomotionCamera(ctx, base, actor);
   const uint32_t controller = Word(base, owner + 4880);
   const uint32_t update = controller ? Word(base, Word(base, controller) + 16) : 0;
   const uint32_t view = Word(base, owner + 40);
@@ -191,11 +240,12 @@ void UpdateSecondCamera(PPCContext& ctx, uint8_t* base, uint32_t primary, double
     snapshot={encoded,target_id,primary,sequence,session_generation};
   }
   if (sequence <= 3 || sequence % 120 == 0)
-    REXLOG_INFO("coop second camera: seq={} owner={:08X} primary={:08X} target={} primary_target={} singleton_unchanged={} finite={} position={},{},{} primary_position={},{},{}",
+    REXLOG_INFO("coop second camera: seq={} owner={:08X} primary={:08X} target={} primary_target={} singleton_unchanged={} finite={} position={},{},{} primary_position={},{},{} mode={} forward={},{},{}",
         sequence, owner, primary, target_id, Word(base, primary + 432),
         Word(base, kCameraGlobal) == primary, finite,
         std::bit_cast<float>(matrix[12]), std::bit_cast<float>(matrix[13]), std::bit_cast<float>(matrix[14]),
-        Float(base, primary + 480), Float(base, primary + 484), Float(base, primary + 488));
+        Float(base, primary + 480), Float(base, primary + 484), Float(base, primary + 488),
+        Word(base, owner + 4896), values[8], values[9], values[10]);
 }
 SecondCameraSnapshot SampleSecondCamera() {
   std::lock_guard lock(snapshot_mutex);
@@ -204,6 +254,24 @@ SecondCameraSnapshot SampleSecondCamera() {
   return snapshot;
 }
 }  // namespace superman_returns::coop
+
+// Contracts/PCs: docs/coop/GROUND-CAMERA-2026-11-09.md. These callbacks change
+// only the loaded camera register; the global singleton always remains P1's.
+void SrCoopLookCamera(PPCRegister& camera, PPCRegister& port) {
+  using namespace superman_returns::coop;
+  if (!storage.load(std::memory_order_acquire) || port.u32 != 1) return;
+  auto* base = rex::system::kernel_state()->memory()->virtual_membase();
+  RouteCamera(base, camera, port.u32, InputBinding(base).secondary_actor);
+}
+void SrCoopLocomotionCamera(PPCRegister& camera, PPCRegister& component) {
+  superman_returns::coop::RouteLocomotionCamera(camera, component);
+}
+void SrCoopMovementCamera(PPCRegister& camera, PPCRegister& actor, PPCRegister& port) {
+  using namespace superman_returns::coop;
+  if (!storage.load(std::memory_order_acquire) || port.u32 != 1) return;
+  auto* base = rex::system::kernel_state()->memory()->virtual_membase();
+  RouteCamera(base, camera, port.u32, Word(base, actor.u32 + 88));
+}
 
 REX_HOOK_RAW(sub_821620E8) {
   superman_returns::coop::DestroySecondCamera(ctx, base);

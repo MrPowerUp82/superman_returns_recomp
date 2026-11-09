@@ -1,0 +1,24 @@
+#pragma once
+#include <cstdint>
+#include <optional>
+
+namespace superman_returns::coop {
+struct CameraInputBinding {
+  uint32_t primary = 0, secondary = 0, primary_actor = 0, secondary_actor = 0;
+  uint64_t generation = 0;
+};
+inline uint32_t CameraForInput(const CameraInputBinding& b, uint64_t session,
+                              uint32_t native, uint32_t port, uint32_t actor) {
+  if (!(session & 1) || (session >> 1) != b.generation ||
+      !b.primary || !b.secondary || b.primary == b.secondary ||
+      !b.primary_actor || b.primary_actor == 255 ||
+      !b.secondary_actor || b.secondary_actor == 255 || b.primary_actor == b.secondary_actor ||
+      native != b.primary || port != 1 || actor != b.secondary_actor) return native;
+  return b.secondary;
+}
+inline std::optional<uint32_t> CameraModeForLocomotion(uint32_t type) {
+  if (type == 0x00464C59) return 0;  // FLY / FlightCamDefsXML (+544)
+  if (type == 0x4C4F434F) return 1;  // LOCO / OnFootCamDefsXML (+2032)
+  return std::nullopt;
+}
+}  // namespace superman_returns::coop

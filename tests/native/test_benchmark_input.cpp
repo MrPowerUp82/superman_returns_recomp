@@ -2,6 +2,20 @@
 #include "test_main.h"
 using superman_returns::BenchmarkInput;
 using superman_returns::BenchmarkPadState;
+SR_TEST(benchmark_input_supports_independent_look_axes_and_legacy_reset) {
+  BenchmarkInput input;
+  SR_CHECK(input.Update("1 500 0 0 -32768 32767",100));
+  SR_CHECK_EQ(input.Sample(100).look_x,-32768);
+  SR_CHECK_EQ(input.Sample(100).look_y,32767);
+  for(auto command:{"2 500 0 0 1", "2 500 0 0 32768 0", "2 500 0 0 0 -32769", "2 500 0 0 0 0 extra"})
+    SR_CHECK(!input.Update(command,200));
+  SR_CHECK_EQ(input.Sample(200).look_x,-32768);
+  SR_CHECK(input.Sample(600)==BenchmarkPadState{});
+  SR_CHECK(input.Update("2 500 0 0 100 -200",700));
+  SR_CHECK(input.Update("3 500 16 0",800));
+  SR_CHECK_EQ(input.Sample(800).look_x,0);
+  SR_CHECK_EQ(input.Sample(800).look_y,0);
+}
 SR_TEST(benchmark_input_holds_from_first_observation_and_releases_on_deadline) {
   BenchmarkInput input;
   SR_CHECK(input.Sample(0)==BenchmarkPadState{});

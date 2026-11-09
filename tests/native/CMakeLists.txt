@@ -49,6 +49,7 @@ add_executable(sr_native_tests
     test_temporal_frame.cpp
     test_camera_candidate_probe.cpp
     test_coop_camera_packet.cpp
+    test_coop_camera_input.cpp
     test_coop_split_frame.cpp
     test_coop_guest_string.cpp
     test_coop_session.cpp

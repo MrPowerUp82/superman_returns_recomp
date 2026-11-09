@@ -55,12 +55,12 @@ public:
       }
     }
     const auto state=input_.Sample(now);if(state!=last_){last_=state;++packet_;}
-    if(out){*out={};out->packet_number=packet_;out->gamepad.buttons=state.buttons;out->gamepad.thumb_ly=state.forward;}
+    if(out){*out={};out->packet_number=packet_;out->gamepad.buttons=state.buttons;out->gamepad.thumb_ly=state.forward;out->gamepad.thumb_rx=state.look_x;out->gamepad.thumb_ry=state.look_y;}
     return X_ERROR_SUCCESS;
   }
   rex::X_RESULT GetDeviceCapabilities(rex::input::DeviceId id,uint32_t,rex::input::X_INPUT_CAPABILITIES* out) override {
     if(id!=device_)return X_ERROR_DEVICE_NOT_CONNECTED;
-    if(out){*out={};out->type=1;out->sub_type=1;out->gamepad.buttons=0xffff;out->gamepad.thumb_ly=int16_t(32767);}
+    if(out){*out={};out->type=1;out->sub_type=1;out->gamepad.buttons=0xffff;out->gamepad.thumb_ly=int16_t(32767);out->gamepad.thumb_rx=int16_t(32767);out->gamepad.thumb_ry=int16_t(32767);}
     return X_ERROR_SUCCESS;
   }
   rex::X_RESULT SetDeviceVibration(rex::input::DeviceId id,rex::input::X_INPUT_VIBRATION*) override {return id==device_?X_ERROR_SUCCESS:X_ERROR_DEVICE_NOT_CONNECTED;}

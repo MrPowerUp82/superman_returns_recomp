@@ -97,6 +97,48 @@ address = 0x8261B58C
 name = "SrVehiclePaletteUpload"
 registers = ["r4", "r5", "r6"]
 
+# Per-player native camera input. Only a live, generation-matched P2 routes to
+# its own manager. ABI/PC audit: docs/coop/GROUND-CAMERA-2026-11-09.md.
+[[entrypoint.midasm_hook]]
+address = 0x821EAC8C
+name = "SrCoopLookCamera"
+registers = ["r11", "r31"]
+
+[[entrypoint.midasm_hook]]
+address = 0x821FFD78
+name = "SrCoopLocomotionCamera"
+registers = ["r3", "r30"]
+
+[[entrypoint.midasm_hook]]
+address = 0x822000E4
+name = "SrCoopLocomotionCamera"
+registers = ["r11", "r30"]
+
+[[entrypoint.midasm_hook]]
+address = 0x82200140
+name = "SrCoopLocomotionCamera"
+registers = ["r3", "r30"]
+
+[[entrypoint.midasm_hook]]
+address = 0x82200148
+name = "SrCoopLocomotionCamera"
+registers = ["r11", "r30"]
+
+[[entrypoint.midasm_hook]]
+address = 0x8220044C
+name = "SrCoopLocomotionCamera"
+registers = ["r11", "r30"]
+
+[[entrypoint.midasm_hook]]
+address = 0x821FC538
+name = "SrCoopLocomotionCamera"
+registers = ["r3", "r29"]
+
+[[entrypoint.midasm_hook]]
+address = 0x82212F14
+name = "SrCoopMovementCamera"
+registers = ["r29", "r27", "r31"]
+
 # Targets found by the first validation pass but omitted from automatic
 # function discovery. Keep these in the manifest so normal codegen can run
 # without --force; their boundaries still need runtime verification.
