@@ -20,6 +20,7 @@
 #include <rex/ui/keybinds.h>
 #include "title_benchmark.h"
 #include "title_benchmark_dialog.h"
+#include "audio_out/xaudio2_output.h"
 #include <rex/input/input_system.h>
 #include "sr_settings.h"
 #include "graphics/backend_selection.h"
@@ -49,6 +50,10 @@ class SupermanReturnsApp : public rex::ReXApp {
   // sr_renderer=native (docs/native-port-plan.md) uses the native renderer
   // when the build and the game profile allow it, else xenos.
   void OnPreSetup(rex::RuntimeConfig& config) override {
+    // Native Windows audio output (XAudio2) unless sr_audio_output=sdl.
+    if (superman_returns::audio_out::XAudio2Selected())
+      config.audio_factory = REX_AUDIO_BACKEND(superman_returns::audio_out::XAudio2AudioSystem);
+
     // Title benchmark: no key or pad may advance the title menu. Tool mode
     // creates only the NOP driver, whatever input_backend (SDL, XInput) says.
     superman_returns::benchmark::NoteStartup();

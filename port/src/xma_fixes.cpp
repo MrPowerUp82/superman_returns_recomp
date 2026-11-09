@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -50,6 +51,12 @@
 #include "xma_flush_policy.h"
 
 namespace {
+
+using Clock = std::chrono::steady_clock;
+
+// Safety net for a context that keeps making progress without ever giving
+// the mixer enough samples. Well under one 256-sample audio frame (5.3 ms).
+constexpr auto kMaxStarvedWait = std::chrono::milliseconds(1);
 
 using rex::audio::XMA_CONTEXT_DATA;
 using rex::audio::XmaContext;
@@ -325,33 +332,53 @@ REX_HOOK_RAW(sub_826592F0) {
 }
 
 void XmaKickStarvedContext(PPCRegister& r26, PPCRegister& r31) {
+  // The audio mixer runs on a single guest thread.
+  static thread_local uint32_t waiting_stream = 0;
+  static thread_local Clock::time_point waiting_since;
+
   if (r26.u32 == 0) {  // Enough samples; the mixer is not waiting.
+    waiting_stream = 0;
     return;
   }
 
   uint8_t* base = rex::system::kernel_state()->memory()->virtual_membase();
   const uint32_t stream = r31.u32;
-  if (!IsValidGuestPtr(stream)) {
+  uint32_t xma_context = 0;
+
+  auto give_up = [&](const char* reason, const ContextState& state = {}) {
+    LogGiveUp(reason, xma_context, stream, state);
+    waiting_stream = 0;
     r26.u64 = 0;
+  };
+
+  if (!IsValidGuestPtr(stream)) {
+    give_up("invalid stream");
     return;
   }
   const uint32_t container = Load32(base, stream);
   if (!IsValidGuestPtr(container)) {
-    r26.u64 = 0;
+    give_up("invalid container");
     return;
   }
-  const uint32_t xma_context = Load32(base, container);
+  xma_context = Load32(base, container);
   if (!IsValidGuestPtr(xma_context)) {
-    LogGiveUp("released", 0, stream, {});
-    r26.u64 = 0;
+    give_up("released");
     return;
   }
 
   const ContextState before_pre = ReadState(base, xma_context);
   XmaContext* context = FindContext(xma_context);
   if (IsDeadContext(base, xma_context, before_pre, context)) {
-    LogGiveUp("released", xma_context, stream, before_pre);
-    r26.u64 = 0;
+    give_up("released", before_pre);
+    return;
+  }
+
+  const auto now = Clock::now();
+  if (stream != waiting_stream) {
+    waiting_stream = stream;
+    waiting_since = now;
+  } else if (now - waiting_since > kMaxStarvedWait) {
+    give_up("timed out", before_pre);
     return;
   }
 
@@ -376,38 +403,25 @@ void XmaKickStarvedContext(PPCRegister& r26, PPCRegister& r31) {
   }
 
   const ContextState after = ReadState(base, xma_context);
-  const bool progress = (after.dword0 != before.dword0 || after.dword2 != before.dword2);
 
-  if (progress) {
-    static thread_local uint32_t retried_stream = 0;
-    static thread_local uint32_t retry_count = 0;
-    if (stream != retried_stream) {
-      retried_stream = stream;
-      retry_count = 0;
-    }
-    if (retry_count++ < 2) {
-      return;  // Keep r26 != 0 so sub_826592F0 retries this stream
-    }
-    retried_stream = 0;
-    retry_count = 0;
-  }
-
-  // The kick decoded synchronously. If this is the end of the sound, try flushing the final carry block:
-  const uint32_t sound = g_mixer_call.sound;
-  const uint32_t remaining = IsValidGuestPtr(sound) ? Load32(base, sound + 36) : 0;
-  if (superman_returns::IsFinalXmaRequest(remaining, g_mixer_call.requested)) {
-    if (TryFlushFinalBlock(base, xma_context, stream)) {
-      // The first export returned zero in r3; restore the context argument.
-      call_ctx.r3.u64 = xma_context;
-      __imp__XMAEnableContext(call_ctx, base);
-      const ContextState after_flush = ReadState(base, xma_context);
-      if (after_flush.dword0 != before.dword0 || after_flush.dword2 != before.dword2) {
-        return;
+  if (after == before) {
+    // The kick decoded synchronously. If this is the end of the sound, try flushing the final carry block:
+    const uint32_t sound = g_mixer_call.sound;
+    const uint32_t remaining = IsValidGuestPtr(sound) ? Load32(base, sound + 36) : 0;
+    if (superman_returns::IsFinalXmaRequest(remaining, g_mixer_call.requested)) {
+      if (TryFlushFinalBlock(base, xma_context, stream)) {
+        // The first export returned zero in r3; restore the context argument.
+        call_ctx.r3.u64 = xma_context;
+        __imp__XMAEnableContext(call_ctx, base);
+        const ContextState after_flush = ReadState(base, xma_context);
+        if (after_flush != before) {
+          return;
+        }
       }
     }
-  }
 
-  // Stopped waiting: the context made no progress. Never spin, never yield, never alter sound+36.
-  LogGiveUp("no progress", xma_context, stream, after);
-  r26.u64 = 0;
+    // Stopped waiting: the context made no progress. Never spin, never yield, never alter sound+36.
+    give_up("no progress", after);
+    return;
+  }
 }

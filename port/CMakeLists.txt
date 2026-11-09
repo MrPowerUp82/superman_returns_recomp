@@ -84,6 +84,7 @@ set(SUPERMANRETURNS_SOURCES
     src/coop_status.cpp
     src/coop_apt_probe.cpp
     src/xma_fixes.cpp
+    src/audio_out/xaudio2_output.cpp
     src/sr_settings.cpp
     src/graphics/backend_selection.cpp
     src/sr_preset.cpp
@@ -103,6 +104,9 @@ else()
 endif()
 
 rexglue_setup_target(superman_returns GPU_PLUGINS xenos)
+if(WIN32)
+    target_link_libraries(superman_returns PRIVATE xaudio2)
+endif()
 # Ship the already exercised join script inside the executable. The launcher
 # does not need a checkout, PowerShell, or an editable Lua mailbox.
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../tools/coop/spawn_p2.lua")
