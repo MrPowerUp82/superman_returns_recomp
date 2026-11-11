@@ -17,6 +17,37 @@ struct BufferTrackingPolicy {
   }
 };
 
+// The physical write watch reports writes to a page, not to an allocation. A
+// small buffer that shares its page with bytes the game writes on every draw is
+// armed, hashed and found unchanged at each use, and the armed page faults on the
+// next neighbouring write: a page fault and a protection syscall per draw that
+// never find a change. After `kFalseAlarms` notifications in a row that left the
+// content unchanged, the buffer stops arming its pages and is hashed at every use
+// instead: the same content check the watch round trip ended in, without the
+// fault or the syscall. The watch is tried again after a number of frames that
+// doubles each time it is suspended again (600 up to 9600).
+struct BufferWatchChurnPolicy {
+  static constexpr uint8_t kFalseAlarms = 8;
+  static constexpr uint32_t kFirstRetryFrames = 600, kMaxRetryFrames = 9600;
+  uint8_t false_alarms = 0;
+  bool suspended = false;
+  uint32_t retry_frames = kFirstRetryFrames;
+  uint64_t resume_frame = 0;
+  // A page-write notification was checked against the content hash. Returns
+  // true when this notification suspends the watch.
+  bool OnNotification(bool content_changed, uint64_t frame) {
+    if (suspended) return false;
+    if (content_changed) { false_alarms = 0; return false; }
+    if (++false_alarms < kFalseAlarms) return false;
+    suspended = true;
+    resume_frame = frame + retry_frames;
+    retry_frames = std::min(retry_frames * 2, kMaxRetryFrames);
+    return true;
+  }
+  bool ShouldResume(uint64_t frame) const { return suspended && frame >= resume_frame; }
+  void OnResumed() { suspended = false; false_alarms = 0; }
+};
+
 inline bool ShouldSkipIntraBatchBufferCheck(
     bool force_every_use, bool already_dirty, bool content_valid,
     uint64_t last_checked_batch, uint64_t current_batch,

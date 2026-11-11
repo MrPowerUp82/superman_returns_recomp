@@ -206,6 +206,10 @@ class Renderer : public NativeFrontend {
     std::map<std::tuple<uint64_t, uint64_t, int>, uint64_t> skip_pso_pairs;
     uint64_t buffer_watch_dirty = 0;
     uint64_t buffer_hash_dirty = 0;
+    // Watch re-arms after a page write / those whose hash was unchanged /
+    // buffers moved to hashing at every use / returned to the watch.
+    uint64_t buffer_watch_rearms = 0, buffer_watch_false_alarms = 0;
+    uint64_t buffer_watch_suspended = 0, buffer_watch_resumed = 0;
     uint64_t buffer_tracking_reused = 0, buffer_tracking_watches = 0, buffer_tracking_drops = 0;
     uint64_t edram_reinterprets = 0;
     uint64_t shader_pending_draws = 0;
@@ -284,6 +288,7 @@ class Renderer : public NativeFrontend {
     uint64_t last_checked_batch = ~0ull;
     uint64_t last_checked_invalidation_stamp = 0;
     bool watched = false;
+    BufferWatchChurnPolicy watch_churn;  // hashed buffers only
     BufferContent content;
     // Write-tracking proof that the bytes still hash to content.value; while
     // it holds, the once-per-frame fallback hash is skipped.

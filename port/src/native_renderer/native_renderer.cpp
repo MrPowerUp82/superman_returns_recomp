@@ -556,6 +556,15 @@ bool SmallBufferHashEveryUse() {
   }();
   return enabled;
 }
+// On by default; SR_NATIVE_BUFFER_WATCH_CHURN=0 keeps every hashed buffer on the
+// write watch for same-binary comparisons.
+bool BufferWatchChurnSuspension() {
+  static const bool enabled=[] {
+    const char* value=std::getenv("SR_NATIVE_BUFFER_WATCH_CHURN");
+    return !value || !*value || *value!='0';
+  }();
+  return enabled;
+}
 bool TextureSlotLookupCaching() {
   static const bool enabled=[] {
     const char* value=std::getenv("SR_NATIVE_TEXTURE_SLOT_CACHE");
@@ -5920,9 +5929,19 @@ Renderer::BufferEntry* Renderer::ApplyBuffer(
 bool Renderer::RefreshTrackedBuffer(TrackedBuffer& t) {
   DetailScope refresh_scope(capture_timings.fb_refresh_ns);
   if (graphics::FrameTimeline::Detail()) ++stream_plan_counters.refresh_calls;
-  const bool every_use=t.size<=kHashedBufferMax && SmallBufferHashEveryUse();
+  // A suspended watch (BufferWatchChurnPolicy) is the same every-use policy,
+  // chosen per buffer.
+  const bool every_use=t.size<=kHashedBufferMax &&
+      (SmallBufferHashEveryUse() || t.watch_churn.suspended);
   const uint64_t current_batch = batches_submitted_;
   const uint32_t current_write_seq = write_seq_.load(std::memory_order_acquire);
+  if (t.watch_churn.ShouldResume(front_frame_) && texture_watch_ && t.watched) {
+    // Arm before this call's hash (every_use still holds here), so a physical
+    // write after it is observable again.
+    t.watch_seq = ArmTextureWatch(t.address, t.size);
+    t.watch_churn.OnResumed();
+    ++stats_.buffer_watch_resumed;
+  }
   if (ShouldSkipIntraBatchBufferCheck(every_use, t.dirty, t.content.valid,
                                       t.last_checked_batch, current_batch,
                                       t.checked_seq, current_write_seq,
@@ -5947,6 +5966,7 @@ bool Renderer::RefreshTrackedBuffer(TrackedBuffer& t) {
         // Arm before reading so a later physical write remains observable.
         t.watch_seq = ArmTextureWatch(t.address, t.size);
         page_written = true;
+        ++stats_.buffer_watch_rearms;
       }
     }
   }
@@ -5976,6 +5996,11 @@ bool Renderer::RefreshTrackedBuffer(TrackedBuffer& t) {
             REX_KERNEL_MEMORY()->TranslatePhysical<const uint8_t*>(t.address & 0x1FFFFFFF), t.size, 0);
       },every_use);
       if (changed) ++stats_.buffer_hash_dirty;
+      if (page_written && hashed) {
+        if (!changed) ++stats_.buffer_watch_false_alarms;
+        if (BufferWatchChurnSuspension() && t.watch_churn.OnNotification(changed, front_frame_))
+          ++stats_.buffer_watch_suspended;
+      }
       if (hashed && buffer_tracking_) UpdateBufferProof(t, changed, sampled ? &before : nullptr, domain);
     }
   }
@@ -8705,6 +8730,9 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
                 "tracking proofs reused {} watches {} drops {}",
                 stats_.buffer_watch_dirty, stats_.buffer_hash_dirty, stats_.buffer_tracking_reused,
                 stats_.buffer_tracking_watches, stats_.buffer_tracking_drops);
+    REXLOG_INFO("native: buffer watch re-arms {} unchanged {} suspended {} resumed {}",
+                stats_.buffer_watch_rearms, stats_.buffer_watch_false_alarms,
+                stats_.buffer_watch_suspended, stats_.buffer_watch_resumed);
     REXLOG_INFO("native: gpu fence wait {} ms total, frames {}", stats_.gpu_wait_us / 1000,
                 frame_count_);
     REXLOG_INFO("native: pm4 mirror packets {} dwords {} indirect {} ({} dwords) resyncs {} "
