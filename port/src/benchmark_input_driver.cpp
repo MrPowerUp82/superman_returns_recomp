@@ -55,7 +55,7 @@ public:
       }
     }
     const auto state=input_.Sample(now);if(state!=last_){last_=state;++packet_;}
-    if(out){*out={};out->packet_number=packet_;out->gamepad.buttons=state.buttons;out->gamepad.thumb_ly=state.forward;out->gamepad.thumb_rx=state.look_x;out->gamepad.thumb_ry=state.look_y;}
+    if(out){*out={};out->packet_number=packet_;out->gamepad.buttons=state.buttons;out->gamepad.thumb_ly=state.forward;out->gamepad.thumb_rx=state.look_x;out->gamepad.thumb_ry=state.look_y;out->gamepad.left_trigger=state.left_trigger;out->gamepad.right_trigger=state.right_trigger;}
     return X_ERROR_SUCCESS;
   }
   rex::X_RESULT GetDeviceCapabilities(rex::input::DeviceId id,uint32_t,rex::input::X_INPUT_CAPABILITIES* out) override {

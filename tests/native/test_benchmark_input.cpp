@@ -16,6 +16,19 @@ SR_TEST(benchmark_input_supports_independent_look_axes_and_legacy_reset) {
   SR_CHECK_EQ(input.Sample(800).look_x,0);
   SR_CHECK_EQ(input.Sample(800).look_y,0);
 }
+SR_TEST(benchmark_input_supports_optional_triggers_after_look_axes) {
+  BenchmarkInput input;
+  SR_CHECK(input.Update("1 500 0 0 0 0 255 128",100));
+  SR_CHECK_EQ(input.Sample(100).left_trigger,255);
+  SR_CHECK_EQ(input.Sample(100).right_trigger,128);
+  for(auto command:{"2 500 0 0 0 0 1", "2 500 0 0 0 0 256 0", "2 500 0 0 0 0 0 -1", "2 500 0 0 0 0 0 0 9"})
+    SR_CHECK(!input.Update(command,200));
+  SR_CHECK_EQ(input.Sample(200).left_trigger,255);
+  SR_CHECK(input.Update("2 500 0 0 1 2",300));
+  SR_CHECK_EQ(input.Sample(300).left_trigger,0);
+  SR_CHECK_EQ(input.Sample(300).right_trigger,0);
+  SR_CHECK(input.Sample(900)==BenchmarkPadState{});
+}
 SR_TEST(benchmark_input_holds_from_first_observation_and_releases_on_deadline) {
   BenchmarkInput input;
   SR_CHECK(input.Sample(0)==BenchmarkPadState{});

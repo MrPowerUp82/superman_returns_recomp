@@ -3,6 +3,7 @@
 #include "coop_camera_input_policy.h"
 
 #include <array>
+#include <cstring>
 #include <atomic>
 #include <bit>
 #include <cmath>
@@ -33,6 +34,7 @@ bool waiting_logged = false;
 std::mutex snapshot_mutex;
 SecondCameraSnapshot snapshot;
 uint32_t view_generation=0;
+uint32_t aim_generation=0;  // view_generation whose aim point (+528) is valid
 uint64_t session_generation=0;
 void InvalidateSnapshot() {
   std::lock_guard lock(snapshot_mutex);
@@ -111,7 +113,80 @@ void SelectLocomotionCamera(PPCContext& ctx, uint8_t* base, uint32_t actor) {
   REXLOG_INFO("coop second camera locomotion: target={} previous={} mode={}",
               target_id, previous, Word(base, owner + 4896));
 }
+void Write(uint8_t* base, uint32_t address, const void* input, size_t count) {
+#ifdef _WIN32
+  SIZE_T copied = 0;
+  if (address && uint64_t(address) + count <= (uint64_t{1} << 32))
+    WriteProcessMemory(GetCurrentProcess(), base + address, input, count, &copied);
+#endif
+}
+void WriteWordBE(uint8_t* base, uint32_t address, uint32_t value) {
+  value = __builtin_bswap32(value);
+  Write(base, address, &value, 4);
+}
+// The manager update (sub_821808F8) is not run for P2's graph. Reproduce the
+// two pieces P2's own gameplay reads through the singleton: the camera
+// position copy (+480) and the aim point (+528) from sub_821759B8, the
+// camera-ray collision used by powers/targeting/aim animation when no target
+// is locked. sub_821759B8's only write outside the manager is the view
+// direction at *(0x82970174)+3104; keep P1's value there.
+void UpdateSecondaryAim(PPCContext& ctx, uint8_t* base) {
+  constexpr uint32_t kViewGlobal = 0x82970174, kViewOffset = 3104;
+  const uint32_t view_object = Word(base, kViewGlobal);
+  std::array<uint8_t, 16> saved{};
+  const bool keep = view_object && Read(base, view_object + kViewOffset, saved.data(), saved.size());
+  ctx.r3.u64 = owner;
+  ctx.r4.u64 = owner + 480;
+  sub_821624D8(ctx, base);
+  ctx.r3.u64 = owner;
+  sub_821759B8(ctx, base);
+  if (keep) Write(base, view_object + kViewOffset, saved.data(), saved.size());
+  std::array<uint32_t, 3> aim{};
+  bool finite = Read(base, owner + 528, aim.data(), sizeof(aim));
+  for (auto word : aim) finite = finite && std::isfinite(std::bit_cast<float>(__builtin_bswap32(word)));
+  if (finite && aim_generation != view_generation) {
+    aim_generation = view_generation;
+    REXLOG_INFO("coop second camera aim ready: target={} aim={},{},{} primary_aim={},{},{}", target_id,
+                std::bit_cast<float>(__builtin_bswap32(aim[0])), std::bit_cast<float>(__builtin_bswap32(aim[1])),
+                std::bit_cast<float>(__builtin_bswap32(aim[2])), Float(base, primary_owner + 528),
+                Float(base, primary_owner + 532), Float(base, primary_owner + 536));
+  }
+  if (!finite) aim_generation = 0;
+}
 }  // namespace
+
+// Called around sub_821BE6C8 (one actor's own update, from the entity loop
+// sub_821C2468). Returns the manager to expose for that actor, or 0.
+uint32_t BeginActorCameraScope(uint8_t* base, uint32_t actor) {
+  if (!storage.load(std::memory_order_relaxed) || !owner || !target_id || !actor) return 0;
+  // Cheap reject first: this runs for every actor, every entity-loop pass, so
+  // read the ID the way the guest itself does (no syscall). `actor` is the
+  // pointer the guest is about to dereference in the same call.
+  if (actor < 0x10000 || actor > 0xFFFFFFFFu - 92) return 0;
+  uint32_t raw = 0;
+  std::memcpy(&raw, base + actor + 88, 4);
+  const auto id = __builtin_bswap32(raw);
+  if (id != target_id) return 0;
+  const auto singleton = Word(base, kCameraGlobal);
+  const auto routed = CameraForActorUpdate(InputBinding(base), RuntimeCoopState(), singleton, id,
+                                           aim_generation && aim_generation == view_generation);
+  if (!routed) return 0;
+  WriteWordBE(base, kCameraGlobal, routed);
+  static uint32_t scopes = 0;
+  if (++scopes <= 3 || scopes % 3600 == 0)
+    REXLOG_INFO("coop actor camera scope: actor={} manager={:08X} primary={:08X} count={}",
+                target_id, routed, singleton, scopes);
+  return singleton;
+}
+void EndActorCameraScope(uint8_t* base, uint32_t primary, uint32_t routed) {
+  if (Word(base, kCameraGlobal) == routed) WriteWordBE(base, kCameraGlobal, primary);
+  else REXLOG_WARN("coop actor camera scope: singleton changed during P2 update ({:08X}); left as is",
+                   Word(base, kCameraGlobal));
+}
+uint32_t SecondCameraOwner() { return owner; }
+void ReadOwner(uint8_t* base, uint32_t address, uint32_t& value) {
+  value = storage.load(std::memory_order_relaxed) && target_id ? Word(base, address) : 0;
+}
 
 void InstallSecondCamera(rex::Runtime& runtime) {
   if (!REXCVAR_GET(sr_coop_second_camera) || !REXCVAR_GET(sr_coop_input) || benchmark::Active()) return;
@@ -222,6 +297,7 @@ void UpdateSecondCamera(PPCContext& ctx, uint8_t* base, uint32_t primary, double
   ctx.r3.u64 = view;
   ctx.r4.u64 = block + kManagerSize;
   REX_CALL_INDIRECT_FUNC(transform);
+  UpdateSecondaryAim(ctx, base);
   std::array<uint32_t, 16> matrix{};
   bool finite = Read(base, block + kManagerSize, matrix.data(), sizeof(matrix));
   for (auto& word : matrix) {
@@ -271,6 +347,34 @@ void SrCoopMovementCamera(PPCRegister& camera, PPCRegister& actor, PPCRegister& 
   if (!storage.load(std::memory_order_acquire) || port.u32 != 1) return;
   auto* base = rex::system::kernel_state()->memory()->virtual_membase();
   RouteCamera(base, camera, port.u32, Word(base, actor.u32 + 88));
+}
+
+// One actor's own update: FSM/Lua (+132), brain/locomotion (+96), powers,
+// targeting and aim animation all read the camera through the singleton.
+// While P2 updates, the singleton names P2's manager; P1 and every other
+// actor keep P1's. Same (simulation) thread as every traced singleton read.
+REX_HOOK_RAW(sub_821BE6C8) {
+  using namespace superman_returns::coop;
+  struct Scope {
+    uint8_t* base; uint32_t primary, routed;
+    ~Scope() { if (primary) EndActorCameraScope(base, primary, routed); }
+  } scope{base, BeginActorCameraScope(base, ctx.r3.u32), SecondCameraOwner()};
+  __imp__sub_821BE6C8(ctx, base);
+}
+
+// A power component's fire/aim update (heat vision, breaths). It is driven by
+// the power-system entity in a later entity-loop phase, outside its owner's
+// sub_821BE6C8, and aims at the singleton's aim point (+528) when nothing is
+// locked (sub_822172B8, target -1). Its owner actor is at component +32.
+REX_HOOK_RAW(sub_8221E748) {
+  using namespace superman_returns::coop;
+  uint32_t owner_actor = 0;
+  superman_returns::coop::ReadOwner(base, ctx.r3.u32 + 32, owner_actor);
+  struct Scope {
+    uint8_t* base; uint32_t primary, routed;
+    ~Scope() { if (primary) EndActorCameraScope(base, primary, routed); }
+  } scope{base, BeginActorCameraScope(base, owner_actor), SecondCameraOwner()};
+  __imp__sub_8221E748(ctx, base);
 }
 
 REX_HOOK_RAW(sub_821620E8) {

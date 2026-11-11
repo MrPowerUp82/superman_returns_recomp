@@ -23,6 +23,14 @@ Load a slot and enter gameplay, then press F2 without sending `spawn_p2.lua` to 
 Unlike the launcher, this development probe retains synthetic input for menu
 navigation and movement checks.
 
+## P2 aim and camera ownership (2026-11-11)
+
+While the live P2 actor runs its own update (`sub_821BE6C8`) and while a P2-owned
+power component fires (`sub_8221E748`), the camera singleton names P2's manager;
+P2's manager now computes its own aim point (+528). P2's powers, targeting, aim
+animation and camera-relative movement follow P2's camera. HUD lock-on markers
+remain shared. See `docs/coop/AIM-CAMERA-2026-11-11.md`.
+
 ## Decision (2026-11-03)
 
 The requested architecture is **two players in one process, one shared world,
