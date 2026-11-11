@@ -76,4 +76,26 @@ SR_TEST(copy_guest_bytes_survives_faults_without_a_syscall) {
   SR_CHECK(reads.ReadScratch(pages+4090,16).empty());
   SR_CHECK(VirtualFree(pages,0,MEM_RELEASE));
 }
+SR_TEST(read_guest_virtual_matches_a_checked_process_read) {
+  using superman_returns::native::ReadGuestVirtual;
+  auto* pages=static_cast<uint8_t*>(VirtualAlloc(nullptr,8192,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE));
+  SR_CHECK(pages!=nullptr);if(!pages) return;
+  pages[4092]=0x12;pages[4093]=0x34;pages[4094]=0x56;pages[4095]=0x78;
+  DWORD previous=0;SR_CHECK(VirtualProtect(pages+4096,4096,PAGE_NOACCESS,&previous));
+  uint32_t word=0;
+  SR_CHECK(ReadGuestVirtual(pages,4092,&word,4));
+  SR_CHECK_EQ(__builtin_bswap32(word),0x12345678u);
+  // Unreadable, partially readable, empty, null-based and wrapping reads fail.
+  SR_CHECK(!ReadGuestVirtual(pages,4096,&word,4));
+  SR_CHECK(!ReadGuestVirtual(pages,4094,&word,4));
+  SR_CHECK(!ReadGuestVirtual(pages,4092,&word,0));
+  SR_CHECK(!ReadGuestVirtual(nullptr,4092,&word,4));
+  SR_CHECK(!ReadGuestVirtual(pages,0xFFFFFFFEu,&word,4));
+  // The GPU register window is refused before any access: no page is touched,
+  // so a base without a mapping behind those addresses is enough to prove it.
+  SR_CHECK(!ReadGuestVirtual(pages,0x7FC80000u,&word,4));
+  SR_CHECK(!ReadGuestVirtual(pages,0x7FC8FFFCu,&word,4));
+  SR_CHECK(!ReadGuestVirtual(pages,0x7FC7FFFEu,&word,4));
+  SR_CHECK(VirtualFree(pages,0,MEM_RELEASE));
+}
 #endif

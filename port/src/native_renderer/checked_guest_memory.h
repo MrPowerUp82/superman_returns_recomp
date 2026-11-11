@@ -29,6 +29,19 @@ inline bool CopyGuestBytes(void* destination, const void* source, size_t length)
   return true;
 }
 
+// Reads guest virtual memory for observation code that runs on guest threads
+// (probes of game objects whose pointers may be stale). Same result as
+// ReadProcessMemory on the own process, without its syscall: sampled on the
+// render thread, those reads were ~10% of its CPU time. The GPU register window
+// (0x7FC80000-0x7FC8FFFF) is refused: its pages fault into the runtime's MMIO
+// handler, which would run the register callbacks instead of failing the read.
+inline bool ReadGuestVirtual(const uint8_t* base, uint32_t address, void* destination, size_t length) {
+  const uint64_t end = uint64_t(address) + length;
+  if (!base || !length || end > (uint64_t{1} << 32)) return false;
+  if (address < 0x7FC90000u && end > 0x7FC80000u) return false;
+  return CopyGuestBytes(destination, base + address, length);
+}
+
 // Owned copies of guest ranges, validated by CopyGuestBytes. VirtualQuery may
 // scan the remainder of the 512 MB physical mapping on every small read. Keep
 // each result alive through nested PM4 reader callbacks.

@@ -2,6 +2,7 @@
 #define NOMINMAX
 #endif
 #include "instance_probe.h"
+#include "checked_guest_memory.h"
 #include "../graphics/observed_instance_lifetimes.h"
 #include "../graphics/observed_rigid_motion.h"
 #include "../graphics/observed_vehicle_batch.h"
@@ -73,14 +74,13 @@ thread_local VehicleUploadScope vehicle_upload;
 thread_local bool vehicle_flush_bracketed=false;
 bool Word(uint8_t* base,uint32_t address,uint32_t& value) {
   if(!base || address<0x10000 || uint64_t(address)+4>(uint64_t{1}<<32)) return false;
-  uint32_t raw=0;SIZE_T size=0;
-  if(!ReadProcessMemory(GetCurrentProcess(),base+address,&raw,4,&size) || size!=4) return false;
+  uint32_t raw=0;
+  if(!ReadGuestVirtual(base,address,&raw,4)) return false;
   value=__builtin_bswap32(raw);return true;
 }
 bool Words(uint8_t* base,uint32_t address,std::span<uint32_t> values) {
   if(!base || address<0x10000 || uint64_t(address)+values.size_bytes()>(uint64_t{1}<<32)) return false;
-  SIZE_T read=0;
-  if(!ReadProcessMemory(GetCurrentProcess(),base+address,values.data(),values.size_bytes(),&read) || read!=values.size_bytes()) return false;
+  if(!ReadGuestVirtual(base,address,values.data(),values.size_bytes())) return false;
   for(auto& word:values)word=__builtin_bswap32(word);return true;
 }
 bool DiagnoseVehicleBatch() {
@@ -121,8 +121,8 @@ bool InstanceProbeEnabled() noexcept {
 }
 bool Half(uint8_t* base,uint32_t address,uint32_t& value) noexcept {
   if(!base || address<0x10000 || address==UINT32_MAX) return false;
-  uint16_t raw=0;SIZE_T size=0;
-  if(!ReadProcessMemory(GetCurrentProcess(),base+address,&raw,2,&size) || size!=2) return false;
+  uint16_t raw=0;
+  if(!ReadGuestVirtual(base,address,&raw,2)) return false;
   value=__builtin_bswap16(raw);return true;
 }
 class InstanceProbePacketScope {
@@ -450,9 +450,8 @@ graphics::ObservedRenderInvocation CaptureInstanceProbeInvocation(uint8_t* base)
       if(rigid && current.owner==current.token.address && current.owner<=UINT32_MAX-191 &&
          Word(base,current.owner,table) && table==current.vtable &&
          Word(base,table+8,target) && target==current.render) {
-        std::array<uint32_t,16> raw{};SIZE_T read=0;
-        if(ReadProcessMemory(GetCurrentProcess(),base+current.owner+128,raw.data(),sizeof(raw),&read) &&
-           read==sizeof(raw)) {
+        std::array<uint32_t,16> raw{};
+        if(ReadGuestVirtual(base,current.owner+128,raw.data(),sizeof(raw))) {
           for(size_t i=0;i<raw.size();++i) invocation.rigid_owner_world[i]=__builtin_bswap32(raw[i]);
           invocation.rigid_owner_world_observed=true;
         }
