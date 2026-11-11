@@ -85,3 +85,38 @@ SR_TEST(render_scheduler_reapplication_preserves_already_published_period_and_st
     SR_CHECK(!ApplyGuestRenderSchedulerPeriod(b,fps));SR_CHECK(b==adjusted);
   }
 }
+
+namespace {
+std::array<uint8_t,176> ObservedSimScheduler() {
+  auto b=ObservedScheduler();
+  Put(b,0,0x82005BC4,4);Put(b,52,0,4);Put(b,60,0x41F00000,4);Put(b,72,33333334,8);
+  return b;
+}
+}
+SR_TEST(sim_scheduler_experiment_changes_only_the_fixed_period) {
+  for(auto [fps,period]:{std::pair{60,16666667ull},std::pair{120,8333334ull}}) {
+    const auto original=ObservedSimScheduler();auto b=original;
+    SR_CHECK(ApplyGuestSimSchedulerPeriod(b,fps));SR_CHECK_EQ(Get(b,72,8),period);
+    for(size_t i=0;i<b.size();++i) if(i<72 || i>=80) SR_CHECK_EQ(b[i],original[i]);
+  }
+}
+SR_TEST(sim_scheduler_experiment_keeps_30_and_unlimited_at_the_original_period) {
+  // Mode 0 feeds +72 into the fixed timestep: an unlimited 1 ms step would
+  // multiply SIM work by 33, so unlimited keeps the original cadence.
+  for(const int32_t fps:{-1,0,30,20}) {
+    auto b=ObservedSimScheduler();const auto original=b;
+    SR_CHECK(!ApplyGuestSimSchedulerPeriod(b,fps));SR_CHECK(b==original);
+  }
+}
+SR_TEST(sim_scheduler_experiment_admits_only_the_sim_peer) {
+  for(const uint32_t vtable:{0x82005B70u,0x82005B98u,0x82005BECu}) {
+    auto b=ObservedSimScheduler();Put(b,0,vtable,4);const auto original=b;
+    SR_CHECK(!ApplyGuestSimSchedulerPeriod(b,60));SR_CHECK(b==original);
+  }
+  for(auto [offset,value,size]:{std::array<uint64_t,3>{52,1,4},{60,0x42700000,4},{72,16666667,8}}) {
+    auto b=ObservedSimScheduler();Put(b,size_t(offset),value,size_t(size));const auto original=b;
+    SR_CHECK(!ApplyGuestSimSchedulerPeriod(b,60));SR_CHECK(b==original);
+  }
+  auto b=ObservedSimScheduler();
+  SR_CHECK(!ApplyGuestSimSchedulerPeriod(std::span(b).first(79),60));
+}
