@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 FIXTURE = r'''
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include "tests/native/test_main.h"
@@ -36,7 +37,13 @@ uint32_t Load32(const uint8_t* base, uint32_t p) {
   std::memcpy(&value, base + p, 4);
   return __builtin_bswap32(value);
 }
-struct ContextState { uint32_t dword0, dword1, dword2, dword9; };
+struct ContextState {
+  uint32_t dword0, dword1, dword2, dword9;
+  bool operator==(const ContextState&) const = default;
+};
+// Mirrors the anonymous-namespace definitions the hook uses in xma_fixes.cpp.
+using Clock = std::chrono::steady_clock;
+constexpr auto kMaxStarvedWait = std::chrono::milliseconds(1);
 ContextState ReadState(const uint8_t* base, uint32_t p) {
   return {Load32(base, p), 1, 0, 0};
 }
