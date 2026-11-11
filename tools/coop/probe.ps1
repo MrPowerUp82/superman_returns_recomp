@@ -6,6 +6,8 @@ param(
   [int]$Forward = 0,
   [ValidateRange(-32768, 32767)][int]$LookX = 0,
   [ValidateRange(-32768, 32767)][int]$LookY = 0,
+  [ValidateRange(0, 255)][int]$LeftTrigger = 0,
+  [ValidateRange(0, 255)][int]$RightTrigger = 0,
   [ValidateSet(0, 1)][int]$Port = 0,
   [ValidateRange(1, 5000)][int]$Milliseconds = 250,
   [switch]$NoScript,
@@ -123,7 +125,7 @@ switch ($Action) {
     if (-not (Get-OwnedProbe)) { throw 'No running owned probe' }
     if ($Port -eq 1) { $inputFile = $p2InputFile }
     $sequence = [long](([string](Get-Content -LiteralPath $inputFile -Raw)).Split(' ')[0]) + 1
-    "$sequence $Milliseconds $Buttons $Forward $LookX $LookY" | Set-Content -LiteralPath $inputFile -Encoding ascii
+    "$sequence $Milliseconds $Buttons $Forward $LookX $LookY $LeftTrigger $RightTrigger" | Set-Content -LiteralPath $inputFile -Encoding ascii
   }
   Script {
     if (-not (Get-OwnedProbe)) { throw 'No running owned probe' }

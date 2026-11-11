@@ -16,6 +16,15 @@ inline uint32_t CameraForInput(const CameraInputBinding& b, uint64_t session,
       native != b.primary || port != 1 || actor != b.secondary_actor) return native;
   return b.secondary;
 }
+// Camera singleton to expose while one actor runs its own update (sub_821BE6C8).
+// Only the live, generation-matched P2 actor sees its own manager, and only
+// after that manager has produced an aim point this generation. 0 = unchanged.
+inline uint32_t CameraForActorUpdate(const CameraInputBinding& b, uint64_t session,
+                                     uint32_t singleton, uint32_t actor, bool aim_ready) {
+  if (!aim_ready || !actor || actor == 255) return 0;
+  const auto routed = CameraForInput(b, session, singleton, 1, actor);
+  return routed != singleton ? routed : 0;
+}
 inline std::optional<uint32_t> CameraModeForLocomotion(uint32_t type) {
   if (type == 0x00464C59) return 0;  // FLY / FlightCamDefsXML (+544)
   if (type == 0x4C4F434F) return 1;  // LOCO / OnFootCamDefsXML (+2032)
