@@ -30,4 +30,10 @@ inline std::optional<uint32_t> CameraModeForLocomotion(uint32_t type) {
   if (type == 0x4C4F434F) return 1;  // LOCO / OnFootCamDefsXML (+2032)
   return std::nullopt;
 }
+// Force sub_82174758 only for a plain FLY(0)/LOCO(1) mismatch with no camera
+// transition in progress (manager +16 == 0). Native transition modes (e.g. 8)
+// belong to the game.
+inline bool ShouldForceLocomotionCamera(std::optional<uint32_t> desired, uint32_t mode, uint32_t state) {
+  return desired && state == 0 && (mode == 0 || mode == 1) && mode != *desired;
+}
 }  // namespace superman_returns::coop

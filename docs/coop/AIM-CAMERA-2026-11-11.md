@@ -72,6 +72,27 @@ campos continuam válidos.
   - `rejoin.png`: remover/recriar o P2; o novo ator também mira pela própria
     câmera. Nenhum aviso de singleton alterado durante o escopo.
 
+## Correção posterior: câmera do P2 girando ao andar
+
+Relato: andando a pé, a câmera do P2 ficava girando. Reproduzido no probe
+(P2 pousado com B, andando com frente+lado): o log mostrava
+`second camera locomotion: previous=8 mode=8` **a cada frame**, com o P2 em
+LOCO e a câmera dele no modo 8 (transição nativa), enquanto a do P1 ia para 1.
+
+Causa: com o escopo por ator, o próprio FSM do P2 passou a conduzir o gerenciador
+do P2, incluindo a transição de pouso (estado +16 ≠ 0, modo 8). A rotina antiga
+`SelectLocomotionCamera` chamava `sub_82174758` todo frame porque o modo (8) não
+era o desejado (1). Com transição ativa, essa rotina não troca o modo, mas zera o
+contador da transição (+4904), reiniciando o blend indefinidamente.
+
+Correção: `ShouldForceLocomotionCamera` só força FLY/LOCO quando o estado é 0 e o
+modo atual é 0 ou 1; modos de transição pertencem ao jogo. Após a correção o
+jogo levou a câmera do P2 ao modo 1 sozinho (nenhuma chamada forçada no ensaio),
+a câmera acompanha a curva como a do P1 com a mesma entrada e fica estável sem
+input. O input sintético do probe ganhou o eixo X do analógico esquerdo
+(`-Strafe`). Evidência: `walk-spin-repro.log`, `walk-fixed.log`, `f0..f3.png`,
+`p1b.png`. A decolagem de volta ao voo não foi exercitada (A não decolou no probe).
+
 ## Limites conhecidos
 
 - O HUD continua compartilhado: o retículo é desenhado no centro de cada metade

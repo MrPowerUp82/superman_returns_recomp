@@ -37,3 +37,12 @@ SR_TEST(coop_actor_update_exposes_p2_camera_only_to_live_ready_p2) {
   SR_CHECK(CameraForActorUpdate(CameraInputBinding{}, 7, 0x1000, 42, true) == 0);
   SR_CHECK(CameraForActorUpdate(b, 7, 0x1000, 255, true) == 0);
 }
+SR_TEST(coop_locomotion_camera_never_restarts_native_transitions) {
+  SR_CHECK(ShouldForceLocomotionCamera(1, 0, 0));   // landed, still flight camera
+  SR_CHECK(ShouldForceLocomotionCamera(0, 1, 0));   // took off, still on-foot camera
+  SR_CHECK(!ShouldForceLocomotionCamera(1, 1, 0));  // already matching
+  SR_CHECK(!ShouldForceLocomotionCamera(1, 8, 0));  // native transition mode
+  SR_CHECK(!ShouldForceLocomotionCamera(1, 8, 3));  // transition in progress
+  SR_CHECK(!ShouldForceLocomotionCamera(1, 0, 3));  // state active: would clear +4904
+  SR_CHECK(!ShouldForceLocomotionCamera(std::nullopt, 0, 0));
+}

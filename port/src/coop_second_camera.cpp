@@ -34,6 +34,7 @@ bool waiting_logged = false;
 std::mutex snapshot_mutex;
 SecondCameraSnapshot snapshot;
 uint32_t view_generation=0;
+uint32_t last_locomotion=0;  // diagnostics: P2 locomotion type last seen
 uint32_t aim_generation=0;  // view_generation whose aim point (+528) is valid
 uint64_t session_generation=0;
 void InvalidateSnapshot() {
@@ -105,9 +106,16 @@ void SelectLocomotionCamera(PPCContext& ctx, uint8_t* base, uint32_t actor) {
   if (!get_type) return;
   ctx.r3.u64 = locomotion;
   REX_CALL_INDIRECT_FUNC(get_type);
+  last_locomotion = ctx.r3.u32;
+  // P2's own FSM now drives its manager natively (actor camera scope), including
+  // transition modes such as 8. Only correct a plain FLY/LOCO mismatch: with a
+  // transition active (+16 != 0) sub_82174758 does not switch but clears the
+  // transition counter (+4904), so calling it every frame restarts the blend
+  // forever and the camera keeps turning while P2 walks.
   const auto desired = CameraModeForLocomotion(ctx.r3.u32);
-  if (!desired || Word(base, owner + 4896) == *desired) return;
-  const auto previous = Word(base, owner + 4896);
+  const auto current = Word(base, owner + 4896);
+  if (!ShouldForceLocomotionCamera(desired, current, Word(base, owner + 16))) return;
+  const auto previous = current;
   ctx.r3.u64 = owner;
   sub_82174758(ctx, base);
   REXLOG_INFO("coop second camera locomotion: target={} previous={} mode={}",
@@ -316,12 +324,12 @@ void UpdateSecondCamera(PPCContext& ctx, uint8_t* base, uint32_t primary, double
     snapshot={encoded,target_id,primary,sequence,session_generation};
   }
   if (sequence <= 3 || sequence % 120 == 0)
-    REXLOG_INFO("coop second camera: seq={} owner={:08X} primary={:08X} target={} primary_target={} singleton_unchanged={} finite={} position={},{},{} primary_position={},{},{} mode={} forward={},{},{}",
+    REXLOG_INFO("coop second camera: seq={} owner={:08X} primary={:08X} target={} primary_target={} singleton_unchanged={} finite={} position={},{},{} primary_position={},{},{} mode={} primary_mode={} p2_locomotion={:08X} forward={},{},{}",
         sequence, owner, primary, target_id, Word(base, primary + 432),
         Word(base, kCameraGlobal) == primary, finite,
         std::bit_cast<float>(matrix[12]), std::bit_cast<float>(matrix[13]), std::bit_cast<float>(matrix[14]),
         Float(base, primary + 480), Float(base, primary + 484), Float(base, primary + 488),
-        Word(base, owner + 4896), values[8], values[9], values[10]);
+        Word(base, owner + 4896), Word(base, primary + 4896), last_locomotion, values[8], values[9], values[10]);
 }
 SecondCameraSnapshot SampleSecondCamera() {
   std::lock_guard lock(snapshot_mutex);
