@@ -44,6 +44,7 @@
       <TextBlock Text="{DynamicResource TextureFilter}"/><ComboBox x:Name="FilterBox" AutomationProperties.Name="{DynamicResource TextureFilter}"/>
       <TextBlock Text="{DynamicResource FrameLimit}"/><ComboBox x:Name="FpsBox" AutomationProperties.Name="{DynamicResource FrameLimitAccessible}"/>
       <TextBlock Text="{DynamicResource Costume}"/><ComboBox x:Name="CostumeBox" AutomationProperties.Name="{DynamicResource Costume}"/>
+      <TextBlock Text="{DynamicResource TextureMods}"/><ComboBox x:Name="TextureModsBox" AutomationProperties.Name="{DynamicResource TextureMods}" ToolTip="{DynamicResource TextureModsNote}"/>
      </StackPanel>
     </UniformGrid>
     <Expander Header="{DynamicResource TemporalGraphics}" Margin="0,0,0,12">

@@ -31,7 +31,8 @@ void ImageToTexture(const Image& image, guest::LinearTexture& inout);
 bool WritePng(const std::filesystem::path& path, const Image& image);
 // Width and height from the PNG header alone (no decode).
 bool PngSize(const std::filesystem::path& path, uint32_t& width, uint32_t& height);
-// Any PNG, forced to 4 channels.
-bool ReadPng(const std::filesystem::path& path, Image& out);
+// Any PNG, forced to 4 channels. `has_alpha` (optional) tells whether the file
+// itself carries alpha (gray+alpha, RGBA, or a transparency chunk).
+bool ReadPng(const std::filesystem::path& path, Image& out, bool* has_alpha = nullptr);
 
 }  // namespace superman_returns::graphics::texture_mods

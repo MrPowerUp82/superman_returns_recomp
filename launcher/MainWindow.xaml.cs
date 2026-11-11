@@ -30,7 +30,7 @@ public partial class MainWindow : Window
         ApplyLanguage();
         PopulateChoices();
         ApplySettingsToUi();
-        foreach (var box in new[] { RendererBox, ApiBox, ResolutionBox, DisplayModeBox, InputBox, GpuBox, RenderScaleBox, AaBox, FilterBox, FpsBox, CostumeBox, ShadowBox, MsaaBox, DlssBox, RtShadowsBox, RtQualityBox, CharacterShadowsBox, ReflectionsBox })
+        foreach (var box in new[] { RendererBox, ApiBox, ResolutionBox, DisplayModeBox, InputBox, GpuBox, RenderScaleBox, AaBox, FilterBox, FpsBox, CostumeBox, TextureModsBox, ShadowBox, MsaaBox, DlssBox, RtShadowsBox, RtQualityBox, CharacterShadowsBox, ReflectionsBox })
             box.SelectionChanged += (_, _) => UpdateSummary();
         VSyncBox.Checked += (_, _) => UpdateSummary();
         SkipIntroBox.Checked += (_, _) => UpdateSummary();
@@ -82,6 +82,7 @@ public partial class MainWindow : Window
         SetChoices(DisplayModeBox, new("Fullscreen", T("Borderless")), new("Windowed", T("Windowed")));
         SetChoices(InputBox, new("KeyboardMouse", T("KeyboardMouse")), new("Controller", T("Controller")));
         SetChoices(CostumeBox, new("default", T("DefaultCostume")), new("2", "Golden Age"), new("kingdom_come", T("KingdomCome")));
+        SetChoices(TextureModsBox, new("normal", T("TextureModsNormal")), new("dump", T("TextureModsDump")), new("tag", T("TextureModsTag")));
         SetChoices(RenderScaleBox, new("50", "50%"), new("75", "75%"), new("100", "100%"), new("125", "125%"), new("150", "150%"), new("200", "200%"), new("300", "300%"), new("400", "400%"));
         SetChoices(AaBox, new("Off", T("Off")), new("FXAA", "FXAA"));
         SetChoices(DlssBox, new("0", T("Off")), new("1", "Quality"), new("2", "Balanced"), new("3", "Performance"), new("4", "DLAA"));
@@ -101,7 +102,7 @@ public partial class MainWindow : Window
         _coopOverridesDisplayed = false;
         Select(RendererBox, _settings.Renderer); Select(ApiBox, _settings.GraphicsApi); SkipIntroBox.IsChecked = _settings.SkipIntro;
         Select(ResolutionBox, _settings.Resolution); Select(DisplayModeBox, _settings.DisplayMode);
-        Select(InputBox, _settings.InputMode); Select(CostumeBox, _settings.Costume); Select(RenderScaleBox, _settings.RenderScale);
+        Select(InputBox, _settings.InputMode); Select(CostumeBox, _settings.Costume); Select(TextureModsBox, _settings.TextureMods); Select(RenderScaleBox, _settings.RenderScale);
         Select(DlssBox, _settings.Dlss.ToString()); Select(RtShadowsBox, _settings.RtShadows.ToString());
         Select(RtQualityBox, _settings.ShadowSoftness.ToString()); Select(CharacterShadowsBox, _settings.CharacterShadows.ToString());
         Select(ReflectionsBox, _settings.RtReflections.ToString());
@@ -129,7 +130,7 @@ public partial class MainWindow : Window
         _settings.RtReflections = int.Parse(Value(ReflectionsBox));
         _settings.SkipIntro = SkipIntroBox.IsChecked == true;
         _settings.Resolution = Value(ResolutionBox); _settings.DisplayMode = Value(DisplayModeBox);
-        _settings.Costume = Value(CostumeBox);
+        _settings.Costume = Value(CostumeBox); _settings.TextureMods = Value(TextureModsBox);
         _settings.Antialiasing = Value(AaBox); _settings.TextureFilter = Value(FilterBox);
         _settings.FpsLimit = Value(FpsBox); _settings.ShadowQuality = Value(ShadowBox); _settings.Msaa = Value(MsaaBox);
         var gpu = (GpuAdapter)GpuBox.SelectedItem; _settings.Gpu = gpu.Name; _settings.GpuIndex = gpu.Index; _settings.GpuLuid = gpu.Luid;

@@ -35,6 +35,10 @@ public sealed class LauncherSettings
     // kingdom_come (skin painted over the Superman Returns suit).
     public string Costume { get; set; } = "default";
     private static readonly string[] Costumes = { "default", "2", "kingdom_come" };
+    // Texture mods: normal (replacements from textures\), dump (also writes every
+    // texture to textures_dump\) or tag (paints each texture with its key).
+    public string TextureMods { get; set; } = "normal";
+    private static readonly string[] TextureModes = { "normal", "dump", "tag" };
     public int RtShadows { get; set; }
     public int ShadowSoftness { get; set; } = 1;
     public int CharacterShadows { get; set; }
@@ -83,6 +87,7 @@ public sealed class LauncherSettings
                 case "renderer": s.Renderer = value; break;
                 case "graphics_api": s.GraphicsApi = value == "vulkan" ? "vulkan" : "d3d12"; break;
                 case "costume": s.Costume = Costumes.Contains(value) ? value : "default"; break;
+                case "texture_mods": s.TextureMods = TextureModes.Contains(value) ? value : "normal"; break;
                 case "skip_intro": if (bool.TryParse(value, out var si)) s.SkipIntro = si; break;
                 case "coop": if (bool.TryParse(value, out var coop)) s.Coop = coop; break;
                 case "frame_generation": if (bool.TryParse(value, out var fg)) s.FrameGeneration = fg; break;
@@ -106,7 +111,7 @@ public sealed class LauncherSettings
             $"vsync={VSync.ToString().ToLowerInvariant()}", $"fps_limit={FpsLimit}", $"render_scale={RenderScale}",
             $"texture_filter={TextureFilter}", $"antialiasing={Antialiasing}", $"shadow_quality={ShadowQuality}",
             $"msaa={Msaa}", $"input={InputMode}", $"renderer={Renderer}", $"graphics_api={GraphicsApi}",
-            $"skip_intro={SkipIntro.ToString().ToLowerInvariant()}", $"costume={Costume}",
+            $"skip_intro={SkipIntro.ToString().ToLowerInvariant()}", $"costume={Costume}", $"texture_mods={TextureMods}",
             $"coop={Coop.ToString().ToLowerInvariant()}", $"rt_shadows={RtShadows}", $"shadow_softness={ShadowSoftness}",
             $"character_shadows={CharacterShadows}", $"rt_reflections={RtReflections}", $"dlss={Dlss}",
             $"frame_generation={FrameGeneration.ToString().ToLowerInvariant()}", $"frame_generation_dll={FrameGenerationDll}" };
@@ -211,6 +216,8 @@ public sealed class LauncherSettings
         }
         if (Costume == "2") result.Add("--sr_costume=2");
         else if (Costume == "kingdom_come") result.Add("--sr_costume_skin=kingdom_come");
+        if (TextureMods == "dump") result.Add("--sr_texture_dump_dir=textures_dump");
+        else if (TextureMods == "tag") result.Add("--sr_texture_tag=all");
         if (benchmark) result.Add("--sr_benchmark=true");
         if (coop) {
             foreach (var flag in new[] { "input", "autojoin", "second_camera", "camera_probe", "camera_transport",

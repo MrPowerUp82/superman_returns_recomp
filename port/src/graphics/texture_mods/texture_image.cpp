@@ -288,7 +288,7 @@ bool PngSize(const std::filesystem::path& path, uint32_t& width, uint32_t& heigh
   return width && height;
 }
 
-bool ReadPng(const std::filesystem::path& path, Image& out) {
+bool ReadPng(const std::filesystem::path& path, Image& out, bool* has_alpha) {
   std::ifstream in(path, std::ios::binary);
   if (!in) return false;
   const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
@@ -296,6 +296,8 @@ bool ReadPng(const std::filesystem::path& path, Image& out) {
   int w = 0, h = 0, channels = 0;
   stbi_uc* pixels = stbi_load_from_memory(bytes.data(), int(bytes.size()), &w, &h, &channels, 4);
   if (!pixels) return false;
+  // stb reports 2/4 channels for gray+alpha/RGBA and for a tRNS chunk.
+  if (has_alpha) *has_alpha = channels == 2 || channels == 4;
   out.width = uint32_t(w);
   out.height = uint32_t(h);
   out.rgba.assign(pixels, pixels + size_t(w) * h * 4);

@@ -22,6 +22,10 @@ REXCVAR_DEFINE_STRING(sr_texture_dump_dir, "", "Superman Returns",
 REXCVAR_DEFINE_STRING(sr_texture_replace_dir, "textures", "Superman Returns",
                       "Folder of replacement textures named <key>.png (relative to the executable)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_STRING(sr_texture_tag, "", "Superman Returns",
+                      "Paint textures with a solid color and their key written on them, to find which "
+                      "texture is which: all, or comma-separated key prefixes (empty = off)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(sr_texture_replace, true, "Superman Returns",
                     "Use replacement textures and costume skins")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
@@ -52,10 +56,15 @@ std::filesystem::path Resolve(const std::string& value) {
 TextureMods& GlobalTextureMods() {
   static TextureMods* mods = [] {
     const bool replace = REXCVAR_GET(sr_texture_replace);
-    auto* created = new TextureMods(ModConfig{Resolve(REXCVAR_GET(sr_texture_dump_dir)),
-                                              replace ? Resolve(REXCVAR_GET(sr_texture_replace_dir)) : std::filesystem::path{},
-                                              replace});
+    ModConfig config;
+    config.dump_dir = Resolve(REXCVAR_GET(sr_texture_dump_dir));
+    if (replace) config.replace_dir = Resolve(REXCVAR_GET(sr_texture_replace_dir));
+    config.replace = replace;
+    config.tag = REXCVAR_GET(sr_texture_tag);
+    auto* created = new TextureMods(std::move(config));
     created->SetWarn([](const std::string& message) { REXLOG_WARN("texture mods: {}", message); });
+    if (!REXCVAR_GET(sr_texture_tag).empty())
+      REXLOG_INFO("texture mods: tag mode on ({}): textures show their key", REXCVAR_GET(sr_texture_tag));
     created->SetNote([](const std::string& message) { REXLOG_INFO("texture mods: {}", message); });
     if (replace) InstallCostumeSkin(*created);
     const auto costume = costume::ParseCostume(REXCVAR_GET(sr_costume));

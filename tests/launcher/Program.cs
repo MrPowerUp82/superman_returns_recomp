@@ -149,6 +149,18 @@ foreach (var costume in new[] { "kingdom_come", "2", "default" }) {
 }
 File.WriteAllText(costumePath, "costume=batman\n");
 Check(LauncherSettings.Load(costumePath).Costume == "default", "an unknown saved costume falls back to the game's choice");
+Check(Flags(gameDefault, "--sr_texture_") == 0, "normal texture mods send no texture flag");
+var dumpArgs = new LauncherSettings { TextureMods = "dump" }.BuildArgumentList();
+Check(dumpArgs.Contains("--sr_texture_dump_dir=textures_dump") && Flags(dumpArgs, "--sr_texture_tag") == 0, "export writes textures_dump");
+var tagArgs = new LauncherSettings { TextureMods = "tag" }.BuildArgumentList();
+Check(tagArgs.Contains("--sr_texture_tag=all") && Flags(tagArgs, "--sr_texture_dump_dir") == 0, "identify tags every texture");
+var texturePath = Path.Combine(fixture, "texture_mods.ini");
+foreach (var mode in new[] { "dump", "tag", "normal" }) {
+    new LauncherSettings { TextureMods = mode }.Save(texturePath);
+    Check(LauncherSettings.Load(texturePath).TextureMods == mode, $"saved texture mode {mode} survives restart");
+}
+File.WriteAllText(texturePath, "texture_mods=hd\n");
+Check(LauncherSettings.Load(texturePath).TextureMods == "normal", "an unknown texture mode falls back to normal");
 Check(new LauncherSettings().Language == "pt-BR", "new preferences retain Portuguese as the default");
 Check(LauncherSettings.Load(oldIni).Language == "pt-BR", "existing preferences without a language retain Portuguese");
 var languagePath = Path.Combine(fixture, "language.ini");

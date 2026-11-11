@@ -59,7 +59,8 @@ Regiões:
   - peças vinho (86,34,48) em toda a textura;
   - a ilha curva à esquerda, até (257,0)–(0,382), é a capa. Ela encosta na peça da sunga em (241,172), por isso é recortada por contorno, não por conectividade;
   - cinto dourado e fivela em S em (0,400)–(512,512), com a fivela em torno de (20–115, 435–495).
-- O lado de fora da capa usa outra textura e não é repintado; o usuário aprovou assim.
+- O lado de dentro da capa (o que fica voltado para as costas) não vem de textura substituível e não é repintado; o usuário aprovou assim. Teste de 2026-11-11: pintar `7D58BD0FC5DA272E` de verde muda só o lado de fora, e com `--sr_texture_tag=all` o lado de dentro continua vinho, sem chave escrita.
+- `81E985D2CD3E08A9` (cabeça): o alfa é a máscara do cabelo (branco = cabelo) e escurece o cabelo qualquer que seja a cor embaixo. Com o alfa do cabelo zerado, a cor pintada aparece.
 - `E786C8E27A1892E6` (512×512) e `F008590FEE139933` (128×128) são o logo do filme da interface, não o traje.
 
 ## Forçar o traje (`--sr_costume`)

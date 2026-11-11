@@ -88,8 +88,15 @@ O campo **Traje** do launcher escolhe a roupa do Superman sem desbloquear nada e
 
 Funciona nos dois backends nativos (Direct3D 12 e Vulkan):
 
-- `--sr_texture_dump_dir=<pasta>` grava cada textura 2D distinta uma vez, como `<chave>.png`, e uma linha por textura em `index.csv` (`key,width,height,format`). A chave é um hash do conteúdo e do formato, a mesma em toda execução e nos dois backends.
-- PNGs com o nome `<chave>.png` na pasta `textures\` ao lado do executável (ou em `--sr_texture_replace_dir=<pasta>`) substituem a textura original. O PNG precisa ter o mesmo tamanho da original; senão, o log avisa e a original fica. Um PNG vence a skin para a mesma chave.
+Guia completo para criar skins (em inglês): [docs/texture-modding.md](docs/texture-modding.md). No launcher, o campo **Mods de textura** tem os três modos abaixo.
+
+- `--sr_texture_dump_dir=<pasta>` grava cada textura 2D distinta uma vez, como `<chave>.png`, e uma linha por textura em `index.csv` (`key,width,height,format`). A chave é um hash do conteúdo e do formato, a mesma em toda execução e nos dois backends. Texturas com alfa também ganham `<chave>.color.png` (as cores, opacas) e `<chave>.alpha.png` (o alfa em cinza).
+- `--sr_texture_tag=all` pinta cada textura de uma cor com a chave escrita nela, para achar no jogo qual arquivo editar. Também aceita prefixos de chave: `--sr_texture_tag=7D58,D25F`.
+- A pasta `textures\` ao lado do executável (ou `--sr_texture_replace_dir=<pasta>`), com subpastas, troca as texturas. O PNG precisa ter o mesmo tamanho da original; senão, o log avisa e a original fica. Um PNG vence a skin para a mesma chave.
+  - `<chave>.png` troca cor e alfa.
+  - `<chave>.color.png` troca só a cor e mantém o alfa original. O jogo usa o alfa como máscara (cabelo, brilho), não como transparência, e editores de imagem gravam preto embaixo do alfa 0: foi isso que deixou a cabeça e as mãos pretas.
+  - `<chave>.alpha.png` troca só o alfa (cinza).
+  - Num `<chave>.png` antigo, o jogo devolve a cor original onde o editor gravou preto sob alfa 0, e mantém o alfa original se o PNG foi salvo sem alfa.
 - `--sr_texture_replace=false` desliga as trocas e as skins.
 - O mapa das texturas do Superman está em [docs/kingdom-come-texture-map-2026-10-28.md](docs/kingdom-come-texture-map-2026-10-28.md).
 - `tools/texture_mods/find_costume_textures.py <dump A> <dump B>` lista as texturas que só aparecem no segundo dump.
