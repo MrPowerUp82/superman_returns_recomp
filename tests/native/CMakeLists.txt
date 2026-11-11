@@ -68,7 +68,6 @@ add_executable(sr_native_tests
     test_shadow_projection.cpp
     test_readback_rows.cpp
     test_shadow_caster_geometry.cpp
-    test_ray_shadow_execution.cpp
     test_temporal_geometry_history.cpp
     test_object_motion_frame.cpp
     test_temporal_vertex_fetch.cpp
@@ -86,12 +85,10 @@ add_executable(sr_native_tests
     test_observed_vehicle_batch.cpp
     test_observed_cloth_motion.cpp
     test_observed_skinned_part_key.cpp
-    test_rt_shadow_shader.cpp
     test_pixel_coverage_shader.cpp
     test_motion_raster_coverage.cpp
     "${SR_NATIVE_DIR}/../graphics/pixel_coverage_shader.cpp"
     "${SR_NATIVE_DIR}/../graphics/scene_resolution_shader.cpp"
-    "${SR_NATIVE_DIR}/../graphics/rt_shadow_shader.cpp"
     "${SR_NATIVE_DIR}/../graphics/graphics_preferences.cpp"
     "${SR_NATIVE_DIR}/../graphics/graphics_options.cpp"
     "${SR_NATIVE_DIR}/../graphics/graphics_options_runtime.cpp"

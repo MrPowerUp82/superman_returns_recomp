@@ -1,6 +1,5 @@
 #include "shader_translator.h"
 #include "shader_library.h"
-#include "../graphics/rt_shadow_shader.h"
 #include "../graphics/pixel_coverage_shader.h"
 
 #include <algorithm>
@@ -160,12 +159,7 @@ Tools FindTools(bool rt_shadow = false,bool pixel_coverage = false) {
     }
   }
   t.cache = root / fingerprint;
-  if (rt_shadow) {
-    const auto patch = graphics::RtShadowShaderCacheIdentity();
-    // v3 contract includes standalone visibility, independently of old fade
-    // multiplication. Actual emitted prefix/anchors/call remain fingerprinted.
-    t.cache /= fmt::format("rt-shadow-v3-{:016X}", XXH3_64bits(patch.data(), patch.size()));
-  }
+  (void)rt_shadow;
   if (pixel_coverage) {
     const auto patch = graphics::PixelCoverageShaderCacheIdentity();
     t.cache /= fmt::format("pixel-coverage-v1-{:016X}", XXH3_64bits(patch.data(), patch.size()));
@@ -500,17 +494,12 @@ class Impl {
       }
       src.assign(specialized.begin(), specialized.end());
     }
-    if (rt_shadow_) {
-      std::string specialized;
-      if (!graphics::SpecializeRtShadowShader(hash,
-              std::string_view(reinterpret_cast<const char*>(src.data()), src.size()),
-              specialized, reason)) {
-        WriteFailed(hash, vertex, reason);
-        cleanup();
-        return false;
-      }
-      src.assign(specialized.begin(), specialized.end());
-    }
+    // Pixel shaders that trace inline RayQuery need shader model 6.5: the sun
+    // shadow receivers (shadowMapOffsetScales, patches 0017-0029) and the
+    // water, whose reflection is ray-traced (gWaterSpec, patch 0031).
+    const std::string_view source_text(reinterpret_cast<const char*>(src.data()), src.size());
+    const bool ray_query = !vertex && (source_text.find("shadowMapOffsetScales") != std::string_view::npos ||
+                                       source_text.find("gWaterSpec") != std::string_view::npos);
     {
       std::ofstream f(std_hlsl, std::ios::binary);
       f.write(reinterpret_cast<const char*>(src.data()), std::streamsize(src.size()));
@@ -524,7 +513,7 @@ class Impl {
     }
     // 2. HLSL -> DXIL (signed: dxil.dll sits next to dxcompiler.dll).
     const std::wstring args2 = std::wstring(L"-T ") +
-                               (rt_shadow_ ? L"ps_6_5" : (vertex ? L"vs_6_0" : L"ps_6_0")) +
+                               (ray_query ? L"ps_6_5" : (vertex ? L"vs_6_0" : L"ps_6_0")) +
                                L" -HV 2021 -all-resources-bound -Wno-ignored-attributes "
                                L"-Qstrip_debug \"" + std_hlsl.wstring() + L"\" -Fo \"" +
                                dx.wstring() + L"\"";
@@ -574,16 +563,6 @@ Impl& Instance() {
 
 // Fetch must not perform lazy tool discovery, filesystem work, or wait for a
 // concurrent Offer. Publish the immutable-enabled Impl only after construction.
-std::atomic<Impl*> g_rt_shadow_instance{nullptr};
-
-Impl& RtShadowInstance() {
-  static Impl* impl = [] {
-    auto* value = new Impl(true);  // same lifetime as base background workers
-    g_rt_shadow_instance.store(value, std::memory_order_release);
-    return value;
-  }();
-  return *impl;
-}
 
 std::atomic<Impl*> g_pixel_coverage_instance{nullptr};
 Impl& PixelCoverageInstance() {
@@ -595,12 +574,6 @@ Impl& PixelCoverageInstance() {
   return *impl;
 }
 
-std::atomic<Impl*> g_rt_coverage_instance{nullptr};
-Impl& RtCoverageInstance() {
-  static Impl* impl=[] {auto* value=new Impl(true,true);
-    g_rt_coverage_instance.store(value,std::memory_order_release);return value;}();
-  return *impl;
-}
 
 }  // namespace
 
@@ -614,10 +587,7 @@ bool ShaderTranslator::Enabled() { return Instance().enabled(); }
 void ShaderTranslator::Offer(uint64_t hash, bool vertex, const uint8_t* container, size_t size) {
   Instance().Offer(hash, vertex, container, size);
   if (!vertex) {
-    OfferRtShadowVariant(hash, container, size);
     OfferPixelCoverageVariant(hash, container, size);
-    if(graphics::IsRtShadowShader(hash) && graphics::IsPixelCoverageShader(hash))
-      RtCoverageInstance().Offer(hash,false,container,size);
   }
 }
 
@@ -625,18 +595,6 @@ TranslateState ShaderTranslator::Fetch(uint64_t hash, bool vertex, std::vector<u
   return Instance().Fetch(hash, vertex, dxil);
 }
 
-void ShaderTranslator::OfferRtShadowVariant(uint64_t hash, const uint8_t* container, size_t size) {
-  if (graphics::IsRtShadowShader(hash) && container && size)
-    RtShadowInstance().Offer(hash, false, container, size);
-}
-
-TranslateState ShaderTranslator::FetchRtShadowVariant(uint64_t hash, std::vector<uint8_t>& dxil) {
-  dxil.clear();
-  if (!graphics::IsRtShadowShader(hash)) return TranslateState::kUnknown;
-  Impl* impl = g_rt_shadow_instance.load(std::memory_order_acquire);
-  if (!impl) ++g_fetch_not_ready;
-  return impl ? impl->FetchNonBlocking(hash, dxil) : TranslateState::kUnknown;
-}
 
 void ShaderTranslator::OfferPixelCoverageVariant(uint64_t hash,const uint8_t* container,size_t size) {
   if(graphics::IsPixelCoverageShader(hash) && container && size)
@@ -650,10 +608,6 @@ TranslateState ShaderTranslator::FetchPixelCoverageVariant(uint64_t hash,std::ve
   return impl ? impl->FetchNonBlocking(hash,dxil) : TranslateState::kUnknown;
 }
 
-TranslateState ShaderTranslator::FetchRtCoverageVariant(uint64_t hash,std::vector<uint8_t>& dxil) {
-  dxil.clear();auto* impl=g_rt_coverage_instance.load(std::memory_order_acquire);
-  return impl ? impl->FetchNonBlocking(hash,dxil) : TranslateState::kUnknown;
-}
 
 bool ShaderTranslator::LoadCached(uint64_t hash, bool vertex, std::vector<uint8_t>& dxil) {
   return Instance().LoadCached(hash, vertex, dxil);
@@ -671,10 +625,7 @@ ShaderPrewarmResult ShaderTranslator::PrewarmVariants(const ShaderLibrary& libra
       tasks.push_back({shader.container_hash, &impl});
       ++result.offered;
     };
-    if (rt_shadow && graphics::IsRtShadowShader(shader.container_hash)) offer(RtShadowInstance());
     if (pixel_coverage && graphics::IsPixelCoverageShader(shader.container_hash)) offer(PixelCoverageInstance());
-    if(rt_shadow && pixel_coverage && graphics::IsRtShadowShader(shader.container_hash) &&
-        graphics::IsPixelCoverageShader(shader.container_hash)) offer(RtCoverageInstance());
   }
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
   for (const auto& task : tasks) {
@@ -692,9 +643,7 @@ ShaderPrewarmResult ShaderTranslator::PrewarmVariants(const ShaderLibrary& libra
 }
 
 bool ShaderTranslator::LoadPrewarmedVariant(uint64_t hash, uint32_t variant, std::vector<uint8_t>& dxil) {
-  Impl* impl = variant == 1 ? g_rt_shadow_instance.load(std::memory_order_acquire) :
-      variant == 2 ? g_pixel_coverage_instance.load(std::memory_order_acquire) :
-      variant == 3 ? g_rt_coverage_instance.load(std::memory_order_acquire) : nullptr;
+  Impl* impl = variant == 2 ? g_pixel_coverage_instance.load(std::memory_order_acquire) : nullptr;
   return impl && impl->WaitReady(hash, false, dxil, 210000) == TranslateState::kReady && !dxil.empty();
 }
 

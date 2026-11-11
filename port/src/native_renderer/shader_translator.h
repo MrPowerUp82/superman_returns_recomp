@@ -49,20 +49,10 @@ class ShaderTranslator {
   // translation that is still running; `state` says why `dxil` stayed empty.
   TranslateState Fetch(uint64_t hash, bool vertex, std::vector<uint8_t>& dxil);
 
-  // Audited RT pixel variant, automatically offered by Offer for its PS.
-  // Never waits, reads disk, or initializes tools on the renderer's Fetch path.
-  TranslateState FetchRtShadowVariant(uint64_t ps_hash, std::vector<uint8_t>& dxil);
-
-  // Registry path when a pre-shader supplies the base: use its ORIGINAL
-  // container without scheduling another base translation.
-  void OfferRtShadowVariant(uint64_t ps_hash, const uint8_t* container, size_t size);
-
   // Original color/alpha/discard plus a current-draw owner MRT. This variant
   // proves fragment coverage only, never previous-frame object identity.
   void OfferPixelCoverageVariant(uint64_t ps_hash, const uint8_t* container, size_t size);
   TranslateState FetchPixelCoverageVariant(uint64_t ps_hash, std::vector<uint8_t>& dxil);
-
-  TranslateState FetchRtCoverageVariant(uint64_t hash, std::vector<uint8_t>& dxil);
 
   // The on-disk cache only, never waits (pipeline cache precompilation).
   bool LoadCached(uint64_t hash, bool vertex, std::vector<uint8_t>& dxil);

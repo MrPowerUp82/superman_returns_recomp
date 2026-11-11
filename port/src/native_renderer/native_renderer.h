@@ -67,12 +67,10 @@
 #include "../graphics/post_vertex_geometry.h"
 #include "../graphics/shadow_projection.h"
 #include "../graphics/shadow_caster_geometry.h"
-#include "../graphics/ray_shadow_execution.h"
-#include "../graphics/rt_shadow_shader.h"
+#include "../graphics/graphics_options.h"
 #include "../graphics/temporal_geometry_history.h"
 #include "../graphics/temporal_class_coverage.h"
 #include "../graphics/object_motion_frame.h"
-#include "../graphics/d3d12/visible_ray_scene.h"
 #include "../graphics/temporal_vertex_fetch.h"
 #include "../graphics/static_world_shader_dependencies.h"
 #include "../graphics/d3d12/post_vertex_clip_capture.h"
@@ -544,6 +542,15 @@ class Renderer : public NativeFrontend {
   static constexpr uint32_t kOutputHeight = profile::kOutputHeight;
   static constexpr size_t kUploadBytesPerFrame = 128u << 20;
   static constexpr uint32_t kSrvHeapSize = 32768;
+  // Ray tracing (rt_shadows.cpp): fixed descriptors at the end of the heap that
+  // the translated shaders address directly (SR_RT_*_INDEX in XenosRecomp
+  // patches 0017-0029); AllocSrvIndex never hands them out.
+  static constexpr uint32_t kRtTlasSrv = kSrvHeapSize - 1;
+  static constexpr uint32_t kRtFrameSrv = kSrvHeapSize - 2;
+  static constexpr uint32_t kRtMaterialSrv = kSrvHeapSize - 3;  // per TLAS instance (reflections)
+  static constexpr uint32_t kRtUvSrv = kSrvHeapSize - 4;        // mesh texture coordinates (reflections)
+  static constexpr uint32_t kRtSkinSrv0 = kSrvHeapSize - 5;     // character buffers 0 and 1 (-6)
+  static constexpr uint32_t kSrvAllocLimit = kSrvHeapSize - 6;
   static constexpr uint32_t kSamplerHeapSize = 2048;
   static constexpr uint32_t kRtvHeapSize = 256;
   static constexpr uint32_t kDsvHeapSize = 64;
@@ -643,46 +650,10 @@ class Renderer : public NativeFrontend {
   int graphics_dlss_mode_=-1;
   bool fxaa_scene_applied_=false;
   bool ray_tracing_capable_=false;
-  bool rt_shadow_wave_capable_=false,rt_shadow_requested_=false,rt_shadow_built_=false;
-  bool rt_shadow_attempted_=false,rt_shadow_draw_active_=false,rt_shadow_counter_recorded_=false;
   bool post_vertex_diagnostic_=false;
   graphics::GraphicsOptionsSnapshot graphics_frame_request_;
-  graphics::RtShadowDrawConstants rt_shadow_constants_{};
-  std::unordered_map<uint64_t,std::vector<uint8_t>> rt_shadow_shaders_;
-  const std::vector<uint8_t>* rt_shadow_variant_=nullptr;
-  bool rt_shadow_character_built_=false;
-  std::unique_ptr<graphics::d3d12::RayTracingScene> rt_shadow_scene_;
-  std::unique_ptr<graphics::d3d12::VisibleRayScene> visible_ray_scene_;
-  struct VisibleRayTicket {uint64_t fence=0,frame=0,revision=0;graphics::GraphicsValues requested{};};
-  VisibleRayTicket visible_ray_tickets_[3]{},visible_ray_applied_{};
-  bool visible_ray_requested_=false,visible_ray_built_=false,visible_ray_recorded_=false,visible_ray_characters_built_=false;
-  uint64_t visible_ray_previous_frame_=0,visible_ray_recorded_frames_=0;
-  uint32_t visible_ray_suppressed_shadow_draws_=0;
-  Microsoft::WRL::ComPtr<ID3D12Resource> visible_ray_counter_readback_[3],visible_ray_timing_readback_;
-  Microsoft::WRL::ComPtr<ID3D12QueryHeap> visible_ray_timing_heap_;
-  uint64_t visible_ray_timestamp_frequency_=0;
-  std::array<float,3> visible_ray_light_{};
-  bool visible_ray_light_valid_=false,visible_ray_light_conflict_=false;
-  graphics::Matrix4 object_motion_final_camera_{},visible_ray_previous_camera_{},visible_ray_inverse_{};
-  Microsoft::WRL::ComPtr<ID3D12Resource> visible_ray_color_[3];
-  D3D12_RESOURCE_STATES visible_ray_color_state_[3]{};
-  void BeginVisibleRayFrame();
-  void BuildVisibleRayScene();
-  void RecordVisibleRayFrame(HostSurface& target);
-  void BeforeVisibleRaySubmit();
-  Microsoft::WRL::ComPtr<ID3D12Resource> visible_ray_shadow_predicate_[3];
-  uint64_t* visible_ray_shadow_enable_[3]{};
-  std::vector<uint8_t*> visible_ray_standalone_flags_;
-  bool visible_ray_predicated_=false,visible_ray_submission_split_=false,visible_ray_unpatched_receiver_=false;
-  Microsoft::WRL::ComPtr<ID3D12Resource> rt_shadow_counter_[3],rt_shadow_counter_readback_[3],rt_shadow_zero_;
-  D3D12_RESOURCE_STATES rt_shadow_counter_state_[3]{D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-      D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
-  graphics::RayShadowExecution rt_shadow_execution_;
-  void BeginRayShadows();
-  void BuildRayShadowScene();
-  bool ConfigureRayShadowDraw(uint8_t* base,uint32_t dev,uint64_t vs,uint64_t ps);
-  void RecordRayShadowCounter();
-  void HarvestRayShadowExecution();
+  graphics::Matrix4 object_motion_final_camera_{};
+  void ReportRtFeatures(graphics::GraphicsBackendReport& report);
   struct MotionRaster {
     uint64_t shader=0,pixel_shader=0,color_serial=0;
     uint32_t coverage_id=0;
@@ -765,7 +736,6 @@ class Renderer : public NativeFrontend {
   D3D12_RESOURCE_STATES motion_coverage_state_[3]{D3D12_RESOURCE_STATE_RENDER_TARGET,
       D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_RENDER_TARGET};
   std::unordered_map<uint64_t,std::vector<uint8_t>> motion_coverage_shaders_;
-  std::unordered_map<uint64_t,std::vector<uint8_t>> motion_ray_shaders_;
   std::unordered_set<uint64_t> motion_coverage_failed_shaders_;
   const std::vector<uint8_t>* motion_coverage_shader_=nullptr;
   bool motion_coverage_draw_active_=false,motion_coverage_bound_=false,motion_coverage_cleared_=false;

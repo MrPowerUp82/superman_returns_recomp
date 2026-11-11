@@ -510,7 +510,7 @@ void Renderer::BeginMotionCapture() {
   motion_coverage_next_id_=motion_coverage_draw_id_=0;motion_coverage_shader_=nullptr;
   object_motion_requested_=!packet_sink_ && REXCVAR_GET(sr_native_object_motion);
   const bool previous=object_motion_previous_;
-  motion_continuous_=(object_motion_requested_ && dlss_wanted_) || visible_ray_requested_;
+  motion_continuous_=object_motion_requested_ && dlss_wanted_;
   object_motion_previous_=motion_continuous_;
   object_motion_output_ready_=object_motion_full_cover_=false;
   object_motion_ticket_={};object_motion_hdr_={};
@@ -724,7 +724,6 @@ void Renderer::FinishMotionScene(HostSurface* depth) {
         XXH3_64bits(motion_camera_words_.data(),sizeof(motion_camera_words_)),input.width,input.height};
     if(!object_motion_lineage_.Seed(object_motion_hdr_,object_motion_ticket_))
       object_motion_frame_.Fail(graphics::ObjectMotionRejection::kLineage);
-    BuildVisibleRayScene();
     if(CaptureObjectMotionFrame()) {
       REXLOG_INFO("native motion lineage seed: resource={:X} lifetime={} serial={} ticket_scene={}",
           object_motion_hdr_.resource,object_motion_hdr_.lifetime,object_motion_hdr_.serial,object_motion_ticket_.scene);
@@ -1005,11 +1004,6 @@ void Renderer::RecordMotionColorBinding(uint32_t slot,const uint32_t* fetch,uint
 }
 
 void Renderer::BeforeMotionColorDraw() {
-  if(visible_ray_requested_ && !visible_ray_submission_split_ && visible_ray_shadow_predicate_[frame_index_] &&
-     graphics_frame_request_.requested[0] && graphics::IsOriginalShadowCaster(current_vs_hash_)) {
-    command_list_->SetPredication(visible_ray_shadow_predicate_[frame_index_].Get(),0,D3D12_PREDICATION_OP_EQUAL_ZERO);
-    visible_ray_predicated_=true;++visible_ray_suppressed_shadow_draws_;
-  }
   if(motion_continuous_ || !motion_capture_active_ || motion_capture_phase_!=2 || !motion_scene_finished_ ||
      motion_color_reports_>=64 || !bound_rts_[0] || bound_rts_[0]->guest_format!=0 ||
      bound_rts_[0]->width!=kOutputWidth || bound_rts_[0]->height!=kOutputHeight) return;
@@ -1137,9 +1131,6 @@ void Renderer::CaptureMotionInlineColorGeometry(uint8_t* base,uint32_t declarati
 }
 
 void Renderer::AfterMotionColorDraw() {
-  if(visible_ray_predicated_) {
-    command_list_->SetPredication(nullptr,0,D3D12_PREDICATION_OP_EQUAL_ZERO);visible_ray_predicated_=false;
-  }
   if(motion_capture_active_ && motion_jitter_draw_active_ && !motion_jitter_applied_) {
     motion_jitter_applied_=true;
     if(!motion_continuous_) REXLOG_INFO("native motion scene jitter issued: phase={} frame={} pixels={},{} ndc={},{} shared_halfpixel_bits={:08X},{:08X} actual_original_draw=true (candidate scene experiment)",

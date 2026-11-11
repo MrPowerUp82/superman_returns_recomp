@@ -47,7 +47,6 @@
 #include "shader_library.h"
 #include "shader_translator.h"
 #include "../graphics/guest/shader_constant_cache.h"
-#include "../graphics/rt_shadow_shader.h"
 #include "../graphics/pixel_coverage_shader.h"
 
 REXCVAR_DEFINE_STRING(sr_native_dump_shader_dir, "", "Superman Returns Native",
@@ -286,10 +285,6 @@ void OfferTranslation(uint8_t* base, uint32_t container, const GuestShaderInfo& 
   if (const ShaderLibrary* lib = PreShaderLibrary();
       lib) {
     if (const PreShader* shader = lib->Find(info.container_hash, info.is_vertex)) {
-      if (!info.is_vertex && graphics::IsRtShadowShader(info.container_hash)) {
-        ShaderTranslator::Get().OfferRtShadowVariant(info.container_hash,
-            shader->container.data(), shader->container.size());
-      }
       if (!info.is_vertex && graphics::IsPixelCoverageShader(info.container_hash))
         ShaderTranslator::Get().OfferPixelCoverageVariant(info.container_hash,
             shader->container.data(),shader->container.size());
@@ -299,10 +294,6 @@ void OfferTranslation(uint8_t* base, uint32_t container, const GuestShaderInfo& 
   if (!info.is_vertex && graphics::IsPixelCoverageShader(info.container_hash) && info.capture)
     ShaderTranslator::Get().OfferPixelCoverageVariant(info.container_hash,
         info.capture->container.data(),info.capture->container.size());
-  if (!info.is_vertex && graphics::IsRtShadowShader(info.container_hash) && info.capture) {
-    ShaderTranslator::Get().OfferRtShadowVariant(info.container_hash,
-        info.capture->container.data(), info.capture->container.size());
-  }
   ShaderTranslator& translator = ShaderTranslator::Get();
   if (!translator.Enabled()) return;
   static std::mutex mutex;
@@ -412,8 +403,6 @@ void TryRegisterInlineShaders(uint8_t* base, uint32_t vs_obj, uint32_t ps_obj) {
     if (g_shaders.count(obj) || g_unknown.count(obj)) continue;
     GuestShaderInfo info;
     if (uint32_t c = ResolveInline(base, obj, vertex, info)) {
-      if (!info.is_vertex && graphics::IsRtShadowShader(info.container_hash))
-        OfferTranslation(base, c, info);
       RegisterLocked(obj, info, "draw-time");
       continue;
     }

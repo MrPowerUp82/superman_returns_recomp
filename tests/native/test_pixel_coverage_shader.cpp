@@ -1,7 +1,6 @@
 #include "test_main.h"
 #include "../../port/src/graphics/pixel_coverage_shader.h"
 
-#include "../../port/src/graphics/rt_shadow_shader.h"
 #include <array>
 #include <filesystem>
 #include <fstream>
@@ -285,18 +284,6 @@ SR_TEST(pixel_coverage_vfx_preserves_depth_and_marks_only_contributing_alpha) {
   }
 }
 
-SR_TEST(pixel_coverage_composes_with_rt_for_every_audited_intersection) {
-  size_t count=0;
-  for(uint64_t hash:kPs) {
-    if(!IsRtShadowShader(hash)) continue;
-    ++count;std::string coverage,combined,error;
-    SR_CHECK(SpecializePixelCoverageShader(hash,Source(hash),coverage,error));
-    SR_CHECK(SpecializeRtShadowShader(hash,coverage,combined,error));
-    SR_CHECK(combined.find(kAssignment)!=std::string::npos);
-    SR_CHECK(combined.find("g_SrRtShadowStandalone")!=std::string::npos);
-  }
-  SR_CHECK(count>=2);
-}
 SR_TEST(pixel_coverage_observed_instanced_pairs_only_add_original_pixel_ownership) {
   SR_CHECK(IsPixelCoverageShaderPair(0xDF1EB50388CC2563ull,0xADAF9F96B596F6EFull));
   SR_CHECK(IsPixelCoverageShaderPair(0xDF1EB50388CC2563ull,0xF2BB7B6551646033ull));

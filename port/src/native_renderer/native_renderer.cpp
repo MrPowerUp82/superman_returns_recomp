@@ -300,10 +300,6 @@ REXCVAR_DEFINE_DOUBLE(sr_native_render_scale, 1.0, "Superman Returns Native",
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(sr_native_temporal_probe, false, "Superman Returns Native",
                     "Diagnose missing D3D12 temporal inputs for future DLSS/RT (no visual effect)");
-REXCVAR_DEFINE_DOUBLE(sr_native_rt_reflection_distance,10000.0,"Superman Returns Native",
-    "Maximum visible-scene reflection ray length in game world units").range(1.0,100000.0);
-REXCVAR_DEFINE_DOUBLE(sr_native_rt_trace_scale,0.5,"Superman Returns Native",
-    "Dedicated DXR trace resolution: 0.25, 0.5 or 1; full-resolution temporal reconstruction");
 REXCVAR_DEFINE_INT32(sr_native_rt_capture_swap, 0, "Superman Returns Native",
                      "Extract audited post-VS world triangles on this guest swap for DXR validation (0=off)");
 REXCVAR_DEFINE_STRING(sr_native_rt_capture_trigger_path, "", "Superman Returns Native",
@@ -1263,7 +1259,7 @@ void Renderer::ShutdownWorker() {
   if(worker_.joinable()) worker_.join();
   // The optional scene owns BLAS/TLAS and their source buffers. Retire all
   // queued work before releasing them, including shutdown outside a swap.
-  if((rt_capture_scene_ || rt_shadow_scene_ || visible_ray_scene_ || post_vertex_capture_ || motion_clips_ || temporal_motion_ || dlss_) && queue_ && fence_ && fence_event_ && device_ &&
+  if((rt_capture_scene_ || post_vertex_capture_ || motion_clips_ || temporal_motion_ || dlss_) && queue_ && fence_ && fence_event_ && device_ &&
      SUCCEEDED(device_->GetDeviceRemovedReason())) {
     const uint64_t value=next_fence_value_++;
     if(SUCCEEDED(queue_->Signal(fence_.Get(),value)) && fence_->GetCompletedValue()<value &&
@@ -1488,16 +1484,13 @@ bool Renderer::EnsureInitialized() {
   ray_tracing_capable_=ray_tracing_capable_ && SUCCEEDED(device_->QueryInterface(IID_PPV_ARGS(&ray_device))) &&
       SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL,&ray_shader_model,sizeof(ray_shader_model))) &&
       ray_shader_model.HighestShaderModel>=D3D_SHADER_MODEL_6_5;
-  D3D12_FEATURE_DATA_D3D12_OPTIONS1 wave_options{};
-  rt_shadow_wave_capable_=SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1,
-      &wave_options,sizeof(wave_options))) && wave_options.WaveOps;
   initialized_ = true;
   return true;
 }
 
 bool Renderer::CreateDrawResources() {
   // --- Main root signature: 3 root CBVs + bindless SRV/sampler tables. ---
-  D3D12_DESCRIPTOR_RANGE srv_ranges[4] = {};
+  D3D12_DESCRIPTOR_RANGE srv_ranges[7] = {};
   for (uint32_t i = 0; i < 3; ++i) {
     srv_ranges[i].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     srv_ranges[i].NumDescriptors = kSrvHeapSize;
@@ -1530,28 +1523,45 @@ bool Renderer::CreateDrawResources() {
   params[7].DescriptorTable.NumDescriptorRanges = 1;
   params[7].DescriptorTable.pDescriptorRanges = &srv_ranges[3];
   params[7].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
-  params[8].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV;
-  params[8].Descriptor={0,6};params[8].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
-  params[9].ParameterType=D3D12_ROOT_PARAMETER_TYPE_CBV;
-  params[9].Descriptor={3,4};params[9].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
-  params[10].ParameterType=D3D12_ROOT_PARAMETER_TYPE_UAV;
-  params[10].Descriptor={0,6};params[10].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
-  params[11].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-  params[11].Constants={4,4,1}; // b4,space4: original-PS pixel owner.
-  params[11].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
+  // Ray tracing (Superman-Returns-PC port, XenosRecomp patches 0014-0031):
+  // space6: 2D array views of stacked textures read by tfetch3D (TEX_STACKED_BIT).
+  srv_ranges[4].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+  srv_ranges[4].NumDescriptors = kSrvHeapSize;
+  srv_ranges[4].RegisterSpace = 6;
+  // space9: raw buffers (frame data, materials, mesh UVs, character buffers), same heap.
+  srv_ranges[5].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+  srv_ranges[5].NumDescriptors = kSrvHeapSize;
+  srv_ranges[5].RegisterSpace = 9;
+  // space8: ray-tracing acceleration structures (TLAS at kRtTlasSrv), same heap.
+  srv_ranges[6].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+  srv_ranges[6].NumDescriptors = kSrvHeapSize;
+  srv_ranges[6].RegisterSpace = 8;
+  params[8].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+  params[8].DescriptorTable.NumDescriptorRanges = 3;
+  params[8].DescriptorTable.pDescriptorRanges = &srv_ranges[4];
+  params[8].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+  // b3: the previous frame's VS constants of the same draw (DLSS motion vectors,
+  // XenosRecomp patch 0030); the current ones where there are none.
+  params[9].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+  params[9].Descriptor.ShaderRegister = 3;
+  params[9].Descriptor.RegisterSpace = 4;
+  params[9].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+  params[10].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+  params[10].Constants={4,4,1}; // b4,space4: original-PS pixel owner.
+  params[10].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
   D3D12_DESCRIPTOR_RANGE reactivity_uav{D3D12_DESCRIPTOR_RANGE_TYPE_UAV,1,1,6,0};
-  params[12].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-  params[12].DescriptorTable={1,&reactivity_uav};params[12].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
-  rs_desc.NumParameters = 13;
+  params[11].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+  params[11].DescriptorTable={1,&reactivity_uav};params[11].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
+  rs_desc.NumParameters = 12;
   // Debug (sr_native_debug_rs_salt): an unused root-constant parameter makes every
   // pipeline new to the driver's shader cache - a cold first run on demand.
   if (int32_t salt = REXCVAR_GET(sr_native_debug_rs_salt); salt > 0) {
-    params[13].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    params[13].Constants.ShaderRegister = 15;
-    params[13].Constants.RegisterSpace = 7;
-    params[13].Constants.Num32BitValues = uint32_t(std::min(salt, 32));
-    params[13].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    rs_desc.NumParameters = 14;
+    params[12].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[12].Constants.ShaderRegister = 15;
+    params[12].Constants.RegisterSpace = 7;
+    params[12].Constants.Num32BitValues = uint32_t(std::min(salt, 32));
+    params[12].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    rs_desc.NumParameters = 13;
   }
   rs_desc.pParameters = params;
   rs_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
@@ -1855,11 +1865,6 @@ bool Renderer::CreateDrawResources() {
           GetAliasPipeline(format,samples);
       }
     }
-    if(ray_tracing_capable_ && !visible_ray_scene_) {
-      auto scene=std::make_unique<graphics::d3d12::VisibleRayScene>();
-      if(SUCCEEDED(scene->Initialize(device_))) visible_ray_scene_=std::move(scene);
-      else REXLOG_WARN("native visible DXR prewarm failed: {}",scene->LastError());
-    }
   }
   benchmark::SetCacheAuditProvider(+[]() {
     const auto shaders=ShaderTranslator::AuditSnapshot();
@@ -1889,7 +1894,7 @@ void Renderer::Retire(ComPtr<ID3D12Resource> resource) {
 }
 
 uint32_t Renderer::AllocSrvIndex() {
-  return AllocateDescriptor(retired_srvs_, srv_completed_fence_, srv_heap_next_, kSrvHeapSize,
+  return AllocateDescriptor(retired_srvs_, srv_completed_fence_, srv_heap_next_, kSrvAllocLimit,
                             [this] { return fence_->GetCompletedValue(); });
 }
 
@@ -2278,7 +2283,7 @@ bool Renderer::BeginFrame() {
                                 [completed](const auto& r) { return r.first <= completed; }),
                  retired_.end());
   frame_open_ = true;
-  BeginRayShadows();
+  graphics_frame_request_=graphics::SharedGraphicsOptions()->Snapshot();
   BeginDlssFrame();
   BeginMotionCapture();
   post_vertex_projection_valid_=post_vertex_camera_conflict_=false;
@@ -2292,8 +2297,7 @@ bool Renderer::BeginFrame() {
   post_vertex_diagnostic_=!packet_sink_ && !post_vertex_done_ &&
       (trigger_ready || (capture_swap>0 && (swap_number_==uint64_t(capture_swap) ||
                                           swap_number_+1==uint64_t(capture_swap))));
-  post_vertex_active_=post_vertex_diagnostic_ || (!packet_sink_ && rt_shadow_requested_ && !visible_ray_requested_);
-  if(post_vertex_diagnostic_) rt_shadow_requested_=false;
+  post_vertex_active_=post_vertex_diagnostic_;
   if(post_vertex_active_) {
     post_vertex_depth_snapshot_.Reset();
     post_vertex_color_snapshot_.Reset();
@@ -3110,9 +3114,6 @@ bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_fo
     for (uint32_t i = 0; i < 4; ++i) if (rts[i]) rts[i]->last_write = seq;
     if (ds) ds->last_write = seq;
   }
-  if(rt_shadow_requested_ && !visible_ray_requested_ && !rt_shadow_attempted_ && rts[0] && ds &&
-     rts[0]->guest_format==12 && post_vertex_capture_ && !post_vertex_capture_->ranges().empty())
-    BuildRayShadowScene();
   rt_count = 0;
   for (uint32_t i = 0; i < 4; ++i) {
     if (rts[i]) rt_count = i + 1;
@@ -3295,9 +3296,8 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
                                            DXGI_FORMAT dsv_format,
                                            D3D12_INDEX_BUFFER_STRIP_CUT_VALUE strip_cut) {
   CpuTimer cpu_timer(cpu_timings.pipeline_ns);
-  const bool ray_variant=rt_shadow_draw_active_ && rt_shadow_variant_;
   const bool coverage_variant=motion_coverage_draw_active_ && motion_coverage_shader_;
-  const bool special_variant=ray_variant || coverage_variant;
+  const bool special_variant=coverage_variant;
   if(coverage_variant && REXCVAR_GET(sr_native_debug_motion_coverage_pso_failure)) return nullptr;
   reg::RB_BLENDCONTROL blend{LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_BLENDCONTROL0)};
   reg::PA_SU_SC_MODE_CNTL mode{LoadReg(base, dev, rex::graphics::XE_GPU_REG_PA_SU_SC_MODE_CNTL)};
@@ -3368,8 +3368,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
   uint64_t key_parts[] = {vs_hash ^ (uint64_t(bound_samples_) << 60) ^
                               (uint64_t(alpha_to_coverage) << 59),
                           (uint64_t(uint32_t(depth_bias)) << 32) | slope_bits,
-                          ps_hash ^ (ray_variant ? (coverage_variant ? 0x53525254434F0003ull : 0x5352525453480001ull) : 0) ^
-                              (coverage_variant ? 0x5352434F56450001ull : 0),
+                          ps_hash ^ (coverage_variant ? 0x5352434F56450001ull : 0),
                           decl_hash,
                           blend.value,
                           uint64_t(mode.value & 0x7) | (uint64_t(color_mask & 0xFFFF) << 8) |
@@ -3418,16 +3417,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
   bool pending = shader_pending_;
   // ps_hash == 0: depth-only draw (the game binds no pixel shader).
   const auto* ps = coverage_variant ? motion_coverage_shader_ :
-      ray_variant ? rt_shadow_variant_ : ps_hash ? LoadShader(ps_hash, false) : nullptr;
-  if(coverage_variant && ray_variant) {
-    auto found=motion_ray_shaders_.find(ps_hash);
-    if(found==motion_ray_shaders_.end()) {
-      std::vector<uint8_t> bytes;
-      if(ShaderTranslator::Get().FetchRtCoverageVariant(ps_hash,bytes)!=TranslateState::kReady) return nullptr;
-      found=motion_ray_shaders_.emplace(ps_hash,std::move(bytes)).first;
-    }
-    ps=&found->second;
-  }
+      ps_hash ? LoadShader(ps_hash, false) : nullptr;
   pending = pending || shader_pending_;
   if (!vs || (ps_hash && !ps)) {
     if (pending) pipelines_.erase(key);  // ask again once the translation finished
@@ -3582,7 +3572,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
     record.key = key;
     record.vs_hash = vs_hash;
     record.ps_hash = ps_hash;
-    record.pixel_variant=coverage_variant ? (ray_variant ? 3u : 2u) : ray_variant ? 1u : 0u;
+    record.pixel_variant=coverage_variant ? 2u : 0u;
     record.blend = desc.BlendState;
     record.raster = desc.RasterizerState;
     record.depth_stencil = desc.DepthStencilState;
@@ -4961,7 +4951,7 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
   }
   std::memcpy(&s[73], &half_pixel[0], 4);
   std::memcpy(&s[74], &half_pixel[1], 4);
-  if((post_vertex_active_ || visible_ray_requested_) && use_mirror) {
+  if(post_vertex_active_ && use_mirror) {
     const bool caster=current_vs_hash_==0x57A00D4EB3BF4C31ull || current_vs_hash_==0xC7C0E381A3C9B79Eull;
     const bool receiver=current_vs_hash_==graphics::CameraCandidateProbe::kViewProjectionShader;
     if(caster || receiver) {
@@ -4974,20 +4964,13 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
       auto& saved=caster ? post_vertex_caster_projection_ : post_vertex_receiver_projection_;
       auto& valid=caster ? post_vertex_caster_valid_ : post_vertex_receiver_valid_;
       const auto visible_direction=graphics::ShadowRayDirection(projection);
-      if(receiver && visible_ray_requested_ && visible_direction.valid) {
-        if(visible_ray_light_valid_) {
-          float cosine=0;for(size_t axis=0;axis<3;++axis) cosine+=visible_ray_light_[axis]*visible_direction.xyz[axis];
-          if(cosine<.999f) visible_ray_light_conflict_=true;
-        }
-        visible_ray_light_=visible_direction.xyz;visible_ray_light_valid_=true;
-      }
       if(visible_direction.valid) {
         if(valid && !graphics::ShadowProjectionsMatch(saved,projection)) post_vertex_light_conflict_=true;
         saved=projection; valid=true;
       } else post_vertex_light_conflict_=true;
     }
   }
-  if((post_vertex_active_ || visible_ray_requested_) && use_mirror &&
+  if(post_vertex_active_ && use_mirror &&
      current_vs_hash_==graphics::CameraCandidateProbe::kViewProjectionShader &&
      !ScreenSpaceDraw(base,dev)) {
     graphics::Matrix4 projection{};
@@ -5157,13 +5140,10 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
   command_list_->SetGraphicsRootConstantBufferView(0, cb_vs_gpu_);
   command_list_->SetGraphicsRootConstantBufferView(1, cb_ps_gpu_);
   command_list_->SetGraphicsRootConstantBufferView(2, shared_gpu);
-  current_motion_raster_.ray_opaque=visible_ray_requested_ && graphics::IsOpaqueRayGeometry({
-      current_vs_hash_,current_ps_hash_,current_motion_raster_.blend_control,
-      current_motion_raster_.color_control,current_motion_raster_.color_mask,spec,
-      current_motion_raster_.coverage_id,std::bit_cast<float>(s[124]),current_motion_raster_.z_write,
-      REXCVAR_GET(sr_native_shader_dir).empty() && REXCVAR_GET(sr_native_preshaders_path).empty() &&
-      REXCVAR_GET(sr_native_shader_tools_dir).empty() && REXCVAR_GET(sr_native_debug_ps_const).empty(),
-      current_motion_raster_.opaque});
+  // b3 (patch 0030): previous VS constants of this draw; the current ones until
+  // the DLSS motion port supplies history (g_SrMotionValid = 0 then).
+  command_list_->SetGraphicsRootConstantBufferView(9, cb_vs_gpu_);
+  current_motion_raster_.ray_opaque=false;
   return true;
 }
 
@@ -5357,7 +5337,6 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
       order_srv_leases();
       command_list_->Close();
       ID3D12CommandList* lists[] = {command_list_.Get()};
-      BeforeVisibleRaySubmit();
       queue_->ExecuteCommandLists(1, lists);
       queue_->Signal(fence_.Get(), next_fence_value_++);
       DumpFrameResources(dump_after ? std::string("after_")
@@ -5554,7 +5533,6 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
     frame_state_bound_ = true;
   }
   // Primitive restart only matters for strips.
-  rt_shadow_draw_active_=ConfigureRayShadowDraw(base,dev,vs_hash,ps_hash);
   if (topology != D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP &&
       topology != D3D_PRIMITIVE_TOPOLOGY_LINESTRIP) {
     strip_cut = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
@@ -5574,13 +5552,6 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
     REXLOG_WARN("native motion coverage PSO unavailable: ps={:016X}; retrying original draw without owner MRT",ps_hash);
     pso=GetPipeline(base,dev,vs_hash,ps_hash,decl,topology_type,rtv_formats,rt_count,dsv_format,strip_cut);
   }
-  if(!pso && rt_shadow_draw_active_) {
-    rt_shadow_draw_active_=false;
-    pso=GetPipeline(base,dev,vs_hash,ps_hash,decl,topology_type,rtv_formats,rt_count,dsv_format,strip_cut);
-  }
-  if(visible_ray_requested_ && graphics_frame_request_.requested[0] && graphics::IsRtShadowShader(ps_hash) &&
-      bound_rts_[0] && bound_rts_[0]->guest_format==12 && !rt_shadow_draw_active_)
-    visible_ray_unpatched_receiver_=true;
   if (!pso) {
     ++stats_.skip_pso;
     ++stats_.skip_pso_pairs[{vs_hash, ps_hash, g_current_pass}];
@@ -5631,7 +5602,7 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
   current_vs_hash_ = vs_hash;
   if(motion_capture_active_) for(auto& source:motion_color_sources_) source={};
   const bool filter_textures = TextureUsageFiltering() && !motion_capture_active_ &&
-      !rt_shadow_draw_active_ && !motion_coverage_draw_active_ && !trace_state_;
+      !motion_coverage_draw_active_ && !trace_state_;
   const uint32_t texture_mask = graphics::guest::TextureMaskForShaders(
       shader_a.get(), shader_b.get(),
       (!vs_obj || shader_a) && (!ps_obj || shader_b), filter_textures);
@@ -5642,7 +5613,7 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
       REXCVAR_GET(sr_native_shader_dir).empty() &&
       REXCVAR_GET(sr_native_preshaders_path).empty() && REXCVAR_GET(sr_native_shader_tools_dir).empty() &&
       REXCVAR_GET(sr_native_debug_ps_const).empty() &&
-      !motion_capture_active_ && !post_vertex_active_ && !rt_shadow_draw_active_ &&
+      !motion_capture_active_ && !post_vertex_active_ &&
       !motion_coverage_draw_active_ && !trace_state_ && !REXCVAR_GET(sr_native_packet_check);
   const auto vs_usage=graphics::guest::ConstantUsageForShaders(shader_a.get(),shader_b.get(),true,
       (!vs_obj || shader_a) && (!ps_obj || shader_b),filter_constants);
@@ -5655,23 +5626,13 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
     CaptureCamera();
   }
   ApplyFixedFunctionState(base, dev);
-  if(rt_shadow_draw_active_) {
-    UploadAlloc rt_constants;
-    if(!Upload(sizeof(rt_shadow_constants_),256,rt_constants)) return false;
-    std::memcpy(rt_constants.cpu,&rt_shadow_constants_,sizeof(rt_shadow_constants_));
-    if(visible_ray_requested_) visible_ray_standalone_flags_.push_back(
-        static_cast<uint8_t*>(rt_constants.cpu)+offsetof(graphics::RtShadowDrawConstants,padding)+sizeof(uint32_t));
-    command_list_->SetGraphicsRootShaderResourceView(8,rt_shadow_scene_ && rt_shadow_scene_->AccelerationStructure() ? rt_shadow_scene_->AccelerationStructure()->GetGPUVirtualAddress() : 0);
-    command_list_->SetGraphicsRootConstantBufferView(9,rt_constants.gpu);
-    command_list_->SetGraphicsRootUnorderedAccessView(10,rt_shadow_counter_[frame_index_]->GetGPUVirtualAddress());
-  }
   command_list_->SetPipelineState(pso);
   current_raster_pipeline_=pso;
   if(motion_coverage_draw_active_) {
-    command_list_->SetGraphicsRoot32BitConstant(11,graphics::MotionPixelOwnerConstant(
+    command_list_->SetGraphicsRoot32BitConstant(10,graphics::MotionPixelOwnerConstant(
         motion_coverage_draw_id_,current_motion_raster_.blend_control,current_motion_raster_.color_mask),0);
     if(motion_reactive_[frame_index_].mask)
-      command_list_->SetGraphicsRootDescriptorTable(12,provider_->OffsetViewDescriptor(
+      command_list_->SetGraphicsRootDescriptorTable(11,provider_->OffsetViewDescriptor(
           srv_heap_->GetGPUDescriptorHandleForHeapStart(),motion_reactive_[frame_index_].uav));
   }
   const D3D12_VERTEX_BUFFER_VIEW default_view{
@@ -7181,7 +7142,6 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
         compat::BenchElapsedMs() >= REXCVAR_GET(sr_native_dump_frame_at_s) * 1000.0 && frame_open_) {
       command_list_->Close();
       ID3D12CommandList* lists[] = {command_list_.Get()};
-      BeforeVisibleRaySubmit();
       queue_->ExecuteCommandLists(1, lists);
       queue_->Signal(fence_.Get(), next_fence_value_++);
       DumpFrameResources(fmt::format("r{}_", index), true);
@@ -7783,156 +7743,6 @@ void Renderer::ReportCapturedRayProbe(uint32_t slot) {
               count,hits,count-hits);
 }
 
-#include "native_visible_rt.inc"
-
-void Renderer::BeginRayShadows() {
-  HarvestRayShadowExecution();
-  graphics_frame_request_=graphics::SharedGraphicsOptions()->Snapshot();
-  BeginVisibleRayFrame();
-  rt_shadow_built_=rt_shadow_attempted_=rt_shadow_draw_active_=rt_shadow_counter_recorded_=false;
-  rt_shadow_character_built_=false;
-  // The primary family gates readiness; the others join as their variants finish.
-  if(ray_tracing_capable_ && rt_shadow_wave_capable_ && rt_shadow_shaders_.empty()) {
-    std::vector<uint8_t> dxil;
-    constexpr uint64_t kPrimary=0x8A6DD1D52752FAD6ull;
-    if(ShaderTranslator::Get().FetchRtShadowVariant(kPrimary,dxil)==TranslateState::kReady) {
-      REXLOG_INFO("native RT shadow shader ready: {} bytes; original lighting family specialization",dxil.size());
-      rt_shadow_shaders_.emplace(kPrimary,std::move(dxil));
-    }
-  }
-  rt_shadow_requested_=graphics_frame_request_.requested[0]==1 && ray_tracing_capable_ &&
-      rt_shadow_wave_capable_ && !rt_shadow_shaders_.empty() && REXCVAR_GET(sr_native_pm4_mirror);
-  if(!rt_shadow_requested_) return;
-  auto buffer=[&](uint64_t bytes,D3D12_HEAP_TYPE type,D3D12_RESOURCE_STATES state,
-                  D3D12_RESOURCE_FLAGS flags,ComPtr<ID3D12Resource>& resource) {
-    D3D12_HEAP_PROPERTIES heap{};heap.Type=type;
-    D3D12_RESOURCE_DESC d{};d.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;d.Width=bytes;
-    d.Height=1;d.DepthOrArraySize=d.MipLevels=1;d.SampleDesc.Count=1;
-    d.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;d.Flags=flags;
-    return device_->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&d,state,nullptr,IID_PPV_ARGS(&resource));
-  };
-  HRESULT hr=S_OK;
-  if(!rt_shadow_zero_) {
-    hr=buffer(4,D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ,D3D12_RESOURCE_FLAG_NONE,rt_shadow_zero_);
-    void* mapped=nullptr; const D3D12_RANGE empty{0,0};
-    if(SUCCEEDED(hr)) hr=rt_shadow_zero_->Map(0,&empty,&mapped);
-    if(SUCCEEDED(hr)) {std::memset(mapped,0,4);rt_shadow_zero_->Unmap(0,nullptr);}
-    else rt_shadow_zero_.Reset();
-  }
-  if(SUCCEEDED(hr) && !rt_shadow_counter_[frame_index_])
-    hr=buffer(4,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,rt_shadow_counter_[frame_index_]);
-  if(SUCCEEDED(hr) && !rt_shadow_counter_readback_[frame_index_])
-    hr=buffer(4,D3D12_HEAP_TYPE_READBACK,D3D12_RESOURCE_STATE_COPY_DEST,
-        D3D12_RESOURCE_FLAG_NONE,rt_shadow_counter_readback_[frame_index_]);
-  if(FAILED(hr)) {REXLOG_ERROR("native RT shader counter unavailable {:08X}",uint32_t(hr));rt_shadow_requested_=false;return;}
-  Transition(rt_shadow_counter_[frame_index_].Get(),rt_shadow_counter_state_[frame_index_],D3D12_RESOURCE_STATE_COPY_DEST);
-  command_list_->CopyBufferRegion(rt_shadow_counter_[frame_index_].Get(),0,rt_shadow_zero_.Get(),0,4);
-  Transition(rt_shadow_counter_[frame_index_].Get(),rt_shadow_counter_state_[frame_index_],D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-}
-
-void Renderer::BuildRayShadowScene() {
-  using namespace graphics::d3d12;
-  rt_shadow_attempted_=true;
-  if(!post_vertex_capture_ || !post_vertex_caster_valid_ || post_vertex_light_conflict_) return;
-  const auto& ranges=post_vertex_capture_->ranges();
-  if(ranges.empty() || post_vertex_capture_->dropped()) return;
-  for(const auto& range:ranges) if(!graphics::IsOriginalShadowCaster(range.vs)) return;
-  post_vertex_capture_->Finish(command_list_.Get(),false);
-  post_vertex_active_=false;
-  if(!rt_shadow_scene_) {
-    auto scene=std::make_unique<RayTracingScene>();
-    const HRESULT hr=scene->Initialize(device_);
-    if(FAILED(hr)) {REXLOG_WARN("native RT shadows initialization failed: {}",scene->LastError());return;}
-    rt_shadow_scene_=std::move(scene);
-  }
-  // One BLAS per class so the instance mask can exclude character casters.
-  std::vector<RayTracingGeometry> geometry;
-  const auto add_class=[&](bool character) {
-    RayTracingGeometry group{post_vertex_capture_->vertices()};
-    group.character=character;
-    for(const auto& range:ranges) {
-      if(graphics::IsCharacterShadowCaster(range.vs)!=character || !range.vertices) continue;
-      if(!group.vertex_count) {group.offset=range.offset;group.vertex_count=range.vertices;}
-      else group.more.push_back({range.offset,range.vertices});
-    }
-    if(group.vertex_count) geometry.push_back(std::move(group));
-  };
-  add_class(false);
-  add_class(true);
-  if(geometry.empty()) return;
-  HRESULT hr=rt_shadow_scene_->BeginFrame(frame_index_);
-  if(SUCCEEDED(hr)) hr=rt_shadow_scene_->BuildScene(command_list_.Get(),geometry);
-  if(FAILED(hr)) {REXLOG_WARN("native RT shadows scene failed: {}",rt_shadow_scene_->LastError());return;}
-  rt_shadow_built_=true;
-  rt_shadow_character_built_=geometry.back().character;
-}
-
-bool Renderer::ConfigureRayShadowDraw(uint8_t* base,uint32_t dev,uint64_t vs,uint64_t ps) {
-  // Only color-producing scene draws can contribute to the applied effect.
-  // A depth-only invocation must not count as an active visual RT shadow.
-  if(!bound_rts_[0] || bound_rts_[0]->guest_format!=12 ||
-     !(LoadReg(base,dev,rex::graphics::XE_GPU_REG_RB_COLOR_MASK)&7u)) return false;
-  const bool standalone=visible_ray_requested_;
-  if(!rt_shadow_requested_ || (!standalone && (!rt_shadow_built_ || !rt_shadow_scene_ || !rt_shadow_scene_->AccelerationStructure())) ||
-     (!standalone && vs!=0x2C45BFFE76D77398ull) || !graphics::IsRtShadowShader(ps) ||
-     (!standalone && post_vertex_light_conflict_)) return false;
-  auto variant=rt_shadow_shaders_.find(ps);
-  if(variant==rt_shadow_shaders_.end()) {
-    std::vector<uint8_t> dxil;
-    if(ShaderTranslator::Get().FetchRtShadowVariant(ps,dxil)!=TranslateState::kReady) return false;
-    variant=rt_shadow_shaders_.emplace(ps,std::move(dxil)).first;
-    REXLOG_INFO("native RT shadow variant ready: ps={:016X} {} bytes",ps,variant->second.size());
-  }
-  const auto& words=mirror_.FloatConstants(false);
-  graphics::ShadowProjection projection;
-  std::memcpy(projection.u.data(),words.data()+9*4,16);
-  std::memcpy(projection.v.data(),words.data()+10*4,16);
-  std::memcpy(projection.z.data(),words.data()+11*4,16);
-  if(!standalone && !graphics::ShadowProjectionsMatch(projection,post_vertex_caster_projection_)) return false;
-  const auto direction=graphics::ShadowRayDirection(projection);
-  rt_shadow_constants_={};
-  std::memcpy(rt_shadow_constants_.light,direction.xyz.data(),sizeof(rt_shadow_constants_.light));
-  rt_shadow_constants_.enabled=standalone ? 0 : 1;rt_shadow_constants_.bias=.05f;rt_shadow_constants_.max_distance=10000;
-  const bool high=graphics_frame_request_.requested[1]==2;
-  rt_shadow_constants_.cone=high ? .01f : .003f;rt_shadow_constants_.samples=high ? 16 : 4;
-  rt_shadow_constants_.mask=graphics_frame_request_.requested[2]==1 ? 3 : 1;
-  rt_shadow_constants_.padding[0]=!visible_ray_requested_ && graphics_frame_request_.requested[3]==1 ? 1 : 0;
-  rt_shadow_constants_.padding[1]=0; // Committed only after this frame records its replacement successfully. // g_SrRtReflectEnabled
-  rt_shadow_variant_=&variant->second;
-  return true;
-}
-
-void Renderer::RecordRayShadowCounter() {
-  if(!rt_shadow_requested_ || !rt_shadow_counter_[frame_index_] || !rt_shadow_counter_readback_[frame_index_]) return;
-  Transition(rt_shadow_counter_[frame_index_].Get(),rt_shadow_counter_state_[frame_index_],D3D12_RESOURCE_STATE_COPY_SOURCE);
-  command_list_->CopyBufferRegion(rt_shadow_counter_readback_[frame_index_].Get(),0,rt_shadow_counter_[frame_index_].Get(),0,4);
-  rt_shadow_counter_recorded_=true;
-}
-
-void Renderer::HarvestRayShadowExecution() {
-  if(!fence_) return;
-  const uint64_t completed=fence_->GetCompletedValue();
-  if(completed==UINT64_MAX) return;
-  const auto previous=rt_shadow_execution_.Latest();
-  for(uint32_t slot=0;slot<3;++slot) {
-    const auto ticket=rt_shadow_execution_.Pending(slot);
-    if(!ticket.fence || ticket.fence>completed) continue;
-    uint32_t pixels=0;
-    if(ticket.counter_recorded && rt_shadow_counter_readback_[slot]) {
-      const D3D12_RANGE range{0,4};void* mapped=nullptr;
-      if(SUCCEEDED(rt_shadow_counter_readback_[slot]->Map(0,&range,&mapped))) {
-        std::memcpy(&pixels,mapped,4);
-        const D3D12_RANGE empty{0,0};rt_shadow_counter_readback_[slot]->Unmap(0,&empty);
-      }
-    }
-    rt_shadow_execution_.Complete(slot,completed,pixels);
-  }
-  const auto result=rt_shadow_execution_.Latest();
-  if(result.applied!=previous.applied || (result.applied[0] && result.frame%120==0))
-    REXLOG_INFO("native RT shadows executed: frame={} revision={} shader_pixels={} applied={} softness={} fence_completed=true (mapped lighting family; original fallback elsewhere)",
-        result.frame,result.revision,result.pixels,result.applied[0],result.applied[1]);
-}
 
 bool Renderer::CreateDlssPipelines(const D3D12_GRAPHICS_PIPELINE_STATE_DESC& blit) {
   const auto serialize=[&](const D3D12_ROOT_SIGNATURE_DESC& desc,ComPtr<ID3D12RootSignature>& root) {
@@ -8037,11 +7847,6 @@ void Renderer::CompleteGuestDraw() {
   graphics::RecordCacheAuditDraw();
   Breadcrumb();
   HostSurface* completed_scene=bound_rts_[0];
-  if(visible_ray_requested_ && current_ps_hash_==benchmark::kSceneFilterPs && !SkipGpuDraw() && completed_scene) {
-    RecordVisibleRayFrame(*completed_scene);
-    // The original target remains the DLSS color source after our own pass.
-    bound_rts_[0]=completed_scene;
-  }
   // Capture after the scene filter actually draws, before resolves clear the
   // bound targets and before HUD draws (which benchmarks intentionally omit).
   if(dlss_wanted_ && !dlss_recorded_ && current_ps_hash_==benchmark::kSceneFilterPs && !SkipGpuDraw())
@@ -8213,6 +8018,14 @@ void Renderer::RecordDlssFrame() {
   dlss_history_=true;dlss_ready_=true;
 }
 
+void Renderer::ReportRtFeatures(graphics::GraphicsBackendReport& report) {
+  for(size_t i=0;i<4;++i) {
+    report.features[i]={false,ray_tracing_capable_,
+        ray_tracing_capable_ ? "Ray tracing is being ported" : "DXR 1.1 is unavailable on this device"};
+    report.applied[i]=0;
+  }
+}
+
 void Renderer::PublishGraphicsOptions() {
   if(dlss_evaluated_frames_ && frame_count_%120==0)
     REXLOG_INFO("native DLSS frames: evaluated={} completed={} composited={} rejected={} applied={}",
@@ -8220,40 +8033,15 @@ void Renderer::PublishGraphicsOptions() {
   auto options=graphics::SharedGraphicsOptions();
   const auto request=options->Snapshot();
   graphics::GraphicsBackendReport report;
-  const auto executed=rt_shadow_execution_.Latest();
-  report.request_revision=executed.revision;
+  report.request_revision=graphics_frame_request_.request_revision;
   report.frame=frame_count_+1;
-  for(size_t i=0;i<4;++i)
-    report.features[i]={false,ray_tracing_capable_,
-        ray_tracing_capable_ ? "Scene geometry and lighting integration pending" : "DXR 1.1 is unavailable on this device"};
-  const bool shadow_ready=ray_tracing_capable_ && rt_shadow_wave_capable_ && !rt_shadow_shaders_.empty() &&
-      REXCVAR_GET(sr_native_pm4_mirror);
-  report.features[0]={shadow_ready,ray_tracing_capable_ && rt_shadow_wave_capable_,
-      shadow_ready ? "Some materials retain original shadows" : "RT lighting shader is not ready"};
-  report.features[1]=report.features[0];
-  report.features[2]={shadow_ready,ray_tracing_capable_ && rt_shadow_wave_capable_,
-      shadow_ready ? "Skinned casters count as characters" : "RT lighting shader is not ready"};
-  report.features[3]={shadow_ready,ray_tracing_capable_ && rt_shadow_wave_capable_,
-      shadow_ready ? "Occlusion only: reflected colors are not traced yet" : "RT lighting shader is not ready"};
-  report.applied=executed.applied;
-  if(executed.revision!=graphics_frame_request_.request_revision)
-    for(size_t row=0;row<4;++row) report.applied[row]=0;
-  if(visible_ray_scene_) {
-    for(size_t row=0;row<4;++row) report.applied[row]=0;
-    for(size_t row=0;row<4;++row) report.features[row]={true,ray_tracing_capable_,
-        "Visible-scene DXR; hit colors use depth-qualified lit scene; opaque geometry only"};
-    if(visible_ray_applied_.revision==graphics_frame_request_.request_revision && visible_ray_applied_.frame) {
-      for(size_t row=0;row<4;++row) report.applied[row]=visible_ray_applied_.requested[row];
-      if(!report.applied[0]) report.applied[1]=report.applied[2]=0;
-    }
-  }
+  ReportRtFeatures(report);
   const bool dlss_supported=dlss_ && dlss_->GetStatus().support==graphics::d3d12::DlssSupport::Supported;
   report.features[4]={dlss_supported,dlss_supported,
       !dlss_supported ? "DLSS SDK support is unavailable" : !dlss_active_ || dlss_failed_ ?
       "DLSS could not start; see the log" : object_motion_requested_ ? "Object motion: unqualified frames retain raster output" : "Camera motion only: moving objects can ghost"};
   const int applied_dlss=dlss_ ? int(dlss_->GetStatus().applied) : 0;
   report.applied[4]=(!object_motion_requested_ || dlss_ready_) && applied_dlss>=2 ? applied_dlss-1 : 0;
-  if(request.requested[0] && !report.applied[0]) report.failure="RT shadows are waiting for a verified shader execution";
   AppendGraphicsHostReport(report);
   report.request_revision=graphics_frame_request_.request_revision;
   options->PublishBackend(graphics_options_epoch_,report);
@@ -8269,7 +8057,6 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
     post_vertex_active_=false;
   }
   EndMotionCapture();
-  RecordRayShadowCounter();
   // Blit the resolved front buffer into the output target.
   auto latest = resolve_latest_.find(front_buffer_address);
   auto it = latest != resolve_latest_.end() ? resolve_textures_.find(latest->second)
@@ -8385,7 +8172,6 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
         ProfileEnd();
         command_list_->Close();
         ID3D12CommandList* lists[] = {command_list_.Get()};
-        BeforeVisibleRaySubmit();
       queue_->ExecuteCommandLists(1, lists);
         frame_open_ = false;
         if (own_queue_) {
@@ -8426,7 +8212,6 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
     ProfileEnd();
     command_list_->Close();
     ID3D12CommandList* lists[] = {command_list_.Get()};
-    BeforeVisibleRaySubmit();
       queue_->ExecuteCommandLists(1, lists);
     frame_open_ = false;
   }
@@ -8439,14 +8224,6 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
   pending_texture_retirements_.clear();
   const HRESULT submitted=queue_->Signal(fence_.Get(), next_fence_value_);
   frame_fence_values_[frame_index_] = next_fence_value_;
-  if(SUCCEEDED(submitted) && visible_ray_recorded_)
-    visible_ray_tickets_[frame_index_]={next_fence_value_,frame_count_+1,
-        graphics_frame_request_.request_revision,graphics_frame_request_.requested};
-  if(SUCCEEDED(submitted) && visible_ray_recorded_ && !visible_ray_characters_built_)
-    visible_ray_tickets_[frame_index_].requested[2]=0;
-  if(SUCCEEDED(submitted)) rt_shadow_execution_.Submit(frame_index_,next_fence_value_,frame_count_+1,
-      graphics_frame_request_.request_revision,graphics_frame_request_.requested,rt_shadow_counter_recorded_,
-      rt_shadow_character_built_);
   if(SUCCEEDED(submitted) && dlss_slots_[frame_index_].ticket && !dlss_slots_[frame_index_].submitted) {
     auto& slot=dlss_slots_[frame_index_];
     slot.fence_value=next_fence_value_;slot.submitted=true;
@@ -8454,7 +8231,6 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
     if(!notified) REXLOG_WARN("native DLSS submission rejected: error={}",uint32_t(notified.error));
   }
   ++next_fence_value_;
-  HarvestRayShadowExecution();
   PublishGraphicsOptions();
   ProfileReport();
   if (dump_all_active_) {
@@ -8779,7 +8555,6 @@ void Renderer::ExecOnPassEnd(int pass) {
     dump_all_active_ = true;
     command_list_->Close();
     ID3D12CommandList* lists[] = {command_list_.Get()};
-    BeforeVisibleRaySubmit();
       queue_->ExecuteCommandLists(1, lists);
     queue_->Signal(fence_.Get(), next_fence_value_++);
     DumpFrameResources(fmt::format("p{:02}_", pass), true);
@@ -8809,7 +8584,6 @@ void Renderer::ExecOnPassEnd(int pass) {
   // Submit what the frame recorded so far, dump, then continue recording.
   command_list_->Close();
   ID3D12CommandList* lists[] = {command_list_.Get()};
-  BeforeVisibleRaySubmit();
       queue_->ExecuteCommandLists(1, lists);
   queue_->Signal(fence_.Get(), next_fence_value_++);
   DumpFrameResources();
@@ -8859,7 +8633,6 @@ void Renderer::WatchHdr(uint32_t index) {
   order_srv_leases();
   command_list_->Close();
   ID3D12CommandList* lists[] = {command_list_.Get()};
-  BeforeVisibleRaySubmit();
       queue_->ExecuteCommandLists(1, lists);
   queue_->Signal(fence_.Get(), next_fence_value_);
   fence_->SetEventOnCompletion(next_fence_value_, fence_event_);
@@ -8904,7 +8677,6 @@ void Renderer::WatchHdr(uint32_t index) {
   Transition(res, *state, old_state);
   command_list_->Close();
   ID3D12CommandList* copy_lists[] = {command_list_.Get()};
-  BeforeVisibleRaySubmit();
       queue_->ExecuteCommandLists(1, copy_lists);
   queue_->Signal(fence_.Get(), next_fence_value_);
   fence_->SetEventOnCompletion(next_fence_value_, fence_event_);
@@ -9081,7 +8853,6 @@ void Renderer::DumpFrameResources(const std::string& prefix, bool surfaces_only,
     Transition(item.resource, *item.state, old_state);
     command_list_->Close();
     ID3D12CommandList* lists[] = {command_list_.Get()};
-    BeforeVisibleRaySubmit();
       queue_->ExecuteCommandLists(1, lists);
     queue_->Signal(fence_.Get(), next_fence_value_);
     fence_->SetEventOnCompletion(next_fence_value_, fence_event_);
@@ -10098,8 +9869,8 @@ void Renderer::DrawIndexedVertices(uint8_t* base, uint32_t prim, int32_t base_ve
   // Continuous motion/DXR need this proof even without a diagnostic trigger.
   // DrawIndexed u6/u7 are otherwise unused; zero/zero means unverified.
   const bool needs_motion_envelope=!packet_sink_ &&
-      ((REXCVAR_GET(sr_native_object_motion) && REXCVAR_GET(sr_dlss)!="off") || REXCVAR_GET(sr_rt_shadows) ||
-       REXCVAR_GET(sr_rt_reflections) || !REXCVAR_GET(sr_native_motion_capture_trigger_path).empty());
+      ((REXCVAR_GET(sr_native_object_motion) && REXCVAR_GET(sr_dlss)!="off") ||
+       !REXCVAR_GET(sr_native_motion_capture_trigger_path).empty());
   if(needs_motion_envelope && cur_.has_index &&
      uint64_t(start_index)+index_count<=uint64_t(draw_range.ib_size)/(draw_range.index32?4u:2u)) {
     draw_range.Resolve();

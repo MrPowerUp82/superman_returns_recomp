@@ -254,7 +254,6 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
             src/graphics/d3d12/post_vertex_clip_capture.cpp
             src/graphics/d3d12/temporal_motion.cpp
             src/graphics/d3d12/ray_tracing_scene.cpp
-            src/graphics/d3d12/visible_ray_scene.cpp
             src/graphics/d3d12/dlss_super_resolution.cpp
             src/graphics/graphics_options.cpp
             src/graphics/native_apt_menu.cpp
@@ -262,7 +261,6 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
             src/graphics/graphics_options_hooks.cpp
             src/graphics/graphics_preferences.cpp
             src/graphics/graphics_settings.cpp
-            src/graphics/rt_shadow_shader.cpp
             src/graphics/pixel_coverage_shader.cpp
               src/graphics/scene_resolution_shader.cpp
             ${SR_NATIVE_ROOT}/resource_write_tracking.cpp
