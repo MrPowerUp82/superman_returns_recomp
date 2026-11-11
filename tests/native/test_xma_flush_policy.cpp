@@ -528,3 +528,30 @@ SR_TEST(xma_scenario_stream_end_and_repeat_reinitialization) {
   SR_CHECK(!tracker.carry_pending);
   SR_CHECK_EQ(tracker.telemetry.trailing_carry_flushes, 2u);
 }
+
+// AUD-11: the decoder clears output_buffer_valid for an empty ring as well as a
+// full one; only its free-block budget tells them apart.
+SR_TEST(xma_output_ring_is_empty_only_when_the_decoder_left_every_block_free) {
+  SR_CHECK(IsXmaOutputRingEmpty(5, 5, 24, 24));    // nothing decoded into an empty ring
+  SR_CHECK(!IsXmaOutputRingEmpty(5, 5, 24, 0));    // the pass filled the ring
+  SR_CHECK(!IsXmaOutputRingEmpty(5, 5, 24, -2));   // filled, padding charged
+  SR_CHECK(!IsXmaOutputRingEmpty(5, 9, 24, 24));   // unread blocks remain
+  SR_CHECK(!IsXmaOutputRingEmpty(0, 0, 0, 0));     // no output buffer
+}
+
+SR_TEST(xma_silence_pad_appends_one_block_and_reports_a_full_ring) {
+  auto pad = PlanXmaSilencePad(4, 4, 24, true);  // empty ring
+  SR_CHECK(pad.fits);
+  SR_CHECK_EQ(pad.write_block, 4u);
+  SR_CHECK_EQ(pad.next_write, 5u);
+  SR_CHECK(!pad.fills_ring);
+
+  pad = PlanXmaSilencePad(0, 23, 24, true);  // last free block, wraps onto the reader
+  SR_CHECK(pad.fits);
+  SR_CHECK_EQ(pad.next_write, 0u);
+  SR_CHECK(pad.fills_ring);
+
+  SR_CHECK(!PlanXmaSilencePad(4, 4, 24, false).fits);  // full ring
+  SR_CHECK(!PlanXmaSilencePad(0, 0, 0, true).fits);    // no output buffer
+  SR_CHECK(!PlanXmaSilencePad(30, 2, 24, true).fits);  // offsets outside the ring
+}

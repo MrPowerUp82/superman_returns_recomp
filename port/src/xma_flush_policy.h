@@ -80,6 +80,42 @@ inline bool IsXmaInputExhausted(bool in0_valid, bool in1_valid, uint32_t current
   return false;
 }
 
+// The runtime decoder clears output_buffer_valid whenever a pass ends with the
+// output ring's read and write offsets equal. Hardware and the game's mixer use
+// that flag to tell a full ring (flag clear: every block is unread) from an
+// empty one (flag set). The decoder's own free-block budget, left behind by the
+// pass that cleared the flag, says which it was: an untouched ring still has
+// every block free, a ring it filled has none.
+inline bool IsXmaOutputRingEmpty(uint32_t read_block, uint32_t write_block, uint32_t block_count,
+                                 int32_t decoder_free_blocks) {
+  return block_count != 0 && read_block == write_block &&
+         decoder_free_blocks >= static_cast<int32_t>(block_count);
+}
+
+// One block of silence appended to a context's output ring, standing in for
+// samples the decoder cannot deliver while the mixer waits for them. The mixer
+// then consumes exactly what it asked for, so the sound's sample count and the
+// count its caller keeps stay equal; skipping the stream instead makes them
+// drift apart until the voice can never finish.
+struct XmaSilencePad {
+  bool fits = false;        // false: the ring has no free block
+  uint32_t write_block = 0; // where the silent block goes
+  uint32_t next_write = 0;  // write offset afterwards
+  bool fills_ring = false;  // the ring is full afterwards: clear output_buffer_valid
+};
+
+inline XmaSilencePad PlanXmaSilencePad(uint32_t read_block, uint32_t write_block,
+                                       uint32_t block_count, bool output_valid) {
+  XmaSilencePad pad;
+  if (block_count == 0 || read_block >= block_count || write_block >= block_count) return pad;
+  if (read_block == write_block && !output_valid) return pad;  // already full
+  pad.fits = true;
+  pad.write_block = write_block;
+  pad.next_write = (write_block + 1) % block_count;
+  pad.fills_ring = pad.next_write == read_block;
+  return pad;
+}
+
 // The mixer's per-pass request is min(asked, remaining): it is the sound's last
 // request when it takes everything the current segment has left.
 inline bool IsFinalXmaRequest(uint32_t segment_remaining, int32_t samples_requested) {

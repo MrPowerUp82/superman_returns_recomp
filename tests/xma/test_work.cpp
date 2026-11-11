@@ -1,4 +1,5 @@
 #include "../native/test_main.h"
+#include "../../port/src/xma_flush_policy.h"
 #include <rex/audio/xma/context.h>
 #include <rex/system/xmemory.h>
 #include <array>
@@ -144,6 +145,25 @@ SR_TEST(xma_zero_output_capacity_returns_without_modulo_or_pcm_write) {
   f.context.*Unlock(Remaining{})=4;SR_CHECK(f.Work());
   SR_CHECK_EQ(f.context.*Unlock(Remaining{}),4u);SR_CHECK_EQ(f.Data().output_buffer_write_offset,0u);
 }
+// AUD-11: Work clears output_buffer_valid for both an untouched empty ring and
+// a ring it just filled. The hook tells them apart with the budget Work leaves.
+SR_TEST(xma_empty_and_full_rings_clear_the_flag_but_leave_different_budgets) {
+  using superman_returns::IsXmaOutputRingEmpty;
+  for(uint32_t offset:{0u,3u}) {
+    Fixture f;if(!f.ready)return;auto data=f.Data();data.output_buffer_block_count=4;
+    data.output_buffer_read_offset=offset;data.output_buffer_write_offset=offset;
+    f.Store(data);  // no valid input: nothing to decode
+    SR_CHECK(f.Work());data=f.Data();
+    SR_CHECK_EQ(data.output_buffer_valid,0u);SR_CHECK_EQ(data.output_buffer_write_offset,offset);
+    SR_CHECK(IsXmaOutputRingEmpty(data.output_buffer_read_offset,data.output_buffer_write_offset,
+        data.output_buffer_block_count,f.context.*Unlock(Budget{})));
+  }
+  Fixture f;if(!f.ready)return;auto data=f.Data();data.output_buffer_block_count=4;f.Store(data);
+  f.context.*Unlock(Remaining{})=4;SR_CHECK(f.Work());data=f.Data();  // four blocks fill it
+  SR_CHECK_EQ(data.output_buffer_valid,0u);
+  SR_CHECK(!IsXmaOutputRingEmpty(data.output_buffer_read_offset,data.output_buffer_write_offset,
+      data.output_buffer_block_count,f.context.*Unlock(Budget{})));
+}
 SR_TEST(xma_full_ring_wrap_stops_without_reconstructing_free_capacity) {
   Fixture f;if(!f.ready)return;auto data=f.Data();data.output_buffer_block_count=4;f.Store(data);
   f.context.*Unlock(Remaining{})=4;SR_CHECK(f.Work());
@@ -195,7 +215,7 @@ int CheckChannelSwitch() {
     auto& raw=f.context.*Unlock(Raw{});
     for(uint8_t block=0;block<blocks;++block) std::fill_n(raw.data()+block*256,256,uint8_t(0x20+block));
     f.context.*Unlock(Remaining{})=blocks;
-    // Match EnsureContextsValid in the mixer hook: the SDK clears this flag
+    // Match RearmEmptyOutput in the mixer hook: the SDK clears this flag
     // after an empty kick, so the caller must rearm it for subsequent output.
     data=f.Data();data.output_buffer_valid=1;f.Store(data);
     SR_CHECK(f.Work());SR_CHECK_EQ(f.Data().output_buffer_write_offset,blocks);f.CheckPcm(0,blocks);
