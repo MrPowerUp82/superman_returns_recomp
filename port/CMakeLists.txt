@@ -5,6 +5,16 @@
 cmake_minimum_required(VERSION 3.25)
 project(superman_returns LANGUAGES CXX)
 
+# A build directory whose first configure did not identify the C++ compiler
+# keeps empty default flags in its cache, and a Release build then compiles the
+# recompiled game, the SDK runtime and the native renderer with no -O at all
+# (about 4x slower title scene). Restore the Release default when it is empty.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU" AND NOT CMAKE_CXX_FLAGS_RELEASE)
+    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG" CACHE STRING
+        "Flags used by the CXX compiler during RELEASE builds." FORCE)
+    message(STATUS "CMAKE_CXX_FLAGS_RELEASE was empty; using -O3 -DNDEBUG")
+endif()
+
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
