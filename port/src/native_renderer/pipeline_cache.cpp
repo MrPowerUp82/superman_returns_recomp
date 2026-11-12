@@ -6,7 +6,6 @@
 //
 #include "pipeline_cache.h"
 #include "../graphics/pipeline_creation_audit.h"
-#include "../graphics/d3d12/post_vertex_clip_capture.h"
 
 #include <algorithm>
 #include <chrono>
@@ -46,8 +45,9 @@ bool ValidHeader(const FileHeader& h) {
 }
 
 bool ValidRecord(const PsoRecord& r) {
-  return r.pixel_variant <= 3 && r.pipeline_kind <= 1 &&
-      (!r.pipeline_kind || (!r.pixel_variant && !r.ps_hash)) &&
+  // Only plain guest raster pipelines: the RT-shadow/motion-coverage pixel
+  // variants and the post-VS clip stream-out kind (old motion pipeline) are gone.
+  return r.pixel_variant == 0 && r.pipeline_kind == 0 &&
       r.element_count <= PsoRecord::kMaxElements &&
       r.num_render_targets <= 8 && r.sample_count > 0 && r.sample_count <= 16;
 }
@@ -131,12 +131,6 @@ D3D12_GRAPHICS_PIPELINE_STATE_DESC PipelineCache::MakeDesc(
   desc.NumRenderTargets = r.num_render_targets;
   for (uint32_t i = 0; i < 8; ++i) desc.RTVFormats[i] = r.rtv_formats[i];
   desc.SampleDesc.Count = r.sample_count;
-  if (r.pipeline_kind == 1) {
-    desc.GS = graphics::d3d12::PostVertexClipCapture::GeometryShader();
-    static const D3D12_SO_DECLARATION_ENTRY output{0,"TEXCOORD",15,0,4,0};
-    static const uint32_t stride = 16;
-    desc.StreamOutput = {&output,1,&stride,1,D3D12_SO_NO_RASTERIZED_STREAM};
-  }
   return desc;
 }
 

@@ -40,7 +40,6 @@ add_executable(sr_native_tests
     test_vblank_policy.cpp
     test_presentation_pacing.cpp
     test_graphics_milestone5.cpp
-    test_motion_pipeline_records.cpp
     test_wait_escape_policy.cpp
     test_guest_render_scheduler.cpp
     test_guest_sleep_profile.cpp
@@ -68,30 +67,16 @@ add_executable(sr_native_tests
     test_shadow_projection.cpp
     test_readback_rows.cpp
     test_shadow_caster_geometry.cpp
-    test_ray_shadow_execution.cpp
     test_temporal_geometry_history.cpp
-    test_object_motion_frame.cpp
     test_temporal_vertex_fetch.cpp
     test_static_world_shader_dependencies.cpp
     test_scene_color_boundary.cpp
     test_scene_color_geometry.cpp
     test_scene_color_vertex_input.cpp
-    test_motion_depth_boundary.cpp
     test_scene_raster_jitter.cpp
     test_scene_resolution_shader.cpp
     test_scene_resolution_mapping.cpp
-    test_observed_instance_lifetimes.cpp
-    test_observed_skinned_motion.cpp
-    test_observed_rigid_motion.cpp
-    test_observed_vehicle_batch.cpp
-    test_observed_cloth_motion.cpp
-    test_observed_skinned_part_key.cpp
-    test_rt_shadow_shader.cpp
-    test_pixel_coverage_shader.cpp
-    test_motion_raster_coverage.cpp
-    "${SR_NATIVE_DIR}/../graphics/pixel_coverage_shader.cpp"
     "${SR_NATIVE_DIR}/../graphics/scene_resolution_shader.cpp"
-    "${SR_NATIVE_DIR}/../graphics/rt_shadow_shader.cpp"
     "${SR_NATIVE_DIR}/../graphics/graphics_preferences.cpp"
     "${SR_NATIVE_DIR}/../graphics/graphics_options.cpp"
     "${SR_NATIVE_DIR}/../graphics/graphics_options_runtime.cpp"
@@ -185,10 +170,6 @@ if(WIN32 AND SR_NATIVE_GPU_TESTS)
   add_test(NAME sr_d3d12_texture_updates_gpu COMMAND sr_d3d12_texture_updates_gpu)
   set_tests_properties(sr_d3d12_texture_updates_gpu PROPERTIES TIMEOUT 60)
 endif()
-add_executable(sr_dlss_contract_tests dlss_super_resolution_test.cpp
-    "${SR_NATIVE_DIR}/../graphics/d3d12/dlss_super_resolution.cpp")
-target_compile_definitions(sr_dlss_contract_tests PRIVATE SR_HAS_DLSS=0)
-add_test(NAME sr_dlss_contract_tests COMMAND sr_dlss_contract_tests)
 add_test(NAME sr_native_tests COMMAND sr_native_tests)
 set_tests_properties(sr_native_tests PROPERTIES TIMEOUT 30)
 # Exercise the current XMA hook body with ABI boundary shims, without the SDK.

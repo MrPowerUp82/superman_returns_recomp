@@ -5,8 +5,6 @@
 #include "../../port/src/native_renderer/pm4_mirror.h"
 #include "../../port/src/native_renderer/game_profile.h"
 #include "../../port/src/native_renderer/packet_sink_policy.h"
-#include "../../port/src/graphics/temporal_class_coverage.h"
-#include "../../port/src/graphics/hybrid_reflection_contract.h"
 #include "../../port/src/graphics/pipeline_creation_audit.h"
 #include "test_main.h"
 SR_TEST(packet_check_cadence_limits_debug_capture) {
@@ -1158,38 +1156,6 @@ SR_TEST(packet_sink_backend_fault_injection_quarantine_and_cancel) {
   SR_CHECK_EQ(sink_invocations, 2u);
 }
 
-SR_TEST(AUD01_temporal_class_coverage_tracks_per_class_acceptance) {
-  using namespace superman_returns::graphics;
-  SR_CHECK(ClassifyTemporalMotionSource(false, false, 0, GeometryHistoryProof::kStaticWorldInputs) == TemporalMotionClass::StaticWorld);
-  SR_CHECK(ClassifyTemporalMotionSource(true, false, 0, GeometryHistoryProof::kVerifiedInstance) == TemporalMotionClass::SkinnedCharacter);
-  SR_CHECK(ClassifyTemporalMotionSource(false, true, 0, GeometryHistoryProof::kVerifiedInstance) == TemporalMotionClass::DynamicCloth);
-  SR_CHECK(ClassifyTemporalMotionSource(false, false, 4, GeometryHistoryProof::kVerifiedInstance) == TemporalMotionClass::VehicleBatch);
-  SR_CHECK(ClassifyTemporalMotionSource(false, false, 1, GeometryHistoryProof::kVerifiedInstance) == TemporalMotionClass::RigidAsset);
-  SR_CHECK(ClassifyTemporalMotionSource(false, false, 2, GeometryHistoryProof::kVerifiedInstance) == TemporalMotionClass::RigidCommon);
-  SR_CHECK(ClassifyTemporalMotionSource(false, false, 0, GeometryHistoryProof::kUnknown) == TemporalMotionClass::Unqualified);
-  TemporalClassCoverageStats s;
-  s.Record(TemporalMotionClass::StaticWorld, 100, GeometryHistoryStatus::kMatch);
-  s.Record(TemporalMotionClass::SkinnedCharacter, 50, GeometryHistoryStatus::kAmbiguous);
-  s.Record(TemporalMotionClass::DynamicCloth, 30, GeometryHistoryStatus::kMissing);
-  s.Record(TemporalMotionClass::RigidAsset, 20, GeometryHistoryStatus::kUnverifiedIdentity);
-  SR_CHECK_EQ(s.TotalDraws(), 4u);
-  SR_CHECK_EQ(s.TotalMatchedDraws(), 1u);
-  SR_CHECK_EQ(s[TemporalMotionClass::StaticWorld].matched_vertices, 100u);
-  SR_CHECK_EQ(s[TemporalMotionClass::SkinnedCharacter].rejected_ambiguous, 1u);
-  SR_CHECK_EQ(s[TemporalMotionClass::DynamicCloth].rejected_missing, 1u);
-  SR_CHECK_EQ(s[TemporalMotionClass::RigidAsset].rejected_unverified, 1u);
-}
-SR_TEST(AUD02_hybrid_reflection_contract_gates_dxr_and_attenuates_roughness) {
-  using namespace superman_returns::graphics;
-  auto e = EvaluateHybridReflectionContract(true, false, 0.25f, true);
-  SR_CHECK(e.ray_query_allowed && !e.fallback_to_environment);
-  SR_CHECK(e.reflection_weight > 0.74f && e.reflection_weight < 0.76f);
-  SR_CHECK(!EvaluateHybridReflectionContract(false, false, 0.f, true).ray_query_allowed);
-  SR_CHECK(!EvaluateHybridReflectionContract(true, true, 0.f, true).ray_query_allowed);
-  SR_CHECK(EvaluateHybridReflectionContract(true, false, 0.f, false).fallback_to_environment);
-  SR_CHECK(EvaluateHybridReflectionContract(true, false, 2.f, true).reflection_weight == 0.f);
-  SR_CHECK(EvaluateHybridReflectionContract(true, false, -1.f, true).reflection_weight == 1.f);
-}
 SR_TEST(AUD04_diagnostic_pipeline_creates_do_not_count_as_gameplay_runtime) {
   using namespace superman_returns::graphics;
   const auto rt = RuntimePipelineCreates(), dg = DiagnosticPipelineCreates();

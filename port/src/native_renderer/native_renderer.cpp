@@ -75,17 +75,7 @@
 #include "../graphics/guest/texture_storage_identity.h"
 #include "../graphics/guest/shader_constant_policy.h"
 #include "../graphics/readback_rows.h"
-#include "../graphics/motion_depth_boundary.h"
 #include "../graphics/scene_color_vertex_input.h"
-#include "../graphics/pixel_coverage_shader.h"
-#include "../graphics/motion_raster_coverage.h"
-#include "../graphics/ray_geometry_opacity.h"
-#include "instance_probe.h"
-#include "../graphics/observed_skinned_motion.h"
-#include "../graphics/observed_skinned_part_key.h"
-#include "../graphics/observed_rigid_motion.h"
-#include "../graphics/observed_vehicle_batch.h"
-#include "../graphics/observed_cloth_motion.h"
 #include "native_bridge.h"
 #include "native_graphics_system.h"
 #include "sdk_compat.h"
@@ -114,19 +104,6 @@ REXCVAR_DEFINE_INT32(sr_native_dump_after_pass, -1, "Superman Returns Native",
                      "Debug: with sr_native_dump_frame_at_s, dump at the end of this pass instead of "
                      "at the end of the frame");
 REXCVAR_DEFINE_STRING(sr_native_dump_dir, "", "Superman Returns Native", "Directory for sr_native_dump_frame_at_s");
-REXCVAR_DEFINE_BOOL(sr_native_object_motion, true, "Superman Returns Native",
-    "Continuous audited object motion for DLSS; unqualified frames retain raster output")
-    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-REXCVAR_DEFINE_INT32(sr_native_object_motion_capture_swap, 0, "Superman Returns Native",
-    "Diagnostic: dump continuous motion inputs at one guest swap, outside performance runs");
-REXCVAR_DEFINE_STRING(sr_native_motion_capture_trigger_path, "", "Superman Returns Native",
-    "Opt-in: capture two consecutive main-scene post-VS clip frames after this file appears; no DLSS application");
-REXCVAR_DEFINE_BOOL(sr_native_debug_observed_skin_motion, false, "Superman Returns Native",
-    "Diagnostic: observed skinned part/lifetime and exact clip correspondence; no complete DLSS motion claim");
-REXCVAR_DEFINE_BOOL(sr_native_debug_motion_jitter, false, "Superman Returns Native",
-    "Diagnostic: apply known Halton jitter to the two-frame HDR motion capture; never enables DLSS");
-REXCVAR_DEFINE_BOOL(sr_native_debug_motion_coverage_pso_failure, false, "Superman Returns Native",
-    "Diagnostic: force the optional motion coverage PSO to fail, exercising original-draw fallback");
 REXCVAR_DEFINE_INT32(sr_native_debug_visible_rt_failure_interval, 0, "Superman Returns Native",
     "Diagnostic: reject every Nth visible DXR frame before tracing to verify same-frame raster fallback");
 REXCVAR_DEFINE_INT32(sr_native_dump_before_draw, -1, "Superman Returns Native",
@@ -300,10 +277,61 @@ REXCVAR_DEFINE_DOUBLE(sr_native_render_scale, 1.0, "Superman Returns Native",
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(sr_native_temporal_probe, false, "Superman Returns Native",
                     "Diagnose missing D3D12 temporal inputs for future DLSS/RT (no visual effect)");
-REXCVAR_DEFINE_DOUBLE(sr_native_rt_reflection_distance,10000.0,"Superman Returns Native",
-    "Maximum visible-scene reflection ray length in game world units").range(1.0,100000.0);
-REXCVAR_DEFINE_DOUBLE(sr_native_rt_trace_scale,0.5,"Superman Returns Native",
-    "Dedicated DXR trace resolution: 0.25, 0.5 or 1; full-resolution temporal reconstruction");
+REXCVAR_DEFINE_DOUBLE(sr_rt_instance_range, 2100.0, "Superman Returns Native",
+                      "Ray tracing takes the city's instanced copies within this distance of the camera (0 = all)");
+REXCVAR_DEFINE_INT32(sr_rt_dump_obj_swap, 0, "Superman Returns Native",
+                     "Debug: at this guest swap, write the ray-traced geometry captured in that frame (world "
+                     "space, from guest memory) to sr_native_dump_dir/rt_city.obj");
+REXCVAR_DEFINE_DOUBLE(sr_rt_shadow_bias, 0.5, "Superman Returns Native",
+                      "Ray-traced shadows: start offset of the shadow ray towards the sun (world units), "
+                      "against the ray hitting the surface it starts on")
+    .range(0.0, 50.0);
+REXCVAR_DEFINE_INT32(sr_rt_shadow_debug, 0, "Superman Returns Native",
+                     "Ray-traced debug view: 0 = off, 1 = receivers paint their world position as a 10-unit "
+                     "grid, 2 = ray-traced sun visibility, 4 = distance to the nearest occluder, 6/7/8 = "
+                     "reflection colour / hit path / hit-miss")
+    .range(0, 10);
+REXCVAR_DEFINE_INT32(sr_rt_shadow_rays, 16, "Superman Returns Native",
+                     "Ray-traced shadows: rays per pixel over the sun's disc with High softness (Low uses at "
+                     "most 8; 2 go first and the rest only where they disagree)")
+    .range(1, 32);
+REXCVAR_DEFINE_DOUBLE(sr_rt_sun_angle, 0.53, "Superman Returns Native",
+                      "Ray-traced shadows: angular diameter of the sun in degrees with Low softness (High "
+                      "doubles it)")
+    .range(0.0, 10.0);
+REXCVAR_DEFINE_INT32(sr_rt_builds_per_frame, 24, "Superman Returns Native",
+                     "Ray-traced scene: new meshes built per frame (bottom-level structures); the rest wait "
+                     "for the next frames")
+    .range(4, 256);
+REXCVAR_DEFINE_BOOL(sr_rt_alpha_test, true, "Superman Returns Native",
+                    "Ray-traced scene: alpha-tested geometry (tree leaves, fences) lets rays through where its "
+                    "colour texture's alpha fails the game's test");
+REXCVAR_DEFINE_BOOL(sr_rt_full_scene, false, "Superman Returns Native",
+                    "Ray-traced scene: static world geometry that does not receive the sun shadow (cars, props, "
+                    "far lit buildings, foliage) is captured too, not only the shadow receivers");
+REXCVAR_DEFINE_INT32(sr_rt_full_scene_hide_swap, 0, "Superman Returns Native",
+                     "Debug A/B: on this swap the ray-traced scene renders without the sr_rt_full_scene geometry");
+REXCVAR_DEFINE_INT32(sr_rt_ab_period, 0, "Superman Returns Native",
+                     "Debug A/B: repeat the sr_rt_full_scene_hide_swap swap every N swaps (0 = once)");
+REXCVAR_DEFINE_STRING(sr_rt_ab_vs, "", "Superman Returns Native",
+                      "Debug A/B: on the A/B swaps leave out only the geometry of these vertex shaders (hex)");
+REXCVAR_DEFINE_BOOL(sr_rt_reflection_palette, true, "Superman Returns Native",
+                    "Ray-traced reflections: the city buildings' palette colours");
+REXCVAR_DEFINE_DOUBLE(sr_rt_reflection_bump, 0.15, "Superman Returns Native",
+                      "Ray-traced reflections: how much of the surface's normal map bends the reflection ray "
+                      "(0 = a mirror from the smooth surface, 1 = the game's bumped direction)")
+    .range(0.0, 1.0);
+REXCVAR_DEFINE_BOOL(sr_rt_reflection_detail, false, "Superman Returns Native",
+                    "Ray-traced reflections: sample the hit material's colour texture at its UV instead of its "
+                    "mean colour (experimental)");
+REXCVAR_DEFINE_BOOL(sr_rt_shadows_replace, true, "Superman Returns Native",
+                    "With RT shadows: the sun shadow comes from the ray-traced scene instead of the game's "
+                    "cascades (false = cascades only, for comparison)");
+REXCVAR_DEFINE_STRING(sr_rt_debug_modes, "0,2,4", "Superman Returns Native",
+                      "Measurement: the debug modes sr_rt_shadow_debug_cycle steps through");
+REXCVAR_DEFINE_INT32(sr_rt_shadow_debug_cycle, 0, "Superman Returns Native",
+                     "Measurement: every N frames step sr_rt_shadow_debug through sr_rt_debug_modes (0 = off)")
+    .range(0, 100000);
 REXCVAR_DEFINE_INT32(sr_native_rt_capture_swap, 0, "Superman Returns Native",
                      "Extract audited post-VS world triangles on this guest swap for DXR validation (0=off)");
 REXCVAR_DEFINE_STRING(sr_native_rt_capture_trigger_path, "", "Superman Returns Native",
@@ -1183,9 +1211,6 @@ inline uint64_t MakeKey(uint32_t a, uint32_t b) { return (uint64_t(a) << 32) | b
 // Guest pixel coordinate -> host pixel coordinate of a surface rendered at
 // `scale` (possibly fractional). Every edge goes through the same rounding, so
 // adjacent regions (tiles, atlas cells) still meet exactly.
-inline uint32_t HostPx(uint32_t v, float scale) {
-  return uint32_t(std::lround(double(v) * double(scale)));
-}
 inline LONG HostPx(LONG v, float scale) { return LONG(std::lround(double(v) * double(scale))); }
 inline D3D12_RECT ScaleRect(D3D12_RECT r, float scale) {
   return {HostPx(r.left, scale), HostPx(r.top, scale), HostPx(r.right, scale),
@@ -1199,8 +1224,6 @@ inline std::vector<D3D12_RECT> ScaleRects(const std::vector<D3D12_RECT>& rs, flo
 }
 
 #include "shaders/blit_ps.h"
-#include "../graphics/d3d12/shaders/dlss_depth_motion_cs.h"
-#include "../graphics/d3d12/shaders/dlss_composite_ps.h"
 #include "shaders/blit_vs.h"
 #include "shaders/fxaa_ps.h"
 #include "shaders/ssao_apply_ms_ps.h"
@@ -1261,9 +1284,10 @@ void Renderer::ShutdownWorker() {
     if(batch_) batch_->Clear();
   }
   if(worker_.joinable()) worker_.join();
+  buffer_stock_.Stop();
   // The optional scene owns BLAS/TLAS and their source buffers. Retire all
   // queued work before releasing them, including shutdown outside a swap.
-  if((rt_capture_scene_ || rt_shadow_scene_ || visible_ray_scene_ || post_vertex_capture_ || motion_clips_ || temporal_motion_ || dlss_) && queue_ && fence_ && fence_event_ && device_ &&
+  if((rt_capture_scene_ || rt_city_tlas_ || !rt_meshes_.empty() || post_vertex_capture_ || dlss_) && queue_ && fence_ && fence_event_ && device_ &&
      SUCCEEDED(device_->GetDeviceRemovedReason())) {
     const uint64_t value=next_fence_value_++;
     if(SUCCEEDED(queue_->Signal(fence_.Get(),value)) && fence_->GetCompletedValue()<value &&
@@ -1272,8 +1296,7 @@ void Renderer::ShutdownWorker() {
   }
   // The wait above covers every recorded DLSS creation and evaluation.
   if(dlss_) {
-    (void)(fence_ && next_fence_value_>1 ? dlss_->Shutdown(fence_.Get(),next_fence_value_-1) : dlss_->Shutdown());
-    dlss_.reset();
+    dlss_.reset();  // the wait above retired every recorded NGX evaluation
   }
   for(auto& [key,entry]:textures_) entry.tracking.reset();
   resource_write_tracker_.Stop();
@@ -1281,7 +1304,6 @@ void Renderer::ShutdownWorker() {
 }
 
 bool PackShaderLookup(uint64_t hash, bool vertex, const void** data, size_t* size);
-bool PrewarmedVariantLookup(uint64_t hash,uint32_t variant,const void** data,size_t* size);
 
 bool Renderer::EnsureInitialized() {
   if (initialized_) {
@@ -1425,19 +1447,6 @@ bool Renderer::EnsureInitialized() {
   }
   fence_event_ = CreateEvent(nullptr, FALSE, FALSE, nullptr);
 
-#if SR_HAS_DLSS
-  // Initialize capability here; fenced frame-boundary settings own mode and sizing.
-  dlss_=std::make_unique<graphics::d3d12::DlssSuperResolution>();
-  wchar_t executable[32768]{};
-  const DWORD path_length=GetModuleFileNameW(nullptr,executable,DWORD(std::size(executable)));
-  if(path_length && path_length<std::size(executable)) {
-    const auto path=std::filesystem::path(executable).parent_path();
-    const auto result=dlss_->Initialize(device_,path.c_str());
-    REXLOG_INFO("native DLSS SDK initialization: result={} ngx={:08X} support={}",
-                uint32_t(result.error),result.ngxResult,uint32_t(dlss_->GetStatus().support));
-
-  }
-#endif
 
   if (!CreateDrawResources()) {
     return false;
@@ -1488,16 +1497,14 @@ bool Renderer::EnsureInitialized() {
   ray_tracing_capable_=ray_tracing_capable_ && SUCCEEDED(device_->QueryInterface(IID_PPV_ARGS(&ray_device))) &&
       SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL,&ray_shader_model,sizeof(ray_shader_model))) &&
       ray_shader_model.HighestShaderModel>=D3D_SHADER_MODEL_6_5;
-  D3D12_FEATURE_DATA_D3D12_OPTIONS1 wave_options{};
-  rt_shadow_wave_capable_=SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1,
-      &wave_options,sizeof(wave_options))) && wave_options.WaveOps;
+  if (ray_tracing_capable_ && !packet_sink_) buffer_stock_.Start(device_);
   initialized_ = true;
   return true;
 }
 
 bool Renderer::CreateDrawResources() {
   // --- Main root signature: 3 root CBVs + bindless SRV/sampler tables. ---
-  D3D12_DESCRIPTOR_RANGE srv_ranges[4] = {};
+  D3D12_DESCRIPTOR_RANGE srv_ranges[7] = {};
   for (uint32_t i = 0; i < 3; ++i) {
     srv_ranges[i].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     srv_ranges[i].NumDescriptors = kSrvHeapSize;
@@ -1530,28 +1537,39 @@ bool Renderer::CreateDrawResources() {
   params[7].DescriptorTable.NumDescriptorRanges = 1;
   params[7].DescriptorTable.pDescriptorRanges = &srv_ranges[3];
   params[7].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
-  params[8].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV;
-  params[8].Descriptor={0,6};params[8].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
-  params[9].ParameterType=D3D12_ROOT_PARAMETER_TYPE_CBV;
-  params[9].Descriptor={3,4};params[9].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
-  params[10].ParameterType=D3D12_ROOT_PARAMETER_TYPE_UAV;
-  params[10].Descriptor={0,6};params[10].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
-  params[11].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-  params[11].Constants={4,4,1}; // b4,space4: original-PS pixel owner.
-  params[11].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
-  D3D12_DESCRIPTOR_RANGE reactivity_uav{D3D12_DESCRIPTOR_RANGE_TYPE_UAV,1,1,6,0};
-  params[12].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-  params[12].DescriptorTable={1,&reactivity_uav};params[12].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
-  rs_desc.NumParameters = 13;
+  // Ray tracing (Superman-Returns-PC port, XenosRecomp patches 0014-0031):
+  // space6: 2D array views of stacked textures read by tfetch3D (TEX_STACKED_BIT).
+  srv_ranges[4].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+  srv_ranges[4].NumDescriptors = kSrvHeapSize;
+  srv_ranges[4].RegisterSpace = 6;
+  // space9: raw buffers (frame data, materials, mesh UVs, character buffers), same heap.
+  srv_ranges[5].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+  srv_ranges[5].NumDescriptors = kSrvHeapSize;
+  srv_ranges[5].RegisterSpace = 9;
+  // space8: ray-tracing acceleration structures (TLAS at kRtTlasSrv), same heap.
+  srv_ranges[6].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+  srv_ranges[6].NumDescriptors = kSrvHeapSize;
+  srv_ranges[6].RegisterSpace = 8;
+  params[8].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+  params[8].DescriptorTable.NumDescriptorRanges = 3;
+  params[8].DescriptorTable.pDescriptorRanges = &srv_ranges[4];
+  params[8].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+  // b3: the previous frame's VS constants of the same draw (DLSS motion vectors,
+  // XenosRecomp patch 0030); the current ones where there are none.
+  params[9].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+  params[9].Descriptor.ShaderRegister = 3;
+  params[9].Descriptor.RegisterSpace = 4;
+  params[9].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+  rs_desc.NumParameters = 10;
   // Debug (sr_native_debug_rs_salt): an unused root-constant parameter makes every
   // pipeline new to the driver's shader cache - a cold first run on demand.
   if (int32_t salt = REXCVAR_GET(sr_native_debug_rs_salt); salt > 0) {
-    params[13].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    params[13].Constants.ShaderRegister = 15;
-    params[13].Constants.RegisterSpace = 7;
-    params[13].Constants.Num32BitValues = uint32_t(std::min(salt, 32));
-    params[13].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    rs_desc.NumParameters = 14;
+    params[10].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[10].Constants.ShaderRegister = 15;
+    params[10].Constants.RegisterSpace = 7;
+    params[10].Constants.Num32BitValues = uint32_t(std::min(salt, 32));
+    params[10].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    rs_desc.NumParameters = 11;
   }
   rs_desc.pParameters = params;
   rs_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
@@ -1615,11 +1633,6 @@ bool Renderer::CreateDrawResources() {
   }
   // Mode/sizing are applied later at the frame boundary. Utility PSOs must
   // exist before either startup or an in-game Off -> DLSS transition uses them.
-  if(dlss_ && dlss_->GetStatus().support==graphics::d3d12::DlssSupport::Supported &&
-     !CreateDlssPipelines(blit)) {
-    REXLOG_WARN("native DLSS pipelines unavailable; DLSS stays Off");
-    dlss_failed_=true;
-  }
 
   // --- Depth resolve copy: root constants (source offset) + SRV table t0. ---
   {
@@ -1841,12 +1854,6 @@ bool Renderer::CreateDrawResources() {
     REXLOG_INFO("native: driver shader cache disabled: {:08X}", uint32_t(hr));
   }
   if(REXCVAR_GET(sr_native_pipeline_cache)) {
-    if(!temporal_motion_) {
-      auto motion=std::make_unique<graphics::d3d12::TemporalMotion>();
-      if(SUCCEEDED(motion->Initialize(device_,rex::filesystem::GetExecutableFolder()/"superman_returns_motion_raster.bin")))
-        temporal_motion_=std::move(motion);
-      else REXLOG_WARN("native temporal prewarm failed: {}",motion->LastError());
-    }
     for(auto format:{DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_R10G10B10A2_UNORM,DXGI_FORMAT_R16G16B16A16_FLOAT}) {
       GetFxaaPipeline(format);
       for(uint32_t samples:{1u,4u,8u}) {
@@ -1854,11 +1861,6 @@ bool Renderer::CreateDrawResources() {
         if(SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS,&support,sizeof(support))) && support.NumQualityLevels)
           GetAliasPipeline(format,samples);
       }
-    }
-    if(ray_tracing_capable_ && !visible_ray_scene_) {
-      auto scene=std::make_unique<graphics::d3d12::VisibleRayScene>();
-      if(SUCCEEDED(scene->Initialize(device_))) visible_ray_scene_=std::move(scene);
-      else REXLOG_WARN("native visible DXR prewarm failed: {}",scene->LastError());
     }
   }
   benchmark::SetCacheAuditProvider(+[]() {
@@ -1872,10 +1874,8 @@ bool Renderer::CreateDrawResources() {
     // (alpha to coverage) can apply: the cache converts captured pipelines to
     // these settings (EXP-052).
     uint32_t msaa = msaa_samples_ ? msaa_samples_ : 4;
-    if(const auto* library=PreShaderLibrary())
-      ShaderTranslator::Get().PrewarmVariants(*library,true,true);
     pipeline_cache_.Start(device_, root_signature_.Get(), &PackShaderLookup, &UsageSemantic, msaa,
-                          foliage_aa_ && msaa > 1,&PrewarmedVariantLookup);
+                          foliage_aa_ && msaa > 1,nullptr);
     pipeline_cache_.WaitForStartup();
   }
   return true;
@@ -1889,7 +1889,7 @@ void Renderer::Retire(ComPtr<ID3D12Resource> resource) {
 }
 
 uint32_t Renderer::AllocSrvIndex() {
-  return AllocateDescriptor(retired_srvs_, srv_completed_fence_, srv_heap_next_, kSrvHeapSize,
+  return AllocateDescriptor(retired_srvs_, srv_completed_fence_, srv_heap_next_, kSrvAllocLimit,
                             [this] { return fence_->GetCompletedValue(); });
 }
 
@@ -2274,13 +2274,12 @@ bool Renderer::BeginFrame() {
   }
   uint64_t completed = fence_->GetCompletedValue();
   if (completed != UINT64_MAX) srv_completed_fence_ = completed;
+  if (completed != UINT64_MAX) buffer_stock_.Collect(completed);
   retired_.erase(std::remove_if(retired_.begin(), retired_.end(),
                                 [completed](const auto& r) { return r.first <= completed; }),
                  retired_.end());
   frame_open_ = true;
-  BeginRayShadows();
-  BeginDlssFrame();
-  BeginMotionCapture();
+  graphics_frame_request_=graphics::SharedGraphicsOptions()->Snapshot();
   post_vertex_projection_valid_=post_vertex_camera_conflict_=false;
   if(post_vertex_capture_) post_vertex_capture_->ReportCompleted(frame_index_);
   ReportCapturedRayProbe(frame_index_);
@@ -2292,8 +2291,7 @@ bool Renderer::BeginFrame() {
   post_vertex_diagnostic_=!packet_sink_ && !post_vertex_done_ &&
       (trigger_ready || (capture_swap>0 && (swap_number_==uint64_t(capture_swap) ||
                                           swap_number_+1==uint64_t(capture_swap))));
-  post_vertex_active_=post_vertex_diagnostic_ || (!packet_sink_ && rt_shadow_requested_ && !visible_ray_requested_);
-  if(post_vertex_diagnostic_) rt_shadow_requested_=false;
+  post_vertex_active_=post_vertex_diagnostic_;
   if(post_vertex_active_) {
     post_vertex_depth_snapshot_.Reset();
     post_vertex_color_snapshot_.Reset();
@@ -2311,10 +2309,8 @@ bool Renderer::BeginFrame() {
   if (temporal_probe_) temporal_.Begin(frame_count_ + 1, output_width_, output_height_);
   if (camera_candidate_probe_enabled_) camera_candidate_probe_.Begin(frame_count_ + 1);
   const int32_t probe_swap = REXCVAR_GET(sr_native_surface_probe_swap);
-  surface_probe_ = !packet_sink_ && ((motion_capture_active_ && !motion_continuous_ && motion_capture_phase_==2) ||
-                   (!surface_probe_done_ && probe_swap > 0 &&
-                    (swap_number_ == uint64_t(probe_swap) ||
-                     swap_number_ + 1 == uint64_t(probe_swap))));
+  surface_probe_ = !packet_sink_ && !surface_probe_done_ && probe_swap > 0 &&
+                   (swap_number_ == uint64_t(probe_swap) || swap_number_ + 1 == uint64_t(probe_swap));
   if (surface_probe_) {
     surface_sequence_.Reset();
     geometry_probe_.Reset(frame_count_ + 1, swap_number_);
@@ -2330,7 +2326,7 @@ bool Renderer::BeginFrame() {
 }
 
 Renderer::HostSurface* Renderer::GetSurface(uint8_t* base, uint32_t surface_object, bool depth,
-                                            uint32_t min_width, uint32_t min_height) {
+                                            uint32_t min_width, uint32_t min_height, bool full_scale) {
   CpuTimer cpu_timer(cpu_timings.surfaces_ns);
   if (!surface_object) {
     return nullptr;
@@ -2361,8 +2357,15 @@ Renderer::HostSurface* Renderer::GetSurface(uint8_t* base, uint32_t surface_obje
   // msaa_samples setting: applies to the surfaces the game multisamples.
   if (samples > 1 && msaa_samples_) samples = msaa_samples_;
   uint32_t samples_log2 = samples >= 8 ? 3 : samples >= 4 ? 2 : samples >= 2 ? 1 : 0;
+  // The 3D scene (the output-sized float colour surface and the depth) is
+  // drawn below the output resolution in DLSS's upscaling modes; the ratio is
+  // part of the key, so a mode change makes new surfaces (dlss.cpp).
+  const bool scene_shaped = !full_scale && width == kOutputWidth && height == kOutputHeight &&
+                            (depth || format == 3 || format == 7 || format == 12);
+  const float scene_ratio = scene_shaped ? DlssSceneRatio() : 1.0f;
+  const uint32_t scene_variant = scene_shaped ? DlssSceneVariant() : 0;  // 0..4, bits 29-31
   uint64_t key = MakeKey((edram_base << 16) | (depth ? 0x8000u : format) | (samples_log2 << 12),
-                         (width << 16) ^ height);
+                         ((width << 16) ^ height) | (scene_variant << 29));
   auto it = surfaces_.find(key);
   if (it != surfaces_.end()) {
     return &it->second;
@@ -2391,7 +2394,7 @@ Renderer::HostSurface* Renderer::GetSurface(uint8_t* base, uint32_t surface_obje
     s.scale = shadow_mul_;
     s.shadow = true;
   } else {
-    s.scale = render_scale_;
+    s.scale = render_scale_ * scene_ratio;
     // Graphics options (EXP-045). The game renders its 3D scene at 1024x576 and
     // stretches it to the 1280x720 output (pass "Upscale"): full_scene_resolution
     // renders every surface except the output-sized ones 1280/1024 larger, so
@@ -2437,7 +2440,6 @@ Renderer::HostSurface* Renderer::GetSurface(uint8_t* base, uint32_t surface_obje
     surfaces_.erase(key);
     return nullptr;
   }
-  s.motion_lifetime=++object_motion_lifetime_;
   if (depth) {
     s.view = provider_->OffsetDSVDescriptor(dsv_heap_->GetCPUDescriptorHandleForHeapStart(),
                                             dsv_heap_next_++ % kDsvHeapSize);
@@ -2446,7 +2448,6 @@ Renderer::HostSurface* Renderer::GetSurface(uint8_t* base, uint32_t surface_obje
     dsv.ViewDimension =
         samples > 1 ? D3D12_DSV_DIMENSION_TEXTURE2DMS : D3D12_DSV_DIMENSION_TEXTURE2D;
     device_->CreateDepthStencilView(s.resource.Get(), &dsv, s.view);
-    MaybeFinishMotionBeforeDepthWrite(&s,true,"surface initial clear");
     command_list_->ClearDepthStencilView(s.view, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
                                          1.0f, 0, 0, nullptr);
   } else {
@@ -2454,7 +2455,6 @@ Renderer::HostSurface* Renderer::GetSurface(uint8_t* base, uint32_t surface_obje
                                             rtv_heap_next_++ % kRtvHeapSize);
     device_->CreateRenderTargetView(s.resource.Get(), nullptr, s.view);
     float zero[4] = {};
-    InvalidateObjectMotionColor(s);
     command_list_->ClearRenderTargetView(s.view, zero, 0, nullptr);
   }
   REXLOG_INFO("native: surface {:08X} {}x{} x{} {} fmt {} samples {}", surface_object, width,
@@ -2499,8 +2499,12 @@ constexpr ProjectionReg kProjectionRegs[] = {
     {0ull, 256},
 #include "projection_regs.inc"
 };
+}  // namespace
 
 // Inverse of a 4x4 matrix (row-major, 16 floats); false if singular.
+// log2(scene / output width) while DLSS upscales the scene (dlss.cpp), 0 otherwise.
+float g_dlss_mip_bias = 0.0f;
+
 bool Invert4x4(const float m[16], float out[16]) {
   double a[4][8];
   for (int r = 0; r < 4; ++r) {
@@ -2529,7 +2533,6 @@ bool Invert4x4(const float m[16], float out[16]) {
   }
   return true;
 }
-}  // namespace
 
 void Renderer::CaptureCamera() {
   // The current pixel shader declares g_mProjectionToWorld (catalog
@@ -2789,7 +2792,6 @@ ID3D12PipelineState* Renderer::GetFxaaPipeline(DXGI_FORMAT format) {
 }
 
 bool Renderer::ApplyFxaa(HostSurface& target) {
-  InvalidateObjectMotionColor(target);
   if (!target.resource || target.depth) return false;
   auto* pso=GetFxaaPipeline(target.view_format);if(!pso)return false;
   // Source copy (the pass reads its own target).
@@ -2876,7 +2878,6 @@ ID3D12PipelineState* Renderer::GetAliasPipeline(DXGI_FORMAT format,uint32_t samp
 }
 
 bool Renderer::ReinterpretSurface(HostSurface& dst, HostSurface& src) {
-  InvalidateObjectMotionColor(dst);
   int src_kind = EdramAliasKind(src.guest_format), dst_kind = EdramAliasKind(dst.guest_format);
   if (src_kind < 0 || dst_kind < 0 || src.width != dst.width || src.height != dst.height ||
       src.samples != dst.samples || src.scale != dst.scale) {
@@ -2954,7 +2955,6 @@ void Renderer::ResolveEdramAliasing(HostSurface* s) {
         s->guest_format == 12 && !s->depth) {
       float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
       Transition(s->resource.Get(), s->state, D3D12_RESOURCE_STATE_RENDER_TARGET);
-      InvalidateObjectMotionColor(*s);
       command_list_->ClearRenderTargetView(s->view, black, 0, nullptr);
       s->last_write = ++edram_write_seq_;
       return;
@@ -2980,7 +2980,6 @@ void Renderer::ResolveEdramAliasing(HostSurface* s) {
     REXLOG_INFO("native watch: edram alias clear {} at draw {}", SurfaceName(s), draw_calls_in_frame_);
   }
   if (s->depth) {
-    MaybeFinishMotionBeforeDepthWrite(s,true,"EDRAM alias depth clear");
     Transition(s->resource.Get(), s->state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
     command_list_->ClearDepthStencilView(s->view, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
                                          1.0f, 0, 0, nullptr);
@@ -2991,7 +2990,6 @@ void Renderer::ResolveEdramAliasing(HostSurface* s) {
     float a = float(REXCVAR_GET(sr_native_edram_alias_alpha));
     float value[4] = {0.0f, 0.0f, 0.0f, a};
     Transition(s->resource.Get(), s->state, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    InvalidateObjectMotionColor(*s);
     command_list_->ClearRenderTargetView(s->view, value, 0, nullptr);
   }
   ++stats_.edram_alias_clears;
@@ -3032,6 +3030,25 @@ bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_fo
       rts[i] = nullptr;
     }
   }
+  // DLSS's upscaling modes draw the scene below the output scale, but the HUD
+  // draws on the output-sized target with the scene's depth bound for its
+  // stencil masks (the power bars: stencil written, then tested). It gets an
+  // output-scale twin of that depth surface, cleared at its first use each
+  // frame as the game clears the depth/stencil before the scene.
+  if (ds && ds->scale != bound_scale_ && DlssSceneVariant()) {
+    HostSurface* twin = GetSurface(base, Load32(base, dev + kDevDepthStencil), true,
+                                   rts[0] ? rts[0]->width : 0, rts[0] ? rts[0]->height : 0, true);
+    if (twin && twin->scale == bound_scale_ && twin->samples == bound_samples_) {
+      if (dlss_twin_swap_ != swap_number_ || dlss_twin_ != twin->resource.Get()) {
+        dlss_twin_swap_ = swap_number_;
+        dlss_twin_ = twin->resource.Get();
+        Transition(twin->resource.Get(), twin->state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        command_list_->ClearDepthStencilView(twin->view, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
+                                             0.0f, 0, 0, nullptr);
+      }
+      ds = twin;
+    }
+  }
   if (ds && ds->scale != bound_scale_) {
     static int logged = 0;
     if (logged++ < 8) {
@@ -3069,7 +3086,6 @@ bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_fo
       ds->edram_base == uint32_t(REXCVAR_GET(sr_native_exp_alias_depth_base)) &&
       alias_clear_frame_ != frame_count_) {
     alias_clear_frame_ = frame_count_;
-    MaybeFinishMotionBeforeDepthWrite(ds,true,"experimental alias depth clear");
     Transition(ds->resource.Get(), ds->state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
     command_list_->ClearDepthStencilView(ds->view, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
                                          float(REXCVAR_GET(sr_native_exp_alias_depth_value)), 0, 0,
@@ -3090,12 +3106,6 @@ bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_fo
   }
   // A larger depth attachment is legal. End the captured resource epoch on
   // its actual pair transition, independent of dimensions and OM cache resets.
-  if(!same_bind && motion_capture_active_ && !motion_scene_finished_ && motion_captured_depth_ &&
-     bind_set_[4] && bind_set_[4]->resource.Get()==motion_captured_depth_.Get() &&
-     !graphics::MatchesRetainedMotionCapturePair(
-        {reinterpret_cast<uintptr_t>(motion_captured_color_.Get()),reinterpret_cast<uintptr_t>(motion_captured_depth_.Get())},
-        {rts[0]?reinterpret_cast<uintptr_t>(rts[0]->resource.Get()):0,ds?reinterpret_cast<uintptr_t>(ds->resource.Get()):0}))
-    FinishMotionScene(bind_set_[4]);
   if (!same_bind) {
     if(post_vertex_diagnostic_ && post_vertex_active_ && !post_vertex_depth_snapshot_ && bind_set_[0] && bind_set_[4] &&
        bind_set_[0]->guest_format==12 && bind_set_[0]->width==bind_set_[4]->width &&
@@ -3110,9 +3120,6 @@ bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_fo
     for (uint32_t i = 0; i < 4; ++i) if (rts[i]) rts[i]->last_write = seq;
     if (ds) ds->last_write = seq;
   }
-  if(rt_shadow_requested_ && !visible_ray_requested_ && !rt_shadow_attempted_ && rts[0] && ds &&
-     rts[0]->guest_format==12 && post_vertex_capture_ && !post_vertex_capture_->ranges().empty())
-    BuildRayShadowScene();
   rt_count = 0;
   for (uint32_t i = 0; i < 4; ++i) {
     if (rts[i]) rt_count = i + 1;
@@ -3121,20 +3128,25 @@ bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_fo
     rtv_formats[i] = rts[i] ? rts[i]->view_format : DXGI_FORMAT_UNKNOWN;
     if (rts[i]) Transition(rts[i]->resource.Get(), rts[i]->state, D3D12_RESOURCE_STATE_RENDER_TARGET);
   }
-  ConfigureMotionCoverage(rts[0],ds,draw_metadata.vs_hash,draw_metadata.ps_hash,rt_count==1);
-  if(motion_coverage_draw_active_) {rtv_formats[1]=DXGI_FORMAT_R32_UINT;rt_count=2;}
   dsv_format = ds ? ds->view_format : DXGI_FORMAT_UNKNOWN;
   if (ds) Transition(ds->resource.Get(), ds->state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-  bool changed = rt_count != bound_rt_count_ || ds != bound_ds_ ||
-      motion_coverage_bound_!=motion_coverage_draw_active_;
+  // DLSS: the scene's draws also write the objects' motion (SV_Target4);
+  // rt_count 5 tells GetPipeline (slot 4 is always kDlssMotionFormat).
+  const D3D12_CPU_DESCRIPTOR_HANDLE* motion = nullptr;
+  if (rts[0] && DlssMode() && dlss_scene_ && !dlss_scene_done_ &&
+      rts[0]->resource.Get() == dlss_scene_ && rts[0]->samples == 1) {
+    motion = DlssMotionTarget();
+  }
+  if (motion) rt_count = 5;
+  bool changed = rt_count != bound_rt_count_ || ds != bound_ds_ || bool(motion) != bound_motion_;
   for (uint32_t i = 0; i < 4 && !changed; ++i) changed = rts[i] != bound_rts_[i];
   if (changed) {
-    D3D12_CPU_DESCRIPTOR_HANDLE rtvs[4] = {};
-    for (uint32_t i = 0; i < rt_count; ++i) {
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvs[5] = {};
+    if (motion) rtvs[4] = *motion;
+    for (uint32_t i = 0; i < rt_count && i < 4; ++i) {
       // Gaps are not allowed with a contiguous RTV array; use the first bound
       // RT's view for gaps (write mask 0 in that case is the guest's intent).
-      rtvs[i] = motion_coverage_draw_active_ && i==1 ? MotionCoverageView() :
-          rts[i] ? rts[i]->view : rts[0] ? rts[0]->view : D3D12_CPU_DESCRIPTOR_HANDLE{};
+      rtvs[i] = rts[i] ? rts[i]->view : rts[0] ? rts[0]->view : D3D12_CPU_DESCRIPTOR_HANDLE{};
     }
     command_list_->OMSetRenderTargets(rt_count, rt_count ? rtvs : nullptr, FALSE,
                                       ds ? &ds->view : nullptr);
@@ -3148,7 +3160,7 @@ bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_fo
     std::memcpy(bound_rts_, rts, sizeof(rts));
     bound_rt_count_ = rt_count;
     bound_ds_ = ds;
-    motion_coverage_bound_=motion_coverage_draw_active_;
+    bound_motion_ = motion != nullptr;
   }
   return true;
 }
@@ -3158,15 +3170,6 @@ bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_fo
 // Order everywhere: sr_native_shader_dir (explicit loose files), the
 // pre-shader library (sr_native_preshaders), the embedded pack, the default
 // loose-file directory.
-bool PrewarmedVariantLookup(uint64_t hash,uint32_t variant,const void** data,size_t* size) {
-  static std::mutex mutex;
-  static std::unordered_map<uint64_t,std::vector<uint8_t>> rt,coverage,combined;
-  if(variant<1 || variant>3) return false;
-  std::lock_guard lock(mutex);
-  auto& bytes=(variant==1 ? rt : variant==2 ? coverage : combined)[hash];
-  if(bytes.empty() && !ShaderTranslator::Get().LoadPrewarmedVariant(hash,variant,bytes)) return false;
-  *data=bytes.data();*size=bytes.size();return true;
-}
 
 bool PackShaderLookup(uint64_t hash, bool vertex, const void** data, size_t* size) {
   if (!REXCVAR_GET(sr_native_shader_dir).empty()) return false;
@@ -3288,6 +3291,80 @@ const std::vector<uint8_t>* Renderer::LoadShader(uint64_t hash, bool vertex) {
   return result;
 }
 
+// Input layout of a pipeline: the game's declaration (attributes the vertex
+// shader reads) plus zero-stride defaults for the inputs it lacks. Shared by
+// the draw pipelines and the ray tracing's stream-output pipelines.
+void Renderer::BuildInputLayout(uint8_t* base, uint32_t decl, const std::vector<uint8_t>& vs_blob,
+                                std::vector<D3D12_INPUT_ELEMENT_DESC>& elements, PsoRecord* record) {
+  const std::vector<uint8_t>* vs = &vs_blob;
+  uint32_t decl_count = decl ? Load32(base, decl + 0x18) : 0;
+  // The game's declarations describe every attribute of the mesh; a vertex
+  // shader that reads fewer must not be given the rest (D3D12 rejects the
+  // pipeline otherwise).
+  const std::vector<std::pair<std::string, uint32_t>> vs_inputs = VertexShaderInputs(*vs);
+  for (uint32_t i = 0; i < decl_count; ++i) {
+    uint32_t e = decl + 0x34 + 12 * i;
+    uint32_t stream = Load16(base, e);
+    uint32_t offset = Load16(base, e + 2);
+    uint32_t type = Load32(base, e + 4);
+    uint32_t usage = Load8(base, e + 9);
+    uint32_t usage_index = Load8(base, e + 10);
+    if (stream == 0xFF) break;
+    DeclFormat fmt = MapDeclType(type);
+    if (fmt.format == DXGI_FORMAT_UNKNOWN) {
+      LogUnsupportedOnce("vertex element type", type, "not in MapDeclType (the element is dropped)");
+      continue;
+    }
+    if (!vs_inputs.empty() &&
+        std::find(vs_inputs.begin(), vs_inputs.end(),
+                  std::make_pair(std::string(UsageSemantic(usage)), usage_index)) == vs_inputs.end()) {
+      continue;
+    }
+    D3D12_INPUT_ELEMENT_DESC d{};
+    d.SemanticName = UsageSemantic(usage);
+    d.SemanticIndex = usage_index;
+    d.Format = fmt.format;
+    d.InputSlot = stream;
+    d.AlignedByteOffset = offset;
+    d.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+    elements.push_back(d);
+    if (record && record->element_count < PsoRecord::kMaxElements) {
+      auto& re = record->elements[record->element_count++];
+      re.usage = uint8_t(usage);
+      re.usage_index = uint8_t(usage_index);
+      re.slot = uint8_t(stream);
+      re.format = uint32_t(fmt.format);
+      re.offset = offset;
+    }
+  }
+
+  // The XDK patches absent attributes to constants. A zero-stride host
+  // buffer supplies the same value regardless of the draw's vertex index.
+  const auto float_inputs = VertexShaderInputs(*vs, true);
+  for (const auto& input : float_inputs) {
+    if (std::any_of(elements.begin(), elements.end(), [&](const auto& e) {
+          return input.first == e.SemanticName && input.second == e.SemanticIndex;
+        })) continue;
+    uint32_t usage = 0;
+    while (usage < 14 && input.first != UsageSemantic(usage)) ++usage;
+    if (usage == 14) continue;
+    D3D12_INPUT_ELEMENT_DESC e{};
+    e.SemanticName = UsageSemantic(usage);
+    e.SemanticIndex = input.second;
+    e.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    e.InputSlot = 16;
+    e.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+    elements.push_back(e);
+    if (record && record->element_count < PsoRecord::kMaxElements) {
+      auto& re = record->elements[record->element_count++];
+      re.usage = uint8_t(usage);
+      re.usage_index = uint8_t(input.second);
+      re.slot = 16;
+      re.format = uint32_t(e.Format);
+    }
+  }
+}
+
 ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t vs_hash,
                                            uint64_t ps_hash, uint32_t decl,
                                            D3D12_PRIMITIVE_TOPOLOGY_TYPE topology_type,
@@ -3295,10 +3372,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
                                            DXGI_FORMAT dsv_format,
                                            D3D12_INDEX_BUFFER_STRIP_CUT_VALUE strip_cut) {
   CpuTimer cpu_timer(cpu_timings.pipeline_ns);
-  const bool ray_variant=rt_shadow_draw_active_ && rt_shadow_variant_;
-  const bool coverage_variant=motion_coverage_draw_active_ && motion_coverage_shader_;
-  const bool special_variant=ray_variant || coverage_variant;
-  if(coverage_variant && REXCVAR_GET(sr_native_debug_motion_coverage_pso_failure)) return nullptr;
+  const bool special_variant=false;
   reg::RB_BLENDCONTROL blend{LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_BLENDCONTROL0)};
   reg::PA_SU_SC_MODE_CNTL mode{LoadReg(base, dev, rex::graphics::XE_GPU_REG_PA_SU_SC_MODE_CNTL)};
   reg::RB_DEPTHCONTROL depth{LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_DEPTHCONTROL)};
@@ -3343,20 +3417,6 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
                 mode.value, poly_scale, poly_offset, depth_bias, depth.value, stencil_ref_mask,
                 bound_samples_, (LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_COLORCONTROL) >> 4) & 1);
   }
-  current_motion_raster_.depth_bias=depth_bias;current_motion_raster_.slope_bias=slope_bias;
-  current_motion_raster_.cull=mode.cull_front && !mode.cull_back ? D3D12_CULL_MODE_FRONT :
-      mode.cull_back && !mode.cull_front ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
-  current_motion_raster_.front_ccw=(mode.face ? false : true) ^ bool(REXCVAR_GET(sr_native_flip_winding));
-  const uint32_t motion_color=LoadReg(base,dev,rex::graphics::XE_GPU_REG_RB_COLORCONTROL);
-  current_motion_raster_.shader=vs_hash;current_motion_raster_.depth_control=depth.value;
-  current_motion_raster_.pixel_shader=ps_hash;current_motion_raster_.ray_opaque=false;
-  current_motion_raster_.blend_control=blend.value;current_motion_raster_.color_control=motion_color;
-  current_motion_raster_.color_mask=color_mask;current_motion_raster_.stencil_enabled=depth.stencil_enable;
-  current_motion_raster_.z_write=depth.z_write_enable;
-  current_motion_raster_.coverage_id=coverage_variant ? motion_coverage_draw_id_ : 0;
-  current_motion_raster_.opaque=graphics::CanReplayMotionRasterCoverage(bound_samples_,depth.z_enable,
-      depth.z_write_enable,depth.stencil_enable,REXCVAR_GET(sr_native_debug_no_ztest),
-      blend.value,motion_color,current_motion_raster_.coverage_id);
   uint32_t slope_bits;
   std::memcpy(&slope_bits, &slope_bias, 4);
 
@@ -3368,8 +3428,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
   uint64_t key_parts[] = {vs_hash ^ (uint64_t(bound_samples_) << 60) ^
                               (uint64_t(alpha_to_coverage) << 59),
                           (uint64_t(uint32_t(depth_bias)) << 32) | slope_bits,
-                          ps_hash ^ (ray_variant ? (coverage_variant ? 0x53525254434F0003ull : 0x5352525453480001ull) : 0) ^
-                              (coverage_variant ? 0x5352434F56450001ull : 0),
+                          ps_hash,
                           decl_hash,
                           blend.value,
                           uint64_t(mode.value & 0x7) | (uint64_t(color_mask & 0xFFFF) << 8) |
@@ -3417,17 +3476,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
   const auto* vs = LoadShader(vs_hash, true);
   bool pending = shader_pending_;
   // ps_hash == 0: depth-only draw (the game binds no pixel shader).
-  const auto* ps = coverage_variant ? motion_coverage_shader_ :
-      ray_variant ? rt_shadow_variant_ : ps_hash ? LoadShader(ps_hash, false) : nullptr;
-  if(coverage_variant && ray_variant) {
-    auto found=motion_ray_shaders_.find(ps_hash);
-    if(found==motion_ray_shaders_.end()) {
-      std::vector<uint8_t> bytes;
-      if(ShaderTranslator::Get().FetchRtCoverageVariant(ps_hash,bytes)!=TranslateState::kReady) return nullptr;
-      found=motion_ray_shaders_.emplace(ps_hash,std::move(bytes)).first;
-    }
-    ps=&found->second;
-  }
+  const auto* ps = ps_hash ? LoadShader(ps_hash, false) : nullptr;
   pending = pending || shader_pending_;
   if (!vs || (ps_hash && !ps)) {
     if (pending) pipelines_.erase(key);  // ask again once the translation finished
@@ -3436,71 +3485,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
 
   std::vector<D3D12_INPUT_ELEMENT_DESC> elements;
   PsoRecord record;
-  // The game's declarations describe every attribute of the mesh; a vertex
-  // shader that reads fewer must not be given the rest (D3D12 rejects the
-  // pipeline otherwise).
-  const std::vector<std::pair<std::string, uint32_t>> vs_inputs = VertexShaderInputs(*vs);
-  for (uint32_t i = 0; i < decl_count; ++i) {
-    uint32_t e = decl + 0x34 + 12 * i;
-    uint32_t stream = Load16(base, e);
-    uint32_t offset = Load16(base, e + 2);
-    uint32_t type = Load32(base, e + 4);
-    uint32_t usage = Load8(base, e + 9);
-    uint32_t usage_index = Load8(base, e + 10);
-    if (stream == 0xFF) break;
-    DeclFormat fmt = MapDeclType(type);
-    if (fmt.format == DXGI_FORMAT_UNKNOWN) {
-      LogUnsupportedOnce("vertex element type", type, "not in MapDeclType (the element is dropped)");
-      continue;
-    }
-    if (!vs_inputs.empty() &&
-        std::find(vs_inputs.begin(), vs_inputs.end(),
-                  std::make_pair(std::string(UsageSemantic(usage)), usage_index)) == vs_inputs.end()) {
-      continue;
-    }
-    D3D12_INPUT_ELEMENT_DESC d{};
-    d.SemanticName = UsageSemantic(usage);
-    d.SemanticIndex = usage_index;
-    d.Format = fmt.format;
-    d.InputSlot = stream;
-    d.AlignedByteOffset = offset;
-    d.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
-    elements.push_back(d);
-    if (record.element_count < PsoRecord::kMaxElements) {
-      auto& re = record.elements[record.element_count++];
-      re.usage = uint8_t(usage);
-      re.usage_index = uint8_t(usage_index);
-      re.slot = uint8_t(stream);
-      re.format = uint32_t(fmt.format);
-      re.offset = offset;
-    }
-  }
-
-  // The XDK patches absent attributes to constants. A zero-stride host
-  // buffer supplies the same value regardless of the draw's vertex index.
-  const auto float_inputs = VertexShaderInputs(*vs, true);
-  for (const auto& input : float_inputs) {
-    if (std::any_of(elements.begin(), elements.end(), [&](const auto& e) {
-          return input.first == e.SemanticName && input.second == e.SemanticIndex;
-        })) continue;
-    uint32_t usage = 0;
-    while (usage < 14 && input.first != UsageSemantic(usage)) ++usage;
-    if (usage == 14) continue;
-    D3D12_INPUT_ELEMENT_DESC e{};
-    e.SemanticName = UsageSemantic(usage);
-    e.SemanticIndex = input.second;
-    e.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-    e.InputSlot = 16;
-    e.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
-    elements.push_back(e);
-    if (record.element_count < PsoRecord::kMaxElements) {
-      auto& re = record.elements[record.element_count++];
-      re.usage = uint8_t(usage);
-      re.usage_index = uint8_t(input.second);
-      re.slot = 16;
-      re.format = uint32_t(e.Format);
-    }
-  }
+  BuildInputLayout(base, decl, *vs, elements, &record);
   D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
   desc.pRootSignature = root_signature_.Get();
   desc.VS = {vs->data(), vs->size()};
@@ -3529,10 +3514,6 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
     if (rtv_formats[i] == DXGI_FORMAT_R32_FLOAT || rtv_formats[i] == DXGI_FORMAT_R32G32_FLOAT) {
       desc.BlendState.RenderTarget[i].BlendEnable = FALSE;
     }
-  }
-  if(coverage_variant) {
-    auto& owner=desc.BlendState.RenderTarget[1];
-    owner.BlendEnable=FALSE;owner.LogicOpEnable=FALSE;owner.RenderTargetWriteMask=D3D12_COLOR_WRITE_ENABLE_RED;
   }
   desc.SampleMask = UINT_MAX;
   desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
@@ -3574,15 +3555,28 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
   desc.PrimitiveTopologyType = topology_type;
   desc.IBStripCutValue = strip_cut;
   desc.NumRenderTargets = rt_count;
-  for (uint32_t i = 0; i < rt_count; ++i) {
+  for (uint32_t i = 0; i < rt_count && i < 4; ++i) {
     desc.RTVFormats[i] = rtv_formats[i] != DXGI_FORMAT_UNKNOWN ? rtv_formats[i] : rtv_formats[0];
+  }
+  if (rt_count == 5) {
+    // DLSS objects' motion (BindRenderTargets): written by the draws that own
+    // their pixels - opaque ones and blended ones that write depth (Superman's
+    // material blends for its fade-out but is solid). Truly transparent draws
+    // (glass, particles: no depth write) leave the motion of what lies behind.
+    desc.RTVFormats[4] = kDlssMotionFormat;
+    desc.BlendState.RenderTarget[4] = desc.BlendState.RenderTarget[0];
+    desc.BlendState.RenderTarget[4].BlendEnable = FALSE;
+    desc.BlendState.RenderTarget[4].LogicOpEnable = FALSE;
+    const bool owns_pixels = !desc.BlendState.RenderTarget[0].BlendEnable || depth.z_write_enable;
+    desc.BlendState.RenderTarget[4].RenderTargetWriteMask =
+        owns_pixels ? D3D12_COLOR_WRITE_ENABLE_RED | D3D12_COLOR_WRITE_ENABLE_GREEN : 0;
   }
   desc.SampleDesc.Count = bound_samples_;
   auto fill_record = [&] {
     record.key = key;
     record.vs_hash = vs_hash;
     record.ps_hash = ps_hash;
-    record.pixel_variant=coverage_variant ? (ray_variant ? 3u : 2u) : ray_variant ? 1u : 0u;
+    record.pixel_variant=0;
     record.blend = desc.BlendState;
     record.raster = desc.RasterizerState;
     record.depth_stencil = desc.DepthStencilState;
@@ -3641,7 +3635,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
                             e.AlignedByteOffset, uint32_t(e.Format));
     }
     std::string targets;
-    for (uint32_t i = 0; i < rt_count; ++i) targets += fmt::format(" {}", uint32_t(rtv_formats[i]));
+    for (uint32_t i = 0; i < rt_count && i < 4; ++i) targets += fmt::format(" {}", uint32_t(rtv_formats[i]));
     REXLOG_ERROR("native: PSO creation failed ({:08X}) vs={:016X} ps={:016X} layout:{} rtv:{} dsv {} "
                  "samples {}", uint32_t(hr), vs_hash, ps_hash, layout, targets,
                  uint32_t(dsv_format), desc.SampleDesc.Count);
@@ -3956,6 +3950,8 @@ void Renderer::InvalidateSlotBindings(uint32_t dest_base) {
 
 void Renderer::RetireSrvIndex(uint32_t index) {
   texture_use_fences_.erase(index);
+  if (index >= srv_generation_.size()) srv_generation_.resize(index + 1);
+  ++srv_generation_[index];  // ray-traced instances drop their colour texture
   if (index > 2) retired_srvs_.emplace_back(next_fence_value_, index);
 }
 
@@ -4318,6 +4314,11 @@ uint32_t Renderer::CreateTexture(const uint32_t fetch[6], TextureEntry& entry) {
   return entry.srv_index;
 }
 
+// Sampler LOD bias in 1/16 steps, offset by 8 so negative biases (DLSS) fit.
+static uint32_t SamplerBiasQ(float lod_bias) {
+  return uint32_t(std::lround((std::clamp(lod_bias, -8.0f, 7.9f) + 8.0f) * 16.0f));
+}
+
 static uint64_t SamplerKey(const uint32_t fetch[6], bool force_linear, uint32_t bias_q) {
   return (uint64_t(fetch[0]) & 0x7FFC00) | (uint64_t(fetch[3] & 0x3FF80000) << 32) |
          (uint64_t(force_linear) << 63) | (uint64_t(bias_q) << 1);
@@ -4327,7 +4328,7 @@ uint32_t Renderer::GetSamplerIndex(const uint32_t fetch[6], bool force_linear, f
   CpuTimer cpu_timer(cpu_timings.sampler_ns);
   xenos::xe_gpu_texture_fetch_t f;
   std::memcpy(&f, fetch, sizeof(f));
-  uint32_t bias_q = uint32_t(std::clamp(lod_bias, 0.0f, 7.9f) * 16.0f);  // 1/16 steps
+  uint32_t bias_q = SamplerBiasQ(lod_bias);
   uint64_t key = SamplerKey(fetch, force_linear, bias_q);
   auto it = samplers_.find(key);
   if (it != samplers_.end()) {
@@ -4363,7 +4364,7 @@ uint32_t Renderer::GetSamplerIndex(const uint32_t fetch[6], bool force_linear, f
   desc.AddressV = MapClamp(uint32_t(f.clamp_y));
   desc.AddressW = MapClamp(uint32_t(f.clamp_z));
   desc.MaxLOD = D3D12_FLOAT32_MAX;
-  desc.MipLODBias = float(bias_q) / 16.0f;
+  desc.MipLODBias = float(bias_q) / 16.0f - 8.0f;
   desc.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
   uint32_t index = sampler_heap_next_ < kSamplerHeapSize ? sampler_heap_next_++ : 0;
   device_->CreateSampler(&desc, provider_->OffsetSamplerDescriptor(
@@ -4584,6 +4585,8 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
     CpuTimer timer(d.flush_ns,detail);
     FlushRingConstants(base, dev);
   }
+  UpdateRtFrame(base);
+  DlssCaptureCamera();
   const bool cache_shared = SharedConstantsCaching();
   UploadAlloc shared;
   if (!cache_shared) {
@@ -4649,7 +4652,10 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
     }
     {
       CpuTimer timer(d.vs_copy_ns,detail);
-      fill(Pm4Mirror::kAluConstantBase, kDevVsConstants, reinterpret_cast<uint32_t*>(vs.cpu));
+      // Through a CPU copy: DLSS keeps it as this draw's "previous" constants
+      // for the next frame (upload memory is slow to read back).
+      fill(Pm4Mirror::kAluConstantBase, kDevVsConstants, cb_vs_cpu_.data());
+      std::memcpy(vs.cpu, cb_vs_cpu_.data(), 4096);
     }
     if(detail) {++d.vs_uploads; d.vs_bytes+=4096;}
     cb_vs_gpu_ = vs.gpu;
@@ -4755,6 +4761,7 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
       s[16 + slot] = 1;
       s[32 + slot] = 2;
       s[48 + slot] = 0;
+      rt_tex2d_[slot] = rt_samp_[slot] = 0;
       ++stats_.texture_slots_skipped;
       continue;
     }
@@ -4777,8 +4784,7 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
     }
     // Empty slots have no texture or sampler. Their three SRV dimensions use
     // the same null descriptors regardless of the remaining fetch words.
-    // Motion capture still needs fetch[1] for the first three slots.
-    if (!IsTextureBound(fetch[0]) && !(motion_capture_active_ && slot < 3)) {
+    if (!IsTextureBound(fetch[0])) {
       s[16 + slot] = 1;
       s[32 + slot] = 2;
       continue;
@@ -4844,7 +4850,12 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
           sampler_bias = std::log2(bound_scale_);
         }
       }
-      const uint32_t bias_q = uint32_t(std::clamp(sampler_bias, 0.0f, 7.9f) * 16.0f);
+      // DLSS upscaling: the scene's textures pick their mips for the output
+      // resolution, not the smaller scene (log2(scene / output), dlss.cpp).
+      if (g_dlss_mip_bias != 0.0f && dlss_scene_ && bound_rts_[0] &&
+          bound_rts_[0]->resource.Get() == dlss_scene_)
+        sampler_bias += g_dlss_mip_bias;
+      const uint32_t bias_q = SamplerBiasQ(sampler_bias);
       const uint64_t sampler_key = SamplerKey(fetch, smooth, bias_q);
       if (sc.sampler_valid && sc.sampler_key == sampler_key) {
         sampler = sc.sampler_index;
@@ -4859,7 +4870,6 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
         srv |= 0x80000000u;
       }
     }
-    if(motion_capture_active_ && slot<3) RecordMotionColorBinding(slot,fetch,srv);
     if (trace_state_ == 1 && (fetch[0] & 3) == uint32_t(xenos::FetchConstantType::kTexture)) {
       uint32_t addr = GuestPhysical(fetch[1] & 0xFFFFF000u);
       auto latest = resolve_latest_.find(addr);
@@ -4902,13 +4912,14 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
     s[16 + slot] = dimension == 2 && srv ? srv : 1;
     s[32 + slot] = dimension == 3 && srv ? srv : 2;
     s[48 + slot] = sampler;
+    rt_tex2d_[slot] = s[slot];
+    rt_samp_[slot] = sampler;
   }
   slots_timer.Stop();
   CpuTimer derived_timer(d.derived_ns,detail);
   for (uint32_t i = 0; i < 4; ++i) {
     const uint32_t vs_bool=GpuConstant(base, dev, Pm4Mirror::kBoolConstantBase + i, kDevVsBools + 4 * i, use_mirror);
     s[64 + i] = vs_bool;
-    if(motion_capture_active_) motion_uploaded_vs_bools_[i]=vs_bool;
     s[68 + i] = GpuConstant(base, dev, Pm4Mirror::kBoolConstantBase + 4 + i, kDevPsBools + 4 * i, use_mirror);
   }
   s[72] = 0;
@@ -4932,36 +4943,11 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
     half_pixel[0] = 1.0f / w;
     half_pixel[1] = -1.0f / h;
   }
-  // Preserve the legacy correction and append only the requested scene delta.
-  // Screen-space/postprocess, shadows and ordinary frames retain their inputs.
-  motion_jitter_draw_active_=false;
-  if(motion_capture_active_ && !motion_scene_finished_ && motion_jitter_ready_ && !motion_continuous_ && REXCVAR_GET(sr_native_debug_motion_jitter) &&
-     bound_rts_[0] && bound_ds_ && bound_rts_[0]->guest_format==12 &&
-     bound_rts_[0]->width==kOutputWidth && bound_rts_[0]->height==kOutputHeight &&
-     bound_samples_==1 && !ScreenSpaceDraw(base,dev) && REXCVAR_GET(sr_native_shader_dir).empty()) {
-    const auto color=bound_rts_[0]->resource->GetDesc(),depth=bound_ds_->resource->GetDesc();
-    if(color.Width==depth.Width && color.Height==depth.Height &&
-       color.Width==uint32_t(HostPx(kOutputWidth,render_scale_)) && color.Height==uint32_t(HostPx(kOutputHeight,render_scale_))) {
-      half_pixel[0]+=motion_frame_jitter_.ndc_x;half_pixel[1]+=motion_frame_jitter_.ndc_y;
-      motion_jitter_draw_active_=true;
-    }
-  }
-  if((dlss_wanted_ || motion_continuous_) && use_mirror && bound_rts_[0] && bound_ds_ && bound_rts_[0]->guest_format==12 &&
-     !ScreenSpaceDraw(base,dev)) {
-    if(dlss_wanted_) {half_pixel[0]+=dlss_jitter_.ndc_x;half_pixel[1]+=dlss_jitter_.ndc_y;}
-    if(motion_continuous_ && dlss_wanted_) motion_jitter_draw_active_=true;
-    if(current_vs_hash_==graphics::CameraCandidateProbe::kViewProjectionShader) {
-      dlss_scene_ds_=bound_ds_;
-      std::memcpy(dlss_view_projection_.data(),mirror_.FloatConstants(false).data(),sizeof(dlss_view_projection_));
-      dlss_view_projection_valid_=true;
-      // Xenos RB_DEPTHCONTROL z_func: 4 GREATER, 6 GEQUAL.
-      const uint32_t z_func=(LoadReg(base,dev,rex::graphics::XE_GPU_REG_RB_DEPTHCONTROL)>>4)&7;
-      dlss_depth_reversed_=z_func==4 || z_func==6;
-    }
-  }
+  // DLSS (dlss.cpp): sub-pixel jitter of the scene's draws.
+  if (!ScreenSpaceDraw(base, dev)) DlssJitter(half_pixel);
   std::memcpy(&s[73], &half_pixel[0], 4);
   std::memcpy(&s[74], &half_pixel[1], 4);
-  if((post_vertex_active_ || visible_ray_requested_) && use_mirror) {
+  if(post_vertex_active_ && use_mirror) {
     const bool caster=current_vs_hash_==0x57A00D4EB3BF4C31ull || current_vs_hash_==0xC7C0E381A3C9B79Eull;
     const bool receiver=current_vs_hash_==graphics::CameraCandidateProbe::kViewProjectionShader;
     if(caster || receiver) {
@@ -4974,20 +4960,13 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
       auto& saved=caster ? post_vertex_caster_projection_ : post_vertex_receiver_projection_;
       auto& valid=caster ? post_vertex_caster_valid_ : post_vertex_receiver_valid_;
       const auto visible_direction=graphics::ShadowRayDirection(projection);
-      if(receiver && visible_ray_requested_ && visible_direction.valid) {
-        if(visible_ray_light_valid_) {
-          float cosine=0;for(size_t axis=0;axis<3;++axis) cosine+=visible_ray_light_[axis]*visible_direction.xyz[axis];
-          if(cosine<.999f) visible_ray_light_conflict_=true;
-        }
-        visible_ray_light_=visible_direction.xyz;visible_ray_light_valid_=true;
-      }
       if(visible_direction.valid) {
         if(valid && !graphics::ShadowProjectionsMatch(saved,projection)) post_vertex_light_conflict_=true;
         saved=projection; valid=true;
       } else post_vertex_light_conflict_=true;
     }
   }
-  if((post_vertex_active_ || visible_ray_requested_) && use_mirror &&
+  if(post_vertex_active_ && use_mirror &&
      current_vs_hash_==graphics::CameraCandidateProbe::kViewProjectionShader &&
      !ScreenSpaceDraw(base,dev)) {
     graphics::Matrix4 projection{};
@@ -5072,6 +5051,12 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
     ++stats_.alpha_test_draws[g_current_pass & 31];
   }
   s[112] = spec;
+  // DLSS objects' motion: this draw's VS constants of the previous frame (b3)
+  // and whether there are any (g_SrMotionValid, shared c30.z).
+  bool motion_valid = false;
+  const D3D12_GPU_VIRTUAL_ADDRESS prev_vs = DlssPrevVsConstants(motion_valid);
+  dlss_prev_vs_gpu_ = prev_vs;
+  s[122] = motion_valid ? 1u : 0u;
   // c31: per-target normalization, before the SNORM RTV clamps fixed16.
   // Populate every slot on every draw, including unbound slots, so switching
   // from the shadow pass back to the scene cannot retain its 1/32 scale.
@@ -5114,12 +5099,6 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
     xform[3] = 1.0f + wy * xform[1];
   }
   std::memcpy(&s[108], xform, sizeof(xform));
-  if(motion_capture_active_) {
-    // Preserve the exact CPU operands written above, without reading a mapped
-    // write-combined upload heap when shared staging/cache are disabled.
-    std::memcpy(motion_clip_fixup_.data(),xform,sizeof(xform));
-    std::memcpy(motion_clip_fixup_.data()+4,half_pixel,sizeof(half_pixel));
-  }
   if (trace_state_ == 1) {
     const float* v = reinterpret_cast<const float*>(mirror_.regs() + Pm4Mirror::kAluConstantBase);
     std::string vc;
@@ -5157,13 +5136,9 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
   command_list_->SetGraphicsRootConstantBufferView(0, cb_vs_gpu_);
   command_list_->SetGraphicsRootConstantBufferView(1, cb_ps_gpu_);
   command_list_->SetGraphicsRootConstantBufferView(2, shared_gpu);
-  current_motion_raster_.ray_opaque=visible_ray_requested_ && graphics::IsOpaqueRayGeometry({
-      current_vs_hash_,current_ps_hash_,current_motion_raster_.blend_control,
-      current_motion_raster_.color_control,current_motion_raster_.color_mask,spec,
-      current_motion_raster_.coverage_id,std::bit_cast<float>(s[124]),current_motion_raster_.z_write,
-      REXCVAR_GET(sr_native_shader_dir).empty() && REXCVAR_GET(sr_native_preshaders_path).empty() &&
-      REXCVAR_GET(sr_native_shader_tools_dir).empty() && REXCVAR_GET(sr_native_debug_ps_const).empty(),
-      current_motion_raster_.opaque});
+  // b3 (patch 0030): previous VS constants of this draw; the current ones until
+  // the DLSS motion port supplies history (g_SrMotionValid = 0 then).
+  command_list_->SetGraphicsRootConstantBufferView(9, dlss_prev_vs_gpu_ ? dlss_prev_vs_gpu_ : cb_vs_gpu_);
   return true;
 }
 
@@ -5244,9 +5219,6 @@ void Renderer::ApplyFixedFunctionState(uint8_t* base, uint32_t dev) {
     command_list_->RSSetViewports(1, &vp);
     fixed_viewport_ = vp;
   }
-  current_motion_raster_.full_viewport=bound_rts_[0] && vp.TopLeftX==0 && vp.TopLeftY==0 &&
-      vp.Width==float(HostPx(bound_rts_[0]->width,bound_rts_[0]->scale)) &&
-      vp.Height==float(HostPx(bound_rts_[0]->height,bound_rts_[0]->scale)) && vp.MinDepth==0 && vp.MaxDepth==1;
   // Scissor (draw_util::GetScissor): window scissor + window offset, clamped by
   // the screen scissor. Not during predicated tiling: host surfaces are untiled
   // while the XDK sets a per-tile scissor.
@@ -5270,7 +5242,6 @@ void Renderer::ApplyFixedFunctionState(uint8_t* base, uint32_t dev) {
     command_list_->RSSetScissorRects(1, &scissor);
     fixed_scissor_ = scissor;
   }
-  current_motion_raster_.scissor=scissor;
   uint32_t stencil_ref_mask = LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_STENCILREFMASK);
   const uint32_t stencil_ref = stencil_ref_mask & 0xFF;
   if (!fixed_state_cached_ || fixed_stencil_ref_ != stencil_ref) {
@@ -5357,7 +5328,6 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
       order_srv_leases();
       command_list_->Close();
       ID3D12CommandList* lists[] = {command_list_.Get()};
-      BeforeVisibleRaySubmit();
       queue_->ExecuteCommandLists(1, lists);
       queue_->Signal(fence_.Get(), next_fence_value_++);
       DumpFrameResources(dump_after ? std::string("after_")
@@ -5424,6 +5394,7 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
     return v.empty() ? 0ull : std::stoull(v, nullptr, 16);
   }();
   if (skip_ps && ps_hash == skip_ps) return false;
+  DlssDrawKey(vs_hash, ps_hash, Load32(base, dev + kDevVertexFetch0), prim, dlss_draw_count_);
   if (benchmark::Active() && benchmark_cut_.ShouldSkip(ps_hash)) return false;
   if (trace_state_ == 1) {
     uint32_t n = decl ? Load32(base, decl + 0x18) : 0;
@@ -5522,21 +5493,6 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
     LogUnsupportedOnce("render target bind", 0);
     return false;
   }
-  if(motion_pre_hud_pending_ && bound_rts_[0] && bound_rts_[0]->guest_format==0 && bound_rts_[0]->samples==1 &&
-     bound_rts_[0]->width==kOutputWidth && bound_rts_[0]->height==kOutputHeight) {
-    // Bounded diagnostic checkpoints, before distinct final-color draw families.
-    // The first font draw was already too late (HUD bar present); inspect the
-    // earlier checkpoints instead of asserting that it is a pre-HUD boundary.
-    const std::array<uint64_t,2> pair{vs_hash,ps_hash};
-    if(motion_color_pairs_.size()<12 &&
-       std::find(motion_color_pairs_.begin(),motion_color_pairs_.end(),pair)==motion_color_pairs_.end()) {
-      motion_color_pairs_.push_back(pair);
-      QueueMotionReadback(bound_rts_[0]->resource.Get(),bound_rts_[0]->state,
-          fmt::format("candidate_color_d{}_vs{:016X}_ps{:016X}",draw_calls_in_frame_,vs_hash,ps_hash));
-    }
-    if(vs_hash==0xFCB6D23E7B941855ull && ps_hash==0x9841B42F263B95DEull)
-      motion_pre_hud_pending_=false;
-  }
   // After binding targets: EDRAM reinterpretation inside BindRenderTargets
   // may have changed the root signature and heaps.
   if (!frame_state_bound_) {
@@ -5551,36 +5507,18 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
         6, sampler_heap_->GetGPUDescriptorHandleForHeapStart());
     command_list_->SetGraphicsRootDescriptorTable(
         7, srv_heap_->GetGPUDescriptorHandleForHeapStart());
+    // Ray tracing (space6 arrays, space9 frame/material buffers, space8 TLAS).
+    command_list_->SetGraphicsRootDescriptorTable(
+        8, srv_heap_->GetGPUDescriptorHandleForHeapStart());
     frame_state_bound_ = true;
   }
   // Primitive restart only matters for strips.
-  rt_shadow_draw_active_=ConfigureRayShadowDraw(base,dev,vs_hash,ps_hash);
   if (topology != D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP &&
       topology != D3D_PRIMITIVE_TOPOLOGY_LINESTRIP) {
     strip_cut = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
   }
   ID3D12PipelineState* pso = GetPipeline(base, dev, vs_hash, ps_hash, decl, topology_type,
                                          rtv_formats, rt_count, dsv_format, strip_cut);
-  if(!pso && motion_coverage_draw_active_) {
-    // Optional diagnostics must never remove an otherwise valid guest draw.
-    // The failed variant key stays separate; retry the original PS/RT layout
-    // and recompute its ordinary motion eligibility in GetPipeline below.
-    motion_coverage_failed_shaders_.insert(ps_hash);
-    motion_coverage_draw_active_=false;motion_coverage_draw_id_=0;motion_coverage_shader_=nullptr;
-    motion_coverage_bound_=false;
-    rtv_formats[1]=DXGI_FORMAT_UNKNOWN;rt_count=1;bound_rt_count_=1;
-    const auto original_rtv=bound_rts_[0]->view;
-    command_list_->OMSetRenderTargets(1,&original_rtv,FALSE,bound_ds_?&bound_ds_->view:nullptr);
-    REXLOG_WARN("native motion coverage PSO unavailable: ps={:016X}; retrying original draw without owner MRT",ps_hash);
-    pso=GetPipeline(base,dev,vs_hash,ps_hash,decl,topology_type,rtv_formats,rt_count,dsv_format,strip_cut);
-  }
-  if(!pso && rt_shadow_draw_active_) {
-    rt_shadow_draw_active_=false;
-    pso=GetPipeline(base,dev,vs_hash,ps_hash,decl,topology_type,rtv_formats,rt_count,dsv_format,strip_cut);
-  }
-  if(visible_ray_requested_ && graphics_frame_request_.requested[0] && graphics::IsRtShadowShader(ps_hash) &&
-      bound_rts_[0] && bound_rts_[0]->guest_format==12 && !rt_shadow_draw_active_)
-    visible_ray_unpatched_receiver_=true;
   if (!pso) {
     ++stats_.skip_pso;
     ++stats_.skip_pso_pairs[{vs_hash, ps_hash, g_current_pass}];
@@ -5629,9 +5567,7 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
   }
   current_ps_hash_ = ps_hash;
   current_vs_hash_ = vs_hash;
-  if(motion_capture_active_) for(auto& source:motion_color_sources_) source={};
-  const bool filter_textures = TextureUsageFiltering() && !motion_capture_active_ &&
-      !rt_shadow_draw_active_ && !motion_coverage_draw_active_ && !trace_state_;
+  const bool filter_textures = TextureUsageFiltering() && !trace_state_;
   const uint32_t texture_mask = graphics::guest::TextureMaskForShaders(
       shader_a.get(), shader_b.get(),
       (!vs_obj || shader_a) && (!ps_obj || shader_b), filter_textures);
@@ -5642,8 +5578,7 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
       REXCVAR_GET(sr_native_shader_dir).empty() &&
       REXCVAR_GET(sr_native_preshaders_path).empty() && REXCVAR_GET(sr_native_shader_tools_dir).empty() &&
       REXCVAR_GET(sr_native_debug_ps_const).empty() &&
-      !motion_capture_active_ && !post_vertex_active_ && !rt_shadow_draw_active_ &&
-      !motion_coverage_draw_active_ && !trace_state_ && !REXCVAR_GET(sr_native_packet_check);
+      !post_vertex_active_ && !trace_state_ && !REXCVAR_GET(sr_native_packet_check);
   const auto vs_usage=graphics::guest::ConstantUsageForShaders(shader_a.get(),shader_b.get(),true,
       (!vs_obj || shader_a) && (!ps_obj || shader_b),filter_constants);
   const auto ps_usage=graphics::guest::ConstantUsageForShaders(shader_a.get(),shader_b.get(),false,
@@ -5655,25 +5590,19 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
     CaptureCamera();
   }
   ApplyFixedFunctionState(base, dev);
-  if(rt_shadow_draw_active_) {
-    UploadAlloc rt_constants;
-    if(!Upload(sizeof(rt_shadow_constants_),256,rt_constants)) return false;
-    std::memcpy(rt_constants.cpu,&rt_shadow_constants_,sizeof(rt_shadow_constants_));
-    if(visible_ray_requested_) visible_ray_standalone_flags_.push_back(
-        static_cast<uint8_t*>(rt_constants.cpu)+offsetof(graphics::RtShadowDrawConstants,padding)+sizeof(uint32_t));
-    command_list_->SetGraphicsRootShaderResourceView(8,rt_shadow_scene_ && rt_shadow_scene_->AccelerationStructure() ? rt_shadow_scene_->AccelerationStructure()->GetGPUVirtualAddress() : 0);
-    command_list_->SetGraphicsRootConstantBufferView(9,rt_constants.gpu);
-    command_list_->SetGraphicsRootUnorderedAccessView(10,rt_shadow_counter_[frame_index_]->GetGPUVirtualAddress());
-  }
   command_list_->SetPipelineState(pso);
   current_raster_pipeline_=pso;
-  if(motion_coverage_draw_active_) {
-    command_list_->SetGraphicsRoot32BitConstant(11,graphics::MotionPixelOwnerConstant(
-        motion_coverage_draw_id_,current_motion_raster_.blend_control,current_motion_raster_.color_mask),0);
-    if(motion_reactive_[frame_index_].mask)
-      command_list_->SetGraphicsRootDescriptorTable(12,provider_->OffsetViewDescriptor(
-          srv_heap_->GetGPUDescriptorHandleForHeapStart(),motion_reactive_[frame_index_].uav));
+  rt_so_target_.decl = decl;
+  {
+    const uint32_t decl_count = decl ? std::min(Load32(base, decl + 0x18), 64u) : 0u;
+    rt_so_target_.decl_hash = decl_count ? XXH3_64bits(GuestPtr(base, decl + 0x34, decl_count * 12),
+                                                       size_t(decl_count) * 12) : 0;
   }
+  rt_so_target_.rt_count = rt_count;
+  std::copy(rtv_formats, rtv_formats + 4, rt_so_target_.rtv);
+  rt_so_target_.dsv = dsv_format;
+  rt_so_target_.strip_cut = strip_cut;
+  rt_so_target_.pso = pso;
   const D3D12_VERTEX_BUFFER_VIEW default_view{
       default_vertex_buffer_->GetGPUVirtualAddress(), 16, 0};
   command_list_->IASetVertexBuffers(16, 1, &default_view);
@@ -6641,7 +6570,6 @@ void Renderer::CapturePostVertexDraw(uint8_t* base,uint32_t dev,
   command_list_->SetPipelineState(current_raster_pipeline_);
 }
 
-#include "native_motion_capture.inc"
 
 void Renderer::RecordGeometrySubmission(uint8_t* base, const WorkBatch* batch, const WorkCmd* cmd,
                                         graphics::GeometrySubmission submission,
@@ -6723,6 +6651,7 @@ void Renderer::ExecDrawVertices(uint8_t* base, const WorkBatch& batch, const Wor
   bool quads;
   const uint32_t surface_before = surface_probe_ ? surface_sequence_.total_draws() : 0;
   bool streams_ok = BindVertexStreams(base, batch, cmd);
+  dlss_draw_count_ = vertex_count;
   if (!dev || !vertex_count || !PrepareDraw(base, dev, prim, topology, quads) || !streams_ok) {
     ++stats_.draws_skipped; ++stats_.pass_skips[g_current_pass & 31];
     return;
@@ -6751,15 +6680,21 @@ void Renderer::ExecDrawVertices(uint8_t* base, const WorkBatch& batch, const Wor
     }
     D3D12_INDEX_BUFFER_VIEW ibv{ib.gpu, quad_count * 24, DXGI_FORMAT_R32_UINT};
     command_list_->IASetIndexBuffer(&ibv);
-    if (!SkipGpuDraw()) {BeforeMotionColorDraw();command_list_->DrawIndexedInstanced(quad_count * 6, 1, 0, 0, 0);AfterMotionColorDraw();}
+    if (!SkipGpuDraw()) {command_list_->DrawIndexedInstanced(quad_count * 6, 1, 0, 0, 0);}
     // Generated/inline geometry has no attested temporal identity here.
-    CaptureMotionClipDraw(base,dev,topology,true,quad_count*6,0,0,
-        D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED,nullptr,nullptr);
   } else {
-    if (!SkipGpuDraw()) {BeforeMotionColorDraw();command_list_->DrawInstanced(vertex_count, 1, start_vertex, 0);AfterMotionColorDraw();}
+    if (!SkipGpuDraw()) {command_list_->DrawInstanced(vertex_count, 1, start_vertex, 0);}
     CapturePostVertexDraw(base,dev,topology,false,vertex_count,start_vertex);
-    CaptureMotionClipDraw(base,dev,topology,false,vertex_count,start_vertex,0,
-        D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED,&batch,&cmd);
+  }
+  // Ray tracing: Superman's cape (CPU cloth) and the instanced city copies.
+  if (!quads && current_vs_hash_ == kRtCapeVs &&
+      (topology == D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST || topology == D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP)) {
+    // The cloth comes as a list or a strip; stream output writes either as a list.
+    const uint32_t so = topology == D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP ? (vertex_count >= 3 ? (vertex_count - 2) * 3 : 0)
+                                                                         : vertex_count - vertex_count % 3;
+    if (RtSceneOn()) RtCaptureCape(base, false, start_vertex, vertex_count, 0, so);
+  } else if (topology == D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST && !quads) {
+    RtCaptureInstanced(base, batch, cmd, start_vertex, vertex_count);
   }
   if (surface_probe_) {
     graphics::GeometrySubmission submission{};
@@ -6799,6 +6734,7 @@ void Renderer::ExecDrawIndexedVertices(uint8_t* base, const WorkBatch& batch,
   const uint32_t surface_before = surface_probe_ ? surface_sequence_.total_draws() : 0;
   bool streams_ok = BindVertexStreams(base, batch, cmd);
   const BufferEntry* ib = cmd.has_index ? ApplyBuffer(base, cmd.index) : nullptr;
+  dlss_draw_count_ = index_count;
   const bool prepared = dev && index_count && PrepareDraw(base, dev, prim, topology, quads, cut);
   const uint32_t quad_indices = cmd.u[5];  // expanded triangle indices of an indexed quad list
   if (!prepared || (quads && !quad_indices) || !streams_ok || !ib) {
@@ -6820,14 +6756,7 @@ void Renderer::ExecDrawIndexedVertices(uint8_t* base, const WorkBatch& batch,
     std::memcpy(tris.cpu, batch.bytes.data() + cmd.u[4], size_t(quad_indices) * 4);
     D3D12_INDEX_BUFFER_VIEW qv{tris.gpu, quad_indices * 4, DXGI_FORMAT_R32_UINT};
     command_list_->IASetIndexBuffer(&qv);
-    if (!SkipGpuDraw()) {BeforeMotionColorDraw();command_list_->DrawIndexedInstanced(quad_indices, 1, 0, base_vertex, 0);AfterMotionColorDraw();}
-    ReportObservedClothDraw(batch,cmd);
-    // Only the audited cloth producer supplies persistent slots for these
-    // generated quad indices; every other generated path remains unverified.
-    const bool observed_cloth=(motion_continuous_ || REXCVAR_GET(sr_native_debug_observed_skin_motion)) &&
-        current_vs_hash_==0xA5232A3184AA617Cull && cmd.observed_render.cloth.source_route_observed;
-    CaptureMotionClipDraw(base,dev,topology,true,quad_indices,0,base_vertex,
-        D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED,observed_cloth?&batch:nullptr,observed_cloth?&cmd:nullptr);
+    if (!SkipGpuDraw()) {command_list_->DrawIndexedInstanced(quad_indices, 1, 0, base_vertex, 0);}
     if (surface_probe_) {
       graphics::GeometrySubmission submission{};
       submission.kind = graphics::GeometrySubmissionKind::kIndexed;
@@ -6864,9 +6793,11 @@ void Renderer::ExecDrawIndexedVertices(uint8_t* base, const WorkBatch& batch,
                   base_vertex, current_ps_hash_, cmd.index_size, cmd.index32, st);
     }
   }
-  if (!SkipGpuDraw()) {BeforeMotionColorDraw();command_list_->DrawIndexedInstanced(index_count, 1, start_index, base_vertex, 0);AfterMotionColorDraw();}
+  if (!SkipGpuDraw()) {command_list_->DrawIndexedInstanced(index_count, 1, start_index, base_vertex, 0);}
+  if (topology == D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST || topology == D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP)
+    RtCaptureDraw(base, batch, cmd, ib, start_index, index_count, base_vertex,
+                  topology == D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
   CapturePostVertexDraw(base,dev,topology,true,index_count,start_index,base_vertex,cut);
-  CaptureMotionClipDraw(base,dev,topology,true,index_count,start_index,base_vertex,cut,&batch,&cmd);
   if (surface_probe_) {
     graphics::GeometrySubmission submission{};
     submission.kind = graphics::GeometrySubmissionKind::kIndexed;
@@ -6910,6 +6841,7 @@ void Renderer::ExecDrawInlineVertices(uint8_t* base, uint32_t prim, uint32_t dat
   D3D12_PRIMITIVE_TOPOLOGY topology;
   bool quads;
   const uint32_t surface_before = surface_probe_ ? surface_sequence_.total_draws() : 0;
+  dlss_draw_count_ = vertex_count;
   if (!dev || !vertex_count || !stride || !data ||
       !PrepareDraw(base, dev, prim, topology, quads)) {
     ++stats_.draws_skipped; ++stats_.pass_skips[g_current_pass & 31];
@@ -6948,10 +6880,8 @@ void Renderer::ExecDrawInlineVertices(uint8_t* base, uint32_t prim, uint32_t dat
     D3D12_VERTEX_BUFFER_VIEW rect_view{rect_vb.gpu, uint32_t(expanded.size()), stride};
     command_list_->IASetVertexBuffers(0, 1, &rect_view);
     bound_vertex_views_mask_ &= ~1u;
-    if (!SkipGpuDraw()) {CaptureMotionInlineColorGeometry(base,decl,expanded,stride,uint32_t(expanded.size()/stride),topology,false);BeforeMotionColorDraw();command_list_->DrawInstanced(uint32_t(expanded.size() / stride), 1, 0, 0);AfterMotionColorDraw();}
+    if (!SkipGpuDraw()) {command_list_->DrawInstanced(uint32_t(expanded.size() / stride), 1, 0, 0);}
     // Generated/inline geometry has no attested temporal identity here.
-    CaptureMotionClipDraw(base,dev,topology,false,uint32_t(expanded.size()/stride),0,0,
-        D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED,nullptr,nullptr);
     if (surface_probe_) {
       graphics::GeometrySubmission submission{};
       submission.kind = graphics::GeometrySubmissionKind::kInline;
@@ -6990,15 +6920,11 @@ void Renderer::ExecDrawInlineVertices(uint8_t* base, uint32_t prim, uint32_t dat
     }
     D3D12_INDEX_BUFFER_VIEW ibv{ib.gpu, quad_count * 12, DXGI_FORMAT_R16_UINT};
     command_list_->IASetIndexBuffer(&ibv);
-    if (!SkipGpuDraw()) {CaptureMotionInlineColorGeometry(base,decl,{vdata,vb_size},stride,vertex_count,topology,quads);BeforeMotionColorDraw();command_list_->DrawIndexedInstanced(quad_count * 6, 1, 0, 0, 0);AfterMotionColorDraw();}
+    if (!SkipGpuDraw()) {command_list_->DrawIndexedInstanced(quad_count * 6, 1, 0, 0, 0);}
     // Generated/inline geometry has no attested temporal identity here.
-    CaptureMotionClipDraw(base,dev,topology,true,quad_count*6,0,0,
-        D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED,nullptr,nullptr);
   } else {
-    if (!SkipGpuDraw()) {CaptureMotionInlineColorGeometry(base,decl,{vdata,vb_size},stride,vertex_count,topology,quads);BeforeMotionColorDraw();command_list_->DrawInstanced(vertex_count, 1, 0, 0);AfterMotionColorDraw();}
+    if (!SkipGpuDraw()) {command_list_->DrawInstanced(vertex_count, 1, 0, 0);}
     // Generated/inline geometry has no attested temporal identity here.
-    CaptureMotionClipDraw(base,dev,topology,false,vertex_count,0,0,
-        D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED,nullptr,nullptr);
   }
   if (surface_probe_) {
     graphics::GeometrySubmission submission{};
@@ -7063,12 +6989,10 @@ void Renderer::ExecBeginTiling(uint8_t* base, uint32_t count, uint32_t rects,
       }
       Transition(other.resource.Get(), other.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
       const auto host_color = graphics::ColorClearValue(other.guest_format, color);
-      InvalidateObjectMotionColor(other);
       command_list_->ClearRenderTargetView(other.view, host_color.data(), 0, nullptr);
     }
   }
   if (ds) {
-    MaybeFinishMotionBeforeDepthWrite(ds,true,"BeginTiling depth clear");
     Transition(ds->resource.Get(), ds->state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
     command_list_->ClearDepthStencilView(ds->view, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
                                          std::clamp(clear_z, 0.0f, 1.0f), uint8_t(clear_stencil),
@@ -7173,6 +7097,11 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
       base, Load32(base, dev + (depth ? kDevDepthStencil : kDevRenderTargets + 4 * source)), depth);
   if (!src) return;
   ++stats_.resolves;
+  if (depth) {
+    DlssOnDepthResolve(*src);
+  } else {
+    DlssOnColorResolve(*src);
+  }
   {
     const int want = REXCVAR_GET(sr_native_dump_before_resolve);
     const int index = resolve_in_frame_++;
@@ -7181,7 +7110,6 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
         compat::BenchElapsedMs() >= REXCVAR_GET(sr_native_dump_frame_at_s) * 1000.0 && frame_open_) {
       command_list_->Close();
       ID3D12CommandList* lists[] = {command_list_.Get()};
-      BeforeVisibleRaySubmit();
       queue_->ExecuteCommandLists(1, lists);
       queue_->Signal(fence_.Get(), next_fence_value_++);
       DumpFrameResources(fmt::format("r{}_", index), true);
@@ -7246,6 +7174,10 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
     // formats only allow whole-subresource copies; the shadow atlas needs
     // region copies at a destination point).
     DXGI_FORMAT dst_format = depth ? DXGI_FORMAT_R32_FLOAT : src->resource_format;
+    // DLSS's upscaled scene: the texture at the output scale, filled from it.
+    ID3D12Resource* const dlss_source = depth ? nullptr : dlss_resolve_source_;
+    dlss_resolve_source_ = nullptr;
+    const float dst_scale = dlss_source ? render_scale_ : src->scale;
     // The same guest memory is resolved at different sizes within a frame (e.g.
     // downsample chains): one host texture per size, never recreated per frame.
     uint64_t resolve_key = (uint64_t(dest_base) << 32) | (uint32_t(dst_format) & 0xFF) |
@@ -7260,7 +7192,7 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
     ResolveTexture& dst = resolve_textures_[resolve_key];
     std::memcpy(dst.guest_fetch, fetch, sizeof(fetch));
     if (!dst.resource || dst.width != dest_w || dst.height != dest_h ||
-        dst.scale != src->scale || dst.layers!=layers || dst.stacked_volume!=volume) {
+        dst.scale != dst_scale || dst.layers!=layers || dst.stacked_volume!=volume) {
       Retire(dst.resource);
       for (auto& [mapping, index] : dst.srv_by_mapping) RetireSrvIndex(index);
       D3D12_CPU_DESCRIPTOR_HANDLE rtv = dst.rtv, raw_rtv = dst.raw_rtv;
@@ -7274,7 +7206,7 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
       dst.height = dest_h;
       dst.layers = layers;
       dst.stacked_volume = volume;
-      dst.scale = src->scale;
+      dst.scale = dst_scale;
       dst.shadow = src->shadow;
       ++stats_.resolve_textures_created;
       dst.format = dst_format;
@@ -7297,7 +7229,6 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
         resolve_latest_.erase(dest_base);
         return;
       }
-      dst.motion_lifetime=++object_motion_lifetime_;
       if(volume) {
         // Initialize every slice, including padding slices not written by the game.
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
@@ -7375,7 +7306,7 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
     if (dy + (y2 - y1) > dest_h) y2 = y1 + (dest_h - std::min(dest_h, dy));
     if (x2 > x1 && y2 > y1 && REXCVAR_GET(sr_native_debug_resolve_mode) != 1) {
       // Guest pixels -> host pixels.
-      const float k = src->scale;
+      const float k = dst_scale;  // the source's scale, or the output's for DLSS's scene
       x1 = HostPx(x1, k);
       y1 = HostPx(y1, k);
       x2 = HostPx(x2, k);
@@ -7392,12 +7323,10 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
       d.pResource = dst.resource.Get();
       d.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
       D3D12_BOX box{x1, y1, 0, x2, y2, 1};
-      if(motion_capture_active_ && !motion_continuous_ && motion_capture_phase_==2) {
-        dst.motion_source_frame=dst.motion_source_serial=dst.motion_source_resource=0;
-        dst.motion_full_color_copy=false;
-      }
-      if(motion_continuous_) object_motion_lineage_.Invalidate(reinterpret_cast<uintptr_t>(dst.resource.Get()));
-      if (depth) {
+      if (dlss_source) {
+        s.pResource = dlss_source;  // left in COPY_SOURCE by DlssOnColorResolve
+        command_list_->CopyTextureRegion(&d, dx, dy, 0, &s, &box);
+      } else if (depth) {
         CopyDepthRegion(*src, dst, x1, y1, x2, y2, dx, dy);
         // The scene depth (not a shadow map) for soft particles later in the frame.
         if (!dst.shadow && dest_w >= 512) scene_depth_key_ = resolve_key;
@@ -7413,31 +7342,8 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
         Breadcrumb("msaa resolve");
       } else {
         command_list_->CopyTextureRegion(&d, dx, dy, volume?stack_plan->destination_z:0, &s, &box);
-        if(motion_continuous_) {
-          dst.motion_write_serial=++motion_color_serial_;dst.motion_write_frame=frame_count_+1;
-          const auto description=dst.resource->GetDesc();
-          const graphics::MotionContentVersion version{reinterpret_cast<uintptr_t>(dst.resource.Get()),
-              dst.motion_lifetime,dst.motion_write_frame,dst.motion_write_serial,uint32_t(description.Width),description.Height};
-          const bool full=!volume && !x1 && !y1 && !dx && !dy &&
-              x2==HostPx(src->width,src->scale) && y2==HostPx(src->height,src->scale) &&
-              x2==description.Width && y2==description.Height;
-          object_motion_lineage_.Propagate(MotionVersion(*src),version,full);
-          if(CaptureObjectMotionFrame())
-            REXLOG_INFO("native motion lineage copy: source={:X}/{} lifetime={} destination={:X}/{} full={} ticket={}",
-                reinterpret_cast<uintptr_t>(src->resource.Get()),src->motion_write_serial,src->motion_lifetime,
-                version.resource,version.serial,full,bool(object_motion_lineage_.Find(version)));
-        }
         if(volume && trace_state_==1)
           REXLOG_INFO("trace stacked resolve base={:08X} mip={} slice={} host_z={} layers={}",dest_base,level,slice,stack_plan->destination_z,layers);
-        if(motion_capture_active_ && !motion_continuous_ && motion_capture_phase_==2) {
-          dst.motion_source_frame=src->motion_write_frame;dst.motion_source_serial=src->motion_write_serial;
-          dst.motion_source_resource=reinterpret_cast<uint64_t>(src->resource.Get());
-          dst.motion_full_color_copy=!volume && !x1 && !y1 && !dx && !dy &&
-              x2==HostPx(src->width,src->scale) && y2==HostPx(src->height,src->scale) &&
-              x2==HostPx(dst.width,dst.scale) && y2==HostPx(dst.height,dst.scale);
-          if(motion_scene_finished_ && motion_color_reports_<64)
-            REXLOG_INFO("native motion color copy: host_frame={} serial={} source={:X} destination={:X} source_frame={} source_draw={} full={} rect={}x{}+{},{} destination_xy={},{}",frame_count_+1,++motion_color_serial_,dst.motion_source_resource,reinterpret_cast<uint64_t>(dst.resource.Get()),dst.motion_source_frame,dst.motion_source_serial,dst.motion_full_color_copy,x2-x1,y2-y1,x1,y1,dx,dy);
-        }
         Breadcrumb("color resolve");
       }
       Transition(dst.resource.Get(), dst.state,
@@ -7488,7 +7394,6 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
         }
         Transition(other.resource.Get(), other.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
         const auto host_color = graphics::ColorClearValue(other.guest_format, color);
-        InvalidateObjectMotionColor(other);
         command_list_->ClearRenderTargetView(other.view, host_color.data(), 1, &r);
       }
       if(coop_pair_.next) {coop_cleared_source_=rt;coop_cleared_stamp_=rt->last_write;}
@@ -7510,7 +7415,6 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
                       g_current_pass, swap_number_);
         }
       }
-      MaybeFinishMotionBeforeDepthWrite(ds,true,"resolve depth clear");
       Transition(ds->resource.Get(), ds->state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
       command_list_->ClearDepthStencilView(ds->view,
                                            D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
@@ -7783,477 +7687,40 @@ void Renderer::ReportCapturedRayProbe(uint32_t slot) {
               count,hits,count-hits);
 }
 
-#include "native_visible_rt.inc"
-
-void Renderer::BeginRayShadows() {
-  HarvestRayShadowExecution();
-  graphics_frame_request_=graphics::SharedGraphicsOptions()->Snapshot();
-  BeginVisibleRayFrame();
-  rt_shadow_built_=rt_shadow_attempted_=rt_shadow_draw_active_=rt_shadow_counter_recorded_=false;
-  rt_shadow_character_built_=false;
-  // The primary family gates readiness; the others join as their variants finish.
-  if(ray_tracing_capable_ && rt_shadow_wave_capable_ && rt_shadow_shaders_.empty()) {
-    std::vector<uint8_t> dxil;
-    constexpr uint64_t kPrimary=0x8A6DD1D52752FAD6ull;
-    if(ShaderTranslator::Get().FetchRtShadowVariant(kPrimary,dxil)==TranslateState::kReady) {
-      REXLOG_INFO("native RT shadow shader ready: {} bytes; original lighting family specialization",dxil.size());
-      rt_shadow_shaders_.emplace(kPrimary,std::move(dxil));
-    }
-  }
-  rt_shadow_requested_=graphics_frame_request_.requested[0]==1 && ray_tracing_capable_ &&
-      rt_shadow_wave_capable_ && !rt_shadow_shaders_.empty() && REXCVAR_GET(sr_native_pm4_mirror);
-  if(!rt_shadow_requested_) return;
-  auto buffer=[&](uint64_t bytes,D3D12_HEAP_TYPE type,D3D12_RESOURCE_STATES state,
-                  D3D12_RESOURCE_FLAGS flags,ComPtr<ID3D12Resource>& resource) {
-    D3D12_HEAP_PROPERTIES heap{};heap.Type=type;
-    D3D12_RESOURCE_DESC d{};d.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;d.Width=bytes;
-    d.Height=1;d.DepthOrArraySize=d.MipLevels=1;d.SampleDesc.Count=1;
-    d.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;d.Flags=flags;
-    return device_->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&d,state,nullptr,IID_PPV_ARGS(&resource));
-  };
-  HRESULT hr=S_OK;
-  if(!rt_shadow_zero_) {
-    hr=buffer(4,D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ,D3D12_RESOURCE_FLAG_NONE,rt_shadow_zero_);
-    void* mapped=nullptr; const D3D12_RANGE empty{0,0};
-    if(SUCCEEDED(hr)) hr=rt_shadow_zero_->Map(0,&empty,&mapped);
-    if(SUCCEEDED(hr)) {std::memset(mapped,0,4);rt_shadow_zero_->Unmap(0,nullptr);}
-    else rt_shadow_zero_.Reset();
-  }
-  if(SUCCEEDED(hr) && !rt_shadow_counter_[frame_index_])
-    hr=buffer(4,D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,rt_shadow_counter_[frame_index_]);
-  if(SUCCEEDED(hr) && !rt_shadow_counter_readback_[frame_index_])
-    hr=buffer(4,D3D12_HEAP_TYPE_READBACK,D3D12_RESOURCE_STATE_COPY_DEST,
-        D3D12_RESOURCE_FLAG_NONE,rt_shadow_counter_readback_[frame_index_]);
-  if(FAILED(hr)) {REXLOG_ERROR("native RT shader counter unavailable {:08X}",uint32_t(hr));rt_shadow_requested_=false;return;}
-  Transition(rt_shadow_counter_[frame_index_].Get(),rt_shadow_counter_state_[frame_index_],D3D12_RESOURCE_STATE_COPY_DEST);
-  command_list_->CopyBufferRegion(rt_shadow_counter_[frame_index_].Get(),0,rt_shadow_zero_.Get(),0,4);
-  Transition(rt_shadow_counter_[frame_index_].Get(),rt_shadow_counter_state_[frame_index_],D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-}
-
-void Renderer::BuildRayShadowScene() {
-  using namespace graphics::d3d12;
-  rt_shadow_attempted_=true;
-  if(!post_vertex_capture_ || !post_vertex_caster_valid_ || post_vertex_light_conflict_) return;
-  const auto& ranges=post_vertex_capture_->ranges();
-  if(ranges.empty() || post_vertex_capture_->dropped()) return;
-  for(const auto& range:ranges) if(!graphics::IsOriginalShadowCaster(range.vs)) return;
-  post_vertex_capture_->Finish(command_list_.Get(),false);
-  post_vertex_active_=false;
-  if(!rt_shadow_scene_) {
-    auto scene=std::make_unique<RayTracingScene>();
-    const HRESULT hr=scene->Initialize(device_);
-    if(FAILED(hr)) {REXLOG_WARN("native RT shadows initialization failed: {}",scene->LastError());return;}
-    rt_shadow_scene_=std::move(scene);
-  }
-  // One BLAS per class so the instance mask can exclude character casters.
-  std::vector<RayTracingGeometry> geometry;
-  const auto add_class=[&](bool character) {
-    RayTracingGeometry group{post_vertex_capture_->vertices()};
-    group.character=character;
-    for(const auto& range:ranges) {
-      if(graphics::IsCharacterShadowCaster(range.vs)!=character || !range.vertices) continue;
-      if(!group.vertex_count) {group.offset=range.offset;group.vertex_count=range.vertices;}
-      else group.more.push_back({range.offset,range.vertices});
-    }
-    if(group.vertex_count) geometry.push_back(std::move(group));
-  };
-  add_class(false);
-  add_class(true);
-  if(geometry.empty()) return;
-  HRESULT hr=rt_shadow_scene_->BeginFrame(frame_index_);
-  if(SUCCEEDED(hr)) hr=rt_shadow_scene_->BuildScene(command_list_.Get(),geometry);
-  if(FAILED(hr)) {REXLOG_WARN("native RT shadows scene failed: {}",rt_shadow_scene_->LastError());return;}
-  rt_shadow_built_=true;
-  rt_shadow_character_built_=geometry.back().character;
-}
-
-bool Renderer::ConfigureRayShadowDraw(uint8_t* base,uint32_t dev,uint64_t vs,uint64_t ps) {
-  // Only color-producing scene draws can contribute to the applied effect.
-  // A depth-only invocation must not count as an active visual RT shadow.
-  if(!bound_rts_[0] || bound_rts_[0]->guest_format!=12 ||
-     !(LoadReg(base,dev,rex::graphics::XE_GPU_REG_RB_COLOR_MASK)&7u)) return false;
-  const bool standalone=visible_ray_requested_;
-  if(!rt_shadow_requested_ || (!standalone && (!rt_shadow_built_ || !rt_shadow_scene_ || !rt_shadow_scene_->AccelerationStructure())) ||
-     (!standalone && vs!=0x2C45BFFE76D77398ull) || !graphics::IsRtShadowShader(ps) ||
-     (!standalone && post_vertex_light_conflict_)) return false;
-  auto variant=rt_shadow_shaders_.find(ps);
-  if(variant==rt_shadow_shaders_.end()) {
-    std::vector<uint8_t> dxil;
-    if(ShaderTranslator::Get().FetchRtShadowVariant(ps,dxil)!=TranslateState::kReady) return false;
-    variant=rt_shadow_shaders_.emplace(ps,std::move(dxil)).first;
-    REXLOG_INFO("native RT shadow variant ready: ps={:016X} {} bytes",ps,variant->second.size());
-  }
-  const auto& words=mirror_.FloatConstants(false);
-  graphics::ShadowProjection projection;
-  std::memcpy(projection.u.data(),words.data()+9*4,16);
-  std::memcpy(projection.v.data(),words.data()+10*4,16);
-  std::memcpy(projection.z.data(),words.data()+11*4,16);
-  if(!standalone && !graphics::ShadowProjectionsMatch(projection,post_vertex_caster_projection_)) return false;
-  const auto direction=graphics::ShadowRayDirection(projection);
-  rt_shadow_constants_={};
-  std::memcpy(rt_shadow_constants_.light,direction.xyz.data(),sizeof(rt_shadow_constants_.light));
-  rt_shadow_constants_.enabled=standalone ? 0 : 1;rt_shadow_constants_.bias=.05f;rt_shadow_constants_.max_distance=10000;
-  const bool high=graphics_frame_request_.requested[1]==2;
-  rt_shadow_constants_.cone=high ? .01f : .003f;rt_shadow_constants_.samples=high ? 16 : 4;
-  rt_shadow_constants_.mask=graphics_frame_request_.requested[2]==1 ? 3 : 1;
-  rt_shadow_constants_.padding[0]=!visible_ray_requested_ && graphics_frame_request_.requested[3]==1 ? 1 : 0;
-  rt_shadow_constants_.padding[1]=0; // Committed only after this frame records its replacement successfully. // g_SrRtReflectEnabled
-  rt_shadow_variant_=&variant->second;
-  return true;
-}
-
-void Renderer::RecordRayShadowCounter() {
-  if(!rt_shadow_requested_ || !rt_shadow_counter_[frame_index_] || !rt_shadow_counter_readback_[frame_index_]) return;
-  Transition(rt_shadow_counter_[frame_index_].Get(),rt_shadow_counter_state_[frame_index_],D3D12_RESOURCE_STATE_COPY_SOURCE);
-  command_list_->CopyBufferRegion(rt_shadow_counter_readback_[frame_index_].Get(),0,rt_shadow_counter_[frame_index_].Get(),0,4);
-  rt_shadow_counter_recorded_=true;
-}
-
-void Renderer::HarvestRayShadowExecution() {
-  if(!fence_) return;
-  const uint64_t completed=fence_->GetCompletedValue();
-  if(completed==UINT64_MAX) return;
-  const auto previous=rt_shadow_execution_.Latest();
-  for(uint32_t slot=0;slot<3;++slot) {
-    const auto ticket=rt_shadow_execution_.Pending(slot);
-    if(!ticket.fence || ticket.fence>completed) continue;
-    uint32_t pixels=0;
-    if(ticket.counter_recorded && rt_shadow_counter_readback_[slot]) {
-      const D3D12_RANGE range{0,4};void* mapped=nullptr;
-      if(SUCCEEDED(rt_shadow_counter_readback_[slot]->Map(0,&range,&mapped))) {
-        std::memcpy(&pixels,mapped,4);
-        const D3D12_RANGE empty{0,0};rt_shadow_counter_readback_[slot]->Unmap(0,&empty);
-      }
-    }
-    rt_shadow_execution_.Complete(slot,completed,pixels);
-  }
-  const auto result=rt_shadow_execution_.Latest();
-  if(result.applied!=previous.applied || (result.applied[0] && result.frame%120==0))
-    REXLOG_INFO("native RT shadows executed: frame={} revision={} shader_pixels={} applied={} softness={} fence_completed=true (mapped lighting family; original fallback elsewhere)",
-        result.frame,result.revision,result.pixels,result.applied[0],result.applied[1]);
-}
-
-bool Renderer::CreateDlssPipelines(const D3D12_GRAPHICS_PIPELINE_STATE_DESC& blit) {
-  const auto serialize=[&](const D3D12_ROOT_SIGNATURE_DESC& desc,ComPtr<ID3D12RootSignature>& root) {
-    ComPtr<ID3DBlob> blob,error;
-    return SUCCEEDED(D3D12SerializeRootSignature(&desc,D3D_ROOT_SIGNATURE_VERSION_1,&blob,&error)) &&
-           SUCCEEDED(device_->CreateRootSignature(0,blob->GetBufferPointer(),blob->GetBufferSize(),IID_PPV_ARGS(&root)));
-  };
-  // Three separate tables: AllocSrvIndex gives no contiguous indices.
-  const auto table=[](D3D12_ROOT_PARAMETER& parameter,D3D12_DESCRIPTOR_RANGE& range,
-                      D3D12_DESCRIPTOR_RANGE_TYPE type,UINT shader_register,D3D12_SHADER_VISIBILITY visibility) {
-    range={};range.RangeType=type;range.NumDescriptors=1;range.BaseShaderRegister=shader_register;
-    parameter={};parameter.ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    parameter.DescriptorTable.NumDescriptorRanges=1;parameter.DescriptorTable.pDescriptorRanges=&range;
-    parameter.ShaderVisibility=visibility;
-  };
-  D3D12_DESCRIPTOR_RANGE ranges[7];
-  D3D12_ROOT_PARAMETER parameters[8]{};
-  table(parameters[0],ranges[0],D3D12_DESCRIPTOR_RANGE_TYPE_SRV,0,D3D12_SHADER_VISIBILITY_ALL);
-  table(parameters[1],ranges[1],D3D12_DESCRIPTOR_RANGE_TYPE_UAV,0,D3D12_SHADER_VISIBILITY_ALL);
-  table(parameters[2],ranges[2],D3D12_DESCRIPTOR_RANGE_TYPE_UAV,1,D3D12_SHADER_VISIBILITY_ALL);
-  parameters[3].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-  parameters[3].Constants.Num32BitValues=sizeof(DlssMotionConstants)/4;
-  D3D12_ROOT_SIGNATURE_DESC desc{};
-  table(parameters[4],ranges[3],D3D12_DESCRIPTOR_RANGE_TYPE_SRV,1,D3D12_SHADER_VISIBILITY_ALL);
-  table(parameters[5],ranges[4],D3D12_DESCRIPTOR_RANGE_TYPE_SRV,2,D3D12_SHADER_VISIBILITY_ALL);
-  table(parameters[6],ranges[5],D3D12_DESCRIPTOR_RANGE_TYPE_UAV,2,D3D12_SHADER_VISIBILITY_ALL);
-  table(parameters[7],ranges[6],D3D12_DESCRIPTOR_RANGE_TYPE_SRV,3,D3D12_SHADER_VISIBILITY_ALL);
-  desc.NumParameters=8;desc.pParameters=parameters;
-  if(!serialize(desc,dlss_motion_root_)) return false;
-  D3D12_COMPUTE_PIPELINE_STATE_DESC compute{};
-  compute.pRootSignature=dlss_motion_root_.Get();
-  compute.CS={kDlssDepthMotionCS,sizeof(kDlssDepthMotionCS)};
-  PipelineCache::RecordRuntimeCreate();
-  if(FAILED(device_->CreateComputePipelineState(&compute,IID_PPV_ARGS(&dlss_motion_pipeline_)))) return false;
-
-  table(parameters[0],ranges[0],D3D12_DESCRIPTOR_RANGE_TYPE_SRV,0,D3D12_SHADER_VISIBILITY_PIXEL);
-  table(parameters[1],ranges[1],D3D12_DESCRIPTOR_RANGE_TYPE_SRV,1,D3D12_SHADER_VISIBILITY_PIXEL);
-  table(parameters[2],ranges[2],D3D12_DESCRIPTOR_RANGE_TYPE_SRV,2,D3D12_SHADER_VISIBILITY_PIXEL);
-  parameters[3]={};parameters[3].ParameterType=D3D12_ROOT_PARAMETER_TYPE_CBV;
-  parameters[3].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
-  desc.NumParameters=4;
-  D3D12_STATIC_SAMPLER_DESC sampler{};
-  sampler.Filter=D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-  sampler.AddressU=sampler.AddressV=sampler.AddressW=D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-  sampler.MaxLOD=D3D12_FLOAT32_MAX;sampler.ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
-  desc.NumStaticSamplers=1;desc.pStaticSamplers=&sampler;
-  if(!serialize(desc,dlss_composite_root_)) return false;
-  auto composite=blit;
-  composite.pRootSignature=dlss_composite_root_.Get();
-  composite.PS={kDlssCompositePS,sizeof(kDlssCompositePS)};
-  PipelineCache::RecordRuntimeCreate();
-  return SUCCEEDED(device_->CreateGraphicsPipelineState(&composite,IID_PPV_ARGS(&dlss_composite_pipeline_)));
-}
-
-bool Renderer::EnsureDlssResources(const HostSurface& scene) {
-  auto& slot=dlss_slots_[frame_index_];
-  const auto format=scene.resource->GetDesc().Format;
-  if(slot.color && slot.color->GetDesc().Format==format) return true;
-  if(slot.ticket) return false;  // Resources of a pending evaluation stay alive.
-  D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;
-  const auto create=[&](ComPtr<ID3D12Resource>& resource,DXGI_FORMAT resource_format,uint32_t width,uint32_t height,
-                        D3D12_RESOURCE_FLAGS flags,D3D12_RESOURCE_STATES state) {
-    D3D12_RESOURCE_DESC d{};d.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;d.Width=width;d.Height=height;
-    d.DepthOrArraySize=d.MipLevels=1;d.Format=resource_format;d.SampleDesc.Count=1;d.Flags=flags;
-    return SUCCEEDED(device_->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&d,state,nullptr,IID_PPV_ARGS(&resource)));
-  };
-  const auto uav=D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-  slot.color_state=D3D12_RESOURCE_STATE_COPY_DEST;
-  slot.rejection_state=slot.output_state=slot.motion_state=slot.depth_state=D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-  if(!create(slot.color,format,dlss_render_width_,dlss_render_height_,D3D12_RESOURCE_FLAG_NONE,slot.color_state) ||
-     !create(slot.output,format,output_width_,output_height_,uav,slot.output_state) ||
-     !create(slot.motion,DXGI_FORMAT_R16G16_FLOAT,dlss_render_width_,dlss_render_height_,uav,slot.motion_state) ||
-     !create(slot.depth,DXGI_FORMAT_R32_FLOAT,dlss_render_width_,dlss_render_height_,uav,slot.depth_state) ||
-     !create(slot.rejection,DXGI_FORMAT_R8_UNORM,dlss_render_width_,dlss_render_height_,uav,slot.rejection_state)) {
-    slot.color.Reset();
-    return false;
-  }
-  if(!slot.color_srv) {
-    slot.color_srv=AllocSrvIndex();slot.output_srv=AllocSrvIndex();slot.depth_in_srv=AllocSrvIndex();
-    slot.motion_uav=AllocSrvIndex();slot.depth_uav=AllocSrvIndex();slot.rejection_uav=AllocSrvIndex();
-  }
-  if(!slot.object_motion_srv) {slot.object_motion_srv=AllocSrvIndex();slot.object_validity_srv=AllocSrvIndex();slot.reactivity_srv=AllocSrvIndex();}
-  const auto cpu=[&](uint32_t index) {
-    return provider_->OffsetViewDescriptor(srv_heap_->GetCPUDescriptorHandleForHeapStart(),index);
-  };
-  D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-  srv.Format=scene.srv_format;srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
-  srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;srv.Texture2D.MipLevels=1;
-  device_->CreateShaderResourceView(slot.color.Get(),&srv,cpu(slot.color_srv));
-  device_->CreateShaderResourceView(slot.output.Get(),&srv,cpu(slot.output_srv));
-  D3D12_UNORDERED_ACCESS_VIEW_DESC view{};view.ViewDimension=D3D12_UAV_DIMENSION_TEXTURE2D;
-  view.Format=DXGI_FORMAT_R16G16_FLOAT;
-  device_->CreateUnorderedAccessView(slot.motion.Get(),nullptr,&view,cpu(slot.motion_uav));
-  view.Format=DXGI_FORMAT_R32_FLOAT;
-  device_->CreateUnorderedAccessView(slot.depth.Get(),nullptr,&view,cpu(slot.depth_uav));
-  view.Format=DXGI_FORMAT_R8_UNORM;
-  device_->CreateUnorderedAccessView(slot.rejection.Get(),nullptr,&view,cpu(slot.rejection_uav));
-  return true;
-}
 
 void Renderer::CompleteGuestDraw() {
   graphics::RecordCacheAuditDraw();
   Breadcrumb();
   HostSurface* completed_scene=bound_rts_[0];
-  if(visible_ray_requested_ && current_ps_hash_==benchmark::kSceneFilterPs && !SkipGpuDraw() && completed_scene) {
-    RecordVisibleRayFrame(*completed_scene);
-    // The original target remains the DLSS color source after our own pass.
-    bound_rts_[0]=completed_scene;
-  }
   // Capture after the scene filter actually draws, before resolves clear the
   // bound targets and before HUD draws (which benchmarks intentionally omit).
-  if(dlss_wanted_ && !dlss_recorded_ && current_ps_hash_==benchmark::kSceneFilterPs && !SkipGpuDraw())
-    RecordDlssFrame();
   if(fxaa_ && graphics_dlss_mode_==0 && current_ps_hash_==benchmark::kSceneFilterPs &&
      !SkipGpuDraw() && bound_rts_[0]) {
     fxaa_scene_applied_=ApplyFxaa(*bound_rts_[0]);
   }
 }
 
-void Renderer::BeginDlssFrame() {
-  if(!dlss_ready_) dlss_history_=false;
-  dlss_wanted_=dlss_recorded_=dlss_ready_=false;
-  dlss_scene_ds_=nullptr;dlss_view_projection_valid_=false;
-  if(!dlss_active_ || !dlss_ || !dlss_motion_pipeline_ || !dlss_composite_pipeline_) return;
-  for(auto& slot:dlss_slots_) {
-    if(!slot.ticket || !slot.submitted) continue;
-    const auto confirmed=dlss_->ConfirmExecution(slot.ticket,fence_.Get(),slot.fence_value);
-    if(confirmed && ++dlss_completed_frames_==1)
-      REXLOG_INFO("native DLSS GPU execution confirmed: ticket={} fence={}",slot.ticket,slot.fence_value);
-    if(confirmed.error!=graphics::d3d12::DlssError::GpuPending) {slot.ticket=0;slot.submitted=false;}
-  }
-  const bool requested=graphics_dlss_mode_>0 && !dlss_failed_ && REXCVAR_GET(sr_native_pm4_mirror);
-  dlss_->SetRequested(requested ? static_cast<graphics::d3d12::DlssRequested>(graphics_dlss_mode_) : graphics::d3d12::DlssRequested::Off);
-  if(!requested) {dlss_history_=false;return;}
-  dlss_wanted_=!dlss_slots_[frame_index_].ticket &&
-      graphics::MakeSceneRasterJitter(dlss_jitter_index_++,dlss_render_width_,dlss_render_height_,true,dlss_jitter_);
-}
-
-void Renderer::RecordDlssFrame() {
-  dlss_recorded_=true;
-  HostSurface* scene=bound_rts_[0];
-  if(object_motion_requested_ && (!scene || !ObjectMotionInputsReady(*scene))) {
-    dlss_history_=false;return;
-  }
-  HostSurface* depth=dlss_scene_ds_;
-  graphics::Matrix4 inverse{};
-  const auto scene_desc=scene ? scene->resource->GetDesc() : D3D12_RESOURCE_DESC{};
-  auto* depth_resource=motion_continuous_ ? motion_depth_snapshot_.Get() : depth ? depth->resource.Get() : nullptr;
-  const auto depth_desc=depth_resource ? depth_resource->GetDesc() : D3D12_RESOURCE_DESC{};
-  const auto& camera=motion_continuous_ ? object_motion_camera_ : dlss_view_projection_;
-  const bool camera_valid=motion_continuous_ ? object_motion_ticket_.frame==frame_count_+1 : dlss_view_projection_valid_;
-  const bool depth_reversed=motion_continuous_ ? object_motion_depth_reversed_ : dlss_depth_reversed_;
-  if(!scene || !depth_resource || !camera_valid || scene->samples!=1 || depth_desc.SampleDesc.Count!=1 ||
-     scene_desc.Width!=dlss_render_width_ || scene_desc.Height!=dlss_render_height_ ||
-     depth_desc.Width!=dlss_render_width_ || depth_desc.Height!=dlss_render_height_ ||
-     !graphics::InvertProjection(camera,inverse) || !EnsureDlssResources(*scene)) {
-    if(++dlss_rejected_frames_==1 || dlss_rejected_frames_%120==0)
-      REXLOG_INFO("native DLSS inputs rejected: scene={}x{} depth={}x{} expected={}x{} camera={} samples={}/{}",
-          scene_desc.Width,scene_desc.Height,depth_desc.Width,depth_desc.Height,dlss_render_width_,dlss_render_height_,
-          camera_valid,scene?scene->samples:0,depth_desc.SampleDesc.Count);
-    dlss_history_=false;
-    return;
-  }
-  auto& slot=dlss_slots_[frame_index_];
-  Transition(scene->resource.Get(),scene->state,D3D12_RESOURCE_STATE_COPY_SOURCE);
-  Transition(slot.color.Get(),slot.color_state,D3D12_RESOURCE_STATE_COPY_DEST);
-  command_list_->CopyResource(slot.color.Get(),scene->resource.Get());
-  Transition(slot.color.Get(),slot.color_state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-
-  auto* depth_input=depth_resource;
-  if(motion_continuous_) Transition(depth_input,object_motion_depth_state_[frame_index_],D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-  else Transition(depth_input,depth->state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-  Transition(slot.motion.Get(),slot.motion_state,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-  Transition(slot.depth.Get(),slot.depth_state,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-  Transition(slot.rejection.Get(),slot.rejection_state,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-  Transition(slot.output.Get(),slot.output_state,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-  const auto cpu_heap=srv_heap_->GetCPUDescriptorHandleForHeapStart();
-  const auto gpu_heap=srv_heap_->GetGPUDescriptorHandleForHeapStart();
-  D3D12_SHADER_RESOURCE_VIEW_DESC depth_srv{};
-  depth_srv.Format=depth_input->GetDesc().Format==DXGI_FORMAT_R32_TYPELESS ? DXGI_FORMAT_R32_FLOAT : DXGI_FORMAT_R24_UNORM_X8_TYPELESS;depth_srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
-  depth_srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;depth_srv.Texture2D.MipLevels=1;
-  device_->CreateShaderResourceView(depth_input,&depth_srv,provider_->OffsetViewDescriptor(cpu_heap,slot.depth_in_srv));
-  const auto object_outputs=motion_continuous_ ? temporal_motion_->Outputs() : graphics::d3d12::TemporalMotionOutputs{};
-  auto object_state=D3D12_RESOURCE_STATE_RENDER_TARGET;
-  auto validity_state=D3D12_RESOURCE_STATE_RENDER_TARGET;
-  if(motion_continuous_) {
-    Transition(object_outputs.velocity,object_state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    Transition(object_outputs.validity,validity_state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-  }
-  auto object_view=depth_srv;object_view.Format=DXGI_FORMAT_R16G16_FLOAT;
-  device_->CreateShaderResourceView(object_outputs.velocity,&object_view,provider_->OffsetViewDescriptor(cpu_heap,slot.object_motion_srv));
-  object_view.Format=DXGI_FORMAT_R8_UINT;
-  device_->CreateShaderResourceView(object_outputs.validity,&object_view,provider_->OffsetViewDescriptor(cpu_heap,slot.object_validity_srv));
-  if(motion_continuous_) Transition(motion_reactive_[frame_index_].mask.Get(),motion_reactive_[frame_index_].state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-  object_view.Format=DXGI_FORMAT_R32_UINT;
-  device_->CreateShaderResourceView(motion_continuous_ ? motion_reactive_[frame_index_].mask.Get() : nullptr,
-      &object_view,provider_->OffsetViewDescriptor(cpu_heap,slot.reactivity_srv));
-  ID3D12DescriptorHeap* heaps[]={srv_heap_.Get(),sampler_heap_.Get()};
-  command_list_->SetDescriptorHeaps(2,heaps);
-  command_list_->SetComputeRootSignature(dlss_motion_root_.Get());
-  command_list_->SetPipelineState(dlss_motion_pipeline_.Get());
-  command_list_->SetComputeRootDescriptorTable(0,provider_->OffsetViewDescriptor(gpu_heap,slot.depth_in_srv));
-  command_list_->SetComputeRootDescriptorTable(1,provider_->OffsetViewDescriptor(gpu_heap,slot.motion_uav));
-  command_list_->SetComputeRootDescriptorTable(2,provider_->OffsetViewDescriptor(gpu_heap,slot.depth_uav));
-  command_list_->SetComputeRootDescriptorTable(4,provider_->OffsetViewDescriptor(gpu_heap,slot.object_motion_srv));
-  command_list_->SetComputeRootDescriptorTable(5,provider_->OffsetViewDescriptor(gpu_heap,slot.object_validity_srv));
-  command_list_->SetComputeRootDescriptorTable(6,provider_->OffsetViewDescriptor(gpu_heap,slot.rejection_uav));
-  command_list_->SetComputeRootDescriptorTable(7,provider_->OffsetViewDescriptor(gpu_heap,slot.reactivity_srv));
-  DlssMotionConstants constants{};
-  constants.object_motion=motion_continuous_ ? 1 : 0;
-  constants.jitter_x=dlss_jitter_.pixel_x;constants.jitter_y=dlss_jitter_.pixel_y;
-  constants.depth_clear=depth_reversed ? 0.f : 1.f;
-  std::memcpy(constants.inverse_current,inverse.data(),sizeof(constants.inverse_current));
-  const auto& previous=motion_continuous_ ? object_motion_previous_camera_ : dlss_history_ ? dlss_previous_view_projection_ : camera;
-  std::memcpy(constants.previous,previous.data(),sizeof(constants.previous));
-  constants.width=float(dlss_render_width_);constants.height=float(dlss_render_height_);
-  if(motion_continuous_ && motion_live_capture_frame_==frame_count_+1 &&
-     REXCVAR_GET(sr_native_debug_observed_skin_motion) && !REXCVAR_GET(sr_native_dump_dir).empty()) {
-    static_assert(sizeof(DlssMotionConstants)==38*sizeof(uint32_t));
-    const auto path=std::filesystem::u8path(REXCVAR_GET(sr_native_dump_dir))/
-        fmt::format("motion_camera_reference_s{}.bin",motion_live_capture_swap_);
-    std::ofstream reference(path,std::ios::binary);
-    const uint32_t header[]{0x4d564352,1,38,0};
-    reference.write(reinterpret_cast<const char*>(header),sizeof(header));
-    reference.write(reinterpret_cast<const char*>(&constants),sizeof(constants));
-  }
-  command_list_->SetComputeRoot32BitConstants(3,sizeof(constants)/4,&constants,0);
-  command_list_->Dispatch((dlss_render_width_+7)/8,(dlss_render_height_+7)/8,1);
-  if(motion_continuous_) {
-    Transition(object_outputs.velocity,object_state,D3D12_RESOURCE_STATE_RENDER_TARGET);
-    Transition(object_outputs.validity,validity_state,D3D12_RESOURCE_STATE_RENDER_TARGET);
-    Transition(depth_input,object_motion_depth_state_[frame_index_],D3D12_RESOURCE_STATE_DEPTH_READ);
-  }
-  Transition(slot.motion.Get(),slot.motion_state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-  Transition(slot.depth.Get(),slot.depth_state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-  Transition(slot.rejection.Get(),slot.rejection_state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-
-  graphics::d3d12::DlssEvaluation evaluation;
-  evaluation.commands=command_list_.Get();
-  evaluation.color=slot.color.Get();evaluation.output=slot.output.Get();
-  evaluation.depth=slot.depth.Get();evaluation.motion=slot.motion.Get();
-  evaluation.rejectionMask=motion_continuous_ ? slot.rejection.Get() : nullptr;
-  evaluation.rejectionMaskState=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-  evaluation.colorState=evaluation.depthState=evaluation.motionState=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-  evaluation.outputState=D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-  auto& frame=evaluation.frame;
-  frame.mode=static_cast<graphics::d3d12::DlssRequested>(graphics_dlss_mode_);
-  frame.renderWidth=dlss_render_width_;frame.renderHeight=dlss_render_height_;
-  frame.outputWidth=output_width_;frame.outputHeight=output_height_;
-  frame.conventionsVerified=frame.colorBeforeHud=frame.rasterJitterApplied=true;
-  frame.motionCameraOnlyAccepted=!motion_continuous_;
-  frame.motionIncludesCameraObjectsAndDeformation=false;
-  frame.motionPartialWithRejectionMask=motion_continuous_;
-  frame.motionJittered=false;
-  frame.depth=depth_reversed ? graphics::d3d12::DlssDepth::Reversed : graphics::d3d12::DlssDepth::Forward;
-  frame.motion=graphics::d3d12::DlssMotion::CurrentToPreviousPixels;
-  frame.hdr=scene_desc.Format==DXGI_FORMAT_R16G16B16A16_FLOAT || scene_desc.Format==DXGI_FORMAT_R11G11B10_FLOAT;
-  frame.jitterX=dlss_jitter_.pixel_x;frame.jitterY=dlss_jitter_.pixel_y;
-  frame.mvScaleX=frame.mvScaleY=1;
-  frame.reset=!dlss_history_;
-  const auto result=dlss_->Evaluate(evaluation);
-  // The compute pass and NGX both replace the guest's root and pipeline state.
-  frame_state_bound_=false;fixed_state_cached_=false;bound_vertex_views_mask_=0;bound_rt_count_=0;
-  bound_ds_=nullptr;std::memset(bound_rts_,0,sizeof(bound_rts_));
-  if(!result) {
-    // A failed SDK call may have recorded commands, so resources stay alive.
-    REXLOG_ERROR("native DLSS evaluation failed: error={} ngx={:08X}; staying on the normal image",
-                 uint32_t(result.error),result.ngxResult);
-    dlss_failed_=true;dlss_history_=false;
-    return;
-  }
-  slot.ticket=result.ticket;slot.submitted=false;
-  if(motion_continuous_) ++object_motion_applied_;
-  if(++dlss_evaluated_frames_==1)
-    REXLOG_INFO("native DLSS evaluation recorded: {}x{} -> {}x{} ticket={}",
-        frame.renderWidth,frame.renderHeight,frame.outputWidth,frame.outputHeight,result.ticket);
-  dlss_previous_view_projection_=camera;
-  dlss_history_=true;dlss_ready_=true;
-}
+#include "native_rt.inc"
 
 void Renderer::PublishGraphicsOptions() {
-  if(dlss_evaluated_frames_ && frame_count_%120==0)
-    REXLOG_INFO("native DLSS frames: evaluated={} completed={} composited={} rejected={} applied={}",
-        dlss_evaluated_frames_,dlss_completed_frames_,dlss_composited_frames_,dlss_rejected_frames_,uint32_t(dlss_->GetStatus().applied));
   auto options=graphics::SharedGraphicsOptions();
   const auto request=options->Snapshot();
   graphics::GraphicsBackendReport report;
-  const auto executed=rt_shadow_execution_.Latest();
-  report.request_revision=executed.revision;
+  report.request_revision=graphics_frame_request_.request_revision;
   report.frame=frame_count_+1;
-  for(size_t i=0;i<4;++i)
-    report.features[i]={false,ray_tracing_capable_,
-        ray_tracing_capable_ ? "Scene geometry and lighting integration pending" : "DXR 1.1 is unavailable on this device"};
-  const bool shadow_ready=ray_tracing_capable_ && rt_shadow_wave_capable_ && !rt_shadow_shaders_.empty() &&
-      REXCVAR_GET(sr_native_pm4_mirror);
-  report.features[0]={shadow_ready,ray_tracing_capable_ && rt_shadow_wave_capable_,
-      shadow_ready ? "Some materials retain original shadows" : "RT lighting shader is not ready"};
-  report.features[1]=report.features[0];
-  report.features[2]={shadow_ready,ray_tracing_capable_ && rt_shadow_wave_capable_,
-      shadow_ready ? "Skinned casters count as characters" : "RT lighting shader is not ready"};
-  report.features[3]={shadow_ready,ray_tracing_capable_ && rt_shadow_wave_capable_,
-      shadow_ready ? "Occlusion only: reflected colors are not traced yet" : "RT lighting shader is not ready"};
-  report.applied=executed.applied;
-  if(executed.revision!=graphics_frame_request_.request_revision)
-    for(size_t row=0;row<4;++row) report.applied[row]=0;
-  if(visible_ray_scene_) {
-    for(size_t row=0;row<4;++row) report.applied[row]=0;
-    for(size_t row=0;row<4;++row) report.features[row]={true,ray_tracing_capable_,
-        "Visible-scene DXR; hit colors use depth-qualified lit scene; opaque geometry only"};
-    if(visible_ray_applied_.revision==graphics_frame_request_.request_revision && visible_ray_applied_.frame) {
-      for(size_t row=0;row<4;++row) report.applied[row]=visible_ray_applied_.requested[row];
-      if(!report.applied[0]) report.applied[1]=report.applied[2]=0;
-    }
-  }
-  const bool dlss_supported=dlss_ && dlss_->GetStatus().support==graphics::d3d12::DlssSupport::Supported;
-  report.features[4]={dlss_supported,dlss_supported,
-      !dlss_supported ? "DLSS SDK support is unavailable" : !dlss_active_ || dlss_failed_ ?
-      "DLSS could not start; see the log" : object_motion_requested_ ? "Object motion: unqualified frames retain raster output" : "Camera motion only: moving objects can ghost"};
-  const int applied_dlss=dlss_ ? int(dlss_->GetStatus().applied) : 0;
-  report.applied[4]=(!object_motion_requested_ || dlss_ready_) && applied_dlss>=2 ? applied_dlss-1 : 0;
-  if(request.requested[0] && !report.applied[0]) report.failure="RT shadows are waiting for a verified shader execution";
+  ReportRtFeatures(report);
+  // DLSS (dlss.cpp): NGX starts at the first scene with a mode on.
+#if SR_HAS_DLSS
+  const bool dlss_capable = !packet_sink_ && !dlss_unavailable_;
+  report.features[4] = {dlss_capable, dlss_capable,
+      packet_sink_ ? "DLSS needs the Direct3D 12 renderer" :
+      dlss_unavailable_ ? "DLSS is unavailable on this GPU or driver; see the log" :
+      "Objects' own motion from the previous frame's draws; the rest from the camera"};
+  report.applied[4] = DlssApplied() ? graphics_dlss_mode_ : 0;
+#else
+  report.features[4] = {false, false, "This build has no NVIDIA DLSS SDK"};
+  report.applied[4] = 0;
+#endif
   AppendGraphicsHostReport(report);
   report.request_revision=graphics_frame_request_.request_revision;
   options->PublishBackend(graphics_options_epoch_,report);
@@ -8268,8 +7735,7 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
     post_vertex_done_=!post_vertex_capture_->ranges().empty();
     post_vertex_active_=false;
   }
-  EndMotionCapture();
-  RecordRayShadowCounter();
+  DlssEndFrame();
   // Blit the resolved front buffer into the output target.
   auto latest = resolve_latest_.find(front_buffer_address);
   auto it = latest != resolve_latest_.end() ? resolve_textures_.find(latest->second)
@@ -8298,22 +7764,10 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
     ID3D12DescriptorHeap* heaps[] = {srv_heap_.Get(), sampler_heap_.Get()};
     command_list_->SetDescriptorHeaps(2, heaps);
     const bool coop_composite=coop_pair_.Ready() && coop_images_[0].resource && coop_images_[1].resource;
-    const bool dlss_composite=dlss_ready_ && !coop_composite;
-    if(dlss_composite && ++dlss_composited_frames_==1) REXLOG_INFO("native DLSS output composited");
-    command_list_->SetGraphicsRootSignature(dlss_composite ? dlss_composite_root_.Get() : blit_root_signature_.Get());
+    command_list_->SetGraphicsRootSignature(blit_root_signature_.Get());
     command_list_->SetGraphicsRootDescriptorTable(
         0, provider_->OffsetViewDescriptor(srv_heap_->GetGPUDescriptorHandleForHeapStart(),
                                            srv_index));
-    if(dlss_composite) {
-      if(!REXCVAR_GET(sr_native_dump_dir).empty() && dlss_composited_frames_==1)
-        REXLOG_INFO("native DLSS presented resolve: address={:08X}",front_buffer_address);
-      auto& slot=dlss_slots_[frame_index_];
-      Transition(slot.color.Get(),slot.color_state,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-      Transition(slot.output.Get(),slot.output_state,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-      const auto heap=srv_heap_->GetGPUDescriptorHandleForHeapStart();
-      command_list_->SetGraphicsRootDescriptorTable(1,provider_->OffsetViewDescriptor(heap,slot.color_srv));
-      command_list_->SetGraphicsRootDescriptorTable(2,provider_->OffsetViewDescriptor(heap,slot.output_srv));
-    }
     // Guest display gamma ramp (Xenos applies it at scan-out; Xenia too).
     UploadAlloc gamma;
     if (Upload(1024 + 16, 256, gamma)) {
@@ -8321,9 +7775,9 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
       if (!GuestGammaRamp256(ramp.data())) ramp.fill(0);
       const auto data=BuildGammaUpload(ramp,REXCVAR_GET(sr_native_gamma_ramp));
       std::memcpy(gamma.cpu,data.data(),sizeof(data));
-      command_list_->SetGraphicsRootConstantBufferView(dlss_composite ? 3 : 1, gamma.gpu);
+      command_list_->SetGraphicsRootConstantBufferView(1, gamma.gpu);
     }
-    command_list_->SetPipelineState(dlss_composite ? dlss_composite_pipeline_.Get() : blit_pipeline_.Get());
+    command_list_->SetPipelineState(blit_pipeline_.Get());
     command_list_->OMSetRenderTargets(1, &output_rtvs_[frame_index_], FALSE, nullptr);
     D3D12_VIEWPORT vp{0, 0, float(output_width_), float(output_height_), 0, 1};
     D3D12_RECT sc{0, 0, LONG(output_width_), LONG(output_height_)};
@@ -8385,7 +7839,6 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
         ProfileEnd();
         command_list_->Close();
         ID3D12CommandList* lists[] = {command_list_.Get()};
-        BeforeVisibleRaySubmit();
       queue_->ExecuteCommandLists(1, lists);
         frame_open_ = false;
         if (own_queue_) {
@@ -8426,7 +7879,6 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
     ProfileEnd();
     command_list_->Close();
     ID3D12CommandList* lists[] = {command_list_.Get()};
-    BeforeVisibleRaySubmit();
       queue_->ExecuteCommandLists(1, lists);
     frame_open_ = false;
   }
@@ -8439,22 +7891,7 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
   pending_texture_retirements_.clear();
   const HRESULT submitted=queue_->Signal(fence_.Get(), next_fence_value_);
   frame_fence_values_[frame_index_] = next_fence_value_;
-  if(SUCCEEDED(submitted) && visible_ray_recorded_)
-    visible_ray_tickets_[frame_index_]={next_fence_value_,frame_count_+1,
-        graphics_frame_request_.request_revision,graphics_frame_request_.requested};
-  if(SUCCEEDED(submitted) && visible_ray_recorded_ && !visible_ray_characters_built_)
-    visible_ray_tickets_[frame_index_].requested[2]=0;
-  if(SUCCEEDED(submitted)) rt_shadow_execution_.Submit(frame_index_,next_fence_value_,frame_count_+1,
-      graphics_frame_request_.request_revision,graphics_frame_request_.requested,rt_shadow_counter_recorded_,
-      rt_shadow_character_built_);
-  if(SUCCEEDED(submitted) && dlss_slots_[frame_index_].ticket && !dlss_slots_[frame_index_].submitted) {
-    auto& slot=dlss_slots_[frame_index_];
-    slot.fence_value=next_fence_value_;slot.submitted=true;
-    const auto notified=dlss_->NotifySubmitted(slot.ticket,fence_.Get(),slot.fence_value);
-    if(!notified) REXLOG_WARN("native DLSS submission rejected: error={}",uint32_t(notified.error));
-  }
   ++next_fence_value_;
-  HarvestRayShadowExecution();
   PublishGraphicsOptions();
   ProfileReport();
   if (dump_all_active_) {
@@ -8492,11 +7929,7 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
       }
       return v;
     }();
-    if (std::find(ab_swaps.begin(), ab_swaps.end(), swap_number_) != ab_swaps.end() ||
-        (motion_live_capture_frame_!=0 && frame_count_+1==motion_live_capture_frame_)) {
-      if (motion_live_capture_frame_!=0 && frame_count_+1==motion_live_capture_frame_)
-        REXLOG_INFO("native motion final capture: frame={} draw_swap={} present_swap={}",
-                    frame_count_+1,motion_live_capture_swap_,swap_number_);
+    if (std::find(ab_swaps.begin(), ab_swaps.end(), swap_number_) != ab_swaps.end()) {
       DumpFrameResources(fmt::format("s{:06}_", swap_number_), false, true);
     }
   }
@@ -8779,7 +8212,6 @@ void Renderer::ExecOnPassEnd(int pass) {
     dump_all_active_ = true;
     command_list_->Close();
     ID3D12CommandList* lists[] = {command_list_.Get()};
-    BeforeVisibleRaySubmit();
       queue_->ExecuteCommandLists(1, lists);
     queue_->Signal(fence_.Get(), next_fence_value_++);
     DumpFrameResources(fmt::format("p{:02}_", pass), true);
@@ -8809,7 +8241,6 @@ void Renderer::ExecOnPassEnd(int pass) {
   // Submit what the frame recorded so far, dump, then continue recording.
   command_list_->Close();
   ID3D12CommandList* lists[] = {command_list_.Get()};
-  BeforeVisibleRaySubmit();
       queue_->ExecuteCommandLists(1, lists);
   queue_->Signal(fence_.Get(), next_fence_value_++);
   DumpFrameResources();
@@ -8859,7 +8290,6 @@ void Renderer::WatchHdr(uint32_t index) {
   order_srv_leases();
   command_list_->Close();
   ID3D12CommandList* lists[] = {command_list_.Get()};
-  BeforeVisibleRaySubmit();
       queue_->ExecuteCommandLists(1, lists);
   queue_->Signal(fence_.Get(), next_fence_value_);
   fence_->SetEventOnCompletion(next_fence_value_, fence_event_);
@@ -8904,7 +8334,6 @@ void Renderer::WatchHdr(uint32_t index) {
   Transition(res, *state, old_state);
   command_list_->Close();
   ID3D12CommandList* copy_lists[] = {command_list_.Get()};
-  BeforeVisibleRaySubmit();
       queue_->ExecuteCommandLists(1, copy_lists);
   queue_->Signal(fence_.Get(), next_fence_value_);
   fence_->SetEventOnCompletion(next_fence_value_, fence_event_);
@@ -9010,11 +8439,6 @@ void Renderer::DumpFrameResources(const std::string& prefix, bool surfaces_only,
   if (!surfaces_only && !output_only && ssao_ao_) {
     items.push_back({"ssao_ao", ssao_ao_.Get(), &ssao_ao_state_});
   }
-  if(!surfaces_only && dlss_ready_) {
-    auto& slot=dlss_slots_[frame_index_];
-    if(slot.color) items.push_back({"dlss_scene",slot.color.Get(),&slot.color_state});
-    if(slot.output) items.push_back({"dlss_upscaled",slot.output.Get(),&slot.output_state});
-  }
   if (REXCVAR_GET(sr_native_debug_texture_format) >= 0 && !surfaces_only) {
     for (auto& [key, te] : textures_) {
       if (!te.resource || te.guest_format != uint32_t(REXCVAR_GET(sr_native_debug_texture_format))) continue;
@@ -9081,7 +8505,6 @@ void Renderer::DumpFrameResources(const std::string& prefix, bool surfaces_only,
     Transition(item.resource, *item.state, old_state);
     command_list_->Close();
     ID3D12CommandList* lists[] = {command_list_.Get()};
-    BeforeVisibleRaySubmit();
       queue_->ExecuteCommandLists(1, lists);
     queue_->Signal(fence_.Get(), next_fence_value_);
     fence_->SetEventOnCompletion(next_fence_value_, fence_event_);
@@ -9232,8 +8655,6 @@ void Renderer::BeginCmd(Op op) {
   if (!batch_) batch_ = std::make_unique<WorkBatch>();
   cur_ = WorkCmd{};
   cur_.op = op;
-  if(op==Op::kDraw || op==Op::kDrawIndexed || op==Op::kDrawInline)
-    cur_.observed_render=CaptureInstanceProbeInvocation(guest_base_);
   cur_.command_serial = ++capture_serial_;
   cur_.tiling_active = capture_tiling_active_;
   cur_.packet_check = (!worker_stop_ && bool(packet_sink_)) || (REXCVAR_GET(sr_native_packet_check) && graphics::guest::IsCaptureFrame(
@@ -10093,20 +9514,6 @@ void Renderer::DrawIndexedVertices(uint8_t* base, uint32_t prim, int32_t base_ve
   }
   index_scope.Stop();
   cur_.streams_ok = PlanStreams(base, dev, Load32(base, dev + kDevVertexDecl), &draw_range);
-  // Capture the exact normalized index envelope while this
-  // guest draw owns its input, never scan live guest indices on the worker.
-  // Continuous motion/DXR need this proof even without a diagnostic trigger.
-  // DrawIndexed u6/u7 are otherwise unused; zero/zero means unverified.
-  const bool needs_motion_envelope=!packet_sink_ &&
-      ((REXCVAR_GET(sr_native_object_motion) && REXCVAR_GET(sr_dlss)!="off") || REXCVAR_GET(sr_rt_shadows) ||
-       REXCVAR_GET(sr_rt_reflections) || !REXCVAR_GET(sr_native_motion_capture_trigger_path).empty());
-  if(needs_motion_envelope && cur_.has_index &&
-     uint64_t(start_index)+index_count<=uint64_t(draw_range.ib_size)/(draw_range.index32?4u:2u)) {
-    draw_range.Resolve();
-    if(draw_range.first<draw_range.end && draw_range.end<=0x1000000u) {
-      cur_.u[6]=draw_range.first;cur_.u[7]=draw_range.end;
-    }
-  }
   EndCmd(base);
 }
 
@@ -10236,7 +9643,6 @@ void Renderer::ExecClear(uint8_t* base, uint32_t count, uint32_t rects, uint32_t
         Transition(other.resource.Get(), other.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
         std::vector<D3D12_RECT> scaled = ScaleRects(rs, other.scale);
         const auto host_color = graphics::ColorClearValue(other.guest_format, color);
-        InvalidateObjectMotionColor(other);
         command_list_->ClearRenderTargetView(other.view, host_color.data(), nrs, nrs ? scaled.data() : nullptr);
         MarkWritten(&other);
       }
@@ -10249,7 +9655,6 @@ void Renderer::ExecClear(uint8_t* base, uint32_t count, uint32_t rects, uint32_t
     HostSurface* rt0 = GetSurface(base, Load32(base, dev + kDevRenderTargets), false);
     if (HostSurface* ds = GetSurface(base, Load32(base, dev + kDevDepthStencil), true,
                                      rt0 ? rt0->width : 0, rt0 ? rt0->height : 0)) {
-      MaybeFinishMotionBeforeDepthWrite(ds,(ds_flags&D3D12_CLEAR_FLAG_DEPTH)!=0,"explicit depth clear");
       Transition(ds->resource.Get(), ds->state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
       std::vector<D3D12_RECT> scaled = ScaleRects(rs, ds->scale);
       command_list_->ClearDepthStencilView(ds->view, ds_flags, std::clamp(z, 0.0f, 1.0f),

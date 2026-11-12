@@ -23,10 +23,6 @@ struct ShaderTranslationAudit {
   uint64_t compile_started = 0, compile_failed = 0, disk_hits = 0, fetch_not_ready = 0;
 };
 
-struct ShaderPrewarmResult {
-  uint32_t offered = 0, ready = 0, failed = 0, pending = 0;
-};
-
 enum class TranslateState {
   kUnknown,  // no container was ever offered for this hash
   kPending,  // queued or being translated
@@ -49,35 +45,10 @@ class ShaderTranslator {
   // translation that is still running; `state` says why `dxil` stayed empty.
   TranslateState Fetch(uint64_t hash, bool vertex, std::vector<uint8_t>& dxil);
 
-  // Audited RT pixel variant, automatically offered by Offer for its PS.
-  // Never waits, reads disk, or initializes tools on the renderer's Fetch path.
-  TranslateState FetchRtShadowVariant(uint64_t ps_hash, std::vector<uint8_t>& dxil);
-
-  // Registry path when a pre-shader supplies the base: use its ORIGINAL
-  // container without scheduling another base translation.
-  void OfferRtShadowVariant(uint64_t ps_hash, const uint8_t* container, size_t size);
-
-  // Original color/alpha/discard plus a current-draw owner MRT. This variant
-  // proves fragment coverage only, never previous-frame object identity.
-  void OfferPixelCoverageVariant(uint64_t ps_hash, const uint8_t* container, size_t size);
-  TranslateState FetchPixelCoverageVariant(uint64_t ps_hash, std::vector<uint8_t>& dxil);
-
-  TranslateState FetchRtCoverageVariant(uint64_t hash, std::vector<uint8_t>& dxil);
-
   // The on-disk cache only, never waits (pipeline cache precompilation).
   bool LoadCached(uint64_t hash, bool vertex, std::vector<uint8_t>& dxil);
 
-  // Startup only: offer all supported ORIGINAL PS containers and wait until
-  // their workers finish. This can launch compilers; call before measured
-  // gameplay. A finite timeout or unsupported tools remain visible failures.
-  ShaderPrewarmResult PrewarmVariants(const ShaderLibrary& library,
-      bool rt_shadow, bool pixel_coverage, uint32_t timeout_ms = 210000);
-
-  // Pipeline-cache worker only: wait for a prewarmed variant, with no new Offer.
-  // variant uses the CNPS v2 domain (1 RT shadow, 2 motion coverage, 3 combined).
-  bool LoadPrewarmedVariant(uint64_t hash, uint32_t variant, std::vector<uint8_t>& dxil);
-
-  // Cumulative process counters across base/RT/coverage workers. Disk hits are
+  // Cumulative process counters of the translation workers. Disk hits are
   // separate from compiler attempts; snapshots can delimit a measured route.
   static ShaderTranslationAudit AuditSnapshot();
 

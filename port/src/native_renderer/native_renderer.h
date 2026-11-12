@@ -67,20 +67,12 @@
 #include "../graphics/post_vertex_geometry.h"
 #include "../graphics/shadow_projection.h"
 #include "../graphics/shadow_caster_geometry.h"
-#include "../graphics/ray_shadow_execution.h"
-#include "../graphics/rt_shadow_shader.h"
-#include "../graphics/temporal_geometry_history.h"
-#include "../graphics/temporal_class_coverage.h"
-#include "../graphics/object_motion_frame.h"
-#include "../graphics/d3d12/visible_ray_scene.h"
-#include "../graphics/temporal_vertex_fetch.h"
+#include "../graphics/graphics_options.h"
 #include "../graphics/static_world_shader_dependencies.h"
-#include "../graphics/d3d12/post_vertex_clip_capture.h"
-#include "../graphics/d3d12/temporal_motion.h"
 #include "../graphics/d3d12/post_vertex_capture.h"
 #include "../graphics/d3d12/ray_tracing_scene.h"
-#include "../graphics/d3d12/dlss_super_resolution.h"
 #include "pipeline_cache.h"
+#include "buffer_stock.h"
 #include "pm4_mirror.h"
 
 namespace superman_returns::native { struct DecodedTexture; }
@@ -104,6 +96,20 @@ class D3D12Provider;
 
 namespace superman_returns::graphics::guest {struct ReplayResult;}
 namespace superman_returns::native {
+
+constexpr DXGI_FORMAT kDlssMotionFormat = DXGI_FORMAT_R16G16_FLOAT;  // objects' motion (SV_Target4)
+struct DlssState;  // dlss.cpp
+struct DlssDeleter {
+  void operator()(DlssState* state) const;  // dlss.cpp
+};
+// Guest pixel coordinate -> host pixel coordinate of a surface rendered at
+// `scale` (possibly fractional). Every edge goes through the same rounding, so
+// adjacent regions (tiles, atlas cells) still meet exactly.
+inline uint32_t HostPx(uint32_t v, float scale) {
+  return uint32_t(std::lround(double(v) * double(scale)));
+}
+bool Invert4x4(const float m[16], float out[16]);
+extern float g_dlss_mip_bias;  // scene samplers' LOD bias while DLSS upscales
 
 bool Enabled();
 
@@ -445,11 +451,9 @@ class Renderer : public NativeFrontend {
     // undefined contents on Xenos and must not carry data across (feedback).
     uint32_t edram_tiles = 0;
     uint64_t last_write = 0;
-    uint64_t motion_write_frame=0,motion_write_serial=0; // Opt-in actual draw stamps; never bind stamps.
-    uint64_t motion_lifetime=0;
   };
   HostSurface* GetSurface(uint8_t* base, uint32_t surface_object, bool depth,
-                          uint32_t min_width = 0, uint32_t min_height = 0);
+                          uint32_t min_width = 0, uint32_t min_height = 0, bool full_scale = false);
   void Transition(ID3D12Resource* resource, D3D12_RESOURCE_STATES& state,
                   D3D12_RESOURCE_STATES after);
   bool BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_formats[4],
@@ -464,9 +468,6 @@ class Renderer : public NativeFrontend {
     uint32_t width = 0, height = 0;  // guest pixels
     uint32_t layers = 1;
     bool stacked_volume = false;   // host Texture3D for validated stacked color resolves
-    uint64_t motion_source_frame=0,motion_source_serial=0,motion_source_resource=0;
-    uint64_t motion_lifetime=0,motion_write_serial=0,motion_write_frame=0;
-    bool motion_full_color_copy=false;
     float scale = 1.0f;              // host pixels per guest pixel (source surface)
     bool shadow = false;             // resolved from a shadow map target
     uint32_t plain_srv = 0;          // default-mapped SRV (soft particles' scene depth)
@@ -544,6 +545,15 @@ class Renderer : public NativeFrontend {
   static constexpr uint32_t kOutputHeight = profile::kOutputHeight;
   static constexpr size_t kUploadBytesPerFrame = 128u << 20;
   static constexpr uint32_t kSrvHeapSize = 32768;
+  // Ray tracing (rt_shadows.cpp): fixed descriptors at the end of the heap that
+  // the translated shaders address directly (SR_RT_*_INDEX in XenosRecomp
+  // patches 0017-0029); AllocSrvIndex never hands them out.
+  static constexpr uint32_t kRtTlasSrv = kSrvHeapSize - 1;
+  static constexpr uint32_t kRtFrameSrv = kSrvHeapSize - 2;
+  static constexpr uint32_t kRtMaterialSrv = kSrvHeapSize - 3;  // per TLAS instance (reflections)
+  static constexpr uint32_t kRtUvSrv = kSrvHeapSize - 4;        // mesh texture coordinates (reflections)
+  static constexpr uint32_t kRtSkinSrv0 = kSrvHeapSize - 5;     // character buffers 0 and 1 (-6)
+  static constexpr uint32_t kSrvAllocLimit = kSrvHeapSize - 6;
   static constexpr uint32_t kSamplerHeapSize = 2048;
   static constexpr uint32_t kRtvHeapSize = 256;
   static constexpr uint32_t kDsvHeapSize = 64;
@@ -603,37 +613,122 @@ class Renderer : public NativeFrontend {
   void SnapshotPostVertexDepth();
   void RecordDepthReceiverProbe();
   std::unique_ptr<graphics::d3d12::RayTracingScene> rt_capture_scene_;
-  std::unique_ptr<graphics::d3d12::DlssSuperResolution> dlss_;
-  // Same layout as DepthMotionConstants in dlss_inputs.hlsl.
-  struct DlssMotionConstants {
-    float inverse_current[16],previous[16],width,height;
-    uint32_t object_motion;float jitter_x,jitter_y,depth_clear;
+  // ---- NVIDIA DLSS (dlss.cpp; ported from Superman-Returns-PC) ----
+  // The scene is the colour surface resolved right after the full-size depth
+  // resolve that ends the 3D draws (learned each frame); its draws get a
+  // sub-pixel jitter, and at that colour resolve DLSS replaces the surface's
+  // contents before the game's post-processing reads them.
+  int DlssMode() const;  // 0 off, 1 DLAA, 2 Quality, 3 Balanced, 4 Performance
+  bool DlssApplied() const;
+  void DlssCaptureCamera();
+  void DlssJitter(float half_pixel[2]);
+  void DlssOnDepthResolve(HostSurface& src);
+  void DlssOnColorResolve(HostSurface& src);
+  void DlssEndFrame();
+  // Scene resolution / output resolution of the current mode (1 = off or DLAA).
+  float DlssSceneRatio() const;
+  uint32_t DlssSceneVariant() const;  // the upscaling mode (2..4), 0 at full resolution
+  // Set by DlssOnColorResolve when DLSS made an output-sized scene: the
+  // resolve copies it (its texture at the output scale) instead of the surface.
+  ID3D12Resource* dlss_resolve_source_ = nullptr;
+  // The HUD's output-scale depth twin, cleared once a frame (BindRenderTargets).
+  ID3D12Resource* dlss_twin_ = nullptr;
+  uint64_t dlss_twin_swap_ = ~0ull;
+  // Objects' motion: every translated vertex shader also runs with the
+  // previous frame's VS constants of the same draw (root CBV b3, XenosRecomp
+  // patch 0030) and the pixel shader writes the difference to SV_Target4,
+  // bound to the object-motion target for the scene's draws. Draws are
+  // matched across frames by a key (shaders, vertex buffer, primitive, count,
+  // occurrence); a draw without a match marks its pixels for the camera's
+  // motion (g_SrMotionValid = 0).
+  bool DlssMotionDraw() const;  // the bound targets are the jittered scene
+  const D3D12_CPU_DESCRIPTOR_HANDLE* DlssMotionTarget();
+  void DlssDrawKey(uint64_t vs_hash, uint64_t ps_hash, uint32_t fetch0, uint32_t prim, uint32_t count);
+  // The previous constants of this draw (uploaded) or 0, and whether they are.
+  D3D12_GPU_VIRTUAL_ADDRESS DlssPrevVsConstants(bool& valid);
+  uint32_t dlss_draw_count_ = 0;  // vertex or index count of the draw being prepared
+  uint64_t dlss_draw_key_ = 0;
+  // The draw without its vertex buffer address: a mesh rebuilt every frame in
+  // a new buffer still has the same one (DlssPrevVsConstants).
+  uint64_t dlss_draw_loose_key_ = 0;
+  std::array<uint32_t, 1024> cb_vs_cpu_{};  // the current VS constants as uploaded
+  uint32_t cb_vs_regs_ = 256;               // registers they hold
+  D3D12_GPU_VIRTUAL_ADDRESS dlss_prev_vs_gpu_ = 0;  // b3 of the draw being prepared (0: the current)
+  // VS constants per draw key for the previous frame, in slots shared by both
+  // frames' stores: a draw whose constants did not change since the last frame
+  // refers to the previous frame's slot instead of copying 4 KB again.
+  struct DlssConstArena {
+    std::vector<std::array<uint32_t, 1024>> slots;
+    std::vector<uint64_t> frame;  // last frame a store referred to the slot
+    std::vector<uint32_t> free;
+    uint64_t current = 1;
+    uint32_t Take() {
+      if (free.empty()) {
+        slots.emplace_back();
+        frame.push_back(0);
+        return uint32_t(slots.size() - 1);
+      }
+      const uint32_t s = free.back();
+      free.pop_back();
+      return s;
+    }
+    void EndFrame() {
+      free.clear();
+      for (uint32_t s = uint32_t(slots.size()); s-- > 0;)
+        if (frame[s] != current) free.push_back(s);
+      ++current;
+    }
   };
-  struct DlssSlot {
-    Microsoft::WRL::ComPtr<ID3D12Resource> color,output,motion,depth,rejection;
-    D3D12_RESOURCE_STATES color_state{},output_state{},motion_state{},depth_state{};
-    D3D12_RESOURCE_STATES rejection_state{};
-    uint32_t rejection_uav=0;
-    uint32_t color_srv=0,output_srv=0,depth_in_srv=0,motion_uav=0,depth_uav=0;
-    uint32_t object_motion_srv=0,object_validity_srv=0,reactivity_srv=0;
-    uint64_t ticket=0,fence_value=0;
-    bool submitted=false;
+  struct DlssConstStore {
+    std::vector<std::pair<uint64_t, uint32_t>> keys;  // key, arena slot (later writes win)
+    std::vector<uint64_t> loose;                       // loose keys seen
+    void Clear() {
+      keys.clear();
+      loose.clear();
+    }
+    void Put(DlssConstArena& arena, uint64_t key, uint64_t loose_key, const std::array<uint32_t, 1024>& v,
+             size_t bytes) {
+      const uint32_t slot = arena.Take();
+      std::memcpy(arena.slots[slot].data(), v.data(), bytes);
+      arena.frame[slot] = arena.current;
+      keys.emplace_back(key, slot);
+      loose.push_back(loose_key);
+    }
+    void PutSame(DlssConstArena& arena, uint64_t key, uint64_t loose_key, uint32_t slot) {
+      arena.frame[slot] = arena.current;
+      keys.emplace_back(key, slot);
+      loose.push_back(loose_key);
+    }
+    void Sort() {
+      std::stable_sort(keys.begin(), keys.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+      std::sort(loose.begin(), loose.end());
+    }
+    uint32_t Find(uint64_t key) const {
+      auto it = std::upper_bound(keys.begin(), keys.end(), key,
+                                 [](uint64_t k, const auto& e) { return k < e.first; });
+      if (it == keys.begin() || std::prev(it)->first != key) return UINT32_MAX;
+      return std::prev(it)->second;
+    }
+    bool HasLoose(uint64_t key) const { return std::binary_search(loose.begin(), loose.end(), key); }
   };
-  DlssSlot dlss_slots_[3];
-  Microsoft::WRL::ComPtr<ID3D12RootSignature> dlss_motion_root_,dlss_composite_root_;
-  Microsoft::WRL::ComPtr<ID3D12PipelineState> dlss_motion_pipeline_,dlss_composite_pipeline_;
-  bool dlss_active_=false,dlss_failed_=false,dlss_wanted_=false,dlss_recorded_=false;
-  bool dlss_ready_=false,dlss_history_=false,dlss_view_projection_valid_=false,dlss_depth_reversed_=false;
-  uint32_t dlss_render_width_=0,dlss_render_height_=0;
-  uint64_t dlss_jitter_index_=0;
-  uint64_t dlss_evaluated_frames_=0,dlss_completed_frames_=0,dlss_composited_frames_=0,dlss_rejected_frames_=0;
-  HostSurface* dlss_scene_ds_=nullptr;
-  graphics::SceneRasterJitter dlss_jitter_{};
-  graphics::Matrix4 dlss_view_projection_{},dlss_previous_view_projection_{};
-  bool CreateDlssPipelines(const D3D12_GRAPHICS_PIPELINE_STATE_DESC& blit);
-  bool EnsureDlssResources(const HostSurface& scene);
-  void BeginDlssFrame();
-  void RecordDlssFrame();
+  DlssConstArena dlss_const_arena_;
+  DlssConstStore dlss_prev_store_, dlss_cur_store_;
+  std::unordered_map<uint64_t, uint32_t> dlss_occurrence_;
+  bool bound_motion_ = false;
+  std::unique_ptr<DlssState, DlssDeleter> dlss_;
+  bool dlss_unavailable_ = false;  // NGX init or DLSS support failed once
+  ID3D12Resource* dlss_scene_ = nullptr;     // learned in the previous frame
+  HostSurface* dlss_scene_depth_ = nullptr;  // this frame's last resolved depth
+  bool dlss_depth_just_resolved_ = false;
+  // The scene is resolved more than once a frame: DLSS runs at the last one,
+  // counted the frame before.
+  int dlss_scene_resolves_ = 0, dlss_scene_resolves_prev_ = 0;
+  bool dlss_scene_done_ = false;  // DLSS ran this frame
+  bool dlss_camera_ = false, dlss_prev_camera_ = false;
+  float dlss_view_proj_[16] = {}, dlss_prev_view_proj_[16] = {};
+  float dlss_jitter_[2] = {};  // this frame's jitter, render pixels (x right, y down)
+  uint32_t dlss_frame_ = 0, dlss_last_evaluated_ = 0;
+  uint64_t dlss_evaluations_ = 0;
   uint64_t graphics_options_epoch_=0;
   void ApplyGraphicsFrameOptions();
   void AppendGraphicsHostReport(graphics::GraphicsBackendReport& report) const;
@@ -643,155 +738,203 @@ class Renderer : public NativeFrontend {
   int graphics_dlss_mode_=-1;
   bool fxaa_scene_applied_=false;
   bool ray_tracing_capable_=false;
-  bool rt_shadow_wave_capable_=false,rt_shadow_requested_=false,rt_shadow_built_=false;
-  bool rt_shadow_attempted_=false,rt_shadow_draw_active_=false,rt_shadow_counter_recorded_=false;
   bool post_vertex_diagnostic_=false;
   graphics::GraphicsOptionsSnapshot graphics_frame_request_;
-  graphics::RtShadowDrawConstants rt_shadow_constants_{};
-  std::unordered_map<uint64_t,std::vector<uint8_t>> rt_shadow_shaders_;
-  const std::vector<uint8_t>* rt_shadow_variant_=nullptr;
-  bool rt_shadow_character_built_=false;
-  std::unique_ptr<graphics::d3d12::RayTracingScene> rt_shadow_scene_;
-  std::unique_ptr<graphics::d3d12::VisibleRayScene> visible_ray_scene_;
-  struct VisibleRayTicket {uint64_t fence=0,frame=0,revision=0;graphics::GraphicsValues requested{};};
-  VisibleRayTicket visible_ray_tickets_[3]{},visible_ray_applied_{};
-  bool visible_ray_requested_=false,visible_ray_built_=false,visible_ray_recorded_=false,visible_ray_characters_built_=false;
-  uint64_t visible_ray_previous_frame_=0,visible_ray_recorded_frames_=0;
-  uint32_t visible_ray_suppressed_shadow_draws_=0;
-  Microsoft::WRL::ComPtr<ID3D12Resource> visible_ray_counter_readback_[3],visible_ray_timing_readback_;
-  Microsoft::WRL::ComPtr<ID3D12QueryHeap> visible_ray_timing_heap_;
-  uint64_t visible_ray_timestamp_frequency_=0;
-  std::array<float,3> visible_ray_light_{};
-  bool visible_ray_light_valid_=false,visible_ray_light_conflict_=false;
-  graphics::Matrix4 object_motion_final_camera_{},visible_ray_previous_camera_{},visible_ray_inverse_{};
-  Microsoft::WRL::ComPtr<ID3D12Resource> visible_ray_color_[3];
-  D3D12_RESOURCE_STATES visible_ray_color_state_[3]{};
-  void BeginVisibleRayFrame();
-  void BuildVisibleRayScene();
-  void RecordVisibleRayFrame(HostSurface& target);
-  void BeforeVisibleRaySubmit();
-  Microsoft::WRL::ComPtr<ID3D12Resource> visible_ray_shadow_predicate_[3];
-  uint64_t* visible_ray_shadow_enable_[3]{};
-  std::vector<uint8_t*> visible_ray_standalone_flags_;
-  bool visible_ray_predicated_=false,visible_ray_submission_split_=false,visible_ray_unpatched_receiver_=false;
-  Microsoft::WRL::ComPtr<ID3D12Resource> rt_shadow_counter_[3],rt_shadow_counter_readback_[3],rt_shadow_zero_;
-  D3D12_RESOURCE_STATES rt_shadow_counter_state_[3]{D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-      D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
-  graphics::RayShadowExecution rt_shadow_execution_;
-  void BeginRayShadows();
-  void BuildRayShadowScene();
-  bool ConfigureRayShadowDraw(uint8_t* base,uint32_t dev,uint64_t vs,uint64_t ps);
-  void RecordRayShadowCounter();
-  void HarvestRayShadowExecution();
-  struct MotionRaster {
-    uint64_t shader=0,pixel_shader=0,color_serial=0;
-    uint32_t coverage_id=0;
-    uint32_t depth_control=0,blend_control=0,color_control=0,color_mask=0;
-    D3D12_CULL_MODE cull=D3D12_CULL_MODE_NONE;
-    bool front_ccw=false,opaque=false,full_viewport=false,stencil_enabled=false,z_write=false,ray_opaque=false;
-    int32_t depth_bias=0;float slope_bias=0;
-    D3D12_RECT scissor{};
-  } current_motion_raster_;
-  struct MotionReadback {
-    Microsoft::WRL::ComPtr<ID3D12Resource> resource;
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout{};
-    uint64_t size=0,swap=0;uint32_t slot=0;std::string name;
-    bool clip_buffer=false;
+  void ReportRtFeatures(graphics::GraphicsBackendReport& report);
+
+  // ---- Ray tracing (rt_shadows.cpp; ported from Superman-Returns-PC) ----
+  struct BufferEntry;
+  // Menu rows (graphics_options.h): 0 RT shadows, 1 softness, 2 character
+  // shadows, 3 RT reflections. D3D12 with DXR 1.1 only.
+  bool RtAvailable() const { return ray_tracing_capable_ && !packet_sink_; }
+  bool RtShadowsOn() const { return RtAvailable() && graphics_frame_request_.requested[0] == 1; }
+  bool RtReflectionsOn() const { return RtAvailable() && graphics_frame_request_.requested[3] == 1; }
+  bool RtSceneOn() const { return RtShadowsOn() || RtReflectionsOn(); }
+  bool RtCharactersOn() const { return RtSceneOn() && graphics_frame_request_.requested[2] == 1; }
+  bool RtHighSoftness() const { return graphics_frame_request_.requested[1] == 2; }
+  int32_t RtDebugMode() const;
+  bool RtAbOldSwap() const;  // sr_rt_full_scene_hide_swap / sr_rt_ab_period: render as before
+  bool RtAbHidesVs(uint64_t vs) const;
+  bool RtAbAll() const;
+  static uint64_t RtXformKey(const float* t) {
+    uint64_t k = 0x2545F4914F6CDD1Dull;
+    for (int i = 0; i < 12; ++i) k = (k ^ uint64_t(int64_t(std::lround(double(t[i]) * 64.0)))) * 0x100000001B3ull;
+    return k;
+  }
+  std::vector<int32_t> RtDebugModes() const;  // sr_rt_debug_modes
+  float rt_camera_[3] = {};  // the camera position (gViewInverse translation), for reflection rays
+  bool rt_camera_valid_ = false;
+  float rt_frame_rows_[12] = {};  // light rows U, V, Z the frame's world reconstruction inverts
+  float rt_view_rows_[12] = {};   // the rows of the last frame data upload (a second view's own)
+  // Per-frame data (inverse cascade-0 light matrix, sun, switches), kRtFrameSrv.
+  static constexpr uint32_t kRtFrameBytes = 256;
+  void UpdateRtFrame(uint8_t* base);
+  bool EnsureRtFrameBuffer();
+  Microsoft::WRL::ComPtr<ID3D12Resource> rt_frame_buffer_;
+  D3D12_RESOURCE_STATES rt_frame_state_ = D3D12_RESOURCE_STATE_COMMON;
+  uint64_t rt_frame_swap_ = ~0ull;
+  // DXR test scene (sr_rt_test_cube).
+  bool EnsureRtScene(const float inv_light[16]);
+  Microsoft::WRL::ComPtr<ID3D12Device5> rt_device_;
+  Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList4> rt_list_;
+  Microsoft::WRL::ComPtr<ID3D12Resource> rt_cube_vb_, rt_cube_ib_, rt_blas_, rt_tlas_,
+      rt_instances_, rt_scratch_;
+  bool rt_scene_ready_ = false;
+  float rt_cube_center_[3] = {};
+  // City geometry: one BLAS per static mesh drawn by the game, one TLAS
+  // instance per (mesh, world matrix) seen recently.
+  void RtCaptureDraw(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd, const BufferEntry* ib,
+                     uint32_t start_index, uint32_t index_count, int32_t base_vertex, bool strip);
+  // Non-indexed instanced draws (the instance_transforms vertex shaders): many
+  // copies of one mesh per draw, mesh indices in the POSITION1 stream.
+  void RtCaptureInstanced(uint8_t* base, const WorkBatch& batch, const WorkCmd& cmd,
+                          uint32_t start_vertex, uint32_t vertex_count);
+  bool RtBuildCityTlas(const float sun_anchor[3]);
+  // Colour of a surface for ray-traced reflections: the draw's colour texture
+  // (SRV index | 0x8000 for PWL gamma, 0xFFFFFF = none; valid while the SRV
+  // index keeps the generation it had, srv_generation_), its sampler and the
+  // texture coordinates (interpolant captured with the mesh, scale, offset).
+  struct RtMaterial {
+    uint32_t albedo = 0xFFFFFF, albedo_gen = 0, sampler = 0;
+    int32_t uv_interp = -1;  // interpolant the pixel shader takes the UV from (-1: mean colour)
+    uint32_t uv_comps = 0;   // u component | v component << 2
+    float uv[4] = {1.0f, 1.0f, 0.0f, 0.0f};  // uv = interpolant * uv[0..1] + uv[2..3]
+    // Tint blend (building shaders, rt_tint_regs.inc): colour = sum(mask channel
+    // (/ saturate(channel sum)) * R/G/B tint) * tint * colour texture.
+    uint32_t mask = 0xFFFFFF, mask_gen = 0, mask_sampler = 0;
+    uint32_t tint_flags = 0;  // R ch | G ch << 2 | B ch << 4 | normalised << 6 | tint << 7 | colour texture << 8
+                              // | palette << 10
+    float tints[4][4] = {};   // R_tint, G_tint, B_tint, tint (rgb); with a palette: [3] = building weights
+    // Building palette (rt_palette_regs.inc): A_tint for the rest weight, the
+    // palette (index into kPaletteRegs) and its index component and scale.
+    float a_tint[4] = {};
+    int32_t palette = -1, palette_interp = -1;
+    uint32_t palette_comp = 0;
+    float palette_scale = 0.0f;
+    // Alpha test of the draw (RB_COLORCONTROL, colour texture alpha > alpha_ref); -1 = none.
+    float alpha_ref = -1.0f;
   };
-  std::unique_ptr<graphics::d3d12::PostVertexClipCapture> motion_clips_;
-  std::unique_ptr<graphics::d3d12::TemporalMotion> temporal_motion_;
-  std::unique_ptr<graphics::d3d12::TemporalMotion> motion_static_candidate_;
-  std::unique_ptr<graphics::d3d12::TemporalMotion> motion_observed_skin_attribution_;
-  std::unique_ptr<graphics::d3d12::TemporalMotion> motion_observed_cloth_attribution_;
-  std::unique_ptr<graphics::d3d12::TemporalMotion> motion_observed_rigid_attribution_;
-  std::unique_ptr<graphics::d3d12::TemporalMotion> motion_visible_draw_attribution_;
-  graphics::TemporalGeometryHistory motion_history_;
-  graphics::ObjectMotionFrame object_motion_frame_;
-  graphics::MotionColorLineage object_motion_lineage_;
-  graphics::MotionSceneTicket object_motion_ticket_;
-  graphics::MotionContentVersion object_motion_hdr_;
-  bool motion_continuous_=false,object_motion_requested_=false,object_motion_previous_=false;
-  bool object_motion_output_ready_=false,object_motion_full_cover_=false;
-  graphics::Matrix4 object_motion_previous_camera_{},object_motion_camera_{};
-  bool object_motion_depth_reversed_=false;
-  uint64_t object_motion_previous_camera_frame_=0;
-  uint64_t object_motion_lifetime_=0,object_motion_reports_=0,object_motion_applied_=0;
-  Microsoft::WRL::ComPtr<ID3D12Resource> object_motion_depth_[3];
-  D3D12_RESOURCE_STATES object_motion_depth_state_[3]{};
-  graphics::MotionContentVersion MotionVersion(const HostSurface& surface) const;
-  void InvalidateObjectMotionColor(HostSurface& surface);
-  struct MotionReactiveSlot {
-    Microsoft::WRL::ComPtr<ID3D12Resource> mask;
-    D3D12_RESOURCE_STATES state=D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-    uint32_t uav=0;
-  } motion_reactive_[3];
-  bool EnsureMotionReactivity();
-  bool ObjectMotionInputsReady(const HostSurface& scene);
-  std::vector<MotionRaster> motion_rasters_;
-  std::vector<MotionReadback> motion_readbacks_;
-  std::unordered_map<uint64_t,Microsoft::WRL::ComPtr<ID3D12PipelineState>> motion_clip_pipelines_;
-  uint32_t motion_capture_phase_=0;
-  uint32_t motion_signature_reports_=0;
-  std::array<uint32_t,18> motion_candidate_reports_{};
-  std::array<uint32_t,2> motion_owner_reports_{};
-  uint32_t motion_cloth_reports_=0;
-  std::array<uint32_t,4> motion_uploaded_vs_bools_{};
-  std::vector<std::array<uint64_t,2>> motion_color_pairs_;
-  struct MotionColorSource {
-    uint64_t resource=0,source=0,frame=0,serial=0;
-    uint32_t descriptor=0,guest_base=0;bool full_copy=false;
-    graphics::MotionContentVersion version;
-  } motion_color_sources_[3];
-  uint64_t motion_color_serial_=0;
-  int64_t motion_live_capture_swap_=-1;
-  uint64_t motion_live_capture_frame_=0;
-  bool CaptureObjectMotionFrame() const;
-  uint32_t motion_color_reports_=0;
-  bool motion_capture_active_=false,motion_scene_finished_=false,motion_capture_done_=false;
-  graphics::SceneRasterJitter motion_frame_jitter_;
-  std::array<float,2> motion_previous_jitter_{};
-  bool motion_jitter_draw_active_=false,motion_jitter_applied_=false,motion_jitter_ready_=false;
-  bool motion_camera_valid_=false,motion_camera_conflict_=false,motion_previous_camera_bad_=false;
-  bool motion_pre_hud_pending_=false;
-  std::array<uint32_t,16> motion_camera_words_{};
-  bool motion_common_camera_valid_=false;
-  uint64_t motion_common_camera_domain_=0;
-  std::array<uint32_t,6> motion_common_camera_fixup_{};
-  std::vector<uint8_t> motion_rigid_sources_; // Parallel to history/raster samples: 1 asset, 2 common.
-  std::array<uint32_t,6> motion_clip_fixup_{}; // Exact uploaded ScreenXform + HalfPixelOffset bits.
-  Microsoft::WRL::ComPtr<ID3D12Resource> motion_depth_snapshot_;
-  Microsoft::WRL::ComPtr<ID3D12Resource> motion_coverage_[3];
-  Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> motion_coverage_rtv_heap_;
-  D3D12_RESOURCE_STATES motion_coverage_state_[3]{D3D12_RESOURCE_STATE_RENDER_TARGET,
-      D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_RENDER_TARGET};
-  std::unordered_map<uint64_t,std::vector<uint8_t>> motion_coverage_shaders_;
-  std::unordered_map<uint64_t,std::vector<uint8_t>> motion_ray_shaders_;
-  std::unordered_set<uint64_t> motion_coverage_failed_shaders_;
-  const std::vector<uint8_t>* motion_coverage_shader_=nullptr;
-  bool motion_coverage_draw_active_=false,motion_coverage_bound_=false,motion_coverage_cleared_=false;
-  uint32_t motion_coverage_next_id_=0,motion_coverage_draw_id_=0;
-  D3D12_CPU_DESCRIPTOR_HANDLE MotionCoverageView() const;
-  void ConfigureMotionCoverage(HostSurface* color,HostSurface* depth,uint64_t vs,uint64_t ps,bool single_color);
-  Microsoft::WRL::ComPtr<ID3D12Resource> motion_captured_depth_,motion_captured_color_;
-  uint32_t motion_captured_color_edram_=0,motion_captured_color_width_=0,motion_captured_color_height_=0;
-  float motion_captured_color_scale_=0;
-  void BeginMotionCapture();
-  void ReportObservedClothDraw(const WorkBatch& batch,const WorkCmd& cmd);
-  void CaptureMotionClipDraw(uint8_t* base,uint32_t dev,D3D12_PRIMITIVE_TOPOLOGY topology,
-      bool indexed,uint32_t count,uint32_t first,int32_t base_vertex,
-      D3D12_INDEX_BUFFER_STRIP_CUT_VALUE cut,const WorkBatch* batch,const WorkCmd* cmd);
-  void FinishMotionScene(HostSurface* depth);
-  void MaybeFinishMotionBeforeDepthWrite(HostSurface* depth,bool writes_depth,const char* reason);
-  void EndMotionCapture();
-  void QueueMotionReadback(ID3D12Resource* texture,D3D12_RESOURCE_STATES state,const std::string& name);
-  void QueueMotionClipReadback(ID3D12Resource* clips,uint32_t bytes);
-  void ReportMotionReadbacks(uint32_t slot);
-  void BeforeMotionColorDraw();
-  void CaptureMotionInlineColorGeometry(uint8_t* base,uint32_t declaration,
-      std::span<const uint8_t> vertices,uint32_t stride,uint32_t count,
-      D3D12_PRIMITIVE_TOPOLOGY topology,bool quads);
-  void AfterMotionColorDraw();
-  void RecordMotionColorBinding(uint32_t slot,const uint32_t* fetch,uint32_t descriptor);
+  bool RtDrawMaterial(int32_t captured_uv_interp, RtMaterial& out);
+  struct RtMesh {
+    Microsoft::WRL::ComPtr<ID3D12Resource> blas;
+    Microsoft::WRL::ComPtr<ID3D12Resource> indices;  // own index buffer (instanced meshes)
+    uint64_t last_swap = 0;
+    uint32_t triangles = 0;
+    uint32_t uv_base = 0xFFFFFFFFu;  // first vertex in rt_uv_pool_ (3 per triangle), none = ~0
+    int32_t uv_interp = -1;          // the TEXCOORD interpolant captured there (+0 of each 32-byte vertex)
+    int32_t palette_interp = -1;     // and the palette index interpolant (+16), -1 = none
+    bool uv_tried = false;
+    RtMaterial material;  // the last material seen on any copy (for copies never drawn textured)
+  };
+  struct RtInstance {
+    uint64_t mesh = 0;
+    float transform[12] = {};
+    uint64_t first_swap = 0, last_swap = 0;
+    uint64_t vs = 0;     // the vertex shader of the draw that captured it (A/B by shader)
+    uint64_t xform = 0;  // hash of the transform alone (an alpha-tested copy hides the shadow pass's hull)
+    uint8_t source = 0;  // 1 = indexed scene draw, 2 = shadow caster pass (Mobj), 4 = instanced draw
+    RtMaterial material;  // from the last draw of it that had a colour texture
+  };
+  static constexpr uint32_t kRtNoAlbedo = 0xFFFFFF;
+  // Superman's cape: world-space cloth vertices, camera-only vertex shader (RtCaptureCape).
+  static constexpr uint64_t kRtCapeVs = 0x4536A1CD0C92C7C9ull;
+  uint32_t rt_tex2d_[16] = {};  // the draw's 2D texture SRV words (shared constants 0..15)
+  uint32_t rt_samp_[16] = {};   // and their sampler indices (shared constants 48..63)
+  // The city shaders' lighting tone: gShadCol rgb, Kramp_lo_hi_Kao.x, ramp_col_exp rgb, valid.
+  float rt_tone_[8] = {};
+  ID3D12PipelineState* RtSoPipeline(uint8_t* base, const char* semantic, uint32_t index, uint32_t components,
+                                    const char* semantic2 = nullptr, uint32_t index2 = 0, uint32_t components2 = 0);
+  int32_t RtDrawUvInterp() const;
+  bool RtSoBeginDraw();
+  bool RtUploadMaterials(const void* data, size_t bytes, size_t offset = 0);
+  void RtUploadPalettes();
+  // Material buffer (kRtMaterialSrv): 128-byte entries for every TLAS instance,
+  // then the building palettes (16 x 8 float4 colours).
+  static constexpr size_t kRtMaterialBytes = 32769 * 128, kRtPaletteBytes = 16 * 8 * 16;
+  void RtSoDraw(ID3D12PipelineState* pso, D3D12_GPU_VIRTUAL_ADDRESS dst, uint64_t bytes, bool indexed,
+                uint32_t count, uint32_t start, int32_t base_vertex);
+  void RtCaptureUv(RtMesh& mesh, uint8_t* base, int32_t interp, int32_t palette_interp, bool indexed,
+                   uint32_t count, uint32_t start, int32_t base_vertex, uint32_t so_count = 0);
+  uint64_t rt_uv_swap_ = 0;
+  uint32_t rt_uv_this_frame_ = 0;
+  Microsoft::WRL::ComPtr<ID3D12Resource> rt_uv_pool_, rt_material_buffer_;
+  D3D12_RESOURCE_STATES rt_uv_state_ = D3D12_RESOURCE_STATE_STREAM_OUT;
+  D3D12_RESOURCE_STATES rt_material_state_ = D3D12_RESOURCE_STATE_COPY_DEST;
+  uint64_t rt_uv_cursor_ = 0;
+  std::vector<uint32_t> srv_generation_;  // bumped when an SRV index is retired
+  uint32_t SrvGeneration(uint32_t index) const {
+    return index < srv_generation_.size() ? srv_generation_[index] : 0;
+  }
+  void RtAddInstance(const RtInstance& instance);
+  void RtDumpObj(uint8_t* base, uint32_t vertex0, uint32_t stride, const std::vector<uint32_t>& idx,
+                 const float transform[12], uint64_t instance_key);
+  bool RtBuildBlas(const D3D12_RAYTRACING_GEOMETRY_DESC& geometry, RtMesh& mesh);
+  // Skinned characters: each skinned receiver draw is drawn a second time with
+  // a stream-output pipeline that keeps only SRLIGHT0 (the post-skinning
+  // light-space position) as a triangle soup; at the next frame's TLAS build
+  // all of them become one BLAS, instanced with the inverse light rows.
+  struct RtSoTarget {  // render state of the draw the stream-output pass repeats
+    uint32_t decl = 0, rt_count = 0;
+    // Content of the vertex declaration: the pipeline key. Its guest address
+    // differs per character instance, which compiled a new pipeline for each.
+    uint64_t decl_hash = 0;
+    DXGI_FORMAT rtv[4] = {}, dsv = DXGI_FORMAT_UNKNOWN;
+    D3D12_INDEX_BUFFER_STRIP_CUT_VALUE strip_cut = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
+    ID3D12PipelineState* pso = nullptr;
+  } rt_so_target_;
+  void RtCaptureSkinned(uint8_t* base, uint32_t u, uint32_t v, uint32_t z, uint32_t start_index,
+                        uint32_t index_count, int32_t base_vertex, uint32_t so_vertices);
+  void RtCaptureCape(uint8_t* base, bool indexed, uint32_t start, uint32_t count, int32_t base_vertex,
+                     uint32_t so_vertices);
+  bool RtBuildSkinnedBlas();
+  bool RtEnsureScratch(uint64_t size);
+  std::unordered_map<uint64_t, Microsoft::WRL::ComPtr<ID3D12PipelineState>> rt_so_pipelines_;
+  // Character stream output, 32 bytes a vertex (UV interpolant, light-space
+  // position): written in one buffer while the other holds the previous
+  // frame's, which the BLAS was built from and the reflection hits read.
+  Microsoft::WRL::ComPtr<ID3D12Resource> rt_so_buffers_[2];
+  D3D12_RESOURCE_STATES rt_so_states_[2] = {D3D12_RESOURCE_STATE_STREAM_OUT, D3D12_RESOURCE_STATE_STREAM_OUT};
+  uint32_t rt_so_write_ = 0, rt_skin_read_ = 0;
+  Microsoft::WRL::ComPtr<ID3D12Resource> rt_so_counters_, rt_skin_blas_;
+  uint64_t rt_skin_blas_size_ = 0, rt_so_cursor_ = 0, rt_so_swap_ = 0;
+  uint32_t rt_so_draws_ = 0;
+  struct RtSkinDraw {
+    uint64_t offset;  // bytes into the character buffer
+    uint32_t vertices;
+    RtMaterial material;
+    bool has_material;
+    // Superman's cape (RtCaptureCape): its soup holds the view vector, not the
+    // light-space position; this 3x4 maps it into light space for the build.
+    bool cape = false;
+    float to_light[12] = {};
+    uint64_t vs = 0;  // the draw's vertex shader (diagnostics, A/B by shader)
+  };
+  std::vector<RtSkinDraw> rt_so_pending_;  // this frame's character draws
+  std::vector<RtSkinDraw> rt_skin_draws_;  // the ones the current character BLAS holds
+  float rt_skin_transform_[12] = {};  // inverse light rows of the captured frame
+  float rt_frame_inv_[12] = {};       // inverse light rows of this frame (light space to world)
+  bool rt_skin_ready_ = false;
+  bool RtMakeIndexBuffer(const std::vector<uint32_t>& indices, RtMesh& mesh);
+  std::unordered_map<uint64_t, RtMesh> rt_meshes_;
+  std::unordered_map<uint64_t, RtInstance> rt_city_instances_;
+  // Keys of instances inserted in the last frames: moving objects get a new key
+  // every frame and are dropped from here after 3 (RtBuildCityTlas).
+  std::deque<std::pair<uint64_t, uint64_t>> rt_young_instances_;  // key, swap inserted
+  Microsoft::WRL::ComPtr<ID3D12Resource> rt_city_tlas_, rt_build_scratch_;
+  uint64_t rt_city_tlas_size_ = 0, rt_build_scratch_size_ = 0;
+  uint64_t rt_builds_swap_ = 0;
+  uint32_t rt_builds_this_frame_ = 0;
+  bool rt_city_ready_ = false;
+  uint64_t rt_applied_frames_ = 0, rt_last_applied_swap_ = 0;
+  struct RtStats {
+    uint64_t captured = 0, new_meshes = 0, skip_format = 0, skip_prim = 0, skip_budget = 0,
+             skip_skinned = 0, skinned_draws = 0, cape_draws = 0, full_scene = 0, strip_meshes = 0, uv_meshes = 0,
+             instanced_draws = 0, instanced_copies = 0, skip_instanced = 0;
+  } rt_stats_;
+  bool rt_scene_failed_ = false;
+  BufferStock buffer_stock_;  // ray-tracing buffers made ahead of the worker (buffer_stock.h)
+  void BuildInputLayout(uint8_t* base, uint32_t decl, const std::vector<uint8_t>& vs,
+                        std::vector<D3D12_INPUT_ELEMENT_DESC>& elements, PsoRecord* record);
   void PublishGraphicsOptions();
   Microsoft::WRL::ComPtr<ID3D12Resource> rt_probe_results_[3], rt_probe_readback_[3];
   uint32_t rt_probe_ray_count_[3]{};

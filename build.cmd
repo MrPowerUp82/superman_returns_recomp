@@ -58,7 +58,7 @@ if not defined SR_LSFG set "SR_LSFG=OFF"
 rem Optional pinned NVIDIA NGX adapter; tools/setup_dlss.ps1 stages the SDK.
 if not defined SR_DLSS (
   set "SR_DLSS=OFF"
-  if exist "%ROOT%.tools\dlss-v3.7.20\dlss-sdk-manifest.json" set "SR_DLSS=ON"
+  if exist "%ROOT%.tools\dlss-v310.9.1\dlss-sdk-manifest.json" set "SR_DLSS=ON"
 )
 rem Native Vulkan renderer (the launcher's default API); SR_VULKAN=OFF builds D3D12 only.
 if not defined SR_VULKAN set "SR_VULKAN=ON"

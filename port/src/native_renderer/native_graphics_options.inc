@@ -70,35 +70,10 @@ void Renderer::ApplyGraphicsFrameOptions() {
         graphics_host_failure_="Presenter did not retire graphics work; previous settings retained";return;
       }
     }
-    if(dlss_) {
-      const auto stopped=dlss_->Shutdown(fence_.Get(),covering);
-      if(!stopped) {
-        graphics_host_failure_="DLSS could not retire its feature; previous settings retained";return;
-      }
-    }
-    bool next_dlss_active=false;
-#if SR_HAS_DLSS
-    if(dlss_) {
-      wchar_t executable[32768]{};
-      const auto length=GetModuleFileNameW(nullptr,executable,DWORD(std::size(executable)));
-      if(length && length<std::size(executable)) {
-        const auto directory=std::filesystem::path(executable).parent_path();
-        dlss_->SetRequested(static_cast<graphics::d3d12::DlssRequested>(requested[4]));
-        const auto started=dlss_->Initialize(device_,directory.c_str());
-        if(started && requested[4]) {
-          graphics::d3d12::DlssOptimalSettings optimal{};
-          const auto queried=dlss_->QueryOptimalSettings(width,height,optimal);
-          if(queried) {
-            const auto extent=graphics::ComputeGraphicsRenderExtent(optimal.renderWidth,optimal.renderHeight,
-                scales[requested[10]],optimal.minWidth,optimal.minHeight,optimal.maxWidth,optimal.maxHeight);
-            next_dlss_active=extent.in_range;
-            if(next_dlss_active) scale=extent.scale;
-          }
-          if(!next_dlss_active) graphics_host_failure_="DLSS auto size multiplied by internal scale exceeds this mode's supported render range";
-        } else if(!started && requested[4]) graphics_host_failure_="DLSS initialization failed; raster output remains active";
-      } else if(requested[4]) graphics_host_failure_="DLSS application directory could not be resolved";
-    }
-#endif
+    // DLSS (dlss.cpp) renders the scene below the output scale itself: the
+    // internal scale stays the user's. Its feature is recreated for the new
+    // size or mode at the next scene.
+    if(dlss_) dlss_.reset();
     const bool storage_changed=width!=output_width_ || height!=output_height_ ||
         scale!=render_scale_ || msaa!=msaa_samples_;
     // Fence completion now permits resource release and CPU descriptor reuse.
@@ -120,7 +95,8 @@ void Renderer::ApplyGraphicsFrameOptions() {
       }
       InvalidateSlotBindings(~0u);
       surfaces_.clear();resolve_textures_.clear();resolve_latest_.clear();resolve_identities_={};
-      scene_rt_=scene_ds_=upscale_rt_=dlss_scene_ds_=nullptr;
+      scene_rt_=scene_ds_=upscale_rt_=nullptr;
+      dlss_scene_=nullptr;dlss_scene_depth_=nullptr;dlss_twin_=nullptr;dlss_resolve_source_=nullptr;
       coop_last_full_resolve_=nullptr;coop_cleared_source_=nullptr;coop_cleared_stamp_=0;
       coop_pair_.Reset();coop_deferred_front_=0;
       for(auto& image:coop_images_) image={};
@@ -133,33 +109,12 @@ void Renderer::ApplyGraphicsFrameOptions() {
       // unrelated texture/buffer descriptors and their allocator generation.
       rtv_heap_next_=kFramesInFlight;dsv_heap_next_=0;
       post_vertex_depth_snapshot_.Reset();post_vertex_color_snapshot_.Reset();
-      motion_history_={};object_motion_lineage_={};object_motion_ticket_={};object_motion_hdr_={};
-      object_motion_previous_=object_motion_output_ready_=false;
-      object_motion_previous_camera_frame_=0;
-      motion_depth_snapshot_.Reset();motion_captured_depth_.Reset();motion_captured_color_.Reset();
-      motion_readbacks_.clear();motion_color_pairs_.clear();
-      for(auto& source:motion_color_sources_) source={};
-      for(auto& resource:object_motion_depth_) resource.Reset();
-      for(auto& resource:motion_coverage_) resource.Reset();
-      for(auto& slot:motion_reactive_) slot.mask.Reset();
-      // TemporalMotion retains dimension-independent prewarmed PSOs; BeginFrame/Render resize fenced slots.
-      motion_static_candidate_.reset();
-      motion_observed_skin_attribution_.reset();motion_observed_cloth_attribution_.reset();
-    }
-    for(auto& slot:dlss_slots_) {
-      // Keep descriptor allocations: EnsureDlssResources overwrites them only
-      // after the covering fences above and restores exact resource states.
-      slot.color.Reset();slot.output.Reset();slot.motion.Reset();slot.depth.Reset();slot.rejection.Reset();
-      slot.ticket=slot.fence_value=0;slot.submitted=false;
     }
     output_width_=width;output_height_=height;render_scale_=scale;msaa_samples_=msaa;
-    dlss_render_width_=render_scale::HostDimension(kOutputWidth,scale);
-    dlss_render_height_=render_scale::HostDimension(kOutputHeight,scale);
-    dlss_active_=dlss_failed_=dlss_ready_=dlss_history_=dlss_wanted_=dlss_recorded_=false;
-    dlss_jitter_index_=0;graphics_dlss_mode_=requested[4];
-    dlss_active_=next_dlss_active;
-    REXLOG_INFO("native graphics hot settings: output={}x{} scene={}x{} scale={} MSAA={} DLSS_request={} active={}",
-        width,height,dlss_render_width_,dlss_render_height_,scale,msaa,requested[4],dlss_active_);
+    graphics_dlss_mode_=requested[4];
+    dlss_scene_=nullptr;dlss_scene_done_=false;dlss_prev_camera_=false;
+    REXLOG_INFO("native graphics hot settings: output={}x{} scale={} MSAA={} DLSS_request={} scene_ratio={}",
+        width,height,scale,msaa,requested[4],DlssSceneRatio());
   }
   fxaa_=requested[8]!=0;
   graphics_host_applied_[5]=0; // This renderer/device is D3D12; API switch waits for restart.
