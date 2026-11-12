@@ -71,6 +71,13 @@ foreach ($notice in 'DOTNET-LICENSE.txt', 'DOTNET-ThirdPartyNotices.txt') {
   Copy-Item (Need (Join-Path $launcherDir $notice) 'Rebuild the launcher.') (Join-Path $stage 'licenses')
 }
 foreach ($dll in 'rexruntime.dll', 'rexgpu-xenos.dll') { Copy-Item (Need (Join-Path $BuildDir $dll) '') $stage }
+# DLSS builds load the NVIDIA runtime next to the exe; ship it with its license.
+# Without an NVIDIA RTX GPU the game reports DLSS unavailable and keeps running.
+$dlssDll = Join-Path $BuildDir 'nvngx_dlss.dll'
+if ((Select-String (Join-Path $BuildDir 'CMakeCache.txt') -Pattern '^SR_DLSS:BOOL=ON' -Quiet)) {
+  Copy-Item (Need $dlssDll 'DLSS build without nvngx_dlss.dll: run tools/setup_dlss.ps1 and rebuild.') $stage
+  Copy-Item (Need (Join-Path $root '.tools\dlss-v310.9.1\LICENSE.txt') 'Run tools/setup_dlss.ps1.') (Join-Path $stage 'licenses\NVIDIA-DLSS-LICENSE.txt')
+}
 foreach ($name in 'msvcp140.dll', 'msvcp140_atomic_wait.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') {
   Copy-Item (Need (Join-Path $crt.FullName $name) '') $stage
 }
