@@ -93,6 +93,26 @@ input. O input sintético do probe ganhou o eixo X do analógico esquerdo
 (`-Strafe`). Evidência: `walk-spin-repro.log`, `walk-fixed.log`, `f0..f3.png`,
 `p1b.png`. A decolagem de volta ao voo não foi exercitada (A não decolou no probe).
 
+## Correção posterior: capa do P2 dura e solta do pescoço (12/11)
+
+Reproduzido no probe com o P1 olhando para outro lado e o P2 correndo fora da
+vista dele: a capa do P2 ficava esticada e afastada dos ombros (`c1.png`,
+`c2.png`), enquanto a do P1 caía normalmente.
+
+`sub_82301510` (atualização do `ClothRenderObj` na preparação de render) só
+chama a simulação `sub_822D85B0` quando o pano está visível na vista preparada
+**e** a até 75 unidades da câmera de render (`sub_822F3530`: LOD 2 até 75, 1 até
+650), ou enquanto o contador de graça do objeto (+28256) é positivo. A passada
+do P2 no split prepara com tempo 0 e nunca simula. Com o P2 fora da vista/raio do
+P1, as partículas da capa ficavam paradas no espaço do mundo enquanto o corpo
+andava.
+
+Correção: `REX_HOOK_RAW(sub_82301510)` concede um frame de graça (+28256 = 1) a
+panos a até 75 unidades da câmera do P2, só com P2 ativo e só na passada com
+tempo (> 0). Usa o próprio mecanismo e raio de LOD do jogo; não altera globais.
+Política em `ClothNeedsSecondaryGrace`, testada. Evidência: `cloth-repro.log`,
+`cloth-fixed.log`, `k2.png`/`k3.png` (capa presa às costas no mesmo cenário).
+
 ## Limites conhecidos
 
 - O HUD continua compartilhado: o retículo é desenhado no centro de cada metade

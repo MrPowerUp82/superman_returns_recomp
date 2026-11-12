@@ -46,3 +46,10 @@ SR_TEST(coop_locomotion_camera_never_restarts_native_transitions) {
   SR_CHECK(!ShouldForceLocomotionCamera(1, 0, 3));  // state active: would clear +4904
   SR_CHECK(!ShouldForceLocomotionCamera(std::nullopt, 0, 0));
 }
+SR_TEST(coop_cloth_grace_only_near_p2_camera_in_timed_passes) {
+  SR_CHECK(ClothNeedsSecondaryGrace(12.5f, 0, 3, 1, -4));
+  SR_CHECK(ClothNeedsSecondaryGrace(12.5f, -1, 75, 0, 0));    // on the radius
+  SR_CHECK(!ClothNeedsSecondaryGrace(12.5f, 0, 75.1f, 0, 0)); // outside LOD 2
+  SR_CHECK(!ClothNeedsSecondaryGrace(0.f, 0, 1, 1, 1));       // P2 preparation pass
+  SR_CHECK(!ClothNeedsSecondaryGrace(12.5f, 1, 1, 1, 1));     // grace already pending
+}

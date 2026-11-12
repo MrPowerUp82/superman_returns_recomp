@@ -36,4 +36,15 @@ inline std::optional<uint32_t> CameraModeForLocomotion(uint32_t type) {
 inline bool ShouldForceLocomotionCamera(std::optional<uint32_t> desired, uint32_t mode, uint32_t state) {
   return desired && state == 0 && (mode == 0 || mode == 1) && mode != *desired;
 }
+// Cloth render objects (sub_82301510) simulate only when visible in the view
+// being prepared and within 75 units of its render camera (sub_822F3530 LOD 2),
+// or while their grace counter (+28256) is positive. The split's P2 pass
+// prepares with zero time and never simulates, so P2's cape would freeze in
+// world space whenever P1's view culls it. Grant one frame of grace to cloth
+// near P2's camera, using the game's own LOD radius.
+constexpr float kClothSimulationRadius = 75.0f;
+inline bool ClothNeedsSecondaryGrace(float time, int32_t grace, float dx, float dy, float dz) {
+  return time > 0 && grace <= 0 &&
+      dx * dx + dy * dy + dz * dz <= kClothSimulationRadius * kClothSimulationRadius;
+}
 }  // namespace superman_returns::coop

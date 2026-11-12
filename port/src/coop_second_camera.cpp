@@ -385,6 +385,33 @@ REX_HOOK_RAW(sub_8221E748) {
   __imp__sub_8221E748(ctx, base);
 }
 
+// Cloth render object update: r3 = object, f1 = render time (0 in the split's
+// P2 preparation pass). Cloth position at +28176, grace counter at +28256.
+REX_HOOK_RAW(sub_82301510) {
+  using namespace superman_returns::coop;
+  if (storage.load(std::memory_order_relaxed) && ctx.f1.f64 > 0) {
+    const auto snapshot = SampleSecondCamera();
+    if (snapshot.view) {
+      std::array<uint32_t, 4> raw{};
+      if (Read(base, ctx.r3.u32 + 28176, raw.data(), 16)) {
+        float cloth[3];
+        for (int i = 0; i < 3; ++i) cloth[i] = std::bit_cast<float>(__builtin_bswap32(raw[i]));
+        auto camera = [&](int i) { return std::bit_cast<float>(packet::ReadWord(*snapshot.view, 48 + i * 4)); };
+        const auto grace = int32_t(Word(base, ctx.r3.u32 + 28256));
+        if (ClothNeedsSecondaryGrace(float(ctx.f1.f64), grace, cloth[0] - camera(0),
+                                     cloth[1] - camera(1), cloth[2] - camera(2))) {
+          WriteWordBE(base, ctx.r3.u32 + 28256, 1);
+          static std::atomic<uint32_t> granted{0};
+          const auto n = ++granted;
+          if (n <= 3 || n % 3600 == 0)
+            REXLOG_INFO("coop cloth: P2-camera grace object={:08X} count={}", ctx.r3.u32, n);
+        }
+      }
+    }
+  }
+  __imp__sub_82301510(ctx, base);
+}
+
 REX_HOOK_RAW(sub_821620E8) {
   superman_returns::coop::DestroySecondCamera(ctx, base);
   __imp__sub_821620E8(ctx, base);
