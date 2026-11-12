@@ -300,6 +300,61 @@ REXCVAR_DEFINE_DOUBLE(sr_native_render_scale, 1.0, "Superman Returns Native",
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(sr_native_temporal_probe, false, "Superman Returns Native",
                     "Diagnose missing D3D12 temporal inputs for future DLSS/RT (no visual effect)");
+REXCVAR_DEFINE_DOUBLE(sr_rt_instance_range, 2100.0, "Superman Returns Native",
+                      "Ray tracing takes the city's instanced copies within this distance of the camera (0 = all)");
+REXCVAR_DEFINE_INT32(sr_rt_dump_obj_swap, 0, "Superman Returns Native",
+                     "Debug: at this guest swap, write the ray-traced geometry captured in that frame (world "
+                     "space, from guest memory) to sr_native_dump_dir/rt_city.obj");
+REXCVAR_DEFINE_DOUBLE(sr_rt_shadow_bias, 0.5, "Superman Returns Native",
+                      "Ray-traced shadows: start offset of the shadow ray towards the sun (world units), "
+                      "against the ray hitting the surface it starts on")
+    .range(0.0, 50.0);
+REXCVAR_DEFINE_INT32(sr_rt_shadow_debug, 0, "Superman Returns Native",
+                     "Ray-traced debug view: 0 = off, 1 = receivers paint their world position as a 10-unit "
+                     "grid, 2 = ray-traced sun visibility, 4 = distance to the nearest occluder, 6/7/8 = "
+                     "reflection colour / hit path / hit-miss")
+    .range(0, 10);
+REXCVAR_DEFINE_INT32(sr_rt_shadow_rays, 16, "Superman Returns Native",
+                     "Ray-traced shadows: rays per pixel over the sun's disc with High softness (Low uses at "
+                     "most 8; 2 go first and the rest only where they disagree)")
+    .range(1, 32);
+REXCVAR_DEFINE_DOUBLE(sr_rt_sun_angle, 0.53, "Superman Returns Native",
+                      "Ray-traced shadows: angular diameter of the sun in degrees with Low softness (High "
+                      "doubles it)")
+    .range(0.0, 10.0);
+REXCVAR_DEFINE_INT32(sr_rt_builds_per_frame, 24, "Superman Returns Native",
+                     "Ray-traced scene: new meshes built per frame (bottom-level structures); the rest wait "
+                     "for the next frames")
+    .range(4, 256);
+REXCVAR_DEFINE_BOOL(sr_rt_alpha_test, true, "Superman Returns Native",
+                    "Ray-traced scene: alpha-tested geometry (tree leaves, fences) lets rays through where its "
+                    "colour texture's alpha fails the game's test");
+REXCVAR_DEFINE_BOOL(sr_rt_full_scene, false, "Superman Returns Native",
+                    "Ray-traced scene: static world geometry that does not receive the sun shadow (cars, props, "
+                    "far lit buildings, foliage) is captured too, not only the shadow receivers");
+REXCVAR_DEFINE_INT32(sr_rt_full_scene_hide_swap, 0, "Superman Returns Native",
+                     "Debug A/B: on this swap the ray-traced scene renders without the sr_rt_full_scene geometry");
+REXCVAR_DEFINE_INT32(sr_rt_ab_period, 0, "Superman Returns Native",
+                     "Debug A/B: repeat the sr_rt_full_scene_hide_swap swap every N swaps (0 = once)");
+REXCVAR_DEFINE_STRING(sr_rt_ab_vs, "", "Superman Returns Native",
+                      "Debug A/B: on the A/B swaps leave out only the geometry of these vertex shaders (hex)");
+REXCVAR_DEFINE_BOOL(sr_rt_reflection_palette, true, "Superman Returns Native",
+                    "Ray-traced reflections: the city buildings' palette colours");
+REXCVAR_DEFINE_DOUBLE(sr_rt_reflection_bump, 0.15, "Superman Returns Native",
+                      "Ray-traced reflections: how much of the surface's normal map bends the reflection ray "
+                      "(0 = a mirror from the smooth surface, 1 = the game's bumped direction)")
+    .range(0.0, 1.0);
+REXCVAR_DEFINE_BOOL(sr_rt_reflection_detail, false, "Superman Returns Native",
+                    "Ray-traced reflections: sample the hit material's colour texture at its UV instead of its "
+                    "mean colour (experimental)");
+REXCVAR_DEFINE_BOOL(sr_rt_shadows_replace, true, "Superman Returns Native",
+                    "With RT shadows: the sun shadow comes from the ray-traced scene instead of the game's "
+                    "cascades (false = cascades only, for comparison)");
+REXCVAR_DEFINE_STRING(sr_rt_debug_modes, "0,2,4", "Superman Returns Native",
+                      "Measurement: the debug modes sr_rt_shadow_debug_cycle steps through");
+REXCVAR_DEFINE_INT32(sr_rt_shadow_debug_cycle, 0, "Superman Returns Native",
+                     "Measurement: every N frames step sr_rt_shadow_debug through sr_rt_debug_modes (0 = off)")
+    .range(0, 100000);
 REXCVAR_DEFINE_INT32(sr_native_rt_capture_swap, 0, "Superman Returns Native",
                      "Extract audited post-VS world triangles on this guest swap for DXR validation (0=off)");
 REXCVAR_DEFINE_STRING(sr_native_rt_capture_trigger_path, "", "Superman Returns Native",
@@ -1257,9 +1312,10 @@ void Renderer::ShutdownWorker() {
     if(batch_) batch_->Clear();
   }
   if(worker_.joinable()) worker_.join();
+  buffer_stock_.Stop();
   // The optional scene owns BLAS/TLAS and their source buffers. Retire all
   // queued work before releasing them, including shutdown outside a swap.
-  if((rt_capture_scene_ || post_vertex_capture_ || motion_clips_ || temporal_motion_ || dlss_) && queue_ && fence_ && fence_event_ && device_ &&
+  if((rt_capture_scene_ || rt_city_tlas_ || !rt_meshes_.empty() || post_vertex_capture_ || motion_clips_ || temporal_motion_ || dlss_) && queue_ && fence_ && fence_event_ && device_ &&
      SUCCEEDED(device_->GetDeviceRemovedReason())) {
     const uint64_t value=next_fence_value_++;
     if(SUCCEEDED(queue_->Signal(fence_.Get(),value)) && fence_->GetCompletedValue()<value &&
@@ -1484,6 +1540,7 @@ bool Renderer::EnsureInitialized() {
   ray_tracing_capable_=ray_tracing_capable_ && SUCCEEDED(device_->QueryInterface(IID_PPV_ARGS(&ray_device))) &&
       SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL,&ray_shader_model,sizeof(ray_shader_model))) &&
       ray_shader_model.HighestShaderModel>=D3D_SHADER_MODEL_6_5;
+  if (ray_tracing_capable_ && !packet_sink_) buffer_stock_.Start(device_);
   initialized_ = true;
   return true;
 }
@@ -2279,6 +2336,7 @@ bool Renderer::BeginFrame() {
   }
   uint64_t completed = fence_->GetCompletedValue();
   if (completed != UINT64_MAX) srv_completed_fence_ = completed;
+  if (completed != UINT64_MAX) buffer_stock_.Collect(completed);
   retired_.erase(std::remove_if(retired_.begin(), retired_.end(),
                                 [completed](const auto& r) { return r.first <= completed; }),
                  retired_.end());
@@ -3289,6 +3347,80 @@ const std::vector<uint8_t>* Renderer::LoadShader(uint64_t hash, bool vertex) {
   return result;
 }
 
+// Input layout of a pipeline: the game's declaration (attributes the vertex
+// shader reads) plus zero-stride defaults for the inputs it lacks. Shared by
+// the draw pipelines and the ray tracing's stream-output pipelines.
+void Renderer::BuildInputLayout(uint8_t* base, uint32_t decl, const std::vector<uint8_t>& vs_blob,
+                                std::vector<D3D12_INPUT_ELEMENT_DESC>& elements, PsoRecord* record) {
+  const std::vector<uint8_t>* vs = &vs_blob;
+  uint32_t decl_count = decl ? Load32(base, decl + 0x18) : 0;
+  // The game's declarations describe every attribute of the mesh; a vertex
+  // shader that reads fewer must not be given the rest (D3D12 rejects the
+  // pipeline otherwise).
+  const std::vector<std::pair<std::string, uint32_t>> vs_inputs = VertexShaderInputs(*vs);
+  for (uint32_t i = 0; i < decl_count; ++i) {
+    uint32_t e = decl + 0x34 + 12 * i;
+    uint32_t stream = Load16(base, e);
+    uint32_t offset = Load16(base, e + 2);
+    uint32_t type = Load32(base, e + 4);
+    uint32_t usage = Load8(base, e + 9);
+    uint32_t usage_index = Load8(base, e + 10);
+    if (stream == 0xFF) break;
+    DeclFormat fmt = MapDeclType(type);
+    if (fmt.format == DXGI_FORMAT_UNKNOWN) {
+      LogUnsupportedOnce("vertex element type", type, "not in MapDeclType (the element is dropped)");
+      continue;
+    }
+    if (!vs_inputs.empty() &&
+        std::find(vs_inputs.begin(), vs_inputs.end(),
+                  std::make_pair(std::string(UsageSemantic(usage)), usage_index)) == vs_inputs.end()) {
+      continue;
+    }
+    D3D12_INPUT_ELEMENT_DESC d{};
+    d.SemanticName = UsageSemantic(usage);
+    d.SemanticIndex = usage_index;
+    d.Format = fmt.format;
+    d.InputSlot = stream;
+    d.AlignedByteOffset = offset;
+    d.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+    elements.push_back(d);
+    if (record && record->element_count < PsoRecord::kMaxElements) {
+      auto& re = record->elements[record->element_count++];
+      re.usage = uint8_t(usage);
+      re.usage_index = uint8_t(usage_index);
+      re.slot = uint8_t(stream);
+      re.format = uint32_t(fmt.format);
+      re.offset = offset;
+    }
+  }
+
+  // The XDK patches absent attributes to constants. A zero-stride host
+  // buffer supplies the same value regardless of the draw's vertex index.
+  const auto float_inputs = VertexShaderInputs(*vs, true);
+  for (const auto& input : float_inputs) {
+    if (std::any_of(elements.begin(), elements.end(), [&](const auto& e) {
+          return input.first == e.SemanticName && input.second == e.SemanticIndex;
+        })) continue;
+    uint32_t usage = 0;
+    while (usage < 14 && input.first != UsageSemantic(usage)) ++usage;
+    if (usage == 14) continue;
+    D3D12_INPUT_ELEMENT_DESC e{};
+    e.SemanticName = UsageSemantic(usage);
+    e.SemanticIndex = input.second;
+    e.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    e.InputSlot = 16;
+    e.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+    elements.push_back(e);
+    if (record && record->element_count < PsoRecord::kMaxElements) {
+      auto& re = record->elements[record->element_count++];
+      re.usage = uint8_t(usage);
+      re.usage_index = uint8_t(input.second);
+      re.slot = 16;
+      re.format = uint32_t(e.Format);
+    }
+  }
+}
+
 ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t vs_hash,
                                            uint64_t ps_hash, uint32_t decl,
                                            D3D12_PRIMITIVE_TOPOLOGY_TYPE topology_type,
@@ -3426,71 +3558,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
 
   std::vector<D3D12_INPUT_ELEMENT_DESC> elements;
   PsoRecord record;
-  // The game's declarations describe every attribute of the mesh; a vertex
-  // shader that reads fewer must not be given the rest (D3D12 rejects the
-  // pipeline otherwise).
-  const std::vector<std::pair<std::string, uint32_t>> vs_inputs = VertexShaderInputs(*vs);
-  for (uint32_t i = 0; i < decl_count; ++i) {
-    uint32_t e = decl + 0x34 + 12 * i;
-    uint32_t stream = Load16(base, e);
-    uint32_t offset = Load16(base, e + 2);
-    uint32_t type = Load32(base, e + 4);
-    uint32_t usage = Load8(base, e + 9);
-    uint32_t usage_index = Load8(base, e + 10);
-    if (stream == 0xFF) break;
-    DeclFormat fmt = MapDeclType(type);
-    if (fmt.format == DXGI_FORMAT_UNKNOWN) {
-      LogUnsupportedOnce("vertex element type", type, "not in MapDeclType (the element is dropped)");
-      continue;
-    }
-    if (!vs_inputs.empty() &&
-        std::find(vs_inputs.begin(), vs_inputs.end(),
-                  std::make_pair(std::string(UsageSemantic(usage)), usage_index)) == vs_inputs.end()) {
-      continue;
-    }
-    D3D12_INPUT_ELEMENT_DESC d{};
-    d.SemanticName = UsageSemantic(usage);
-    d.SemanticIndex = usage_index;
-    d.Format = fmt.format;
-    d.InputSlot = stream;
-    d.AlignedByteOffset = offset;
-    d.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
-    elements.push_back(d);
-    if (record.element_count < PsoRecord::kMaxElements) {
-      auto& re = record.elements[record.element_count++];
-      re.usage = uint8_t(usage);
-      re.usage_index = uint8_t(usage_index);
-      re.slot = uint8_t(stream);
-      re.format = uint32_t(fmt.format);
-      re.offset = offset;
-    }
-  }
-
-  // The XDK patches absent attributes to constants. A zero-stride host
-  // buffer supplies the same value regardless of the draw's vertex index.
-  const auto float_inputs = VertexShaderInputs(*vs, true);
-  for (const auto& input : float_inputs) {
-    if (std::any_of(elements.begin(), elements.end(), [&](const auto& e) {
-          return input.first == e.SemanticName && input.second == e.SemanticIndex;
-        })) continue;
-    uint32_t usage = 0;
-    while (usage < 14 && input.first != UsageSemantic(usage)) ++usage;
-    if (usage == 14) continue;
-    D3D12_INPUT_ELEMENT_DESC e{};
-    e.SemanticName = UsageSemantic(usage);
-    e.SemanticIndex = input.second;
-    e.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-    e.InputSlot = 16;
-    e.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
-    elements.push_back(e);
-    if (record.element_count < PsoRecord::kMaxElements) {
-      auto& re = record.elements[record.element_count++];
-      re.usage = uint8_t(usage);
-      re.usage_index = uint8_t(input.second);
-      re.slot = 16;
-      re.format = uint32_t(e.Format);
-    }
-  }
+  BuildInputLayout(base, decl, *vs, elements, &record);
   D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
   desc.pRootSignature = root_signature_.Get();
   desc.VS = {vs->data(), vs->size()};
@@ -3946,6 +4014,8 @@ void Renderer::InvalidateSlotBindings(uint32_t dest_base) {
 
 void Renderer::RetireSrvIndex(uint32_t index) {
   texture_use_fences_.erase(index);
+  if (index >= srv_generation_.size()) srv_generation_.resize(index + 1);
+  ++srv_generation_[index];  // ray-traced instances drop their colour texture
   if (index > 2) retired_srvs_.emplace_back(next_fence_value_, index);
 }
 
@@ -4574,6 +4644,7 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
     CpuTimer timer(d.flush_ns,detail);
     FlushRingConstants(base, dev);
   }
+  UpdateRtFrame(base);
   const bool cache_shared = SharedConstantsCaching();
   UploadAlloc shared;
   if (!cache_shared) {
@@ -4745,6 +4816,7 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
       s[16 + slot] = 1;
       s[32 + slot] = 2;
       s[48 + slot] = 0;
+      rt_tex2d_[slot] = rt_samp_[slot] = 0;
       ++stats_.texture_slots_skipped;
       continue;
     }
@@ -4892,6 +4964,8 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
     s[16 + slot] = dimension == 2 && srv ? srv : 1;
     s[32 + slot] = dimension == 3 && srv ? srv : 2;
     s[48 + slot] = sampler;
+    rt_tex2d_[slot] = s[slot];
+    rt_samp_[slot] = sampler;
   }
   slots_timer.Stop();
   CpuTimer derived_timer(d.derived_ns,detail);
@@ -5530,6 +5604,9 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
         6, sampler_heap_->GetGPUDescriptorHandleForHeapStart());
     command_list_->SetGraphicsRootDescriptorTable(
         7, srv_heap_->GetGPUDescriptorHandleForHeapStart());
+    // Ray tracing (space6 arrays, space9 frame/material buffers, space8 TLAS).
+    command_list_->SetGraphicsRootDescriptorTable(
+        8, srv_heap_->GetGPUDescriptorHandleForHeapStart());
     frame_state_bound_ = true;
   }
   // Primitive restart only matters for strips.
@@ -5628,6 +5705,17 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
   ApplyFixedFunctionState(base, dev);
   command_list_->SetPipelineState(pso);
   current_raster_pipeline_=pso;
+  rt_so_target_.decl = decl;
+  {
+    const uint32_t decl_count = decl ? std::min(Load32(base, decl + 0x18), 64u) : 0u;
+    rt_so_target_.decl_hash = decl_count ? XXH3_64bits(GuestPtr(base, decl + 0x34, decl_count * 12),
+                                                       size_t(decl_count) * 12) : 0;
+  }
+  rt_so_target_.rt_count = rt_count;
+  std::copy(rtv_formats, rtv_formats + 4, rt_so_target_.rtv);
+  rt_so_target_.dsv = dsv_format;
+  rt_so_target_.strip_cut = strip_cut;
+  rt_so_target_.pso = pso;
   if(motion_coverage_draw_active_) {
     command_list_->SetGraphicsRoot32BitConstant(10,graphics::MotionPixelOwnerConstant(
         motion_coverage_draw_id_,current_motion_raster_.blend_control,current_motion_raster_.color_mask),0);
@@ -6722,6 +6810,16 @@ void Renderer::ExecDrawVertices(uint8_t* base, const WorkBatch& batch, const Wor
     CaptureMotionClipDraw(base,dev,topology,false,vertex_count,start_vertex,0,
         D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED,&batch,&cmd);
   }
+  // Ray tracing: Superman's cape (CPU cloth) and the instanced city copies.
+  if (!quads && current_vs_hash_ == kRtCapeVs &&
+      (topology == D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST || topology == D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP)) {
+    // The cloth comes as a list or a strip; stream output writes either as a list.
+    const uint32_t so = topology == D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP ? (vertex_count >= 3 ? (vertex_count - 2) * 3 : 0)
+                                                                         : vertex_count - vertex_count % 3;
+    if (RtSceneOn()) RtCaptureCape(base, false, start_vertex, vertex_count, 0, so);
+  } else if (topology == D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST && !quads) {
+    RtCaptureInstanced(base, batch, cmd, start_vertex, vertex_count);
+  }
   if (surface_probe_) {
     graphics::GeometrySubmission submission{};
     submission.kind = graphics::GeometrySubmissionKind::kVertices;
@@ -6826,6 +6924,9 @@ void Renderer::ExecDrawIndexedVertices(uint8_t* base, const WorkBatch& batch,
     }
   }
   if (!SkipGpuDraw()) {BeforeMotionColorDraw();command_list_->DrawIndexedInstanced(index_count, 1, start_index, base_vertex, 0);AfterMotionColorDraw();}
+  if (topology == D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST || topology == D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP)
+    RtCaptureDraw(base, batch, cmd, ib, start_index, index_count, base_vertex,
+                  topology == D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
   CapturePostVertexDraw(base,dev,topology,true,index_count,start_index,base_vertex,cut);
   CaptureMotionClipDraw(base,dev,topology,true,index_count,start_index,base_vertex,cut,&batch,&cmd);
   if (surface_probe_) {
@@ -8018,13 +8119,7 @@ void Renderer::RecordDlssFrame() {
   dlss_history_=true;dlss_ready_=true;
 }
 
-void Renderer::ReportRtFeatures(graphics::GraphicsBackendReport& report) {
-  for(size_t i=0;i<4;++i) {
-    report.features[i]={false,ray_tracing_capable_,
-        ray_tracing_capable_ ? "Ray tracing is being ported" : "DXR 1.1 is unavailable on this device"};
-    report.applied[i]=0;
-  }
-}
+#include "native_rt.inc"
 
 void Renderer::PublishGraphicsOptions() {
   if(dlss_evaluated_frames_ && frame_count_%120==0)

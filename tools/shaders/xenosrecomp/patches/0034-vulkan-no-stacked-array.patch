@@ -1,0 +1,34 @@
+diff --git a/XenosRecomp/shader_common.h b/XenosRecomp/shader_common.h
+index a1c69ceb8d1b810f9ba97be4e3e3409a6ead1999..88865118d928068da2512db3cf862581a3758d0f 100644
+--- a/XenosRecomp/shader_common.h
++++ b/XenosRecomp/shader_common.h
+@@ -249,9 +249,10 @@ TextureCube<float4> g_TextureCubeDescriptorHeap[] : register(t0, space2);
+ // array layer floor(z * layers) (D3D would round to nearest even: 1.5 -> 2),
+ // not a volume; the renderer sets TEX_STACKED_BIT on the 3D index of such a
+ // slot and points it at an array view of the texture.
+-#ifdef SR_VULKAN_BUFFERS
+-[[vk::binding(3,1)]] Texture2DArray<float4> g_Texture2DArrayDescriptorHeap[32];
+-#else
++// Superman Returns Recomp: stacked shadow cascades are host Texture3D volumes
++// (sr_native_stacked_resolves) and the Vulkan descriptor layout has no array
++// binding, so only D3D12 declares the array (its root signature has space6).
++#ifndef SR_VULKAN_BUFFERS
+ Texture2DArray<float4> g_Texture2DArrayDescriptorHeap[] : register(t0, space6);
+ #endif
+ #define TEX_STACKED_BIT 0x10000000u
+@@ -636,6 +637,7 @@ float4 tfetch2DBicubic(uint resourceDescriptorIndex, uint samplerDescriptorIndex
+ 
+ float4 tfetch3D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord)
+ {
++#ifndef SR_VULKAN_BUFFERS
+     if (resourceDescriptorIndex & TEX_STACKED_BIT)
+     {
+         Texture2DArray<float4> stack = g_Texture2DArrayDescriptorHeap[TEX_INDEX(resourceDescriptorIndex)];
+@@ -644,6 +646,7 @@ float4 tfetch3D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float
+         return conanGamma(resourceDescriptorIndex, stack.Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex],
+             float3(texCoord.xy, min(floor(max(texCoord.z * float(layers), 0.0)), float(layers - 1)))));
+     }
++#endif
+     return conanGamma(resourceDescriptorIndex, g_Texture3DDescriptorHeap[TEX_INDEX(resourceDescriptorIndex)].Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord));
+ }
+ 

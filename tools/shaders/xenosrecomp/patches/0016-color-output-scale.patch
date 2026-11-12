@@ -1,9 +1,11 @@
+diff --git a/XenosRecomp/shader_common.h b/XenosRecomp/shader_common.h
+index 19fdfdf0651110f6cc02bc7b4afb6e6d91bd1f4e..26b1ea9f38497e20afe4e9ded956357c94dc0051 100644
 --- a/XenosRecomp/shader_common.h
 +++ b/XenosRecomp/shader_common.h
-@@ -110,8 +110,11 @@
- #define g_SoftParticleDistance SR_SHARED_FLOAT(472)
+@@ -111,8 +111,11 @@ struct PushConstants
  #define g_SoftParticleTexelScale SR_SHARED_FLOAT(476)
  #define g_SoftParticleDepth SR_SHARED_UINT(480)
+ #define g_ShadowRange SR_SHARED_FLOAT(484)
 +#define g_ColorOutputScale SR_SHARED_FLOAT4(496)
  #define g_SpecConstants() g_SpecConstantsRuntime
  #else
@@ -12,19 +14,21 @@
  [[vk::constant_id(0)]] const uint g_SpecConstants = 0;
  #define g_SpecConstants() g_SpecConstants
  #endif
-@@ -141,7 +144,8 @@
+@@ -142,7 +145,8 @@ struct PushConstants
      float g_AlphaThreshold : packoffset(c18.w); \
      uint4 g_VertexFetchArr[224] : packoffset(c32); \
      uint4 g_LoopConstantsArr[8] : packoffset(c19); \
--    float4 g_ScreenXform : packoffset(c27);     uint g_SpecConstantsRuntime : packoffset(c28.x); float g_PixelPosScale : packoffset(c28.y); float g_ShadowAtlasTexelScale : packoffset(c28.z); float g_ShadowSoftness : packoffset(c28.w); float2 g_SoftParticleW : packoffset(c29.x); float g_SoftParticleDistance : packoffset(c29.z); float g_SoftParticleTexelScale : packoffset(c29.w); uint g_SoftParticleDepth : packoffset(c30.x);
-+    float4 g_ScreenXform : packoffset(c27);     uint g_SpecConstantsRuntime : packoffset(c28.x); float g_PixelPosScale : packoffset(c28.y); float g_ShadowAtlasTexelScale : packoffset(c28.z); float g_ShadowSoftness : packoffset(c28.w); float2 g_SoftParticleW : packoffset(c29.x); float g_SoftParticleDistance : packoffset(c29.z); float g_SoftParticleTexelScale : packoffset(c29.w); uint g_SoftParticleDepth : packoffset(c30.x); \
+-    float4 g_ScreenXform : packoffset(c27);     uint g_SpecConstantsRuntime : packoffset(c28.x); float g_PixelPosScale : packoffset(c28.y); float g_ShadowAtlasTexelScale : packoffset(c28.z); float g_ShadowSoftness : packoffset(c28.w); float2 g_SoftParticleW : packoffset(c29.x); float g_SoftParticleDistance : packoffset(c29.z); float g_SoftParticleTexelScale : packoffset(c29.w); uint g_SoftParticleDepth : packoffset(c30.x); float g_ShadowRange : packoffset(c30.y);
++    float4 g_ScreenXform : packoffset(c27);     uint g_SpecConstantsRuntime : packoffset(c28.x); float g_PixelPosScale : packoffset(c28.y); float g_ShadowAtlasTexelScale : packoffset(c28.z); float g_ShadowSoftness : packoffset(c28.w); float2 g_SoftParticleW : packoffset(c29.x); float g_SoftParticleDistance : packoffset(c29.z); float g_SoftParticleTexelScale : packoffset(c29.w); uint g_SoftParticleDepth : packoffset(c30.x); float g_ShadowRange : packoffset(c30.y); \
 +    float4 g_ColorOutputScale : packoffset(c31);
  
  #define g_Booleans(i) (g_BooleansArr[(i) / 4][(i) % 4])
  #define g_VertexFetch(i) (g_VertexFetchArr[i])
+diff --git a/XenosRecomp/shader_recompiler.cpp b/XenosRecomp/shader_recompiler.cpp
+index 7a69f1d1b6fa8aa1a5dd7ae842bdfa63e4248391..2bfaca47be2ea184c76b5bba1b42607426830678 100644
 --- a/XenosRecomp/shader_recompiler.cpp
 +++ b/XenosRecomp/shader_recompiler.cpp
-@@ -2659,6 +2659,19 @@
+@@ -2685,6 +2685,19 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
                      indent();
                      out += '}';
                  #endif
