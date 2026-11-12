@@ -1,6 +1,5 @@
 #pragma once
 #include "shader_capture.h"
-#include "../observed_instance_lifetimes.h"
 #include <array>
 #include <cstdint>
 #include <memory>
@@ -64,7 +63,6 @@ enum class Op : uint8_t {
 };
 struct WorkCmd {
   Op op = Op::kRing;
-  ObservedRenderInvocation observed_render;
   uint32_t device =
       0; // Captured device identity, independent of current guest globals.
   std::shared_ptr<const ShaderCapture> vertex_shader, pixel_shader;

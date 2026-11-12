@@ -75,17 +75,7 @@
 #include "../graphics/guest/texture_storage_identity.h"
 #include "../graphics/guest/shader_constant_policy.h"
 #include "../graphics/readback_rows.h"
-#include "../graphics/motion_depth_boundary.h"
 #include "../graphics/scene_color_vertex_input.h"
-#include "../graphics/pixel_coverage_shader.h"
-#include "../graphics/motion_raster_coverage.h"
-#include "../graphics/ray_geometry_opacity.h"
-#include "instance_probe.h"
-#include "../graphics/observed_skinned_motion.h"
-#include "../graphics/observed_skinned_part_key.h"
-#include "../graphics/observed_rigid_motion.h"
-#include "../graphics/observed_vehicle_batch.h"
-#include "../graphics/observed_cloth_motion.h"
 #include "native_bridge.h"
 #include "native_graphics_system.h"
 #include "sdk_compat.h"
@@ -114,19 +104,6 @@ REXCVAR_DEFINE_INT32(sr_native_dump_after_pass, -1, "Superman Returns Native",
                      "Debug: with sr_native_dump_frame_at_s, dump at the end of this pass instead of "
                      "at the end of the frame");
 REXCVAR_DEFINE_STRING(sr_native_dump_dir, "", "Superman Returns Native", "Directory for sr_native_dump_frame_at_s");
-REXCVAR_DEFINE_BOOL(sr_native_object_motion, true, "Superman Returns Native",
-    "Continuous audited object motion for DLSS; unqualified frames retain raster output")
-    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-REXCVAR_DEFINE_INT32(sr_native_object_motion_capture_swap, 0, "Superman Returns Native",
-    "Diagnostic: dump continuous motion inputs at one guest swap, outside performance runs");
-REXCVAR_DEFINE_STRING(sr_native_motion_capture_trigger_path, "", "Superman Returns Native",
-    "Opt-in: capture two consecutive main-scene post-VS clip frames after this file appears; no DLSS application");
-REXCVAR_DEFINE_BOOL(sr_native_debug_observed_skin_motion, false, "Superman Returns Native",
-    "Diagnostic: observed skinned part/lifetime and exact clip correspondence; no complete DLSS motion claim");
-REXCVAR_DEFINE_BOOL(sr_native_debug_motion_jitter, false, "Superman Returns Native",
-    "Diagnostic: apply known Halton jitter to the two-frame HDR motion capture; never enables DLSS");
-REXCVAR_DEFINE_BOOL(sr_native_debug_motion_coverage_pso_failure, false, "Superman Returns Native",
-    "Diagnostic: force the optional motion coverage PSO to fail, exercising original-draw fallback");
 REXCVAR_DEFINE_INT32(sr_native_debug_visible_rt_failure_interval, 0, "Superman Returns Native",
     "Diagnostic: reject every Nth visible DXR frame before tracing to verify same-frame raster fallback");
 REXCVAR_DEFINE_INT32(sr_native_dump_before_draw, -1, "Superman Returns Native",
@@ -1310,7 +1287,7 @@ void Renderer::ShutdownWorker() {
   buffer_stock_.Stop();
   // The optional scene owns BLAS/TLAS and their source buffers. Retire all
   // queued work before releasing them, including shutdown outside a swap.
-  if((rt_capture_scene_ || rt_city_tlas_ || !rt_meshes_.empty() || post_vertex_capture_ || motion_clips_ || temporal_motion_ || dlss_) && queue_ && fence_ && fence_event_ && device_ &&
+  if((rt_capture_scene_ || rt_city_tlas_ || !rt_meshes_.empty() || post_vertex_capture_ || dlss_) && queue_ && fence_ && fence_event_ && device_ &&
      SUCCEEDED(device_->GetDeviceRemovedReason())) {
     const uint64_t value=next_fence_value_++;
     if(SUCCEEDED(queue_->Signal(fence_.Get(),value)) && fence_->GetCompletedValue()<value &&
@@ -1327,7 +1304,6 @@ void Renderer::ShutdownWorker() {
 }
 
 bool PackShaderLookup(uint64_t hash, bool vertex, const void** data, size_t* size);
-bool PrewarmedVariantLookup(uint64_t hash,uint32_t variant,const void** data,size_t* size);
 
 bool Renderer::EnsureInitialized() {
   if (initialized_) {
@@ -1584,22 +1560,16 @@ bool Renderer::CreateDrawResources() {
   params[9].Descriptor.ShaderRegister = 3;
   params[9].Descriptor.RegisterSpace = 4;
   params[9].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
-  params[10].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-  params[10].Constants={4,4,1}; // b4,space4: original-PS pixel owner.
-  params[10].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
-  D3D12_DESCRIPTOR_RANGE reactivity_uav{D3D12_DESCRIPTOR_RANGE_TYPE_UAV,1,1,6,0};
-  params[11].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-  params[11].DescriptorTable={1,&reactivity_uav};params[11].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
-  rs_desc.NumParameters = 12;
+  rs_desc.NumParameters = 10;
   // Debug (sr_native_debug_rs_salt): an unused root-constant parameter makes every
   // pipeline new to the driver's shader cache - a cold first run on demand.
   if (int32_t salt = REXCVAR_GET(sr_native_debug_rs_salt); salt > 0) {
-    params[12].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    params[12].Constants.ShaderRegister = 15;
-    params[12].Constants.RegisterSpace = 7;
-    params[12].Constants.Num32BitValues = uint32_t(std::min(salt, 32));
-    params[12].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    rs_desc.NumParameters = 13;
+    params[10].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    params[10].Constants.ShaderRegister = 15;
+    params[10].Constants.RegisterSpace = 7;
+    params[10].Constants.Num32BitValues = uint32_t(std::min(salt, 32));
+    params[10].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    rs_desc.NumParameters = 11;
   }
   rs_desc.pParameters = params;
   rs_desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
@@ -1884,12 +1854,6 @@ bool Renderer::CreateDrawResources() {
     REXLOG_INFO("native: driver shader cache disabled: {:08X}", uint32_t(hr));
   }
   if(REXCVAR_GET(sr_native_pipeline_cache)) {
-    if(!temporal_motion_) {
-      auto motion=std::make_unique<graphics::d3d12::TemporalMotion>();
-      if(SUCCEEDED(motion->Initialize(device_,rex::filesystem::GetExecutableFolder()/"superman_returns_motion_raster.bin")))
-        temporal_motion_=std::move(motion);
-      else REXLOG_WARN("native temporal prewarm failed: {}",motion->LastError());
-    }
     for(auto format:{DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_R10G10B10A2_UNORM,DXGI_FORMAT_R16G16B16A16_FLOAT}) {
       GetFxaaPipeline(format);
       for(uint32_t samples:{1u,4u,8u}) {
@@ -1910,10 +1874,8 @@ bool Renderer::CreateDrawResources() {
     // (alpha to coverage) can apply: the cache converts captured pipelines to
     // these settings (EXP-052).
     uint32_t msaa = msaa_samples_ ? msaa_samples_ : 4;
-    if(const auto* library=PreShaderLibrary())
-      ShaderTranslator::Get().PrewarmVariants(*library,true,true);
     pipeline_cache_.Start(device_, root_signature_.Get(), &PackShaderLookup, &UsageSemantic, msaa,
-                          foliage_aa_ && msaa > 1,&PrewarmedVariantLookup);
+                          foliage_aa_ && msaa > 1,nullptr);
     pipeline_cache_.WaitForStartup();
   }
   return true;
@@ -2318,7 +2280,6 @@ bool Renderer::BeginFrame() {
                  retired_.end());
   frame_open_ = true;
   graphics_frame_request_=graphics::SharedGraphicsOptions()->Snapshot();
-  BeginMotionCapture();
   post_vertex_projection_valid_=post_vertex_camera_conflict_=false;
   if(post_vertex_capture_) post_vertex_capture_->ReportCompleted(frame_index_);
   ReportCapturedRayProbe(frame_index_);
@@ -2348,10 +2309,8 @@ bool Renderer::BeginFrame() {
   if (temporal_probe_) temporal_.Begin(frame_count_ + 1, output_width_, output_height_);
   if (camera_candidate_probe_enabled_) camera_candidate_probe_.Begin(frame_count_ + 1);
   const int32_t probe_swap = REXCVAR_GET(sr_native_surface_probe_swap);
-  surface_probe_ = !packet_sink_ && ((motion_capture_active_ && !motion_continuous_ && motion_capture_phase_==2) ||
-                   (!surface_probe_done_ && probe_swap > 0 &&
-                    (swap_number_ == uint64_t(probe_swap) ||
-                     swap_number_ + 1 == uint64_t(probe_swap))));
+  surface_probe_ = !packet_sink_ && !surface_probe_done_ && probe_swap > 0 &&
+                   (swap_number_ == uint64_t(probe_swap) || swap_number_ + 1 == uint64_t(probe_swap));
   if (surface_probe_) {
     surface_sequence_.Reset();
     geometry_probe_.Reset(frame_count_ + 1, swap_number_);
@@ -2481,7 +2440,6 @@ Renderer::HostSurface* Renderer::GetSurface(uint8_t* base, uint32_t surface_obje
     surfaces_.erase(key);
     return nullptr;
   }
-  s.motion_lifetime=++object_motion_lifetime_;
   if (depth) {
     s.view = provider_->OffsetDSVDescriptor(dsv_heap_->GetCPUDescriptorHandleForHeapStart(),
                                             dsv_heap_next_++ % kDsvHeapSize);
@@ -2490,7 +2448,6 @@ Renderer::HostSurface* Renderer::GetSurface(uint8_t* base, uint32_t surface_obje
     dsv.ViewDimension =
         samples > 1 ? D3D12_DSV_DIMENSION_TEXTURE2DMS : D3D12_DSV_DIMENSION_TEXTURE2D;
     device_->CreateDepthStencilView(s.resource.Get(), &dsv, s.view);
-    MaybeFinishMotionBeforeDepthWrite(&s,true,"surface initial clear");
     command_list_->ClearDepthStencilView(s.view, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
                                          1.0f, 0, 0, nullptr);
   } else {
@@ -2498,7 +2455,6 @@ Renderer::HostSurface* Renderer::GetSurface(uint8_t* base, uint32_t surface_obje
                                             rtv_heap_next_++ % kRtvHeapSize);
     device_->CreateRenderTargetView(s.resource.Get(), nullptr, s.view);
     float zero[4] = {};
-    InvalidateObjectMotionColor(s);
     command_list_->ClearRenderTargetView(s.view, zero, 0, nullptr);
   }
   REXLOG_INFO("native: surface {:08X} {}x{} x{} {} fmt {} samples {}", surface_object, width,
@@ -2836,7 +2792,6 @@ ID3D12PipelineState* Renderer::GetFxaaPipeline(DXGI_FORMAT format) {
 }
 
 bool Renderer::ApplyFxaa(HostSurface& target) {
-  InvalidateObjectMotionColor(target);
   if (!target.resource || target.depth) return false;
   auto* pso=GetFxaaPipeline(target.view_format);if(!pso)return false;
   // Source copy (the pass reads its own target).
@@ -2923,7 +2878,6 @@ ID3D12PipelineState* Renderer::GetAliasPipeline(DXGI_FORMAT format,uint32_t samp
 }
 
 bool Renderer::ReinterpretSurface(HostSurface& dst, HostSurface& src) {
-  InvalidateObjectMotionColor(dst);
   int src_kind = EdramAliasKind(src.guest_format), dst_kind = EdramAliasKind(dst.guest_format);
   if (src_kind < 0 || dst_kind < 0 || src.width != dst.width || src.height != dst.height ||
       src.samples != dst.samples || src.scale != dst.scale) {
@@ -3001,7 +2955,6 @@ void Renderer::ResolveEdramAliasing(HostSurface* s) {
         s->guest_format == 12 && !s->depth) {
       float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
       Transition(s->resource.Get(), s->state, D3D12_RESOURCE_STATE_RENDER_TARGET);
-      InvalidateObjectMotionColor(*s);
       command_list_->ClearRenderTargetView(s->view, black, 0, nullptr);
       s->last_write = ++edram_write_seq_;
       return;
@@ -3027,7 +2980,6 @@ void Renderer::ResolveEdramAliasing(HostSurface* s) {
     REXLOG_INFO("native watch: edram alias clear {} at draw {}", SurfaceName(s), draw_calls_in_frame_);
   }
   if (s->depth) {
-    MaybeFinishMotionBeforeDepthWrite(s,true,"EDRAM alias depth clear");
     Transition(s->resource.Get(), s->state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
     command_list_->ClearDepthStencilView(s->view, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
                                          1.0f, 0, 0, nullptr);
@@ -3038,7 +2990,6 @@ void Renderer::ResolveEdramAliasing(HostSurface* s) {
     float a = float(REXCVAR_GET(sr_native_edram_alias_alpha));
     float value[4] = {0.0f, 0.0f, 0.0f, a};
     Transition(s->resource.Get(), s->state, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    InvalidateObjectMotionColor(*s);
     command_list_->ClearRenderTargetView(s->view, value, 0, nullptr);
   }
   ++stats_.edram_alias_clears;
@@ -3135,7 +3086,6 @@ bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_fo
       ds->edram_base == uint32_t(REXCVAR_GET(sr_native_exp_alias_depth_base)) &&
       alias_clear_frame_ != frame_count_) {
     alias_clear_frame_ = frame_count_;
-    MaybeFinishMotionBeforeDepthWrite(ds,true,"experimental alias depth clear");
     Transition(ds->resource.Get(), ds->state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
     command_list_->ClearDepthStencilView(ds->view, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
                                          float(REXCVAR_GET(sr_native_exp_alias_depth_value)), 0, 0,
@@ -3156,12 +3106,6 @@ bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_fo
   }
   // A larger depth attachment is legal. End the captured resource epoch on
   // its actual pair transition, independent of dimensions and OM cache resets.
-  if(!same_bind && motion_capture_active_ && !motion_scene_finished_ && motion_captured_depth_ &&
-     bind_set_[4] && bind_set_[4]->resource.Get()==motion_captured_depth_.Get() &&
-     !graphics::MatchesRetainedMotionCapturePair(
-        {reinterpret_cast<uintptr_t>(motion_captured_color_.Get()),reinterpret_cast<uintptr_t>(motion_captured_depth_.Get())},
-        {rts[0]?reinterpret_cast<uintptr_t>(rts[0]->resource.Get()):0,ds?reinterpret_cast<uintptr_t>(ds->resource.Get()):0}))
-    FinishMotionScene(bind_set_[4]);
   if (!same_bind) {
     if(post_vertex_diagnostic_ && post_vertex_active_ && !post_vertex_depth_snapshot_ && bind_set_[0] && bind_set_[4] &&
        bind_set_[0]->guest_format==12 && bind_set_[0]->width==bind_set_[4]->width &&
@@ -3184,20 +3128,17 @@ bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_fo
     rtv_formats[i] = rts[i] ? rts[i]->view_format : DXGI_FORMAT_UNKNOWN;
     if (rts[i]) Transition(rts[i]->resource.Get(), rts[i]->state, D3D12_RESOURCE_STATE_RENDER_TARGET);
   }
-  ConfigureMotionCoverage(rts[0],ds,draw_metadata.vs_hash,draw_metadata.ps_hash,rt_count==1);
-  if(motion_coverage_draw_active_) {rtv_formats[1]=DXGI_FORMAT_R32_UINT;rt_count=2;}
   dsv_format = ds ? ds->view_format : DXGI_FORMAT_UNKNOWN;
   if (ds) Transition(ds->resource.Get(), ds->state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
   // DLSS: the scene's draws also write the objects' motion (SV_Target4);
   // rt_count 5 tells GetPipeline (slot 4 is always kDlssMotionFormat).
   const D3D12_CPU_DESCRIPTOR_HANDLE* motion = nullptr;
-  if (!motion_coverage_draw_active_ && rts[0] && DlssMode() && dlss_scene_ && !dlss_scene_done_ &&
+  if (rts[0] && DlssMode() && dlss_scene_ && !dlss_scene_done_ &&
       rts[0]->resource.Get() == dlss_scene_ && rts[0]->samples == 1) {
     motion = DlssMotionTarget();
   }
   if (motion) rt_count = 5;
-  bool changed = rt_count != bound_rt_count_ || ds != bound_ds_ || bool(motion) != bound_motion_ ||
-      motion_coverage_bound_!=motion_coverage_draw_active_;
+  bool changed = rt_count != bound_rt_count_ || ds != bound_ds_ || bool(motion) != bound_motion_;
   for (uint32_t i = 0; i < 4 && !changed; ++i) changed = rts[i] != bound_rts_[i];
   if (changed) {
     D3D12_CPU_DESCRIPTOR_HANDLE rtvs[5] = {};
@@ -3205,8 +3146,7 @@ bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_fo
     for (uint32_t i = 0; i < rt_count && i < 4; ++i) {
       // Gaps are not allowed with a contiguous RTV array; use the first bound
       // RT's view for gaps (write mask 0 in that case is the guest's intent).
-      rtvs[i] = motion_coverage_draw_active_ && i==1 ? MotionCoverageView() :
-          rts[i] ? rts[i]->view : rts[0] ? rts[0]->view : D3D12_CPU_DESCRIPTOR_HANDLE{};
+      rtvs[i] = rts[i] ? rts[i]->view : rts[0] ? rts[0]->view : D3D12_CPU_DESCRIPTOR_HANDLE{};
     }
     command_list_->OMSetRenderTargets(rt_count, rt_count ? rtvs : nullptr, FALSE,
                                       ds ? &ds->view : nullptr);
@@ -3221,7 +3161,6 @@ bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_fo
     bound_rt_count_ = rt_count;
     bound_ds_ = ds;
     bound_motion_ = motion != nullptr;
-    motion_coverage_bound_=motion_coverage_draw_active_;
   }
   return true;
 }
@@ -3231,15 +3170,6 @@ bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_fo
 // Order everywhere: sr_native_shader_dir (explicit loose files), the
 // pre-shader library (sr_native_preshaders), the embedded pack, the default
 // loose-file directory.
-bool PrewarmedVariantLookup(uint64_t hash,uint32_t variant,const void** data,size_t* size) {
-  static std::mutex mutex;
-  static std::unordered_map<uint64_t,std::vector<uint8_t>> rt,coverage,combined;
-  if(variant<1 || variant>3) return false;
-  std::lock_guard lock(mutex);
-  auto& bytes=(variant==1 ? rt : variant==2 ? coverage : combined)[hash];
-  if(bytes.empty() && !ShaderTranslator::Get().LoadPrewarmedVariant(hash,variant,bytes)) return false;
-  *data=bytes.data();*size=bytes.size();return true;
-}
 
 bool PackShaderLookup(uint64_t hash, bool vertex, const void** data, size_t* size) {
   if (!REXCVAR_GET(sr_native_shader_dir).empty()) return false;
@@ -3442,9 +3372,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
                                            DXGI_FORMAT dsv_format,
                                            D3D12_INDEX_BUFFER_STRIP_CUT_VALUE strip_cut) {
   CpuTimer cpu_timer(cpu_timings.pipeline_ns);
-  const bool coverage_variant=motion_coverage_draw_active_ && motion_coverage_shader_;
-  const bool special_variant=coverage_variant;
-  if(coverage_variant && REXCVAR_GET(sr_native_debug_motion_coverage_pso_failure)) return nullptr;
+  const bool special_variant=false;
   reg::RB_BLENDCONTROL blend{LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_BLENDCONTROL0)};
   reg::PA_SU_SC_MODE_CNTL mode{LoadReg(base, dev, rex::graphics::XE_GPU_REG_PA_SU_SC_MODE_CNTL)};
   reg::RB_DEPTHCONTROL depth{LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_DEPTHCONTROL)};
@@ -3489,20 +3417,6 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
                 mode.value, poly_scale, poly_offset, depth_bias, depth.value, stencil_ref_mask,
                 bound_samples_, (LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_COLORCONTROL) >> 4) & 1);
   }
-  current_motion_raster_.depth_bias=depth_bias;current_motion_raster_.slope_bias=slope_bias;
-  current_motion_raster_.cull=mode.cull_front && !mode.cull_back ? D3D12_CULL_MODE_FRONT :
-      mode.cull_back && !mode.cull_front ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
-  current_motion_raster_.front_ccw=(mode.face ? false : true) ^ bool(REXCVAR_GET(sr_native_flip_winding));
-  const uint32_t motion_color=LoadReg(base,dev,rex::graphics::XE_GPU_REG_RB_COLORCONTROL);
-  current_motion_raster_.shader=vs_hash;current_motion_raster_.depth_control=depth.value;
-  current_motion_raster_.pixel_shader=ps_hash;current_motion_raster_.ray_opaque=false;
-  current_motion_raster_.blend_control=blend.value;current_motion_raster_.color_control=motion_color;
-  current_motion_raster_.color_mask=color_mask;current_motion_raster_.stencil_enabled=depth.stencil_enable;
-  current_motion_raster_.z_write=depth.z_write_enable;
-  current_motion_raster_.coverage_id=coverage_variant ? motion_coverage_draw_id_ : 0;
-  current_motion_raster_.opaque=graphics::CanReplayMotionRasterCoverage(bound_samples_,depth.z_enable,
-      depth.z_write_enable,depth.stencil_enable,REXCVAR_GET(sr_native_debug_no_ztest),
-      blend.value,motion_color,current_motion_raster_.coverage_id);
   uint32_t slope_bits;
   std::memcpy(&slope_bits, &slope_bias, 4);
 
@@ -3514,7 +3428,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
   uint64_t key_parts[] = {vs_hash ^ (uint64_t(bound_samples_) << 60) ^
                               (uint64_t(alpha_to_coverage) << 59),
                           (uint64_t(uint32_t(depth_bias)) << 32) | slope_bits,
-                          ps_hash ^ (coverage_variant ? 0x5352434F56450001ull : 0),
+                          ps_hash,
                           decl_hash,
                           blend.value,
                           uint64_t(mode.value & 0x7) | (uint64_t(color_mask & 0xFFFF) << 8) |
@@ -3562,8 +3476,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
   const auto* vs = LoadShader(vs_hash, true);
   bool pending = shader_pending_;
   // ps_hash == 0: depth-only draw (the game binds no pixel shader).
-  const auto* ps = coverage_variant ? motion_coverage_shader_ :
-      ps_hash ? LoadShader(ps_hash, false) : nullptr;
+  const auto* ps = ps_hash ? LoadShader(ps_hash, false) : nullptr;
   pending = pending || shader_pending_;
   if (!vs || (ps_hash && !ps)) {
     if (pending) pipelines_.erase(key);  // ask again once the translation finished
@@ -3601,10 +3514,6 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
     if (rtv_formats[i] == DXGI_FORMAT_R32_FLOAT || rtv_formats[i] == DXGI_FORMAT_R32G32_FLOAT) {
       desc.BlendState.RenderTarget[i].BlendEnable = FALSE;
     }
-  }
-  if(coverage_variant) {
-    auto& owner=desc.BlendState.RenderTarget[1];
-    owner.BlendEnable=FALSE;owner.LogicOpEnable=FALSE;owner.RenderTargetWriteMask=D3D12_COLOR_WRITE_ENABLE_RED;
   }
   desc.SampleMask = UINT_MAX;
   desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
@@ -3667,7 +3576,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
     record.key = key;
     record.vs_hash = vs_hash;
     record.ps_hash = ps_hash;
-    record.pixel_variant=coverage_variant ? 2u : 0u;
+    record.pixel_variant=0;
     record.blend = desc.BlendState;
     record.raster = desc.RasterizerState;
     record.depth_stencil = desc.DepthStencilState;
@@ -4875,8 +4784,7 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
     }
     // Empty slots have no texture or sampler. Their three SRV dimensions use
     // the same null descriptors regardless of the remaining fetch words.
-    // Motion capture still needs fetch[1] for the first three slots.
-    if (!IsTextureBound(fetch[0]) && !(motion_capture_active_ && slot < 3)) {
+    if (!IsTextureBound(fetch[0])) {
       s[16 + slot] = 1;
       s[32 + slot] = 2;
       continue;
@@ -4962,7 +4870,6 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
         srv |= 0x80000000u;
       }
     }
-    if(motion_capture_active_ && slot<3) RecordMotionColorBinding(slot,fetch,srv);
     if (trace_state_ == 1 && (fetch[0] & 3) == uint32_t(xenos::FetchConstantType::kTexture)) {
       uint32_t addr = GuestPhysical(fetch[1] & 0xFFFFF000u);
       auto latest = resolve_latest_.find(addr);
@@ -5013,7 +4920,6 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
   for (uint32_t i = 0; i < 4; ++i) {
     const uint32_t vs_bool=GpuConstant(base, dev, Pm4Mirror::kBoolConstantBase + i, kDevVsBools + 4 * i, use_mirror);
     s[64 + i] = vs_bool;
-    if(motion_capture_active_) motion_uploaded_vs_bools_[i]=vs_bool;
     s[68 + i] = GpuConstant(base, dev, Pm4Mirror::kBoolConstantBase + 4 + i, kDevPsBools + 4 * i, use_mirror);
   }
   s[72] = 0;
@@ -5036,20 +4942,6 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
     }
     half_pixel[0] = 1.0f / w;
     half_pixel[1] = -1.0f / h;
-  }
-  // Preserve the legacy correction and append only the requested scene delta.
-  // Screen-space/postprocess, shadows and ordinary frames retain their inputs.
-  motion_jitter_draw_active_=false;
-  if(motion_capture_active_ && !motion_scene_finished_ && motion_jitter_ready_ && !motion_continuous_ && REXCVAR_GET(sr_native_debug_motion_jitter) &&
-     bound_rts_[0] && bound_ds_ && bound_rts_[0]->guest_format==12 &&
-     bound_rts_[0]->width==kOutputWidth && bound_rts_[0]->height==kOutputHeight &&
-     bound_samples_==1 && !ScreenSpaceDraw(base,dev) && REXCVAR_GET(sr_native_shader_dir).empty()) {
-    const auto color=bound_rts_[0]->resource->GetDesc(),depth=bound_ds_->resource->GetDesc();
-    if(color.Width==depth.Width && color.Height==depth.Height &&
-       color.Width==uint32_t(HostPx(kOutputWidth,render_scale_)) && color.Height==uint32_t(HostPx(kOutputHeight,render_scale_))) {
-      half_pixel[0]+=motion_frame_jitter_.ndc_x;half_pixel[1]+=motion_frame_jitter_.ndc_y;
-      motion_jitter_draw_active_=true;
-    }
   }
   // DLSS (dlss.cpp): sub-pixel jitter of the scene's draws.
   if (!ScreenSpaceDraw(base, dev)) DlssJitter(half_pixel);
@@ -5207,12 +5099,6 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
     xform[3] = 1.0f + wy * xform[1];
   }
   std::memcpy(&s[108], xform, sizeof(xform));
-  if(motion_capture_active_) {
-    // Preserve the exact CPU operands written above, without reading a mapped
-    // write-combined upload heap when shared staging/cache are disabled.
-    std::memcpy(motion_clip_fixup_.data(),xform,sizeof(xform));
-    std::memcpy(motion_clip_fixup_.data()+4,half_pixel,sizeof(half_pixel));
-  }
   if (trace_state_ == 1) {
     const float* v = reinterpret_cast<const float*>(mirror_.regs() + Pm4Mirror::kAluConstantBase);
     std::string vc;
@@ -5253,7 +5139,6 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
   // b3 (patch 0030): previous VS constants of this draw; the current ones until
   // the DLSS motion port supplies history (g_SrMotionValid = 0 then).
   command_list_->SetGraphicsRootConstantBufferView(9, dlss_prev_vs_gpu_ ? dlss_prev_vs_gpu_ : cb_vs_gpu_);
-  current_motion_raster_.ray_opaque=false;
   return true;
 }
 
@@ -5334,9 +5219,6 @@ void Renderer::ApplyFixedFunctionState(uint8_t* base, uint32_t dev) {
     command_list_->RSSetViewports(1, &vp);
     fixed_viewport_ = vp;
   }
-  current_motion_raster_.full_viewport=bound_rts_[0] && vp.TopLeftX==0 && vp.TopLeftY==0 &&
-      vp.Width==float(HostPx(bound_rts_[0]->width,bound_rts_[0]->scale)) &&
-      vp.Height==float(HostPx(bound_rts_[0]->height,bound_rts_[0]->scale)) && vp.MinDepth==0 && vp.MaxDepth==1;
   // Scissor (draw_util::GetScissor): window scissor + window offset, clamped by
   // the screen scissor. Not during predicated tiling: host surfaces are untiled
   // while the XDK sets a per-tile scissor.
@@ -5360,7 +5242,6 @@ void Renderer::ApplyFixedFunctionState(uint8_t* base, uint32_t dev) {
     command_list_->RSSetScissorRects(1, &scissor);
     fixed_scissor_ = scissor;
   }
-  current_motion_raster_.scissor=scissor;
   uint32_t stencil_ref_mask = LoadReg(base, dev, rex::graphics::XE_GPU_REG_RB_STENCILREFMASK);
   const uint32_t stencil_ref = stencil_ref_mask & 0xFF;
   if (!fixed_state_cached_ || fixed_stencil_ref_ != stencil_ref) {
@@ -5612,21 +5493,6 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
     LogUnsupportedOnce("render target bind", 0);
     return false;
   }
-  if(motion_pre_hud_pending_ && bound_rts_[0] && bound_rts_[0]->guest_format==0 && bound_rts_[0]->samples==1 &&
-     bound_rts_[0]->width==kOutputWidth && bound_rts_[0]->height==kOutputHeight) {
-    // Bounded diagnostic checkpoints, before distinct final-color draw families.
-    // The first font draw was already too late (HUD bar present); inspect the
-    // earlier checkpoints instead of asserting that it is a pre-HUD boundary.
-    const std::array<uint64_t,2> pair{vs_hash,ps_hash};
-    if(motion_color_pairs_.size()<12 &&
-       std::find(motion_color_pairs_.begin(),motion_color_pairs_.end(),pair)==motion_color_pairs_.end()) {
-      motion_color_pairs_.push_back(pair);
-      QueueMotionReadback(bound_rts_[0]->resource.Get(),bound_rts_[0]->state,
-          fmt::format("candidate_color_d{}_vs{:016X}_ps{:016X}",draw_calls_in_frame_,vs_hash,ps_hash));
-    }
-    if(vs_hash==0xFCB6D23E7B941855ull && ps_hash==0x9841B42F263B95DEull)
-      motion_pre_hud_pending_=false;
-  }
   // After binding targets: EDRAM reinterpretation inside BindRenderTargets
   // may have changed the root signature and heaps.
   if (!frame_state_bound_) {
@@ -5653,19 +5519,6 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
   }
   ID3D12PipelineState* pso = GetPipeline(base, dev, vs_hash, ps_hash, decl, topology_type,
                                          rtv_formats, rt_count, dsv_format, strip_cut);
-  if(!pso && motion_coverage_draw_active_) {
-    // Optional diagnostics must never remove an otherwise valid guest draw.
-    // The failed variant key stays separate; retry the original PS/RT layout
-    // and recompute its ordinary motion eligibility in GetPipeline below.
-    motion_coverage_failed_shaders_.insert(ps_hash);
-    motion_coverage_draw_active_=false;motion_coverage_draw_id_=0;motion_coverage_shader_=nullptr;
-    motion_coverage_bound_=false;
-    rtv_formats[1]=DXGI_FORMAT_UNKNOWN;rt_count=1;bound_rt_count_=1;
-    const auto original_rtv=bound_rts_[0]->view;
-    command_list_->OMSetRenderTargets(1,&original_rtv,FALSE,bound_ds_?&bound_ds_->view:nullptr);
-    REXLOG_WARN("native motion coverage PSO unavailable: ps={:016X}; retrying original draw without owner MRT",ps_hash);
-    pso=GetPipeline(base,dev,vs_hash,ps_hash,decl,topology_type,rtv_formats,rt_count,dsv_format,strip_cut);
-  }
   if (!pso) {
     ++stats_.skip_pso;
     ++stats_.skip_pso_pairs[{vs_hash, ps_hash, g_current_pass}];
@@ -5714,9 +5567,7 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
   }
   current_ps_hash_ = ps_hash;
   current_vs_hash_ = vs_hash;
-  if(motion_capture_active_) for(auto& source:motion_color_sources_) source={};
-  const bool filter_textures = TextureUsageFiltering() && !motion_capture_active_ &&
-      !motion_coverage_draw_active_ && !trace_state_;
+  const bool filter_textures = TextureUsageFiltering() && !trace_state_;
   const uint32_t texture_mask = graphics::guest::TextureMaskForShaders(
       shader_a.get(), shader_b.get(),
       (!vs_obj || shader_a) && (!ps_obj || shader_b), filter_textures);
@@ -5727,8 +5578,7 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
       REXCVAR_GET(sr_native_shader_dir).empty() &&
       REXCVAR_GET(sr_native_preshaders_path).empty() && REXCVAR_GET(sr_native_shader_tools_dir).empty() &&
       REXCVAR_GET(sr_native_debug_ps_const).empty() &&
-      !motion_capture_active_ && !post_vertex_active_ &&
-      !motion_coverage_draw_active_ && !trace_state_ && !REXCVAR_GET(sr_native_packet_check);
+      !post_vertex_active_ && !trace_state_ && !REXCVAR_GET(sr_native_packet_check);
   const auto vs_usage=graphics::guest::ConstantUsageForShaders(shader_a.get(),shader_b.get(),true,
       (!vs_obj || shader_a) && (!ps_obj || shader_b),filter_constants);
   const auto ps_usage=graphics::guest::ConstantUsageForShaders(shader_a.get(),shader_b.get(),false,
@@ -5753,13 +5603,6 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
   rt_so_target_.dsv = dsv_format;
   rt_so_target_.strip_cut = strip_cut;
   rt_so_target_.pso = pso;
-  if(motion_coverage_draw_active_) {
-    command_list_->SetGraphicsRoot32BitConstant(10,graphics::MotionPixelOwnerConstant(
-        motion_coverage_draw_id_,current_motion_raster_.blend_control,current_motion_raster_.color_mask),0);
-    if(motion_reactive_[frame_index_].mask)
-      command_list_->SetGraphicsRootDescriptorTable(11,provider_->OffsetViewDescriptor(
-          srv_heap_->GetGPUDescriptorHandleForHeapStart(),motion_reactive_[frame_index_].uav));
-  }
   const D3D12_VERTEX_BUFFER_VIEW default_view{
       default_vertex_buffer_->GetGPUVirtualAddress(), 16, 0};
   command_list_->IASetVertexBuffers(16, 1, &default_view);
@@ -6727,7 +6570,6 @@ void Renderer::CapturePostVertexDraw(uint8_t* base,uint32_t dev,
   command_list_->SetPipelineState(current_raster_pipeline_);
 }
 
-#include "native_motion_capture.inc"
 
 void Renderer::RecordGeometrySubmission(uint8_t* base, const WorkBatch* batch, const WorkCmd* cmd,
                                         graphics::GeometrySubmission submission,
@@ -6838,15 +6680,11 @@ void Renderer::ExecDrawVertices(uint8_t* base, const WorkBatch& batch, const Wor
     }
     D3D12_INDEX_BUFFER_VIEW ibv{ib.gpu, quad_count * 24, DXGI_FORMAT_R32_UINT};
     command_list_->IASetIndexBuffer(&ibv);
-    if (!SkipGpuDraw()) {BeforeMotionColorDraw();command_list_->DrawIndexedInstanced(quad_count * 6, 1, 0, 0, 0);AfterMotionColorDraw();}
+    if (!SkipGpuDraw()) {command_list_->DrawIndexedInstanced(quad_count * 6, 1, 0, 0, 0);}
     // Generated/inline geometry has no attested temporal identity here.
-    CaptureMotionClipDraw(base,dev,topology,true,quad_count*6,0,0,
-        D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED,nullptr,nullptr);
   } else {
-    if (!SkipGpuDraw()) {BeforeMotionColorDraw();command_list_->DrawInstanced(vertex_count, 1, start_vertex, 0);AfterMotionColorDraw();}
+    if (!SkipGpuDraw()) {command_list_->DrawInstanced(vertex_count, 1, start_vertex, 0);}
     CapturePostVertexDraw(base,dev,topology,false,vertex_count,start_vertex);
-    CaptureMotionClipDraw(base,dev,topology,false,vertex_count,start_vertex,0,
-        D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED,&batch,&cmd);
   }
   // Ray tracing: Superman's cape (CPU cloth) and the instanced city copies.
   if (!quads && current_vs_hash_ == kRtCapeVs &&
@@ -6918,14 +6756,7 @@ void Renderer::ExecDrawIndexedVertices(uint8_t* base, const WorkBatch& batch,
     std::memcpy(tris.cpu, batch.bytes.data() + cmd.u[4], size_t(quad_indices) * 4);
     D3D12_INDEX_BUFFER_VIEW qv{tris.gpu, quad_indices * 4, DXGI_FORMAT_R32_UINT};
     command_list_->IASetIndexBuffer(&qv);
-    if (!SkipGpuDraw()) {BeforeMotionColorDraw();command_list_->DrawIndexedInstanced(quad_indices, 1, 0, base_vertex, 0);AfterMotionColorDraw();}
-    ReportObservedClothDraw(batch,cmd);
-    // Only the audited cloth producer supplies persistent slots for these
-    // generated quad indices; every other generated path remains unverified.
-    const bool observed_cloth=(motion_continuous_ || REXCVAR_GET(sr_native_debug_observed_skin_motion)) &&
-        current_vs_hash_==0xA5232A3184AA617Cull && cmd.observed_render.cloth.source_route_observed;
-    CaptureMotionClipDraw(base,dev,topology,true,quad_indices,0,base_vertex,
-        D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED,observed_cloth?&batch:nullptr,observed_cloth?&cmd:nullptr);
+    if (!SkipGpuDraw()) {command_list_->DrawIndexedInstanced(quad_indices, 1, 0, base_vertex, 0);}
     if (surface_probe_) {
       graphics::GeometrySubmission submission{};
       submission.kind = graphics::GeometrySubmissionKind::kIndexed;
@@ -6962,12 +6793,11 @@ void Renderer::ExecDrawIndexedVertices(uint8_t* base, const WorkBatch& batch,
                   base_vertex, current_ps_hash_, cmd.index_size, cmd.index32, st);
     }
   }
-  if (!SkipGpuDraw()) {BeforeMotionColorDraw();command_list_->DrawIndexedInstanced(index_count, 1, start_index, base_vertex, 0);AfterMotionColorDraw();}
+  if (!SkipGpuDraw()) {command_list_->DrawIndexedInstanced(index_count, 1, start_index, base_vertex, 0);}
   if (topology == D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST || topology == D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP)
     RtCaptureDraw(base, batch, cmd, ib, start_index, index_count, base_vertex,
                   topology == D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
   CapturePostVertexDraw(base,dev,topology,true,index_count,start_index,base_vertex,cut);
-  CaptureMotionClipDraw(base,dev,topology,true,index_count,start_index,base_vertex,cut,&batch,&cmd);
   if (surface_probe_) {
     graphics::GeometrySubmission submission{};
     submission.kind = graphics::GeometrySubmissionKind::kIndexed;
@@ -7050,10 +6880,8 @@ void Renderer::ExecDrawInlineVertices(uint8_t* base, uint32_t prim, uint32_t dat
     D3D12_VERTEX_BUFFER_VIEW rect_view{rect_vb.gpu, uint32_t(expanded.size()), stride};
     command_list_->IASetVertexBuffers(0, 1, &rect_view);
     bound_vertex_views_mask_ &= ~1u;
-    if (!SkipGpuDraw()) {CaptureMotionInlineColorGeometry(base,decl,expanded,stride,uint32_t(expanded.size()/stride),topology,false);BeforeMotionColorDraw();command_list_->DrawInstanced(uint32_t(expanded.size() / stride), 1, 0, 0);AfterMotionColorDraw();}
+    if (!SkipGpuDraw()) {command_list_->DrawInstanced(uint32_t(expanded.size() / stride), 1, 0, 0);}
     // Generated/inline geometry has no attested temporal identity here.
-    CaptureMotionClipDraw(base,dev,topology,false,uint32_t(expanded.size()/stride),0,0,
-        D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED,nullptr,nullptr);
     if (surface_probe_) {
       graphics::GeometrySubmission submission{};
       submission.kind = graphics::GeometrySubmissionKind::kInline;
@@ -7092,15 +6920,11 @@ void Renderer::ExecDrawInlineVertices(uint8_t* base, uint32_t prim, uint32_t dat
     }
     D3D12_INDEX_BUFFER_VIEW ibv{ib.gpu, quad_count * 12, DXGI_FORMAT_R16_UINT};
     command_list_->IASetIndexBuffer(&ibv);
-    if (!SkipGpuDraw()) {CaptureMotionInlineColorGeometry(base,decl,{vdata,vb_size},stride,vertex_count,topology,quads);BeforeMotionColorDraw();command_list_->DrawIndexedInstanced(quad_count * 6, 1, 0, 0, 0);AfterMotionColorDraw();}
+    if (!SkipGpuDraw()) {command_list_->DrawIndexedInstanced(quad_count * 6, 1, 0, 0, 0);}
     // Generated/inline geometry has no attested temporal identity here.
-    CaptureMotionClipDraw(base,dev,topology,true,quad_count*6,0,0,
-        D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED,nullptr,nullptr);
   } else {
-    if (!SkipGpuDraw()) {CaptureMotionInlineColorGeometry(base,decl,{vdata,vb_size},stride,vertex_count,topology,quads);BeforeMotionColorDraw();command_list_->DrawInstanced(vertex_count, 1, 0, 0);AfterMotionColorDraw();}
+    if (!SkipGpuDraw()) {command_list_->DrawInstanced(vertex_count, 1, 0, 0);}
     // Generated/inline geometry has no attested temporal identity here.
-    CaptureMotionClipDraw(base,dev,topology,false,vertex_count,0,0,
-        D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED,nullptr,nullptr);
   }
   if (surface_probe_) {
     graphics::GeometrySubmission submission{};
@@ -7165,12 +6989,10 @@ void Renderer::ExecBeginTiling(uint8_t* base, uint32_t count, uint32_t rects,
       }
       Transition(other.resource.Get(), other.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
       const auto host_color = graphics::ColorClearValue(other.guest_format, color);
-      InvalidateObjectMotionColor(other);
       command_list_->ClearRenderTargetView(other.view, host_color.data(), 0, nullptr);
     }
   }
   if (ds) {
-    MaybeFinishMotionBeforeDepthWrite(ds,true,"BeginTiling depth clear");
     Transition(ds->resource.Get(), ds->state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
     command_list_->ClearDepthStencilView(ds->view, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
                                          std::clamp(clear_z, 0.0f, 1.0f), uint8_t(clear_stencil),
@@ -7407,7 +7229,6 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
         resolve_latest_.erase(dest_base);
         return;
       }
-      dst.motion_lifetime=++object_motion_lifetime_;
       if(volume) {
         // Initialize every slice, including padding slices not written by the game.
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
@@ -7502,11 +7323,6 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
       d.pResource = dst.resource.Get();
       d.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
       D3D12_BOX box{x1, y1, 0, x2, y2, 1};
-      if(motion_capture_active_ && !motion_continuous_ && motion_capture_phase_==2) {
-        dst.motion_source_frame=dst.motion_source_serial=dst.motion_source_resource=0;
-        dst.motion_full_color_copy=false;
-      }
-      if(motion_continuous_) object_motion_lineage_.Invalidate(reinterpret_cast<uintptr_t>(dst.resource.Get()));
       if (dlss_source) {
         s.pResource = dlss_source;  // left in COPY_SOURCE by DlssOnColorResolve
         command_list_->CopyTextureRegion(&d, dx, dy, 0, &s, &box);
@@ -7526,31 +7342,8 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
         Breadcrumb("msaa resolve");
       } else {
         command_list_->CopyTextureRegion(&d, dx, dy, volume?stack_plan->destination_z:0, &s, &box);
-        if(motion_continuous_) {
-          dst.motion_write_serial=++motion_color_serial_;dst.motion_write_frame=frame_count_+1;
-          const auto description=dst.resource->GetDesc();
-          const graphics::MotionContentVersion version{reinterpret_cast<uintptr_t>(dst.resource.Get()),
-              dst.motion_lifetime,dst.motion_write_frame,dst.motion_write_serial,uint32_t(description.Width),description.Height};
-          const bool full=!volume && !x1 && !y1 && !dx && !dy &&
-              x2==HostPx(src->width,src->scale) && y2==HostPx(src->height,src->scale) &&
-              x2==description.Width && y2==description.Height;
-          object_motion_lineage_.Propagate(MotionVersion(*src),version,full);
-          if(CaptureObjectMotionFrame())
-            REXLOG_INFO("native motion lineage copy: source={:X}/{} lifetime={} destination={:X}/{} full={} ticket={}",
-                reinterpret_cast<uintptr_t>(src->resource.Get()),src->motion_write_serial,src->motion_lifetime,
-                version.resource,version.serial,full,bool(object_motion_lineage_.Find(version)));
-        }
         if(volume && trace_state_==1)
           REXLOG_INFO("trace stacked resolve base={:08X} mip={} slice={} host_z={} layers={}",dest_base,level,slice,stack_plan->destination_z,layers);
-        if(motion_capture_active_ && !motion_continuous_ && motion_capture_phase_==2) {
-          dst.motion_source_frame=src->motion_write_frame;dst.motion_source_serial=src->motion_write_serial;
-          dst.motion_source_resource=reinterpret_cast<uint64_t>(src->resource.Get());
-          dst.motion_full_color_copy=!volume && !x1 && !y1 && !dx && !dy &&
-              x2==HostPx(src->width,src->scale) && y2==HostPx(src->height,src->scale) &&
-              x2==HostPx(dst.width,dst.scale) && y2==HostPx(dst.height,dst.scale);
-          if(motion_scene_finished_ && motion_color_reports_<64)
-            REXLOG_INFO("native motion color copy: host_frame={} serial={} source={:X} destination={:X} source_frame={} source_draw={} full={} rect={}x{}+{},{} destination_xy={},{}",frame_count_+1,++motion_color_serial_,dst.motion_source_resource,reinterpret_cast<uint64_t>(dst.resource.Get()),dst.motion_source_frame,dst.motion_source_serial,dst.motion_full_color_copy,x2-x1,y2-y1,x1,y1,dx,dy);
-        }
         Breadcrumb("color resolve");
       }
       Transition(dst.resource.Get(), dst.state,
@@ -7601,7 +7394,6 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
         }
         Transition(other.resource.Get(), other.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
         const auto host_color = graphics::ColorClearValue(other.guest_format, color);
-        InvalidateObjectMotionColor(other);
         command_list_->ClearRenderTargetView(other.view, host_color.data(), 1, &r);
       }
       if(coop_pair_.next) {coop_cleared_source_=rt;coop_cleared_stamp_=rt->last_write;}
@@ -7623,7 +7415,6 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
                       g_current_pass, swap_number_);
         }
       }
-      MaybeFinishMotionBeforeDepthWrite(ds,true,"resolve depth clear");
       Transition(ds->resource.Get(), ds->state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
       command_list_->ClearDepthStencilView(ds->view,
                                            D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
@@ -7944,7 +7735,6 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
     post_vertex_done_=!post_vertex_capture_->ranges().empty();
     post_vertex_active_=false;
   }
-  EndMotionCapture();
   DlssEndFrame();
   // Blit the resolved front buffer into the output target.
   auto latest = resolve_latest_.find(front_buffer_address);
@@ -8139,11 +7929,7 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
       }
       return v;
     }();
-    if (std::find(ab_swaps.begin(), ab_swaps.end(), swap_number_) != ab_swaps.end() ||
-        (motion_live_capture_frame_!=0 && frame_count_+1==motion_live_capture_frame_)) {
-      if (motion_live_capture_frame_!=0 && frame_count_+1==motion_live_capture_frame_)
-        REXLOG_INFO("native motion final capture: frame={} draw_swap={} present_swap={}",
-                    frame_count_+1,motion_live_capture_swap_,swap_number_);
+    if (std::find(ab_swaps.begin(), ab_swaps.end(), swap_number_) != ab_swaps.end()) {
       DumpFrameResources(fmt::format("s{:06}_", swap_number_), false, true);
     }
   }
@@ -8869,8 +8655,6 @@ void Renderer::BeginCmd(Op op) {
   if (!batch_) batch_ = std::make_unique<WorkBatch>();
   cur_ = WorkCmd{};
   cur_.op = op;
-  if(op==Op::kDraw || op==Op::kDrawIndexed || op==Op::kDrawInline)
-    cur_.observed_render=CaptureInstanceProbeInvocation(guest_base_);
   cur_.command_serial = ++capture_serial_;
   cur_.tiling_active = capture_tiling_active_;
   cur_.packet_check = (!worker_stop_ && bool(packet_sink_)) || (REXCVAR_GET(sr_native_packet_check) && graphics::guest::IsCaptureFrame(
@@ -9730,19 +9514,6 @@ void Renderer::DrawIndexedVertices(uint8_t* base, uint32_t prim, int32_t base_ve
   }
   index_scope.Stop();
   cur_.streams_ok = PlanStreams(base, dev, Load32(base, dev + kDevVertexDecl), &draw_range);
-  // Capture the exact normalized index envelope while this
-  // guest draw owns its input, never scan live guest indices on the worker.
-  // Continuous motion/DXR need this proof even without a diagnostic trigger.
-  // DrawIndexed u6/u7 are otherwise unused; zero/zero means unverified.
-  const bool needs_motion_envelope=!packet_sink_ &&
-      !REXCVAR_GET(sr_native_motion_capture_trigger_path).empty();
-  if(needs_motion_envelope && cur_.has_index &&
-     uint64_t(start_index)+index_count<=uint64_t(draw_range.ib_size)/(draw_range.index32?4u:2u)) {
-    draw_range.Resolve();
-    if(draw_range.first<draw_range.end && draw_range.end<=0x1000000u) {
-      cur_.u[6]=draw_range.first;cur_.u[7]=draw_range.end;
-    }
-  }
   EndCmd(base);
 }
 
@@ -9872,7 +9643,6 @@ void Renderer::ExecClear(uint8_t* base, uint32_t count, uint32_t rects, uint32_t
         Transition(other.resource.Get(), other.state, D3D12_RESOURCE_STATE_RENDER_TARGET);
         std::vector<D3D12_RECT> scaled = ScaleRects(rs, other.scale);
         const auto host_color = graphics::ColorClearValue(other.guest_format, color);
-        InvalidateObjectMotionColor(other);
         command_list_->ClearRenderTargetView(other.view, host_color.data(), nrs, nrs ? scaled.data() : nullptr);
         MarkWritten(&other);
       }
@@ -9885,7 +9655,6 @@ void Renderer::ExecClear(uint8_t* base, uint32_t count, uint32_t rects, uint32_t
     HostSurface* rt0 = GetSurface(base, Load32(base, dev + kDevRenderTargets), false);
     if (HostSurface* ds = GetSurface(base, Load32(base, dev + kDevDepthStencil), true,
                                      rt0 ? rt0->width : 0, rt0 ? rt0->height : 0)) {
-      MaybeFinishMotionBeforeDepthWrite(ds,(ds_flags&D3D12_CLEAR_FLAG_DEPTH)!=0,"explicit depth clear");
       Transition(ds->resource.Get(), ds->state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
       std::vector<D3D12_RECT> scaled = ScaleRects(rs, ds->scale);
       command_list_->ClearDepthStencilView(ds->view, ds_flags, std::clamp(z, 0.0f, 1.0f),

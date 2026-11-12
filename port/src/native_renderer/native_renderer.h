@@ -68,13 +68,7 @@
 #include "../graphics/shadow_projection.h"
 #include "../graphics/shadow_caster_geometry.h"
 #include "../graphics/graphics_options.h"
-#include "../graphics/temporal_geometry_history.h"
-#include "../graphics/temporal_class_coverage.h"
-#include "../graphics/object_motion_frame.h"
-#include "../graphics/temporal_vertex_fetch.h"
 #include "../graphics/static_world_shader_dependencies.h"
-#include "../graphics/d3d12/post_vertex_clip_capture.h"
-#include "../graphics/d3d12/temporal_motion.h"
 #include "../graphics/d3d12/post_vertex_capture.h"
 #include "../graphics/d3d12/ray_tracing_scene.h"
 #include "pipeline_cache.h"
@@ -457,8 +451,6 @@ class Renderer : public NativeFrontend {
     // undefined contents on Xenos and must not carry data across (feedback).
     uint32_t edram_tiles = 0;
     uint64_t last_write = 0;
-    uint64_t motion_write_frame=0,motion_write_serial=0; // Opt-in actual draw stamps; never bind stamps.
-    uint64_t motion_lifetime=0;
   };
   HostSurface* GetSurface(uint8_t* base, uint32_t surface_object, bool depth,
                           uint32_t min_width = 0, uint32_t min_height = 0, bool full_scale = false);
@@ -476,9 +468,6 @@ class Renderer : public NativeFrontend {
     uint32_t width = 0, height = 0;  // guest pixels
     uint32_t layers = 1;
     bool stacked_volume = false;   // host Texture3D for validated stacked color resolves
-    uint64_t motion_source_frame=0,motion_source_serial=0,motion_source_resource=0;
-    uint64_t motion_lifetime=0,motion_write_serial=0,motion_write_frame=0;
-    bool motion_full_color_copy=false;
     float scale = 1.0f;              // host pixels per guest pixel (source surface)
     bool shadow = false;             // resolved from a shadow map target
     uint32_t plain_srv = 0;          // default-mapped SRV (soft particles' scene depth)
@@ -624,12 +613,6 @@ class Renderer : public NativeFrontend {
   void SnapshotPostVertexDepth();
   void RecordDepthReceiverProbe();
   std::unique_ptr<graphics::d3d12::RayTracingScene> rt_capture_scene_;
-  // Old object-motion pipeline (native_motion_capture.inc): fed the previous
-  // DLSS adapter; dormant since dlss.cpp (dlss_wanted_ stays false).
-  bool dlss_wanted_=false,dlss_history_=false,dlss_view_projection_valid_=false;
-  uint32_t dlss_render_width_=0,dlss_render_height_=0;
-  HostSurface* dlss_scene_ds_=nullptr;
-
   // ---- NVIDIA DLSS (dlss.cpp; ported from Superman-Returns-PC) ----
   // The scene is the colour surface resolved right after the full-size depth
   // resolve that ends the 3D draws (learned each frame); its draws get a
@@ -757,7 +740,6 @@ class Renderer : public NativeFrontend {
   bool ray_tracing_capable_=false;
   bool post_vertex_diagnostic_=false;
   graphics::GraphicsOptionsSnapshot graphics_frame_request_;
-  graphics::Matrix4 object_motion_final_camera_{};
   void ReportRtFeatures(graphics::GraphicsBackendReport& report);
 
   // ---- Ray tracing (rt_shadows.cpp; ported from Superman-Returns-PC) ----
@@ -953,114 +935,6 @@ class Renderer : public NativeFrontend {
   BufferStock buffer_stock_;  // ray-tracing buffers made ahead of the worker (buffer_stock.h)
   void BuildInputLayout(uint8_t* base, uint32_t decl, const std::vector<uint8_t>& vs,
                         std::vector<D3D12_INPUT_ELEMENT_DESC>& elements, PsoRecord* record);
-  struct MotionRaster {
-    uint64_t shader=0,pixel_shader=0,color_serial=0;
-    uint32_t coverage_id=0;
-    uint32_t depth_control=0,blend_control=0,color_control=0,color_mask=0;
-    D3D12_CULL_MODE cull=D3D12_CULL_MODE_NONE;
-    bool front_ccw=false,opaque=false,full_viewport=false,stencil_enabled=false,z_write=false,ray_opaque=false;
-    int32_t depth_bias=0;float slope_bias=0;
-    D3D12_RECT scissor{};
-  } current_motion_raster_;
-  struct MotionReadback {
-    Microsoft::WRL::ComPtr<ID3D12Resource> resource;
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout{};
-    uint64_t size=0,swap=0;uint32_t slot=0;std::string name;
-    bool clip_buffer=false;
-  };
-  std::unique_ptr<graphics::d3d12::PostVertexClipCapture> motion_clips_;
-  std::unique_ptr<graphics::d3d12::TemporalMotion> temporal_motion_;
-  std::unique_ptr<graphics::d3d12::TemporalMotion> motion_static_candidate_;
-  std::unique_ptr<graphics::d3d12::TemporalMotion> motion_observed_skin_attribution_;
-  std::unique_ptr<graphics::d3d12::TemporalMotion> motion_observed_cloth_attribution_;
-  std::unique_ptr<graphics::d3d12::TemporalMotion> motion_observed_rigid_attribution_;
-  std::unique_ptr<graphics::d3d12::TemporalMotion> motion_visible_draw_attribution_;
-  graphics::TemporalGeometryHistory motion_history_;
-  graphics::ObjectMotionFrame object_motion_frame_;
-  graphics::MotionColorLineage object_motion_lineage_;
-  graphics::MotionSceneTicket object_motion_ticket_;
-  graphics::MotionContentVersion object_motion_hdr_;
-  bool motion_continuous_=false,object_motion_requested_=false,object_motion_previous_=false;
-  bool object_motion_output_ready_=false,object_motion_full_cover_=false;
-  graphics::Matrix4 object_motion_previous_camera_{},object_motion_camera_{};
-  bool object_motion_depth_reversed_=false;
-  uint64_t object_motion_previous_camera_frame_=0;
-  uint64_t object_motion_lifetime_=0,object_motion_reports_=0,object_motion_applied_=0;
-  Microsoft::WRL::ComPtr<ID3D12Resource> object_motion_depth_[3];
-  D3D12_RESOURCE_STATES object_motion_depth_state_[3]{};
-  graphics::MotionContentVersion MotionVersion(const HostSurface& surface) const;
-  void InvalidateObjectMotionColor(HostSurface& surface);
-  struct MotionReactiveSlot {
-    Microsoft::WRL::ComPtr<ID3D12Resource> mask;
-    D3D12_RESOURCE_STATES state=D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-    uint32_t uav=0;
-  } motion_reactive_[3];
-  bool EnsureMotionReactivity();
-  bool ObjectMotionInputsReady(const HostSurface& scene);
-  std::vector<MotionRaster> motion_rasters_;
-  std::vector<MotionReadback> motion_readbacks_;
-  std::unordered_map<uint64_t,Microsoft::WRL::ComPtr<ID3D12PipelineState>> motion_clip_pipelines_;
-  uint32_t motion_capture_phase_=0;
-  uint32_t motion_signature_reports_=0;
-  std::array<uint32_t,18> motion_candidate_reports_{};
-  std::array<uint32_t,2> motion_owner_reports_{};
-  uint32_t motion_cloth_reports_=0;
-  std::array<uint32_t,4> motion_uploaded_vs_bools_{};
-  std::vector<std::array<uint64_t,2>> motion_color_pairs_;
-  struct MotionColorSource {
-    uint64_t resource=0,source=0,frame=0,serial=0;
-    uint32_t descriptor=0,guest_base=0;bool full_copy=false;
-    graphics::MotionContentVersion version;
-  } motion_color_sources_[3];
-  uint64_t motion_color_serial_=0;
-  int64_t motion_live_capture_swap_=-1;
-  uint64_t motion_live_capture_frame_=0;
-  bool CaptureObjectMotionFrame() const;
-  uint32_t motion_color_reports_=0;
-  bool motion_capture_active_=false,motion_scene_finished_=false,motion_capture_done_=false;
-  graphics::SceneRasterJitter motion_frame_jitter_;
-  std::array<float,2> motion_previous_jitter_{};
-  bool motion_jitter_draw_active_=false,motion_jitter_applied_=false,motion_jitter_ready_=false;
-  bool motion_camera_valid_=false,motion_camera_conflict_=false,motion_previous_camera_bad_=false;
-  bool motion_pre_hud_pending_=false;
-  std::array<uint32_t,16> motion_camera_words_{};
-  bool motion_common_camera_valid_=false;
-  uint64_t motion_common_camera_domain_=0;
-  std::array<uint32_t,6> motion_common_camera_fixup_{};
-  std::vector<uint8_t> motion_rigid_sources_; // Parallel to history/raster samples: 1 asset, 2 common.
-  std::array<uint32_t,6> motion_clip_fixup_{}; // Exact uploaded ScreenXform + HalfPixelOffset bits.
-  Microsoft::WRL::ComPtr<ID3D12Resource> motion_depth_snapshot_;
-  Microsoft::WRL::ComPtr<ID3D12Resource> motion_coverage_[3];
-  Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> motion_coverage_rtv_heap_;
-  D3D12_RESOURCE_STATES motion_coverage_state_[3]{D3D12_RESOURCE_STATE_RENDER_TARGET,
-      D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_RENDER_TARGET};
-  std::unordered_map<uint64_t,std::vector<uint8_t>> motion_coverage_shaders_;
-  std::unordered_set<uint64_t> motion_coverage_failed_shaders_;
-  const std::vector<uint8_t>* motion_coverage_shader_=nullptr;
-  bool motion_coverage_draw_active_=false,motion_coverage_bound_=false,motion_coverage_cleared_=false;
-  uint32_t motion_coverage_next_id_=0,motion_coverage_draw_id_=0;
-  D3D12_CPU_DESCRIPTOR_HANDLE MotionCoverageView() const;
-  void ConfigureMotionCoverage(HostSurface* color,HostSurface* depth,uint64_t vs,uint64_t ps,bool single_color);
-  Microsoft::WRL::ComPtr<ID3D12Resource> motion_captured_depth_,motion_captured_color_;
-  uint32_t motion_captured_color_edram_=0,motion_captured_color_width_=0,motion_captured_color_height_=0;
-  float motion_captured_color_scale_=0;
-  void BeginMotionCapture();
-  void ReportObservedClothDraw(const WorkBatch& batch,const WorkCmd& cmd);
-  void CaptureMotionClipDraw(uint8_t* base,uint32_t dev,D3D12_PRIMITIVE_TOPOLOGY topology,
-      bool indexed,uint32_t count,uint32_t first,int32_t base_vertex,
-      D3D12_INDEX_BUFFER_STRIP_CUT_VALUE cut,const WorkBatch* batch,const WorkCmd* cmd);
-  void FinishMotionScene(HostSurface* depth);
-  void MaybeFinishMotionBeforeDepthWrite(HostSurface* depth,bool writes_depth,const char* reason);
-  void EndMotionCapture();
-  void QueueMotionReadback(ID3D12Resource* texture,D3D12_RESOURCE_STATES state,const std::string& name);
-  void QueueMotionClipReadback(ID3D12Resource* clips,uint32_t bytes);
-  void ReportMotionReadbacks(uint32_t slot);
-  void BeforeMotionColorDraw();
-  void CaptureMotionInlineColorGeometry(uint8_t* base,uint32_t declaration,
-      std::span<const uint8_t> vertices,uint32_t stride,uint32_t count,
-      D3D12_PRIMITIVE_TOPOLOGY topology,bool quads);
-  void AfterMotionColorDraw();
-  void RecordMotionColorBinding(uint32_t slot,const uint32_t* fetch,uint32_t descriptor);
   void PublishGraphicsOptions();
   Microsoft::WRL::ComPtr<ID3D12Resource> rt_probe_results_[3], rt_probe_readback_[3];
   uint32_t rt_probe_ray_count_[3]{};

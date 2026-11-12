@@ -77,8 +77,12 @@ Performance (`sr_dlss_preset` muda).
   os mips da resolução de saída); o cache de samplers aceita bias negativo.
 - Menu: NVIDIA DLSS Off / Quality / Balanced / Performance / DLAA (`sr_dlss`).
   `sr_dlss_debug=1` mostra os vetores de movimento, `2` só o jitter.
-- O pipeline antigo de movimento por objeto (`native_motion_capture.inc`,
-  variantes de cobertura) ficou inativo: só alimentava o adaptador antigo.
+- O pipeline antigo de movimento por objeto (captura `native_motion_capture.inc`,
+  `TemporalMotion`, variantes de cobertura de pixels, sonda de instâncias do
+  guest e os dados "observed" por draw) foi removido: só alimentava o adaptador
+  antigo. Os hooks do manifesto que ele usava (`single_instance_motion_hooks.cpp`)
+  ficaram vazios para não exigir nova geração do código recompilado. O cache de
+  pipelines ignora os registros de variantes antigas.
 
 Verificado na RTX 2060 (benchmark, dumps de frame): os quatro modos (DLAA,
 Quality 853×480, Balanced 742×418, Performance 640×360 → 1280×720) e RT + DLSS
@@ -86,7 +90,6 @@ juntos, sem erros de NGX.
 
 ## Pendente
 
-- Remover o código do pipeline antigo de movimento por objeto, agora inativo.
 - Co-op em tela dividida: a vista do P2 recebe os dados do frame com a própria
   matriz de luz, mas não foi validada com RT ligado (o co-op continua exigindo
   DLSS desligado).

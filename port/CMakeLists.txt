@@ -244,7 +244,6 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
         add_library(sr_native OBJECT
             ${SR_NATIVE_ROOT}/native_bridge.cpp
             ${SR_NATIVE_ROOT}/native_hooks.cpp
-            ${SR_NATIVE_ROOT}/instance_probe.cpp
             ${SR_NATIVE_ROOT}/guest_cpu_profile.cpp
             ${SR_NATIVE_ROOT}/guest_render_scheduler.cpp
             ${SR_NATIVE_ROOT}/native_graphics_system.cpp
@@ -253,8 +252,6 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
             ${SR_NATIVE_ROOT}/buffer_stock.cpp
             src/graphics/d3d12/device_capabilities.cpp
             src/graphics/d3d12/post_vertex_capture.cpp
-            src/graphics/d3d12/post_vertex_clip_capture.cpp
-            src/graphics/d3d12/temporal_motion.cpp
             src/graphics/d3d12/ray_tracing_scene.cpp
             src/graphics/graphics_options.cpp
             src/graphics/native_apt_menu.cpp
@@ -262,7 +259,6 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
             src/graphics/graphics_options_hooks.cpp
             src/graphics/graphics_preferences.cpp
             src/graphics/graphics_settings.cpp
-            src/graphics/pixel_coverage_shader.cpp
               src/graphics/scene_resolution_shader.cpp
             ${SR_NATIVE_ROOT}/resource_write_tracking.cpp
             ${SR_NATIVE_ROOT}/pm4_mirror.cpp

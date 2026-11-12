@@ -1,6 +1,5 @@
 #include "shader_translator.h"
 #include "shader_library.h"
-#include "../graphics/pixel_coverage_shader.h"
 
 #include <algorithm>
 #include <atomic>
@@ -96,7 +95,7 @@ fs::path FirstWith(const std::vector<fs::path>& dirs, const char* file) {
   return {};
 }
 
-Tools FindTools(bool rt_shadow = false,bool pixel_coverage = false) {
+Tools FindTools() {
   Tools t;
   const fs::path exe = rex::filesystem::GetExecutableFolder();
   std::vector<fs::path> dirs;
@@ -159,11 +158,6 @@ Tools FindTools(bool rt_shadow = false,bool pixel_coverage = false) {
     }
   }
   t.cache = root / fingerprint;
-  (void)rt_shadow;
-  if (pixel_coverage) {
-    const auto patch = graphics::PixelCoverageShaderCacheIdentity();
-    t.cache /= fmt::format("pixel-coverage-v1-{:016X}", XXH3_64bits(patch.data(), patch.size()));
-  }
   if (!WritableDir(t.cache) || !WritableDir(t.cache / "tmp")) {
     t.why = "cache folder not writable: " + t.cache.string();
     return t;
@@ -234,13 +228,12 @@ struct Entry {
 
 class Impl {
  public:
-  explicit Impl(bool rt_shadow = false,bool pixel_coverage = false)
-      : rt_shadow_(rt_shadow),pixel_coverage_(pixel_coverage) {
+  Impl() {
     if (!REXCVAR_GET(sr_native_runtime_shaders)) {
       REXLOG_INFO("runtime shaders: disabled (sr_native_runtime_shaders=false)");
       return;
     }
-    tools_ = FindTools(rt_shadow_,pixel_coverage_);
+    tools_ = FindTools();
     if (!tools_.ok) {
       REXLOG_WARN("runtime shaders: unavailable ({}); only the pre-shader library and the "
                   "embedded pack can supply shaders", tools_.why);
@@ -248,7 +241,7 @@ class Impl {
     }
     REXLOG_INFO("runtime shaders: {} + {}, cache {}", tools_.translator.filename().string(),
                 tools_.dxc.filename().string(), tools_.cache.string());
-    const int n = (rt_shadow_ || pixel_coverage_) ? 1 : std::clamp(REXCVAR_GET(sr_native_runtime_shader_threads), 1, 8);
+    const int n = std::clamp(REXCVAR_GET(sr_native_runtime_shader_threads), 1, 8);
     for (int i = 0; i < n; ++i) threads_.emplace_back([this] { Worker(); });
     enabled_ = true;
   }
@@ -271,11 +264,11 @@ class Impl {
     if (entries_.count(key)) return;
     Entry& e = entries_[key];
     e.vertex = vertex;
-    if (!rt_shadow_ && !pixel_coverage_ && fs::exists(DxilPath(hash, vertex))) {
+    if (fs::exists(DxilPath(hash, vertex))) {
       e.state = TranslateState::kReady;  // loaded on first Get
       return;
     }
-    if (!rt_shadow_ && !pixel_coverage_ && fs::exists(FailedPath(hash, vertex))) {
+    if (fs::exists(FailedPath(hash, vertex))) {
       e.state = TranslateState::kFailed;
       return;
     }
@@ -406,18 +399,8 @@ class Impl {
       std::string reason;
       std::vector<uint8_t> dxil;
       bool ok, compiled = false;
-      // Variant disk I/O always belongs to this worker. Fetch only observes
-      // in-memory state, even on a warm cache or while the worker owns mutex_.
-      if ((rt_shadow_ || pixel_coverage_) && ReadFile(DxilPath(hash, vertex), dxil) && !dxil.empty()) {
-        ++g_disk_hits;
-        ok = true;
-      } else if ((rt_shadow_ || pixel_coverage_) && fs::exists(FailedPath(hash, vertex))) {
-        reason = "cached shader specialization failure";
-        ok = false;
-      } else {
-        compiled = true;
-        ok = Translate(hash, vertex, container, dxil, reason);
-      }
+      compiled = true;
+      ok = Translate(hash, vertex, container, dxil, reason);
       if (compiled && !ok) ++g_compile_failed;
       const double ms = std::chrono::duration<double, std::milli>(
                             std::chrono::steady_clock::now() - start).count();
@@ -451,8 +434,8 @@ class Impl {
   bool Translate(uint64_t hash, bool vertex, const std::vector<uint8_t>& container,
                  std::vector<uint8_t>& dxil, std::string& reason) {
     ++g_compile_started;
-    REXLOG_INFO("native cache audit: shader_compile hash={:016X} stage={} variant={}",
-                hash, vertex ? "vs" : "ps", rt_shadow_ ? (pixel_coverage_ ? 3 : 1) : pixel_coverage_ ? 2 : 0);
+    REXLOG_INFO("native cache audit: shader_compile hash={:016X} stage={} variant=0",
+                hash, vertex ? "vs" : "ps");
     const std::string stem = Stem(hash, vertex);
     const fs::path tmp = tools_.cache / "tmp";
     const fs::path bin = tmp / (stem + ".bin");
@@ -486,14 +469,6 @@ class Impl {
     }
     std::vector<uint8_t> src;
     ReadFile(hlsl, src);
-    if (pixel_coverage_) {
-      std::string specialized;
-      if (!graphics::SpecializePixelCoverageShader(hash,
-              std::string_view(reinterpret_cast<const char*>(src.data()), src.size()), specialized, reason)) {
-        WriteFailed(hash, vertex, reason); cleanup(); return false;
-      }
-      src.assign(specialized.begin(), specialized.end());
-    }
     // Pixel shaders that trace inline RayQuery need shader model 6.5: the sun
     // shadow receivers (shadowMapOffsetScales, patches 0017-0029) and the
     // water, whose reflection is ray-traced (gWaterSpec, patch 0031).
@@ -544,7 +519,6 @@ class Impl {
   }
 
   Tools tools_;
-  const bool rt_shadow_,pixel_coverage_;
   bool enabled_ = false;
   bool stop_ = false;
   std::mutex mutex_;
@@ -564,15 +538,6 @@ Impl& Instance() {
 // Fetch must not perform lazy tool discovery, filesystem work, or wait for a
 // concurrent Offer. Publish the immutable-enabled Impl only after construction.
 
-std::atomic<Impl*> g_pixel_coverage_instance{nullptr};
-Impl& PixelCoverageInstance() {
-  static Impl* impl = [] {
-    auto* value = new Impl(false,true);
-    g_pixel_coverage_instance.store(value,std::memory_order_release);
-    return value;
-  }();
-  return *impl;
-}
 
 
 }  // namespace
@@ -586,9 +551,6 @@ bool ShaderTranslator::Enabled() { return Instance().enabled(); }
 
 void ShaderTranslator::Offer(uint64_t hash, bool vertex, const uint8_t* container, size_t size) {
   Instance().Offer(hash, vertex, container, size);
-  if (!vertex) {
-    OfferPixelCoverageVariant(hash, container, size);
-  }
 }
 
 TranslateState ShaderTranslator::Fetch(uint64_t hash, bool vertex, std::vector<uint8_t>& dxil) {
@@ -596,56 +558,12 @@ TranslateState ShaderTranslator::Fetch(uint64_t hash, bool vertex, std::vector<u
 }
 
 
-void ShaderTranslator::OfferPixelCoverageVariant(uint64_t hash,const uint8_t* container,size_t size) {
-  if(graphics::IsPixelCoverageShader(hash) && container && size)
-    PixelCoverageInstance().Offer(hash,false,container,size);
-}
-TranslateState ShaderTranslator::FetchPixelCoverageVariant(uint64_t hash,std::vector<uint8_t>& dxil) {
-  dxil.clear();
-  if(!graphics::IsPixelCoverageShader(hash)) return TranslateState::kUnknown;
-  Impl* impl=g_pixel_coverage_instance.load(std::memory_order_acquire);
-  if (!impl) ++g_fetch_not_ready;
-  return impl ? impl->FetchNonBlocking(hash,dxil) : TranslateState::kUnknown;
-}
 
 
 bool ShaderTranslator::LoadCached(uint64_t hash, bool vertex, std::vector<uint8_t>& dxil) {
   return Instance().LoadCached(hash, vertex, dxil);
 }
 
-ShaderPrewarmResult ShaderTranslator::PrewarmVariants(const ShaderLibrary& library,
-    bool rt_shadow, bool pixel_coverage, uint32_t timeout_ms) {
-  ShaderPrewarmResult result;
-  struct Task { uint64_t hash; Impl* impl; };
-  std::vector<Task> tasks;
-  for (const auto& shader : library.shaders()) {
-    if (shader.vertex) continue;
-    auto offer = [&](Impl& impl) {
-      impl.Offer(shader.container_hash, false, shader.container.data(), shader.container.size());
-      tasks.push_back({shader.container_hash, &impl});
-      ++result.offered;
-    };
-    if (pixel_coverage && graphics::IsPixelCoverageShader(shader.container_hash)) offer(PixelCoverageInstance());
-  }
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-  for (const auto& task : tasks) {
-    std::vector<uint8_t> bytes;
-    const auto remaining = std::max<int64_t>(0, std::chrono::duration_cast<std::chrono::milliseconds>(
-        deadline - std::chrono::steady_clock::now()).count());
-    const auto state = task.impl->WaitReady(task.hash, false, bytes, uint32_t(remaining));
-    if (state == TranslateState::kReady && !bytes.empty()) ++result.ready;
-    else if (state == TranslateState::kPending) ++result.pending;
-    else ++result.failed;
-  }
-  REXLOG_INFO("native cache audit: shader_prewarm offered={} ready={} failed={} pending={}",
-              result.offered, result.ready, result.failed, result.pending);
-  return result;
-}
-
-bool ShaderTranslator::LoadPrewarmedVariant(uint64_t hash, uint32_t variant, std::vector<uint8_t>& dxil) {
-  Impl* impl = variant == 2 ? g_pixel_coverage_instance.load(std::memory_order_acquire) : nullptr;
-  return impl && impl->WaitReady(hash, false, dxil, 210000) == TranslateState::kReady && !dxil.empty();
-}
 
 ShaderTranslationAudit ShaderTranslator::AuditSnapshot() {
   return {g_compile_started.load(), g_compile_failed.load(), g_disk_hits.load(), g_fetch_not_ready.load()};

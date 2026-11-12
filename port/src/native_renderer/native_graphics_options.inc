@@ -95,7 +95,7 @@ void Renderer::ApplyGraphicsFrameOptions() {
       }
       InvalidateSlotBindings(~0u);
       surfaces_.clear();resolve_textures_.clear();resolve_latest_.clear();resolve_identities_={};
-      scene_rt_=scene_ds_=upscale_rt_=dlss_scene_ds_=nullptr;
+      scene_rt_=scene_ds_=upscale_rt_=nullptr;
       dlss_scene_=nullptr;dlss_scene_depth_=nullptr;dlss_twin_=nullptr;dlss_resolve_source_=nullptr;
       coop_last_full_resolve_=nullptr;coop_cleared_source_=nullptr;coop_cleared_stamp_=0;
       coop_pair_.Reset();coop_deferred_front_=0;
@@ -109,23 +109,9 @@ void Renderer::ApplyGraphicsFrameOptions() {
       // unrelated texture/buffer descriptors and their allocator generation.
       rtv_heap_next_=kFramesInFlight;dsv_heap_next_=0;
       post_vertex_depth_snapshot_.Reset();post_vertex_color_snapshot_.Reset();
-      motion_history_={};object_motion_lineage_={};object_motion_ticket_={};object_motion_hdr_={};
-      object_motion_previous_=object_motion_output_ready_=false;
-      object_motion_previous_camera_frame_=0;
-      motion_depth_snapshot_.Reset();motion_captured_depth_.Reset();motion_captured_color_.Reset();
-      motion_readbacks_.clear();motion_color_pairs_.clear();
-      for(auto& source:motion_color_sources_) source={};
-      for(auto& resource:object_motion_depth_) resource.Reset();
-      for(auto& resource:motion_coverage_) resource.Reset();
-      for(auto& slot:motion_reactive_) slot.mask.Reset();
-      // TemporalMotion retains dimension-independent prewarmed PSOs; BeginFrame/Render resize fenced slots.
-      motion_static_candidate_.reset();
-      motion_observed_skin_attribution_.reset();motion_observed_cloth_attribution_.reset();
     }
     output_width_=width;output_height_=height;render_scale_=scale;msaa_samples_=msaa;
-    dlss_render_width_=render_scale::HostDimension(kOutputWidth,scale);
-    dlss_render_height_=render_scale::HostDimension(kOutputHeight,scale);
-    dlss_history_=dlss_wanted_=false;graphics_dlss_mode_=requested[4];
+    graphics_dlss_mode_=requested[4];
     dlss_scene_=nullptr;dlss_scene_done_=false;dlss_prev_camera_=false;
     REXLOG_INFO("native graphics hot settings: output={}x{} scale={} MSAA={} DLSS_request={} scene_ratio={}",
         width,height,scale,msaa,requested[4],DlssSceneRatio());

@@ -40,7 +40,6 @@ add_executable(sr_native_tests
     test_vblank_policy.cpp
     test_presentation_pacing.cpp
     test_graphics_milestone5.cpp
-    test_motion_pipeline_records.cpp
     test_wait_escape_policy.cpp
     test_guest_render_scheduler.cpp
     test_guest_sleep_profile.cpp
@@ -69,25 +68,14 @@ add_executable(sr_native_tests
     test_readback_rows.cpp
     test_shadow_caster_geometry.cpp
     test_temporal_geometry_history.cpp
-    test_object_motion_frame.cpp
     test_temporal_vertex_fetch.cpp
     test_static_world_shader_dependencies.cpp
     test_scene_color_boundary.cpp
     test_scene_color_geometry.cpp
     test_scene_color_vertex_input.cpp
-    test_motion_depth_boundary.cpp
     test_scene_raster_jitter.cpp
     test_scene_resolution_shader.cpp
     test_scene_resolution_mapping.cpp
-    test_observed_instance_lifetimes.cpp
-    test_observed_skinned_motion.cpp
-    test_observed_rigid_motion.cpp
-    test_observed_vehicle_batch.cpp
-    test_observed_cloth_motion.cpp
-    test_observed_skinned_part_key.cpp
-    test_pixel_coverage_shader.cpp
-    test_motion_raster_coverage.cpp
-    "${SR_NATIVE_DIR}/../graphics/pixel_coverage_shader.cpp"
     "${SR_NATIVE_DIR}/../graphics/scene_resolution_shader.cpp"
     "${SR_NATIVE_DIR}/../graphics/graphics_preferences.cpp"
     "${SR_NATIVE_DIR}/../graphics/graphics_options.cpp"
