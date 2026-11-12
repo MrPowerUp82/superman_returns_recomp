@@ -1,4 +1,4 @@
-# Port do RT (sombras e reflexos) do Superman-Returns-PC
+# Port do RT (sombras e reflexos) e do DLSS do Superman-Returns-PC
 
 Origem: `github.com/gangg111/Superman-Returns-PC` (commits `644273f`..`a7f6513` e
 a parte de RT de `6be83f6`), base comum com este repositório em `92c26e0`
@@ -54,10 +54,38 @@ Exigem Direct3D 12 e GPU com DXR 1.1 / SM 6.5. Cvars de ajuste e diagnóstico:
 reflexos), `sr_rt_shadow_bias`, `sr_rt_builds_per_frame`, `sr_rt_full_scene`,
 `sr_rt_reflection_bump`, `sr_rt_instance_range`, `sr_rt_dump_obj_swap`.
 
+## DLSS
+
+`dlss.cpp` (do projeto deles, commit `c575663` + ajustes de `6be83f6`) substitui
+o adaptador antigo (`dlss_super_resolution.cpp`, composição na apresentação).
+SDK: NGX **v310.9.1** (`tools/setup_dlss.ps1`, pinado por hash de blob e
+assinatura NVIDIA), preset K (transformer) em DLAA/Quality/Balanced e M em
+Performance (`sr_dlss_preset` muda).
+
+- A cena é aprendida a cada frame: o resolve de cor logo depois do resolve de
+  profundidade de tamanho cheio. Os draws dela recebem jitter Halton pelo
+  `g_HalfPixelOffset`; a câmera vem de `gViewProjectionXform` (`camera_regs.inc`).
+- Movimento por objeto (patch 0030): cada VS roda também com as constantes do
+  mesmo draw no frame anterior (CBV b3) e o PS grava a diferença em
+  `SV_Target4` (R16G16F); sem histórico, o compute `motion_vectors.hlsl` usa o
+  movimento da câmera pela profundidade.
+- Upscaling: só as superfícies da cena 3D (1280×720 float e a profundidade) são
+  desenhadas na fração do modo (2/3, 0,58, 1/2); a saída do DLSS volta para a
+  textura que o pós-processamento lê, na escala de saída. O HUD usa um "gêmeo"
+  da profundidade em escala de saída para suas máscaras de stencil.
+- Menu: NVIDIA DLSS Off / Quality / Balanced / Performance / DLAA (`sr_dlss`).
+  `sr_dlss_debug=1` mostra os vetores de movimento, `2` só o jitter.
+- O pipeline antigo de movimento por objeto (`native_motion_capture.inc`,
+  variantes de cobertura) ficou inativo: só alimentava o adaptador antigo.
+
+Verificado na RTX 2060 (benchmark, dumps de frame): Quality 853×480 → 1280×720,
+DLAA, e RT + DLSS juntos sem erros de NGX.
+
 ## Pendente
 
-- DLSS deles (fase 3): o `dlss.cpp` usa MRT extra para o movimento por objeto e
-  constantes VS do frame anterior por draw (patch 0030). O DLSS atual deste
-  projeto continua ativo até essa troca.
-- Co-op em tela dividida: o frame RT usa a primeira matriz de luz do frame; a
-  segunda câmera ainda não foi validada com RT ligado.
+- Bias de mip das texturas no upscaling (`g_dlss_mip_bias` é calculado mas o
+  cache de samplers só aceita bias positivo).
+- Remover o código do pipeline antigo de movimento por objeto, agora inativo.
+- Co-op em tela dividida: a vista do P2 recebe os dados do frame com a própria
+  matriz de luz, mas não foi validada com RT ligado (o co-op continua exigindo
+  DLSS desligado).

@@ -5,11 +5,11 @@ No game DLLs, interposer, installer, or machine configuration.
 #>
 [CmdletBinding()]
 param(
-    [string]$SdkRoot = (Join-Path $PSScriptRoot '../.tools/dlss-v3.7.20'),
+    [string]$SdkRoot = (Join-Path $PSScriptRoot '../.tools/dlss-v310.9.1'),
     [string]$RuntimeDirectory
 )
 $ErrorActionPreference = 'Stop'
-$revision = 'a11125971f4d5f19ce17ca8cbe6f703eaa16de76'
+$revision = '374959484e79a640feaba44c93ac8cfb0a03f5b5'  # tag v310.9.1 (DLSS 4 transformer presets J/K/L/M)
 $licenseUrl = "https://github.com/NVIDIA/DLSS/blob/$revision/LICENSE.txt"
 if (-not [Environment]::Is64BitProcess -or $env:OS -ne 'Windows_NT') {
     throw 'This setup stages the Windows x64 NGX SDK only.'
@@ -17,16 +17,19 @@ if (-not [Environment]::Is64BitProcess -or $env:OS -ne 'Windows_NT') {
 # Official Git blob IDs at the pinned commit (SHA-1 over 'blob <length>\0' + bytes).
 # Also write raw SHA-256 for local audit/deployment. Never trust a moving tag/main.
 $files = [ordered]@{
-    'LICENSE.txt' = '8e8c157bbe2f7cfbbd25aa02b42c9f867fe71728'
-    'include/nvsdk_ngx.h' = '0a7e5bb14f51be0b0e53d1f9c4a4ce97fb7948f1'
-    'include/nvsdk_ngx_defs.h' = 'e86e446f8aee7c6aab2f466d0bd81ef24070b0d8'
-    'include/nvsdk_ngx_helpers.h' = '79dd5a9865f02129a027a49d5f294944e712a1eb'
-    'include/nvsdk_ngx_params.h' = 'd4f72f94e0fa9f8a32d5902a2626ef03b2e7c555'
-    'lib/Windows_x86_64/rel/nvngx_dlss.dll' = '59c36c2d33d2268053a8bf498813025c91646bc1'
-    'lib/Windows_x86_64/x86_64/nvsdk_ngx_d.lib' = '690ee22232caf0b4e5282f02c26a984e9e646329'
-    'lib/Windows_x86_64/x86_64/nvsdk_ngx_d_dbg.lib' = 'b8a6eb9605f4ddf02f60e1976727c719777167f7'
-    'lib/Windows_x86_64/x86_64/nvsdk_ngx_s.lib' = '0e9794b5c9108d3c368e885cdab1d45324afd566'
-    'lib/Windows_x86_64/x86_64/nvsdk_ngx_s_dbg.lib' = '425ea86a8625cc3c6613d3f933963b2ef486c7c3'
+    'LICENSE.txt' = '80756566d773cdac55179c5ae16c4495df7f73b5'
+    'include/nvsdk_ngx.h' = 'ae6b49174049eed69cc377b2fffd3c901651f764'
+    'include/nvsdk_ngx_defs.h' = '807fa2475e90214f6846b9b4840be92e7bd66b5b'
+    'include/nvsdk_ngx_helpers.h' = 'e6a0f2581e1586240821afa7523a65a75654e847'
+    'include/nvsdk_ngx_helpers_d3d.h' = '664f99d95d3f8375304dc558ec601a66635ade7b'
+    'include/nvsdk_ngx_helpers_cuda.h' = '251ba9d5fcf0800bbc3fbb5e8870c61739c6d98a'
+    'include/nvsdk_ngx_loader.h' = '13756a449673327b08dfc9e6715937636de4ca48'
+    'include/nvsdk_ngx_params.h' = '014d9f4adec600ea3677947b7f98258da9f9c7fc'
+    'lib/Windows_x86_64/rel/nvngx_dlss.dll' = '875981984f56e71b4fde6605484ef767dadf9910'
+    'lib/Windows_x86_64/x64/nvsdk_ngx_d.lib' = '6ddf9dbcb4961d2948982177ab7db73fce7a4d40'
+    'lib/Windows_x86_64/x64/nvsdk_ngx_d_dbg.lib' = '04c664553652ead566f8b6df858b639acb341cf4'
+    'lib/Windows_x86_64/x64/nvsdk_ngx_s.lib' = 'fcd9adc26d111e7013be555d27a4cf60e5753eb5'
+    'lib/Windows_x86_64/x64/nvsdk_ngx_s_dbg.lib' = '3f73215a02142f3db9cc337d5e6868f02601f976'
 }
 
 function Get-GitBlobHash([string]$Path) {
@@ -59,7 +62,7 @@ foreach ($entry in $files.GetEnumerator()) {
     }
     $audit += [ordered]@{ path = $entry.Key; gitBlobSha1 = $actual; sha256 = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant() }
 }
-$manifest = [ordered]@{ tag = 'v3.7.20'; commit = $revision; source = 'https://github.com/NVIDIA/DLSS'; license = $licenseUrl; files = $audit }
+$manifest = [ordered]@{ tag = 'v310.9.1'; commit = $revision; source = 'https://github.com/NVIDIA/DLSS'; license = $licenseUrl; files = $audit }
 $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $root 'dlss-sdk-manifest.json') -Encoding UTF8
 if ($RuntimeDirectory) {
     $runtime = [IO.Path]::GetFullPath($RuntimeDirectory)

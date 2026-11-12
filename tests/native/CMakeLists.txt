@@ -182,10 +182,6 @@ if(WIN32 AND SR_NATIVE_GPU_TESTS)
   add_test(NAME sr_d3d12_texture_updates_gpu COMMAND sr_d3d12_texture_updates_gpu)
   set_tests_properties(sr_d3d12_texture_updates_gpu PROPERTIES TIMEOUT 60)
 endif()
-add_executable(sr_dlss_contract_tests dlss_super_resolution_test.cpp
-    "${SR_NATIVE_DIR}/../graphics/d3d12/dlss_super_resolution.cpp")
-target_compile_definitions(sr_dlss_contract_tests PRIVATE SR_HAS_DLSS=0)
-add_test(NAME sr_dlss_contract_tests COMMAND sr_dlss_contract_tests)
 add_test(NAME sr_native_tests COMMAND sr_native_tests)
 set_tests_properties(sr_native_tests PROPERTIES TIMEOUT 30)
 # Exercise the current XMA hook body with ABI boundary shims, without the SDK.

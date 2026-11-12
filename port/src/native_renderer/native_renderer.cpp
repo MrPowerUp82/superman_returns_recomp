@@ -1234,9 +1234,6 @@ inline uint64_t MakeKey(uint32_t a, uint32_t b) { return (uint64_t(a) << 32) | b
 // Guest pixel coordinate -> host pixel coordinate of a surface rendered at
 // `scale` (possibly fractional). Every edge goes through the same rounding, so
 // adjacent regions (tiles, atlas cells) still meet exactly.
-inline uint32_t HostPx(uint32_t v, float scale) {
-  return uint32_t(std::lround(double(v) * double(scale)));
-}
 inline LONG HostPx(LONG v, float scale) { return LONG(std::lround(double(v) * double(scale))); }
 inline D3D12_RECT ScaleRect(D3D12_RECT r, float scale) {
   return {HostPx(r.left, scale), HostPx(r.top, scale), HostPx(r.right, scale),
@@ -1250,8 +1247,6 @@ inline std::vector<D3D12_RECT> ScaleRects(const std::vector<D3D12_RECT>& rs, flo
 }
 
 #include "shaders/blit_ps.h"
-#include "../graphics/d3d12/shaders/dlss_depth_motion_cs.h"
-#include "../graphics/d3d12/shaders/dlss_composite_ps.h"
 #include "shaders/blit_vs.h"
 #include "shaders/fxaa_ps.h"
 #include "shaders/ssao_apply_ms_ps.h"
@@ -1324,8 +1319,7 @@ void Renderer::ShutdownWorker() {
   }
   // The wait above covers every recorded DLSS creation and evaluation.
   if(dlss_) {
-    (void)(fence_ && next_fence_value_>1 ? dlss_->Shutdown(fence_.Get(),next_fence_value_-1) : dlss_->Shutdown());
-    dlss_.reset();
+    dlss_.reset();  // the wait above retired every recorded NGX evaluation
   }
   for(auto& [key,entry]:textures_) entry.tracking.reset();
   resource_write_tracker_.Stop();
@@ -1477,19 +1471,6 @@ bool Renderer::EnsureInitialized() {
   }
   fence_event_ = CreateEvent(nullptr, FALSE, FALSE, nullptr);
 
-#if SR_HAS_DLSS
-  // Initialize capability here; fenced frame-boundary settings own mode and sizing.
-  dlss_=std::make_unique<graphics::d3d12::DlssSuperResolution>();
-  wchar_t executable[32768]{};
-  const DWORD path_length=GetModuleFileNameW(nullptr,executable,DWORD(std::size(executable)));
-  if(path_length && path_length<std::size(executable)) {
-    const auto path=std::filesystem::path(executable).parent_path();
-    const auto result=dlss_->Initialize(device_,path.c_str());
-    REXLOG_INFO("native DLSS SDK initialization: result={} ngx={:08X} support={}",
-                uint32_t(result.error),result.ngxResult,uint32_t(dlss_->GetStatus().support));
-
-  }
-#endif
 
   if (!CreateDrawResources()) {
     return false;
@@ -1682,11 +1663,6 @@ bool Renderer::CreateDrawResources() {
   }
   // Mode/sizing are applied later at the frame boundary. Utility PSOs must
   // exist before either startup or an in-game Off -> DLSS transition uses them.
-  if(dlss_ && dlss_->GetStatus().support==graphics::d3d12::DlssSupport::Supported &&
-     !CreateDlssPipelines(blit)) {
-    REXLOG_WARN("native DLSS pipelines unavailable; DLSS stays Off");
-    dlss_failed_=true;
-  }
 
   // --- Depth resolve copy: root constants (source offset) + SRV table t0. ---
   {
@@ -2342,7 +2318,6 @@ bool Renderer::BeginFrame() {
                  retired_.end());
   frame_open_ = true;
   graphics_frame_request_=graphics::SharedGraphicsOptions()->Snapshot();
-  BeginDlssFrame();
   BeginMotionCapture();
   post_vertex_projection_valid_=post_vertex_camera_conflict_=false;
   if(post_vertex_capture_) post_vertex_capture_->ReportCompleted(frame_index_);
@@ -2392,7 +2367,7 @@ bool Renderer::BeginFrame() {
 }
 
 Renderer::HostSurface* Renderer::GetSurface(uint8_t* base, uint32_t surface_object, bool depth,
-                                            uint32_t min_width, uint32_t min_height) {
+                                            uint32_t min_width, uint32_t min_height, bool full_scale) {
   CpuTimer cpu_timer(cpu_timings.surfaces_ns);
   if (!surface_object) {
     return nullptr;
@@ -2423,8 +2398,15 @@ Renderer::HostSurface* Renderer::GetSurface(uint8_t* base, uint32_t surface_obje
   // msaa_samples setting: applies to the surfaces the game multisamples.
   if (samples > 1 && msaa_samples_) samples = msaa_samples_;
   uint32_t samples_log2 = samples >= 8 ? 3 : samples >= 4 ? 2 : samples >= 2 ? 1 : 0;
+  // The 3D scene (the output-sized float colour surface and the depth) is
+  // drawn below the output resolution in DLSS's upscaling modes; the ratio is
+  // part of the key, so a mode change makes new surfaces (dlss.cpp).
+  const bool scene_shaped = !full_scale && width == kOutputWidth && height == kOutputHeight &&
+                            (depth || format == 3 || format == 7 || format == 12);
+  const float scene_ratio = scene_shaped ? DlssSceneRatio() : 1.0f;
+  const uint32_t scene_variant = scene_shaped ? DlssSceneVariant() : 0;  // 0..4, bits 29-31
   uint64_t key = MakeKey((edram_base << 16) | (depth ? 0x8000u : format) | (samples_log2 << 12),
-                         (width << 16) ^ height);
+                         ((width << 16) ^ height) | (scene_variant << 29));
   auto it = surfaces_.find(key);
   if (it != surfaces_.end()) {
     return &it->second;
@@ -2453,7 +2435,7 @@ Renderer::HostSurface* Renderer::GetSurface(uint8_t* base, uint32_t surface_obje
     s.scale = shadow_mul_;
     s.shadow = true;
   } else {
-    s.scale = render_scale_;
+    s.scale = render_scale_ * scene_ratio;
     // Graphics options (EXP-045). The game renders its 3D scene at 1024x576 and
     // stretches it to the 1280x720 output (pass "Upscale"): full_scene_resolution
     // renders every surface except the output-sized ones 1280/1024 larger, so
@@ -2561,6 +2543,7 @@ constexpr ProjectionReg kProjectionRegs[] = {
     {0ull, 256},
 #include "projection_regs.inc"
 };
+}  // namespace
 
 // Inverse of a 4x4 matrix (row-major, 16 floats); false if singular.
 bool Invert4x4(const float m[16], float out[16]) {
@@ -2591,7 +2574,6 @@ bool Invert4x4(const float m[16], float out[16]) {
   }
   return true;
 }
-}  // namespace
 
 void Renderer::CaptureCamera() {
   // The current pixel shader declares g_mProjectionToWorld (catalog
@@ -3094,6 +3076,25 @@ bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_fo
       rts[i] = nullptr;
     }
   }
+  // DLSS's upscaling modes draw the scene below the output scale, but the HUD
+  // draws on the output-sized target with the scene's depth bound for its
+  // stencil masks (the power bars: stencil written, then tested). It gets an
+  // output-scale twin of that depth surface, cleared at its first use each
+  // frame as the game clears the depth/stencil before the scene.
+  if (ds && ds->scale != bound_scale_ && DlssSceneVariant()) {
+    HostSurface* twin = GetSurface(base, Load32(base, dev + kDevDepthStencil), true,
+                                   rts[0] ? rts[0]->width : 0, rts[0] ? rts[0]->height : 0, true);
+    if (twin && twin->scale == bound_scale_ && twin->samples == bound_samples_) {
+      if (dlss_twin_swap_ != swap_number_ || dlss_twin_ != twin->resource.Get()) {
+        dlss_twin_swap_ = swap_number_;
+        dlss_twin_ = twin->resource.Get();
+        Transition(twin->resource.Get(), twin->state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        command_list_->ClearDepthStencilView(twin->view, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
+                                             0.0f, 0, 0, nullptr);
+      }
+      ds = twin;
+    }
+  }
   if (ds && ds->scale != bound_scale_) {
     static int logged = 0;
     if (logged++ < 8) {
@@ -3184,12 +3185,21 @@ bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_fo
   if(motion_coverage_draw_active_) {rtv_formats[1]=DXGI_FORMAT_R32_UINT;rt_count=2;}
   dsv_format = ds ? ds->view_format : DXGI_FORMAT_UNKNOWN;
   if (ds) Transition(ds->resource.Get(), ds->state, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-  bool changed = rt_count != bound_rt_count_ || ds != bound_ds_ ||
+  // DLSS: the scene's draws also write the objects' motion (SV_Target4);
+  // rt_count 5 tells GetPipeline (slot 4 is always kDlssMotionFormat).
+  const D3D12_CPU_DESCRIPTOR_HANDLE* motion = nullptr;
+  if (!motion_coverage_draw_active_ && rts[0] && DlssMode() && dlss_scene_ && !dlss_scene_done_ &&
+      rts[0]->resource.Get() == dlss_scene_ && rts[0]->samples == 1) {
+    motion = DlssMotionTarget();
+  }
+  if (motion) rt_count = 5;
+  bool changed = rt_count != bound_rt_count_ || ds != bound_ds_ || bool(motion) != bound_motion_ ||
       motion_coverage_bound_!=motion_coverage_draw_active_;
   for (uint32_t i = 0; i < 4 && !changed; ++i) changed = rts[i] != bound_rts_[i];
   if (changed) {
-    D3D12_CPU_DESCRIPTOR_HANDLE rtvs[4] = {};
-    for (uint32_t i = 0; i < rt_count; ++i) {
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvs[5] = {};
+    if (motion) rtvs[4] = *motion;
+    for (uint32_t i = 0; i < rt_count && i < 4; ++i) {
       // Gaps are not allowed with a contiguous RTV array; use the first bound
       // RT's view for gaps (write mask 0 in that case is the guest's intent).
       rtvs[i] = motion_coverage_draw_active_ && i==1 ? MotionCoverageView() :
@@ -3207,6 +3217,7 @@ bool Renderer::BindRenderTargets(uint8_t* base, uint32_t dev, DXGI_FORMAT rtv_fo
     std::memcpy(bound_rts_, rts, sizeof(rts));
     bound_rt_count_ = rt_count;
     bound_ds_ = ds;
+    bound_motion_ = motion != nullptr;
     motion_coverage_bound_=motion_coverage_draw_active_;
   }
   return true;
@@ -3632,8 +3643,21 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
   desc.PrimitiveTopologyType = topology_type;
   desc.IBStripCutValue = strip_cut;
   desc.NumRenderTargets = rt_count;
-  for (uint32_t i = 0; i < rt_count; ++i) {
+  for (uint32_t i = 0; i < rt_count && i < 4; ++i) {
     desc.RTVFormats[i] = rtv_formats[i] != DXGI_FORMAT_UNKNOWN ? rtv_formats[i] : rtv_formats[0];
+  }
+  if (rt_count == 5) {
+    // DLSS objects' motion (BindRenderTargets): written by the draws that own
+    // their pixels - opaque ones and blended ones that write depth (Superman's
+    // material blends for its fade-out but is solid). Truly transparent draws
+    // (glass, particles: no depth write) leave the motion of what lies behind.
+    desc.RTVFormats[4] = kDlssMotionFormat;
+    desc.BlendState.RenderTarget[4] = desc.BlendState.RenderTarget[0];
+    desc.BlendState.RenderTarget[4].BlendEnable = FALSE;
+    desc.BlendState.RenderTarget[4].LogicOpEnable = FALSE;
+    const bool owns_pixels = !desc.BlendState.RenderTarget[0].BlendEnable || depth.z_write_enable;
+    desc.BlendState.RenderTarget[4].RenderTargetWriteMask =
+        owns_pixels ? D3D12_COLOR_WRITE_ENABLE_RED | D3D12_COLOR_WRITE_ENABLE_GREEN : 0;
   }
   desc.SampleDesc.Count = bound_samples_;
   auto fill_record = [&] {
@@ -3699,7 +3723,7 @@ ID3D12PipelineState* Renderer::GetPipeline(uint8_t* base, uint32_t dev, uint64_t
                             e.AlignedByteOffset, uint32_t(e.Format));
     }
     std::string targets;
-    for (uint32_t i = 0; i < rt_count; ++i) targets += fmt::format(" {}", uint32_t(rtv_formats[i]));
+    for (uint32_t i = 0; i < rt_count && i < 4; ++i) targets += fmt::format(" {}", uint32_t(rtv_formats[i]));
     REXLOG_ERROR("native: PSO creation failed ({:08X}) vs={:016X} ps={:016X} layout:{} rtv:{} dsv {} "
                  "samples {}", uint32_t(hr), vs_hash, ps_hash, layout, targets,
                  uint32_t(dsv_format), desc.SampleDesc.Count);
@@ -4645,6 +4669,7 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
     FlushRingConstants(base, dev);
   }
   UpdateRtFrame(base);
+  DlssCaptureCamera();
   const bool cache_shared = SharedConstantsCaching();
   UploadAlloc shared;
   if (!cache_shared) {
@@ -4710,7 +4735,10 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
     }
     {
       CpuTimer timer(d.vs_copy_ns,detail);
-      fill(Pm4Mirror::kAluConstantBase, kDevVsConstants, reinterpret_cast<uint32_t*>(vs.cpu));
+      // Through a CPU copy: DLSS keeps it as this draw's "previous" constants
+      // for the next frame (upload memory is slow to read back).
+      fill(Pm4Mirror::kAluConstantBase, kDevVsConstants, cb_vs_cpu_.data());
+      std::memcpy(vs.cpu, cb_vs_cpu_.data(), 4096);
     }
     if(detail) {++d.vs_uploads; d.vs_bytes+=4096;}
     cb_vs_gpu_ = vs.gpu;
@@ -5010,19 +5038,8 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
       motion_jitter_draw_active_=true;
     }
   }
-  if((dlss_wanted_ || motion_continuous_) && use_mirror && bound_rts_[0] && bound_ds_ && bound_rts_[0]->guest_format==12 &&
-     !ScreenSpaceDraw(base,dev)) {
-    if(dlss_wanted_) {half_pixel[0]+=dlss_jitter_.ndc_x;half_pixel[1]+=dlss_jitter_.ndc_y;}
-    if(motion_continuous_ && dlss_wanted_) motion_jitter_draw_active_=true;
-    if(current_vs_hash_==graphics::CameraCandidateProbe::kViewProjectionShader) {
-      dlss_scene_ds_=bound_ds_;
-      std::memcpy(dlss_view_projection_.data(),mirror_.FloatConstants(false).data(),sizeof(dlss_view_projection_));
-      dlss_view_projection_valid_=true;
-      // Xenos RB_DEPTHCONTROL z_func: 4 GREATER, 6 GEQUAL.
-      const uint32_t z_func=(LoadReg(base,dev,rex::graphics::XE_GPU_REG_RB_DEPTHCONTROL)>>4)&7;
-      dlss_depth_reversed_=z_func==4 || z_func==6;
-    }
-  }
+  // DLSS (dlss.cpp): sub-pixel jitter of the scene's draws.
+  if (!ScreenSpaceDraw(base, dev)) DlssJitter(half_pixel);
   std::memcpy(&s[73], &half_pixel[0], 4);
   std::memcpy(&s[74], &half_pixel[1], 4);
   if(post_vertex_active_ && use_mirror) {
@@ -5129,6 +5146,12 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
     ++stats_.alpha_test_draws[g_current_pass & 31];
   }
   s[112] = spec;
+  // DLSS objects' motion: this draw's VS constants of the previous frame (b3)
+  // and whether there are any (g_SrMotionValid, shared c30.z).
+  bool motion_valid = false;
+  const D3D12_GPU_VIRTUAL_ADDRESS prev_vs = DlssPrevVsConstants(motion_valid);
+  dlss_prev_vs_gpu_ = prev_vs;
+  s[122] = motion_valid ? 1u : 0u;
   // c31: per-target normalization, before the SNORM RTV clamps fixed16.
   // Populate every slot on every draw, including unbound slots, so switching
   // from the shadow pass back to the scene cannot retain its 1/32 scale.
@@ -5216,7 +5239,7 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
   command_list_->SetGraphicsRootConstantBufferView(2, shared_gpu);
   // b3 (patch 0030): previous VS constants of this draw; the current ones until
   // the DLSS motion port supplies history (g_SrMotionValid = 0 then).
-  command_list_->SetGraphicsRootConstantBufferView(9, cb_vs_gpu_);
+  command_list_->SetGraphicsRootConstantBufferView(9, dlss_prev_vs_gpu_ ? dlss_prev_vs_gpu_ : cb_vs_gpu_);
   current_motion_raster_.ray_opaque=false;
   return true;
 }
@@ -5477,6 +5500,7 @@ bool Renderer::PrepareDraw(uint8_t* base, uint32_t dev, uint32_t prim,
     return v.empty() ? 0ull : std::stoull(v, nullptr, 16);
   }();
   if (skip_ps && ps_hash == skip_ps) return false;
+  DlssDrawKey(vs_hash, ps_hash, Load32(base, dev + kDevVertexFetch0), prim, dlss_draw_count_);
   if (benchmark::Active() && benchmark_cut_.ShouldSkip(ps_hash)) return false;
   if (trace_state_ == 1) {
     uint32_t n = decl ? Load32(base, decl + 0x18) : 0;
@@ -6772,6 +6796,7 @@ void Renderer::ExecDrawVertices(uint8_t* base, const WorkBatch& batch, const Wor
   bool quads;
   const uint32_t surface_before = surface_probe_ ? surface_sequence_.total_draws() : 0;
   bool streams_ok = BindVertexStreams(base, batch, cmd);
+  dlss_draw_count_ = vertex_count;
   if (!dev || !vertex_count || !PrepareDraw(base, dev, prim, topology, quads) || !streams_ok) {
     ++stats_.draws_skipped; ++stats_.pass_skips[g_current_pass & 31];
     return;
@@ -6858,6 +6883,7 @@ void Renderer::ExecDrawIndexedVertices(uint8_t* base, const WorkBatch& batch,
   const uint32_t surface_before = surface_probe_ ? surface_sequence_.total_draws() : 0;
   bool streams_ok = BindVertexStreams(base, batch, cmd);
   const BufferEntry* ib = cmd.has_index ? ApplyBuffer(base, cmd.index) : nullptr;
+  dlss_draw_count_ = index_count;
   const bool prepared = dev && index_count && PrepareDraw(base, dev, prim, topology, quads, cut);
   const uint32_t quad_indices = cmd.u[5];  // expanded triangle indices of an indexed quad list
   if (!prepared || (quads && !quad_indices) || !streams_ok || !ib) {
@@ -6972,6 +6998,7 @@ void Renderer::ExecDrawInlineVertices(uint8_t* base, uint32_t prim, uint32_t dat
   D3D12_PRIMITIVE_TOPOLOGY topology;
   bool quads;
   const uint32_t surface_before = surface_probe_ ? surface_sequence_.total_draws() : 0;
+  dlss_draw_count_ = vertex_count;
   if (!dev || !vertex_count || !stride || !data ||
       !PrepareDraw(base, dev, prim, topology, quads)) {
     ++stats_.draws_skipped; ++stats_.pass_skips[g_current_pass & 31];
@@ -7235,6 +7262,11 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
       base, Load32(base, dev + (depth ? kDevDepthStencil : kDevRenderTargets + 4 * source)), depth);
   if (!src) return;
   ++stats_.resolves;
+  if (depth) {
+    DlssOnDepthResolve(*src);
+  } else {
+    DlssOnColorResolve(*src);
+  }
   {
     const int want = REXCVAR_GET(sr_native_dump_before_resolve);
     const int index = resolve_in_frame_++;
@@ -7307,6 +7339,10 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
     // formats only allow whole-subresource copies; the shadow atlas needs
     // region copies at a destination point).
     DXGI_FORMAT dst_format = depth ? DXGI_FORMAT_R32_FLOAT : src->resource_format;
+    // DLSS's upscaled scene: the texture at the output scale, filled from it.
+    ID3D12Resource* const dlss_source = depth ? nullptr : dlss_resolve_source_;
+    dlss_resolve_source_ = nullptr;
+    const float dst_scale = dlss_source ? render_scale_ : src->scale;
     // The same guest memory is resolved at different sizes within a frame (e.g.
     // downsample chains): one host texture per size, never recreated per frame.
     uint64_t resolve_key = (uint64_t(dest_base) << 32) | (uint32_t(dst_format) & 0xFF) |
@@ -7321,7 +7357,7 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
     ResolveTexture& dst = resolve_textures_[resolve_key];
     std::memcpy(dst.guest_fetch, fetch, sizeof(fetch));
     if (!dst.resource || dst.width != dest_w || dst.height != dest_h ||
-        dst.scale != src->scale || dst.layers!=layers || dst.stacked_volume!=volume) {
+        dst.scale != dst_scale || dst.layers!=layers || dst.stacked_volume!=volume) {
       Retire(dst.resource);
       for (auto& [mapping, index] : dst.srv_by_mapping) RetireSrvIndex(index);
       D3D12_CPU_DESCRIPTOR_HANDLE rtv = dst.rtv, raw_rtv = dst.raw_rtv;
@@ -7335,7 +7371,7 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
       dst.height = dest_h;
       dst.layers = layers;
       dst.stacked_volume = volume;
-      dst.scale = src->scale;
+      dst.scale = dst_scale;
       dst.shadow = src->shadow;
       ++stats_.resolve_textures_created;
       dst.format = dst_format;
@@ -7436,7 +7472,7 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
     if (dy + (y2 - y1) > dest_h) y2 = y1 + (dest_h - std::min(dest_h, dy));
     if (x2 > x1 && y2 > y1 && REXCVAR_GET(sr_native_debug_resolve_mode) != 1) {
       // Guest pixels -> host pixels.
-      const float k = src->scale;
+      const float k = dst_scale;  // the source's scale, or the output's for DLSS's scene
       x1 = HostPx(x1, k);
       y1 = HostPx(y1, k);
       x2 = HostPx(x2, k);
@@ -7458,7 +7494,10 @@ void Renderer::ExecResolve(uint8_t* base, uint32_t flags, uint32_t src_rect,
         dst.motion_full_color_copy=false;
       }
       if(motion_continuous_) object_motion_lineage_.Invalidate(reinterpret_cast<uintptr_t>(dst.resource.Get()));
-      if (depth) {
+      if (dlss_source) {
+        s.pResource = dlss_source;  // left in COPY_SOURCE by DlssOnColorResolve
+        command_list_->CopyTextureRegion(&d, dx, dy, 0, &s, &box);
+      } else if (depth) {
         CopyDepthRegion(*src, dst, x1, y1, x2, y2, dx, dy);
         // The scene depth (not a shadow map) for soft particles later in the frame.
         if (!dst.shadow && dest_w >= 512) scene_depth_key_ = resolve_key;
@@ -7845,298 +7884,39 @@ void Renderer::ReportCapturedRayProbe(uint32_t slot) {
 }
 
 
-bool Renderer::CreateDlssPipelines(const D3D12_GRAPHICS_PIPELINE_STATE_DESC& blit) {
-  const auto serialize=[&](const D3D12_ROOT_SIGNATURE_DESC& desc,ComPtr<ID3D12RootSignature>& root) {
-    ComPtr<ID3DBlob> blob,error;
-    return SUCCEEDED(D3D12SerializeRootSignature(&desc,D3D_ROOT_SIGNATURE_VERSION_1,&blob,&error)) &&
-           SUCCEEDED(device_->CreateRootSignature(0,blob->GetBufferPointer(),blob->GetBufferSize(),IID_PPV_ARGS(&root)));
-  };
-  // Three separate tables: AllocSrvIndex gives no contiguous indices.
-  const auto table=[](D3D12_ROOT_PARAMETER& parameter,D3D12_DESCRIPTOR_RANGE& range,
-                      D3D12_DESCRIPTOR_RANGE_TYPE type,UINT shader_register,D3D12_SHADER_VISIBILITY visibility) {
-    range={};range.RangeType=type;range.NumDescriptors=1;range.BaseShaderRegister=shader_register;
-    parameter={};parameter.ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    parameter.DescriptorTable.NumDescriptorRanges=1;parameter.DescriptorTable.pDescriptorRanges=&range;
-    parameter.ShaderVisibility=visibility;
-  };
-  D3D12_DESCRIPTOR_RANGE ranges[7];
-  D3D12_ROOT_PARAMETER parameters[8]{};
-  table(parameters[0],ranges[0],D3D12_DESCRIPTOR_RANGE_TYPE_SRV,0,D3D12_SHADER_VISIBILITY_ALL);
-  table(parameters[1],ranges[1],D3D12_DESCRIPTOR_RANGE_TYPE_UAV,0,D3D12_SHADER_VISIBILITY_ALL);
-  table(parameters[2],ranges[2],D3D12_DESCRIPTOR_RANGE_TYPE_UAV,1,D3D12_SHADER_VISIBILITY_ALL);
-  parameters[3].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-  parameters[3].Constants.Num32BitValues=sizeof(DlssMotionConstants)/4;
-  D3D12_ROOT_SIGNATURE_DESC desc{};
-  table(parameters[4],ranges[3],D3D12_DESCRIPTOR_RANGE_TYPE_SRV,1,D3D12_SHADER_VISIBILITY_ALL);
-  table(parameters[5],ranges[4],D3D12_DESCRIPTOR_RANGE_TYPE_SRV,2,D3D12_SHADER_VISIBILITY_ALL);
-  table(parameters[6],ranges[5],D3D12_DESCRIPTOR_RANGE_TYPE_UAV,2,D3D12_SHADER_VISIBILITY_ALL);
-  table(parameters[7],ranges[6],D3D12_DESCRIPTOR_RANGE_TYPE_SRV,3,D3D12_SHADER_VISIBILITY_ALL);
-  desc.NumParameters=8;desc.pParameters=parameters;
-  if(!serialize(desc,dlss_motion_root_)) return false;
-  D3D12_COMPUTE_PIPELINE_STATE_DESC compute{};
-  compute.pRootSignature=dlss_motion_root_.Get();
-  compute.CS={kDlssDepthMotionCS,sizeof(kDlssDepthMotionCS)};
-  PipelineCache::RecordRuntimeCreate();
-  if(FAILED(device_->CreateComputePipelineState(&compute,IID_PPV_ARGS(&dlss_motion_pipeline_)))) return false;
-
-  table(parameters[0],ranges[0],D3D12_DESCRIPTOR_RANGE_TYPE_SRV,0,D3D12_SHADER_VISIBILITY_PIXEL);
-  table(parameters[1],ranges[1],D3D12_DESCRIPTOR_RANGE_TYPE_SRV,1,D3D12_SHADER_VISIBILITY_PIXEL);
-  table(parameters[2],ranges[2],D3D12_DESCRIPTOR_RANGE_TYPE_SRV,2,D3D12_SHADER_VISIBILITY_PIXEL);
-  parameters[3]={};parameters[3].ParameterType=D3D12_ROOT_PARAMETER_TYPE_CBV;
-  parameters[3].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
-  desc.NumParameters=4;
-  D3D12_STATIC_SAMPLER_DESC sampler{};
-  sampler.Filter=D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-  sampler.AddressU=sampler.AddressV=sampler.AddressW=D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-  sampler.MaxLOD=D3D12_FLOAT32_MAX;sampler.ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
-  desc.NumStaticSamplers=1;desc.pStaticSamplers=&sampler;
-  if(!serialize(desc,dlss_composite_root_)) return false;
-  auto composite=blit;
-  composite.pRootSignature=dlss_composite_root_.Get();
-  composite.PS={kDlssCompositePS,sizeof(kDlssCompositePS)};
-  PipelineCache::RecordRuntimeCreate();
-  return SUCCEEDED(device_->CreateGraphicsPipelineState(&composite,IID_PPV_ARGS(&dlss_composite_pipeline_)));
-}
-
-bool Renderer::EnsureDlssResources(const HostSurface& scene) {
-  auto& slot=dlss_slots_[frame_index_];
-  const auto format=scene.resource->GetDesc().Format;
-  if(slot.color && slot.color->GetDesc().Format==format) return true;
-  if(slot.ticket) return false;  // Resources of a pending evaluation stay alive.
-  D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;
-  const auto create=[&](ComPtr<ID3D12Resource>& resource,DXGI_FORMAT resource_format,uint32_t width,uint32_t height,
-                        D3D12_RESOURCE_FLAGS flags,D3D12_RESOURCE_STATES state) {
-    D3D12_RESOURCE_DESC d{};d.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;d.Width=width;d.Height=height;
-    d.DepthOrArraySize=d.MipLevels=1;d.Format=resource_format;d.SampleDesc.Count=1;d.Flags=flags;
-    return SUCCEEDED(device_->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&d,state,nullptr,IID_PPV_ARGS(&resource)));
-  };
-  const auto uav=D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-  slot.color_state=D3D12_RESOURCE_STATE_COPY_DEST;
-  slot.rejection_state=slot.output_state=slot.motion_state=slot.depth_state=D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-  if(!create(slot.color,format,dlss_render_width_,dlss_render_height_,D3D12_RESOURCE_FLAG_NONE,slot.color_state) ||
-     !create(slot.output,format,output_width_,output_height_,uav,slot.output_state) ||
-     !create(slot.motion,DXGI_FORMAT_R16G16_FLOAT,dlss_render_width_,dlss_render_height_,uav,slot.motion_state) ||
-     !create(slot.depth,DXGI_FORMAT_R32_FLOAT,dlss_render_width_,dlss_render_height_,uav,slot.depth_state) ||
-     !create(slot.rejection,DXGI_FORMAT_R8_UNORM,dlss_render_width_,dlss_render_height_,uav,slot.rejection_state)) {
-    slot.color.Reset();
-    return false;
-  }
-  if(!slot.color_srv) {
-    slot.color_srv=AllocSrvIndex();slot.output_srv=AllocSrvIndex();slot.depth_in_srv=AllocSrvIndex();
-    slot.motion_uav=AllocSrvIndex();slot.depth_uav=AllocSrvIndex();slot.rejection_uav=AllocSrvIndex();
-  }
-  if(!slot.object_motion_srv) {slot.object_motion_srv=AllocSrvIndex();slot.object_validity_srv=AllocSrvIndex();slot.reactivity_srv=AllocSrvIndex();}
-  const auto cpu=[&](uint32_t index) {
-    return provider_->OffsetViewDescriptor(srv_heap_->GetCPUDescriptorHandleForHeapStart(),index);
-  };
-  D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-  srv.Format=scene.srv_format;srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
-  srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;srv.Texture2D.MipLevels=1;
-  device_->CreateShaderResourceView(slot.color.Get(),&srv,cpu(slot.color_srv));
-  device_->CreateShaderResourceView(slot.output.Get(),&srv,cpu(slot.output_srv));
-  D3D12_UNORDERED_ACCESS_VIEW_DESC view{};view.ViewDimension=D3D12_UAV_DIMENSION_TEXTURE2D;
-  view.Format=DXGI_FORMAT_R16G16_FLOAT;
-  device_->CreateUnorderedAccessView(slot.motion.Get(),nullptr,&view,cpu(slot.motion_uav));
-  view.Format=DXGI_FORMAT_R32_FLOAT;
-  device_->CreateUnorderedAccessView(slot.depth.Get(),nullptr,&view,cpu(slot.depth_uav));
-  view.Format=DXGI_FORMAT_R8_UNORM;
-  device_->CreateUnorderedAccessView(slot.rejection.Get(),nullptr,&view,cpu(slot.rejection_uav));
-  return true;
-}
-
 void Renderer::CompleteGuestDraw() {
   graphics::RecordCacheAuditDraw();
   Breadcrumb();
   HostSurface* completed_scene=bound_rts_[0];
   // Capture after the scene filter actually draws, before resolves clear the
   // bound targets and before HUD draws (which benchmarks intentionally omit).
-  if(dlss_wanted_ && !dlss_recorded_ && current_ps_hash_==benchmark::kSceneFilterPs && !SkipGpuDraw())
-    RecordDlssFrame();
   if(fxaa_ && graphics_dlss_mode_==0 && current_ps_hash_==benchmark::kSceneFilterPs &&
      !SkipGpuDraw() && bound_rts_[0]) {
     fxaa_scene_applied_=ApplyFxaa(*bound_rts_[0]);
   }
 }
 
-void Renderer::BeginDlssFrame() {
-  if(!dlss_ready_) dlss_history_=false;
-  dlss_wanted_=dlss_recorded_=dlss_ready_=false;
-  dlss_scene_ds_=nullptr;dlss_view_projection_valid_=false;
-  if(!dlss_active_ || !dlss_ || !dlss_motion_pipeline_ || !dlss_composite_pipeline_) return;
-  for(auto& slot:dlss_slots_) {
-    if(!slot.ticket || !slot.submitted) continue;
-    const auto confirmed=dlss_->ConfirmExecution(slot.ticket,fence_.Get(),slot.fence_value);
-    if(confirmed && ++dlss_completed_frames_==1)
-      REXLOG_INFO("native DLSS GPU execution confirmed: ticket={} fence={}",slot.ticket,slot.fence_value);
-    if(confirmed.error!=graphics::d3d12::DlssError::GpuPending) {slot.ticket=0;slot.submitted=false;}
-  }
-  const bool requested=graphics_dlss_mode_>0 && !dlss_failed_ && REXCVAR_GET(sr_native_pm4_mirror);
-  dlss_->SetRequested(requested ? static_cast<graphics::d3d12::DlssRequested>(graphics_dlss_mode_) : graphics::d3d12::DlssRequested::Off);
-  if(!requested) {dlss_history_=false;return;}
-  dlss_wanted_=!dlss_slots_[frame_index_].ticket &&
-      graphics::MakeSceneRasterJitter(dlss_jitter_index_++,dlss_render_width_,dlss_render_height_,true,dlss_jitter_);
-}
-
-void Renderer::RecordDlssFrame() {
-  dlss_recorded_=true;
-  HostSurface* scene=bound_rts_[0];
-  if(object_motion_requested_ && (!scene || !ObjectMotionInputsReady(*scene))) {
-    dlss_history_=false;return;
-  }
-  HostSurface* depth=dlss_scene_ds_;
-  graphics::Matrix4 inverse{};
-  const auto scene_desc=scene ? scene->resource->GetDesc() : D3D12_RESOURCE_DESC{};
-  auto* depth_resource=motion_continuous_ ? motion_depth_snapshot_.Get() : depth ? depth->resource.Get() : nullptr;
-  const auto depth_desc=depth_resource ? depth_resource->GetDesc() : D3D12_RESOURCE_DESC{};
-  const auto& camera=motion_continuous_ ? object_motion_camera_ : dlss_view_projection_;
-  const bool camera_valid=motion_continuous_ ? object_motion_ticket_.frame==frame_count_+1 : dlss_view_projection_valid_;
-  const bool depth_reversed=motion_continuous_ ? object_motion_depth_reversed_ : dlss_depth_reversed_;
-  if(!scene || !depth_resource || !camera_valid || scene->samples!=1 || depth_desc.SampleDesc.Count!=1 ||
-     scene_desc.Width!=dlss_render_width_ || scene_desc.Height!=dlss_render_height_ ||
-     depth_desc.Width!=dlss_render_width_ || depth_desc.Height!=dlss_render_height_ ||
-     !graphics::InvertProjection(camera,inverse) || !EnsureDlssResources(*scene)) {
-    if(++dlss_rejected_frames_==1 || dlss_rejected_frames_%120==0)
-      REXLOG_INFO("native DLSS inputs rejected: scene={}x{} depth={}x{} expected={}x{} camera={} samples={}/{}",
-          scene_desc.Width,scene_desc.Height,depth_desc.Width,depth_desc.Height,dlss_render_width_,dlss_render_height_,
-          camera_valid,scene?scene->samples:0,depth_desc.SampleDesc.Count);
-    dlss_history_=false;
-    return;
-  }
-  auto& slot=dlss_slots_[frame_index_];
-  Transition(scene->resource.Get(),scene->state,D3D12_RESOURCE_STATE_COPY_SOURCE);
-  Transition(slot.color.Get(),slot.color_state,D3D12_RESOURCE_STATE_COPY_DEST);
-  command_list_->CopyResource(slot.color.Get(),scene->resource.Get());
-  Transition(slot.color.Get(),slot.color_state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-
-  auto* depth_input=depth_resource;
-  if(motion_continuous_) Transition(depth_input,object_motion_depth_state_[frame_index_],D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-  else Transition(depth_input,depth->state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-  Transition(slot.motion.Get(),slot.motion_state,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-  Transition(slot.depth.Get(),slot.depth_state,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-  Transition(slot.rejection.Get(),slot.rejection_state,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-  Transition(slot.output.Get(),slot.output_state,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-  const auto cpu_heap=srv_heap_->GetCPUDescriptorHandleForHeapStart();
-  const auto gpu_heap=srv_heap_->GetGPUDescriptorHandleForHeapStart();
-  D3D12_SHADER_RESOURCE_VIEW_DESC depth_srv{};
-  depth_srv.Format=depth_input->GetDesc().Format==DXGI_FORMAT_R32_TYPELESS ? DXGI_FORMAT_R32_FLOAT : DXGI_FORMAT_R24_UNORM_X8_TYPELESS;depth_srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
-  depth_srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;depth_srv.Texture2D.MipLevels=1;
-  device_->CreateShaderResourceView(depth_input,&depth_srv,provider_->OffsetViewDescriptor(cpu_heap,slot.depth_in_srv));
-  const auto object_outputs=motion_continuous_ ? temporal_motion_->Outputs() : graphics::d3d12::TemporalMotionOutputs{};
-  auto object_state=D3D12_RESOURCE_STATE_RENDER_TARGET;
-  auto validity_state=D3D12_RESOURCE_STATE_RENDER_TARGET;
-  if(motion_continuous_) {
-    Transition(object_outputs.velocity,object_state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    Transition(object_outputs.validity,validity_state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-  }
-  auto object_view=depth_srv;object_view.Format=DXGI_FORMAT_R16G16_FLOAT;
-  device_->CreateShaderResourceView(object_outputs.velocity,&object_view,provider_->OffsetViewDescriptor(cpu_heap,slot.object_motion_srv));
-  object_view.Format=DXGI_FORMAT_R8_UINT;
-  device_->CreateShaderResourceView(object_outputs.validity,&object_view,provider_->OffsetViewDescriptor(cpu_heap,slot.object_validity_srv));
-  if(motion_continuous_) Transition(motion_reactive_[frame_index_].mask.Get(),motion_reactive_[frame_index_].state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-  object_view.Format=DXGI_FORMAT_R32_UINT;
-  device_->CreateShaderResourceView(motion_continuous_ ? motion_reactive_[frame_index_].mask.Get() : nullptr,
-      &object_view,provider_->OffsetViewDescriptor(cpu_heap,slot.reactivity_srv));
-  ID3D12DescriptorHeap* heaps[]={srv_heap_.Get(),sampler_heap_.Get()};
-  command_list_->SetDescriptorHeaps(2,heaps);
-  command_list_->SetComputeRootSignature(dlss_motion_root_.Get());
-  command_list_->SetPipelineState(dlss_motion_pipeline_.Get());
-  command_list_->SetComputeRootDescriptorTable(0,provider_->OffsetViewDescriptor(gpu_heap,slot.depth_in_srv));
-  command_list_->SetComputeRootDescriptorTable(1,provider_->OffsetViewDescriptor(gpu_heap,slot.motion_uav));
-  command_list_->SetComputeRootDescriptorTable(2,provider_->OffsetViewDescriptor(gpu_heap,slot.depth_uav));
-  command_list_->SetComputeRootDescriptorTable(4,provider_->OffsetViewDescriptor(gpu_heap,slot.object_motion_srv));
-  command_list_->SetComputeRootDescriptorTable(5,provider_->OffsetViewDescriptor(gpu_heap,slot.object_validity_srv));
-  command_list_->SetComputeRootDescriptorTable(6,provider_->OffsetViewDescriptor(gpu_heap,slot.rejection_uav));
-  command_list_->SetComputeRootDescriptorTable(7,provider_->OffsetViewDescriptor(gpu_heap,slot.reactivity_srv));
-  DlssMotionConstants constants{};
-  constants.object_motion=motion_continuous_ ? 1 : 0;
-  constants.jitter_x=dlss_jitter_.pixel_x;constants.jitter_y=dlss_jitter_.pixel_y;
-  constants.depth_clear=depth_reversed ? 0.f : 1.f;
-  std::memcpy(constants.inverse_current,inverse.data(),sizeof(constants.inverse_current));
-  const auto& previous=motion_continuous_ ? object_motion_previous_camera_ : dlss_history_ ? dlss_previous_view_projection_ : camera;
-  std::memcpy(constants.previous,previous.data(),sizeof(constants.previous));
-  constants.width=float(dlss_render_width_);constants.height=float(dlss_render_height_);
-  if(motion_continuous_ && motion_live_capture_frame_==frame_count_+1 &&
-     REXCVAR_GET(sr_native_debug_observed_skin_motion) && !REXCVAR_GET(sr_native_dump_dir).empty()) {
-    static_assert(sizeof(DlssMotionConstants)==38*sizeof(uint32_t));
-    const auto path=std::filesystem::u8path(REXCVAR_GET(sr_native_dump_dir))/
-        fmt::format("motion_camera_reference_s{}.bin",motion_live_capture_swap_);
-    std::ofstream reference(path,std::ios::binary);
-    const uint32_t header[]{0x4d564352,1,38,0};
-    reference.write(reinterpret_cast<const char*>(header),sizeof(header));
-    reference.write(reinterpret_cast<const char*>(&constants),sizeof(constants));
-  }
-  command_list_->SetComputeRoot32BitConstants(3,sizeof(constants)/4,&constants,0);
-  command_list_->Dispatch((dlss_render_width_+7)/8,(dlss_render_height_+7)/8,1);
-  if(motion_continuous_) {
-    Transition(object_outputs.velocity,object_state,D3D12_RESOURCE_STATE_RENDER_TARGET);
-    Transition(object_outputs.validity,validity_state,D3D12_RESOURCE_STATE_RENDER_TARGET);
-    Transition(depth_input,object_motion_depth_state_[frame_index_],D3D12_RESOURCE_STATE_DEPTH_READ);
-  }
-  Transition(slot.motion.Get(),slot.motion_state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-  Transition(slot.depth.Get(),slot.depth_state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-  Transition(slot.rejection.Get(),slot.rejection_state,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-
-  graphics::d3d12::DlssEvaluation evaluation;
-  evaluation.commands=command_list_.Get();
-  evaluation.color=slot.color.Get();evaluation.output=slot.output.Get();
-  evaluation.depth=slot.depth.Get();evaluation.motion=slot.motion.Get();
-  evaluation.rejectionMask=motion_continuous_ ? slot.rejection.Get() : nullptr;
-  evaluation.rejectionMaskState=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-  evaluation.colorState=evaluation.depthState=evaluation.motionState=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-  evaluation.outputState=D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-  auto& frame=evaluation.frame;
-  frame.mode=static_cast<graphics::d3d12::DlssRequested>(graphics_dlss_mode_);
-  frame.renderWidth=dlss_render_width_;frame.renderHeight=dlss_render_height_;
-  frame.outputWidth=output_width_;frame.outputHeight=output_height_;
-  frame.conventionsVerified=frame.colorBeforeHud=frame.rasterJitterApplied=true;
-  frame.motionCameraOnlyAccepted=!motion_continuous_;
-  frame.motionIncludesCameraObjectsAndDeformation=false;
-  frame.motionPartialWithRejectionMask=motion_continuous_;
-  frame.motionJittered=false;
-  frame.depth=depth_reversed ? graphics::d3d12::DlssDepth::Reversed : graphics::d3d12::DlssDepth::Forward;
-  frame.motion=graphics::d3d12::DlssMotion::CurrentToPreviousPixels;
-  frame.hdr=scene_desc.Format==DXGI_FORMAT_R16G16B16A16_FLOAT || scene_desc.Format==DXGI_FORMAT_R11G11B10_FLOAT;
-  frame.jitterX=dlss_jitter_.pixel_x;frame.jitterY=dlss_jitter_.pixel_y;
-  frame.mvScaleX=frame.mvScaleY=1;
-  frame.reset=!dlss_history_;
-  const auto result=dlss_->Evaluate(evaluation);
-  // The compute pass and NGX both replace the guest's root and pipeline state.
-  frame_state_bound_=false;fixed_state_cached_=false;bound_vertex_views_mask_=0;bound_rt_count_=0;
-  bound_ds_=nullptr;std::memset(bound_rts_,0,sizeof(bound_rts_));
-  if(!result) {
-    // A failed SDK call may have recorded commands, so resources stay alive.
-    REXLOG_ERROR("native DLSS evaluation failed: error={} ngx={:08X}; staying on the normal image",
-                 uint32_t(result.error),result.ngxResult);
-    dlss_failed_=true;dlss_history_=false;
-    return;
-  }
-  slot.ticket=result.ticket;slot.submitted=false;
-  if(motion_continuous_) ++object_motion_applied_;
-  if(++dlss_evaluated_frames_==1)
-    REXLOG_INFO("native DLSS evaluation recorded: {}x{} -> {}x{} ticket={}",
-        frame.renderWidth,frame.renderHeight,frame.outputWidth,frame.outputHeight,result.ticket);
-  dlss_previous_view_projection_=camera;
-  dlss_history_=true;dlss_ready_=true;
-}
-
 #include "native_rt.inc"
 
 void Renderer::PublishGraphicsOptions() {
-  if(dlss_evaluated_frames_ && frame_count_%120==0)
-    REXLOG_INFO("native DLSS frames: evaluated={} completed={} composited={} rejected={} applied={}",
-        dlss_evaluated_frames_,dlss_completed_frames_,dlss_composited_frames_,dlss_rejected_frames_,uint32_t(dlss_->GetStatus().applied));
   auto options=graphics::SharedGraphicsOptions();
   const auto request=options->Snapshot();
   graphics::GraphicsBackendReport report;
   report.request_revision=graphics_frame_request_.request_revision;
   report.frame=frame_count_+1;
   ReportRtFeatures(report);
-  const bool dlss_supported=dlss_ && dlss_->GetStatus().support==graphics::d3d12::DlssSupport::Supported;
-  report.features[4]={dlss_supported,dlss_supported,
-      !dlss_supported ? "DLSS SDK support is unavailable" : !dlss_active_ || dlss_failed_ ?
-      "DLSS could not start; see the log" : object_motion_requested_ ? "Object motion: unqualified frames retain raster output" : "Camera motion only: moving objects can ghost"};
-  const int applied_dlss=dlss_ ? int(dlss_->GetStatus().applied) : 0;
-  report.applied[4]=(!object_motion_requested_ || dlss_ready_) && applied_dlss>=2 ? applied_dlss-1 : 0;
+  // DLSS (dlss.cpp): NGX starts at the first scene with a mode on.
+#if SR_HAS_DLSS
+  const bool dlss_capable = !packet_sink_ && !dlss_unavailable_;
+  report.features[4] = {dlss_capable, dlss_capable,
+      packet_sink_ ? "DLSS needs the Direct3D 12 renderer" :
+      dlss_unavailable_ ? "DLSS is unavailable on this GPU or driver; see the log" :
+      "Objects' own motion from the previous frame's draws; the rest from the camera"};
+  report.applied[4] = DlssApplied() ? graphics_dlss_mode_ : 0;
+#else
+  report.features[4] = {false, false, "This build has no NVIDIA DLSS SDK"};
+  report.applied[4] = 0;
+#endif
   AppendGraphicsHostReport(report);
   report.request_revision=graphics_frame_request_.request_revision;
   options->PublishBackend(graphics_options_epoch_,report);
@@ -8152,6 +7932,7 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
     post_vertex_active_=false;
   }
   EndMotionCapture();
+  DlssEndFrame();
   // Blit the resolved front buffer into the output target.
   auto latest = resolve_latest_.find(front_buffer_address);
   auto it = latest != resolve_latest_.end() ? resolve_textures_.find(latest->second)
@@ -8180,22 +7961,10 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
     ID3D12DescriptorHeap* heaps[] = {srv_heap_.Get(), sampler_heap_.Get()};
     command_list_->SetDescriptorHeaps(2, heaps);
     const bool coop_composite=coop_pair_.Ready() && coop_images_[0].resource && coop_images_[1].resource;
-    const bool dlss_composite=dlss_ready_ && !coop_composite;
-    if(dlss_composite && ++dlss_composited_frames_==1) REXLOG_INFO("native DLSS output composited");
-    command_list_->SetGraphicsRootSignature(dlss_composite ? dlss_composite_root_.Get() : blit_root_signature_.Get());
+    command_list_->SetGraphicsRootSignature(blit_root_signature_.Get());
     command_list_->SetGraphicsRootDescriptorTable(
         0, provider_->OffsetViewDescriptor(srv_heap_->GetGPUDescriptorHandleForHeapStart(),
                                            srv_index));
-    if(dlss_composite) {
-      if(!REXCVAR_GET(sr_native_dump_dir).empty() && dlss_composited_frames_==1)
-        REXLOG_INFO("native DLSS presented resolve: address={:08X}",front_buffer_address);
-      auto& slot=dlss_slots_[frame_index_];
-      Transition(slot.color.Get(),slot.color_state,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-      Transition(slot.output.Get(),slot.output_state,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-      const auto heap=srv_heap_->GetGPUDescriptorHandleForHeapStart();
-      command_list_->SetGraphicsRootDescriptorTable(1,provider_->OffsetViewDescriptor(heap,slot.color_srv));
-      command_list_->SetGraphicsRootDescriptorTable(2,provider_->OffsetViewDescriptor(heap,slot.output_srv));
-    }
     // Guest display gamma ramp (Xenos applies it at scan-out; Xenia too).
     UploadAlloc gamma;
     if (Upload(1024 + 16, 256, gamma)) {
@@ -8203,9 +7972,9 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
       if (!GuestGammaRamp256(ramp.data())) ramp.fill(0);
       const auto data=BuildGammaUpload(ramp,REXCVAR_GET(sr_native_gamma_ramp));
       std::memcpy(gamma.cpu,data.data(),sizeof(data));
-      command_list_->SetGraphicsRootConstantBufferView(dlss_composite ? 3 : 1, gamma.gpu);
+      command_list_->SetGraphicsRootConstantBufferView(1, gamma.gpu);
     }
-    command_list_->SetPipelineState(dlss_composite ? dlss_composite_pipeline_.Get() : blit_pipeline_.Get());
+    command_list_->SetPipelineState(blit_pipeline_.Get());
     command_list_->OMSetRenderTargets(1, &output_rtvs_[frame_index_], FALSE, nullptr);
     D3D12_VIEWPORT vp{0, 0, float(output_width_), float(output_height_), 0, 1};
     D3D12_RECT sc{0, 0, LONG(output_width_), LONG(output_height_)};
@@ -8319,12 +8088,6 @@ void Renderer::EndFrameAndPresent(uint32_t front_buffer_address) {
   pending_texture_retirements_.clear();
   const HRESULT submitted=queue_->Signal(fence_.Get(), next_fence_value_);
   frame_fence_values_[frame_index_] = next_fence_value_;
-  if(SUCCEEDED(submitted) && dlss_slots_[frame_index_].ticket && !dlss_slots_[frame_index_].submitted) {
-    auto& slot=dlss_slots_[frame_index_];
-    slot.fence_value=next_fence_value_;slot.submitted=true;
-    const auto notified=dlss_->NotifySubmitted(slot.ticket,fence_.Get(),slot.fence_value);
-    if(!notified) REXLOG_WARN("native DLSS submission rejected: error={}",uint32_t(notified.error));
-  }
   ++next_fence_value_;
   PublishGraphicsOptions();
   ProfileReport();
@@ -8876,11 +8639,6 @@ void Renderer::DumpFrameResources(const std::string& prefix, bool surfaces_only,
   }
   if (!surfaces_only && !output_only && ssao_ao_) {
     items.push_back({"ssao_ao", ssao_ao_.Get(), &ssao_ao_state_});
-  }
-  if(!surfaces_only && dlss_ready_) {
-    auto& slot=dlss_slots_[frame_index_];
-    if(slot.color) items.push_back({"dlss_scene",slot.color.Get(),&slot.color_state});
-    if(slot.output) items.push_back({"dlss_upscaled",slot.output.Get(),&slot.output_state});
   }
   if (REXCVAR_GET(sr_native_debug_texture_format) >= 0 && !surfaces_only) {
     for (auto& [key, te] : textures_) {
@@ -9964,8 +9722,7 @@ void Renderer::DrawIndexedVertices(uint8_t* base, uint32_t prim, int32_t base_ve
   // Continuous motion/DXR need this proof even without a diagnostic trigger.
   // DrawIndexed u6/u7 are otherwise unused; zero/zero means unverified.
   const bool needs_motion_envelope=!packet_sink_ &&
-      ((REXCVAR_GET(sr_native_object_motion) && REXCVAR_GET(sr_dlss)!="off") ||
-       !REXCVAR_GET(sr_native_motion_capture_trigger_path).empty());
+      !REXCVAR_GET(sr_native_motion_capture_trigger_path).empty();
   if(needs_motion_envelope && cur_.has_index &&
      uint64_t(start_index)+index_count<=uint64_t(draw_range.ib_size)/(draw_range.index32?4u:2u)) {
     draw_range.Resolve();

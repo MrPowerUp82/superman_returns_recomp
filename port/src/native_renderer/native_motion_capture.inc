@@ -539,7 +539,7 @@ void Renderer::BeginMotionCapture() {
       HostPx(kOutputWidth,render_scale_),HostPx(kOutputHeight,render_scale_),
       REXCVAR_GET(sr_native_debug_motion_jitter),motion_frame_jitter_);
   if(motion_continuous_) {
-    motion_frame_jitter_=dlss_wanted_ ? dlss_jitter_ : graphics::SceneRasterJitter{};motion_jitter_ready_=dlss_wanted_;
+    motion_frame_jitter_=graphics::SceneRasterJitter{};motion_jitter_ready_=dlss_wanted_;
     if(!previous) {motion_previous_jitter_={};motion_previous_camera_bad_=true;}
   }
   motion_camera_valid_=motion_camera_conflict_=false;motion_rasters_.clear();motion_rigid_sources_.clear();

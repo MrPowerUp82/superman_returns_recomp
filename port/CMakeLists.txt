@@ -229,12 +229,12 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
         # An OBJECT library, not a static one: the hook objects only override
         # weak recompiled functions, so nothing would pull them from an archive.
         set(SR_NATIVE_ROOT src/native_renderer)
-        set(SR_DLSS_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../.tools/dlss-v3.7.20" CACHE PATH
+        set(SR_DLSS_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../.tools/dlss-v310.9.1" CACHE PATH
             "Pinned official NVIDIA NGX SDK (tools/setup_dlss.ps1)")
         set(sr_dlss_default ON)
         foreach(sr_ngx_file IN ITEMS include/nvsdk_ngx.h include/nvsdk_ngx_defs.h
                 include/nvsdk_ngx_helpers.h include/nvsdk_ngx_params.h
-                lib/Windows_x86_64/x86_64/nvsdk_ngx_d.lib
+                lib/Windows_x86_64/x64/nvsdk_ngx_d.lib
                 lib/Windows_x86_64/rel/nvngx_dlss.dll LICENSE.txt dlss-sdk-manifest.json)
             if(NOT EXISTS "${SR_DLSS_SDK_DIR}/${sr_ngx_file}")
                 set(sr_dlss_default OFF)
@@ -256,7 +256,6 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
             src/graphics/d3d12/post_vertex_clip_capture.cpp
             src/graphics/d3d12/temporal_motion.cpp
             src/graphics/d3d12/ray_tracing_scene.cpp
-            src/graphics/d3d12/dlss_super_resolution.cpp
             src/graphics/graphics_options.cpp
             src/graphics/native_apt_menu.cpp
             src/graphics/graphics_options_runtime.cpp
@@ -336,7 +335,7 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
         target_link_libraries(sr_native PRIVATE rex::runtime rex::xxhash)
         if(SR_DLSS)
             foreach(sr_ngx_file IN ITEMS include/nvsdk_ngx.h
-                    lib/Windows_x86_64/x86_64/nvsdk_ngx_d.lib
+                    lib/Windows_x86_64/x64/nvsdk_ngx_d.lib
                     lib/Windows_x86_64/rel/nvngx_dlss.dll LICENSE.txt dlss-sdk-manifest.json)
                 if(NOT EXISTS "${SR_DLSS_SDK_DIR}/${sr_ngx_file}")
                     message(FATAL_ERROR "Missing pinned DLSS SDK file ${sr_ngx_file}: run tools/setup_dlss.ps1")
@@ -344,8 +343,9 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
             endforeach()
             target_include_directories(sr_native PRIVATE "${SR_DLSS_SDK_DIR}/include")
             target_compile_definitions(sr_native PRIVATE SR_HAS_DLSS=1)
+            target_sources(sr_native PRIVATE ${SR_NATIVE_ROOT}/dlss.cpp)
             target_link_libraries(superman_returns PRIVATE
-                "${SR_DLSS_SDK_DIR}/lib/Windows_x86_64/x86_64/nvsdk_ngx_d.lib" advapi32 user32)
+                "${SR_DLSS_SDK_DIR}/lib/Windows_x86_64/x64/nvsdk_ngx_d.lib" advapi32 user32)
             add_custom_command(TARGET superman_returns POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
                     "${SR_DLSS_SDK_DIR}/lib/Windows_x86_64/rel/nvngx_dlss.dll"
@@ -355,6 +355,7 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
                     "$<TARGET_FILE_DIR:superman_returns>/NVIDIA-DLSS-LICENSE.txt")
         else()
             target_compile_definitions(sr_native PRIVATE SR_HAS_DLSS=0)
+            target_sources(sr_native PRIVATE ${SR_NATIVE_ROOT}/dlss_off.cpp)
         endif()
         if(SR_VULKAN_GAME)
             target_sources(sr_native PRIVATE src/graphics/vulkan/platform/native_provider.cpp src/graphics/vulkan/platform/shader_process.cpp)
