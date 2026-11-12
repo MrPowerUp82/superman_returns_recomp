@@ -115,6 +115,7 @@ inline uint32_t HostPx(uint32_t v, float scale) {
   return uint32_t(std::lround(double(v) * double(scale)));
 }
 bool Invert4x4(const float m[16], float out[16]);
+extern float g_dlss_mip_bias;  // scene samplers' LOD bias while DLSS upscales
 
 bool Enabled();
 

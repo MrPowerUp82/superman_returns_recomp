@@ -73,18 +73,19 @@ Performance (`sr_dlss_preset` muda).
   desenhadas na fração do modo (2/3, 0,58, 1/2); a saída do DLSS volta para a
   textura que o pós-processamento lê, na escala de saída. O HUD usa um "gêmeo"
   da profundidade em escala de saída para suas máscaras de stencil.
+- As texturas da cena usam bias de mip log2(cena / saída) no upscaling (escolhem
+  os mips da resolução de saída); o cache de samplers aceita bias negativo.
 - Menu: NVIDIA DLSS Off / Quality / Balanced / Performance / DLAA (`sr_dlss`).
   `sr_dlss_debug=1` mostra os vetores de movimento, `2` só o jitter.
 - O pipeline antigo de movimento por objeto (`native_motion_capture.inc`,
   variantes de cobertura) ficou inativo: só alimentava o adaptador antigo.
 
-Verificado na RTX 2060 (benchmark, dumps de frame): Quality 853×480 → 1280×720,
-DLAA, e RT + DLSS juntos sem erros de NGX.
+Verificado na RTX 2060 (benchmark, dumps de frame): os quatro modos (DLAA,
+Quality 853×480, Balanced 742×418, Performance 640×360 → 1280×720) e RT + DLSS
+juntos, sem erros de NGX.
 
 ## Pendente
 
-- Bias de mip das texturas no upscaling (`g_dlss_mip_bias` é calculado mas o
-  cache de samplers só aceita bias positivo).
 - Remover o código do pipeline antigo de movimento por objeto, agora inativo.
 - Co-op em tela dividida: a vista do P2 recebe os dados do frame com a própria
   matriz de luz, mas não foi validada com RT ligado (o co-op continua exigindo

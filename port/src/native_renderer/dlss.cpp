@@ -64,8 +64,7 @@ REXCVAR_DEFINE_DOUBLE(sr_dlss_jitter_scale, 1.0, "Superman Returns Native",
     .range(-1.0, 1.0);
 
 namespace superman_returns::native {
-// log2(scene / output width) while DLSS upscales (not yet applied to samplers).
-float g_dlss_mip_bias = 0.0f;
+extern float g_dlss_mip_bias;  // native_renderer.cpp (scene samplers' LOD bias)
 
 namespace {
 

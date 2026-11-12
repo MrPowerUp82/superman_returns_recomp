@@ -2546,6 +2546,9 @@ constexpr ProjectionReg kProjectionRegs[] = {
 }  // namespace
 
 // Inverse of a 4x4 matrix (row-major, 16 floats); false if singular.
+// log2(scene / output width) while DLSS upscales the scene (dlss.cpp), 0 otherwise.
+float g_dlss_mip_bias = 0.0f;
+
 bool Invert4x4(const float m[16], float out[16]) {
   double a[4][8];
   for (int r = 0; r < 4; ++r) {
@@ -4402,6 +4405,11 @@ uint32_t Renderer::CreateTexture(const uint32_t fetch[6], TextureEntry& entry) {
   return entry.srv_index;
 }
 
+// Sampler LOD bias in 1/16 steps, offset by 8 so negative biases (DLSS) fit.
+static uint32_t SamplerBiasQ(float lod_bias) {
+  return uint32_t(std::lround((std::clamp(lod_bias, -8.0f, 7.9f) + 8.0f) * 16.0f));
+}
+
 static uint64_t SamplerKey(const uint32_t fetch[6], bool force_linear, uint32_t bias_q) {
   return (uint64_t(fetch[0]) & 0x7FFC00) | (uint64_t(fetch[3] & 0x3FF80000) << 32) |
          (uint64_t(force_linear) << 63) | (uint64_t(bias_q) << 1);
@@ -4411,7 +4419,7 @@ uint32_t Renderer::GetSamplerIndex(const uint32_t fetch[6], bool force_linear, f
   CpuTimer cpu_timer(cpu_timings.sampler_ns);
   xenos::xe_gpu_texture_fetch_t f;
   std::memcpy(&f, fetch, sizeof(f));
-  uint32_t bias_q = uint32_t(std::clamp(lod_bias, 0.0f, 7.9f) * 16.0f);  // 1/16 steps
+  uint32_t bias_q = SamplerBiasQ(lod_bias);
   uint64_t key = SamplerKey(fetch, force_linear, bias_q);
   auto it = samplers_.find(key);
   if (it != samplers_.end()) {
@@ -4447,7 +4455,7 @@ uint32_t Renderer::GetSamplerIndex(const uint32_t fetch[6], bool force_linear, f
   desc.AddressV = MapClamp(uint32_t(f.clamp_y));
   desc.AddressW = MapClamp(uint32_t(f.clamp_z));
   desc.MaxLOD = D3D12_FLOAT32_MAX;
-  desc.MipLODBias = float(bias_q) / 16.0f;
+  desc.MipLODBias = float(bias_q) / 16.0f - 8.0f;
   desc.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
   uint32_t index = sampler_heap_next_ < kSamplerHeapSize ? sampler_heap_next_++ : 0;
   device_->CreateSampler(&desc, provider_->OffsetSamplerDescriptor(
@@ -4934,7 +4942,12 @@ bool Renderer::UploadConstants(uint8_t* base, uint32_t dev, uint32_t texture_mas
           sampler_bias = std::log2(bound_scale_);
         }
       }
-      const uint32_t bias_q = uint32_t(std::clamp(sampler_bias, 0.0f, 7.9f) * 16.0f);
+      // DLSS upscaling: the scene's textures pick their mips for the output
+      // resolution, not the smaller scene (log2(scene / output), dlss.cpp).
+      if (g_dlss_mip_bias != 0.0f && dlss_scene_ && bound_rts_[0] &&
+          bound_rts_[0]->resource.Get() == dlss_scene_)
+        sampler_bias += g_dlss_mip_bias;
+      const uint32_t bias_q = SamplerBiasQ(sampler_bias);
       const uint64_t sampler_key = SamplerKey(fetch, smooth, bias_q);
       if (sc.sampler_valid && sc.sampler_key == sampler_key) {
         sampler = sc.sampler_index;
