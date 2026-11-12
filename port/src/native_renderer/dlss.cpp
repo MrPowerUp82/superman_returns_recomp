@@ -666,4 +666,14 @@ bool Renderer::DlssApplied() const {
          dlss_last_evaluated_ + 2 >= dlss_frame_ && dlss_last_evaluated_;
 }
 
+// Graphics settings changed the output or the scene size: the caller has
+// retired all GPU work. Only the feature is recreated, at the next scene;
+// NGX itself (seconds to start) and the sized resources (resized on use) stay.
+void Renderer::DlssReleaseFeature() {
+  if (!dlss_) return;
+  if (dlss_->feature) NVSDK_NGX_D3D12_ReleaseFeature(dlss_->feature);
+  dlss_->feature = nullptr;
+  dlss_->reset = true;
+}
+
 }  // namespace superman_returns::native

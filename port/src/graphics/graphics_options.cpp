@@ -108,6 +108,7 @@ bool GraphicsOptions::PublishBackend(uint64_t epoch, const GraphicsBackendReport
   bool unapplied=false;
   for(size_t row=0;row<kGraphicsOptionCount;++row) {
     if((state_.requested[4]>0 && (row==8 || row==9)) ||
+       ((state_.requested[0] || state_.requested[3]) && row==9) || // DXR scenes are single-sample
        GraphicsOptionRequiresRestart(static_cast<GraphicsOption>(row)) ||
        (row>=5 && !state_.features[row].implemented)) continue;
     if((row==static_cast<size_t>(GraphicsOption::kShadowSoftness) ||

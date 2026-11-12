@@ -24,5 +24,6 @@ void Renderer::DlssJitter(float[2]) {}
 void Renderer::DlssOnDepthResolve(HostSurface&) {}
 void Renderer::DlssOnColorResolve(HostSurface&) {}
 void Renderer::DlssEndFrame() {}
+void Renderer::DlssReleaseFeature() {}
 
 }  // namespace superman_returns::native

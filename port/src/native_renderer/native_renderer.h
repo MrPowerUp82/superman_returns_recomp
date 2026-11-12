@@ -625,6 +625,7 @@ class Renderer : public NativeFrontend {
   void DlssOnDepthResolve(HostSurface& src);
   void DlssOnColorResolve(HostSurface& src);
   void DlssEndFrame();
+  void DlssReleaseFeature();  // keeps NGX; the feature and history follow the new size
   // Scene resolution / output resolution of the current mode (1 = off or DLAA).
   float DlssSceneRatio() const;
   uint32_t DlssSceneVariant() const;  // the upscaling mode (2..4), 0 at full resolution

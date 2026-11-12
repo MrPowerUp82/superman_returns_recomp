@@ -72,8 +72,8 @@ void Renderer::ApplyGraphicsFrameOptions() {
     }
     // DLSS (dlss.cpp) renders the scene below the output scale itself: the
     // internal scale stays the user's. Its feature is recreated for the new
-    // size or mode at the next scene.
-    if(dlss_) dlss_.reset();
+    // size or mode at the next scene; NGX stays initialized.
+    DlssReleaseFeature();
     const bool storage_changed=width!=output_width_ || height!=output_height_ ||
         scale!=render_scale_ || msaa!=msaa_samples_;
     // Fence completion now permits resource release and CPU descriptor reuse.
