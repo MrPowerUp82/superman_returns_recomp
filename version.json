@@ -1,0 +1,20 @@
+{
+  "version": "2026.11.12-1353148",
+  "commit": "1353148",
+  "built": "2026-11-12T16:13:07.6827565Z",
+  "xex_sha256": "c8f243acd99de9a91f5ae4f409721c0e954e3d5eb96861419d3da07b8106db2b",
+  "zip_parts": [
+    {
+      "name": "superman_returns_win64.4045e19483a655a8.part001",
+      "size": 83886080,
+      "sha256": "eee4300f3ece68b775225bc1ebdde19f416f51f35e2b488fa353a4db2ea44179"
+    },
+    {
+      "name": "superman_returns_win64.4045e19483a655a8.part002",
+      "size": 56442768,
+      "sha256": "0c00988ba03515f112ab273f259b88d124941e05b1ec18a2fcbb7317cd748022"
+    }
+  ],
+  "zip_size": 140328848,
+  "zip_sha256": "4045e19483a655a89b5fc12d965d4c0ac3440dba25b6643ce68e447dade9f938"
+}
