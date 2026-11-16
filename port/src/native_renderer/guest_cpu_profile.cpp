@@ -15,6 +15,7 @@
 #include <mutex>
 #include "checked_guest_memory.h"
 #include "xdk_constant_upload.h"
+#include "native_guest_rewrites.h"
 #include "../coop_camera_probe.h"
 
 namespace {
@@ -193,7 +194,11 @@ GuestNativeCaptureProfile::~GuestNativeCaptureProfile() {
     if(!Enabled()) {__imp__sub_##address(ctx,base);return;} \
     Scope scope(index);__imp__sub_##address(ctx,base); \
   }
-SR_PROFILE_GUEST(823055A8,0)
+// 823055A8 also carries the native instance LOD rewrite (native_guest_rewrites.cpp).
+extern "C" REX_FUNC(sub_823055A8) {
+  if(!Enabled()) {superman_returns::native::RunInstanceLod(ctx,base);return;}
+  Scope scope(0);superman_returns::native::RunInstanceLod(ctx,base);
+}
 REX_EXTERN(__imp__sub_82783948);
 extern "C" REX_FUNC(sub_82783948) {
   superman_returns::coop::NoteCameraProbeGroup(ctx.r4.u32, ctx.r5.u32, uint32_t(ctx.lr));
