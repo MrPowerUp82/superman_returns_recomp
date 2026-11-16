@@ -15,7 +15,7 @@ def process_cpu_seconds(handle):
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--blocks',type=int,default=3)
-    parser.add_argument('--suite',choices=['settings','query','compare','arm','arm_compare','arm_default'],default='settings')
+    parser.add_argument('--suite',choices=['settings','query','compare','arm','arm_compare','arm_default','constant_upload','constant_upload_shadow'],default='settings')
     parser.add_argument('--cpu-profile',choices=['0','1'],default='1')
     parser.add_argument('--name',default=datetime.datetime.now().strftime('cpu_web_%Y%m%d_%H%M%S'))
     args=parser.parse_args()
@@ -39,6 +39,9 @@ def main():
                                        'SR_NATIVE_SKIP_UNPUBLISHED_TEXTURE_QUERY':'1'}},
         'arm':{'arm_legacy':{'SR_TRACKING_BATCH_ARM':'0'},'arm_regions':{'SR_TRACKING_BATCH_ARM':'1'}},
         'arm_default':{'arm_default':{'SR_TRACKING_BATCH_ARM':None}},
+        'constant_upload':{'upload_original':{'SR_NATIVE_CONSTANT_UPLOAD':'0'},
+                           'upload_native':{'SR_NATIVE_CONSTANT_UPLOAD':'1'}},
+        'constant_upload_shadow':{'upload_shadow':{'SR_NATIVE_CONSTANT_UPLOAD':'2'}},
         'arm_compare':{'arm_regions':{'SR_D3D12_TEXTURE_WRITE_TRACKING':'compare','SR_TRACKING_BATCH_ARM':'1'},
                        'arm_legacy':{'SR_D3D12_TEXTURE_WRITE_TRACKING':'compare','SR_TRACKING_BATCH_ARM':'0'}}}[args.suite]
     base={'SR_NATIVE_CPU_PROFILE':args.cpu_profile,'SR_NATIVE_CONSTANTS_PROFILE':args.cpu_profile,
@@ -114,6 +117,12 @@ def main():
                     arm=dict(re.findall(r'(\w+)=(\d+)',run['arm_profiles'][-1]))
                     if not int(arm['protects']) or not int(arm['queries']) or int(arm['queries'])>int(arm['requested_alias_pages']):
                         raise RuntimeError('Default mode did not demonstrate region-based Arm')
+                if '[native constant upload] MISMATCH' in log:
+                    raise RuntimeError('Native constant upload diverged from the translated original')
+                if args.suite=='constant_upload_shadow':
+                    run['upload_shadow']=[line for line in log.splitlines() if '[native constant upload] shadow' in line]
+                    if not run['upload_shadow']:
+                        raise RuntimeError('Shadow mode logged no compared calls')
                 if 'native texture tracking: coverage mismatch' in log:
                     raise RuntimeError('Tracking audit mismatch; benchmark FPS cannot accept this variant')
                 if args.suite in ('compare','arm_compare'):

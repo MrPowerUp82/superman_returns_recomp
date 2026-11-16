@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <mutex>
 #include "checked_guest_memory.h"
+#include "xdk_constant_upload.h"
 #include "../coop_camera_probe.h"
 
 namespace {
@@ -203,7 +204,12 @@ SR_PROFILE_GUEST(82305B88,2)
 SR_PROFILE_GUEST(82316958,3)
 SR_PROFILE_GUEST(82319108,4)
 SR_PROFILE_GUEST(826092B8,5)
-SR_PROFILE_GUEST(821078C0,6)
+// 821078C0 also carries the native masked constant upload (xdk_constant_upload.h).
+REX_EXTERN(__imp__sub_821078C0);
+extern "C" REX_FUNC(sub_821078C0) {
+  if(!Enabled()) {superman_returns::native::constant_upload::Run(ctx,base,__imp__sub_821078C0);return;}
+  Scope scope(6);superman_returns::native::constant_upload::Run(ctx,base,__imp__sub_821078C0);
+}
 SR_PROFILE_GUEST(827838D0,8)
 SR_PROFILE_GUEST(822E9E68,10)
 SR_PROFILE_GUEST(82307CF8,11)
