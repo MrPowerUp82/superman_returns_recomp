@@ -42,9 +42,9 @@ def main():
         'constant_upload':{'upload_original':{'SR_NATIVE_CONSTANT_UPLOAD':'0'},
                            'upload_native':{'SR_NATIVE_CONSTANT_UPLOAD':'1'}},
         'constant_upload_shadow':{'upload_shadow':{'SR_NATIVE_CONSTANT_UPLOAD':'2'}},
-        'guest_rewrites':{'rewrites_original':{'SR_NATIVE_LIGHT_TEST':'0','SR_NATIVE_INSTANCE_LOD':'0'},
-                          'rewrites_native':{'SR_NATIVE_LIGHT_TEST':'1','SR_NATIVE_INSTANCE_LOD':'1'}},
-        'guest_rewrites_shadow':{'rewrites_shadow':{'SR_NATIVE_LIGHT_TEST':'2','SR_NATIVE_INSTANCE_LOD':'2'}},
+        'guest_rewrites':{'rewrites_original':{'SR_NATIVE_LIGHT_TEST':'0','SR_NATIVE_INSTANCE_LOD':'0','SR_NATIVE_FRUSTUM_CULL':'0','SR_NATIVE_OBJECT_LOD':'0'},
+                          'rewrites_native':{'SR_NATIVE_LIGHT_TEST':'1','SR_NATIVE_INSTANCE_LOD':'1','SR_NATIVE_FRUSTUM_CULL':'1','SR_NATIVE_OBJECT_LOD':'1'}},
+        'guest_rewrites_shadow':{'rewrites_shadow':{'SR_NATIVE_LIGHT_TEST':'2','SR_NATIVE_INSTANCE_LOD':'2','SR_NATIVE_FRUSTUM_CULL':'2','SR_NATIVE_OBJECT_LOD':'2'}},
         'arm_compare':{'arm_regions':{'SR_D3D12_TEXTURE_WRITE_TRACKING':'compare','SR_TRACKING_BATCH_ARM':'1'},
                        'arm_legacy':{'SR_D3D12_TEXTURE_WRITE_TRACKING':'compare','SR_TRACKING_BATCH_ARM':'0'}}}[args.suite]
     base={'SR_NATIVE_CPU_PROFILE':args.cpu_profile,'SR_NATIVE_CONSTANTS_PROFILE':args.cpu_profile,
@@ -122,12 +122,14 @@ def main():
                         raise RuntimeError('Default mode did not demonstrate region-based Arm')
                 if '[native constant upload] MISMATCH' in log:
                     raise RuntimeError('Native constant upload diverged from the translated original')
-                if '[native light test] MISMATCH' in log or '[native instance lod] MISMATCH' in log:
+                if any(f'[native {name}] MISMATCH' in log for name in ('light test','instance lod','frustum cull','object lod')):
                     raise RuntimeError('Native guest rewrite diverged from the translated original')
                 if args.suite=='guest_rewrites_shadow':
-                    run['rewrite_shadow']=[line for line in log.splitlines() if 'shadow calls=' in line and ('[native light test]' in line or '[native instance lod]' in line)]
-                    if not any('[native light test]' in l for l in run['rewrite_shadow']) or not any('[native instance lod]' in l for l in run['rewrite_shadow']):
-                        raise RuntimeError('Shadow mode logged no compared calls for both rewrites')
+                    names=('light test','instance lod','frustum cull','object lod')
+                    run['rewrite_shadow']=[line for line in log.splitlines() if 'shadow calls=' in line and any(f'[native {n}]' in line for n in names)]
+                    missing=[n for n in names if not any(f'[native {n}]' in l for l in run['rewrite_shadow'])]
+                    if missing:
+                        raise RuntimeError('Shadow mode logged no compared calls for: '+', '.join(missing))
                 if args.suite=='constant_upload_shadow':
                     run['upload_shadow']=[line for line in log.splitlines() if '[native constant upload] shadow' in line]
                     if not run['upload_shadow']:

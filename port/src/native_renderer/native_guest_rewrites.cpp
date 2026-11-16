@@ -14,8 +14,11 @@
 //    82305D6C -> 82305B34. The accessors 82775BD8/82775BF0 it inlines are
 //    identical to the demo's 82775D98/82775DB0. guest_cpu_profile.cpp owns the
 //    823055A8 symbol and calls RunInstanceLod.
+//  * sub_82319108 (demo 82319340): 5-plane sphere-vs-frustum test. Identical
+//    except one constant, 0x820219A0 -> 0x82021360. Also owned by the
+//    guest_cpu_profile wrapper, which calls RunFrustumCull.
 //
-// SR_NATIVE_LIGHT_TEST / SR_NATIVE_INSTANCE_LOD: 0 = translated original
+// SR_NATIVE_LIGHT_TEST / SR_NATIVE_INSTANCE_LOD / SR_NATIVE_FRUSTUM_CULL: 0 = translated original
 // (default), 1 = native, 2 = shadow (original result kept, native compared).
 #include <array>
 #include <atomic>
@@ -31,8 +34,11 @@
 
 REX_EXTERN(__imp__sub_8231A5F8);
 REX_EXTERN(__imp__sub_823055A8);
+REX_EXTERN(__imp__sub_82319108);
 REX_EXTERN(sub_8231A5F8);
 REX_EXTERN(sub_82319108);
+REX_EXTERN(sub_8278D258);
+REX_EXTERN(__imp__sub_82305B88);
 
 namespace {
 
@@ -48,6 +54,14 @@ int LightTestMode() {
 }
 int InstanceLodMode() {
   static const int mode = EnvMode("SR_NATIVE_INSTANCE_LOD");
+  return mode;
+}
+int ObjectLodMode() {
+  static const int mode = EnvMode("SR_NATIVE_OBJECT_LOD");
+  return mode;
+}
+int FrustumCullMode() {
+  static const int mode = EnvMode("SR_NATIVE_FRUSTUM_CULL");
   return mode;
 }
 
@@ -644,6 +658,342 @@ std::atomic<uint64_t> g_calls{0}, g_mismatches{0}, g_fallbacks{0};
 
 }  // namespace instance_lod
 
+namespace frustum_cull {
+
+constexpr uint32_t kStaticVector = 0x82970270;
+constexpr uint32_t kStaticFlag = 0x82970280;
+constexpr uint32_t kConstX = 0x82021360;
+constexpr uint32_t kConstY = 0x820013B8;
+
+inline uint32_t Load32(const uint8_t* base, uint32_t a) {
+  uint32_t v;
+  std::memcpy(&v, base + a, 4);
+  return __builtin_bswap32(v);
+}
+inline void Store32(uint8_t* base, uint32_t a, uint32_t v) {
+  v = __builtin_bswap32(v);
+  std::memcpy(base + a, &v, 4);
+}
+inline simde__m128 LoadVector(const uint8_t* base, uint32_t a) {
+  const simde__m128i raw = simde_mm_load_si128(reinterpret_cast<const simde__m128i*>(base + (a & ~0xFu)));
+  return simde_mm_castsi128_ps(
+      simde_mm_shuffle_epi8(raw, simde_mm_load_si128(reinterpret_cast<const simde__m128i*>(VectorMaskL))));
+}
+inline float Lane(simde__m128 v, int lane) {
+  alignas(16) float f[4];
+  simde_mm_store_ps(f, v);
+  return f[lane];
+}
+
+uint32_t NativeCull(PPCContext& ctx, uint8_t* base) {
+  uint32_t flag = Load32(base, kStaticFlag);
+  if (!(flag & 1)) {
+    Store32(base, kStaticFlag, flag | 1);
+    Store32(base, kStaticVector + 0, Load32(base, kConstX));
+    Store32(base, kStaticVector + 4, Load32(base, kConstY));
+    Store32(base, kStaticVector + 8, 0);
+    Store32(base, kStaticVector + 12, 0);
+  }
+  const simde__m128 k = LoadVector(base, kStaticVector);
+  const simde__m128 point = LoadVector(base, ctx.r4.u32);
+  const simde__m128 bias = LoadVector(base, ctx.r5.u32);
+  ctx.fpscr.enableFlushMode();
+  simde__m128 m = simde_mm_shuffle_ps(k, k, 0xFF);  // splat guest element 0
+  uint32_t plane = ctx.r3.u32;
+  for (int i = 0; i < 5; ++i, plane += 16) {
+    simde__m128 d = simde_mm_dp_ps(LoadVector(base, plane), point, 0xFF);
+    d = simde_mm_add_ps(d, bias);
+    m = simde_mm_min_ps(m, d);
+  }
+  ctx.fpscr.disableFlushModeUnconditional();
+  const double lhs = double(Lane(m, 3));   // guest element 0 of the minimum
+  const double rhs = double(Lane(k, 2));   // guest element 1 of K
+  return lhs < rhs ? 0u : 1u;
+}
+
+std::atomic<uint64_t> g_calls{0}, g_mismatches{0};
+
+}  // namespace frustum_cull
+
+namespace object_lod {
+// New functional rewrite (no demo counterpart): sub_82305B88, the
+// single-object sibling of 823055A8. Reconstructed from the retail generated
+// code (port/generated/default, sub_82305B88). Ghidra 12.1.3 + XEXLoaderWV
+// could not decompile it: its PowerPC:BE:64:A2ALT language lacks VMX128, so
+// the vector body is "bad instruction data" there. o = r3:
+//   owner = [[[o+88]+12]+12] (early return, r3 = o, if a link is 0)
+//   if [o+220] == 0: [o+220] = 8278D258(1856, 0, [0x8296D894], 2, 16, 0, 0, 0)
+//                    initialised to {vtable 0x820217A8, 0, 2, 0} (or 0)
+//   q = [o+220]; q+8 = q+4 = 0; q->vt[28](q, [o+8]); q->vt[48](q, o+128)
+//   [o+16] &= ~0x80; K = static splat of [0x820013C0] (0x82970360, set once
+//   under bit 0 of 0x82970370); b = [owner+68]; f+144 = splat(b+52)
+//   p = {b+40, b+44, b+48, K} -> f+176; c = M(o+128..o+191) * p with the w
+//   lane kept from p -> f+112
+//   visible = 82319108([0x829A9390], f+112, f+144); !visible -> [o+16] |= 0x80
+//   flags = visible; light mask from the 0x8296FEA0 table as in 823055A8;
+//   for l = lights-1..0 in the mask: 8231A5F8(light owner, copy of c at f+128,
+//   f+144, l, 0, 0, 0), stop at the first rejection, else flags |= 2 << l
+//   [o+48] = flags; o->vt[88](o, copy of c at f+160); [o+16] |= 0x200
+// The guest calls keep their arguments, a 256-byte guest frame and the
+// original return addresses in LR; r3 is the last call's result (or o on the
+// early return), as in the original. Non-volatile registers are never
+// modified, so the __savegprlr_25 save area is not reproduced (dead).
+using light_test::Ld32;
+using light_test::LdV;
+using light_test::LvslSplat;
+using light_test::Perm;
+using light_test::St32;
+using light_test::StV;
+using V = simde__m128;
+
+constexpr uint32_t kFrame = 256;
+
+// REX_CALL_INDIRECT_FUNC from the generated pch: the dispatch table follows
+// the image (base 0x82000000, size 0x9E0000), code 0x820F0000 + 0x81F5B8 plus
+// a 0x10000 thunk reserve; unregistered targets resolve through the runtime.
+inline void CallIndirect(PPCContext& ctx, uint8_t* base, uint32_t target, uint32_t lr) {
+  ctx.r11.u64 = target;
+  ctx.ctr.u64 = target;
+  ctx.lr = lr;
+  PPCFunc* fn = nullptr;
+  if (uint32_t(target - 0x820F0000u) < 0x81F5B8u + 0x10000u)
+    fn = *reinterpret_cast<PPCFunc**>(base + 0x82000000ull + 0x9E0000ull +
+                                      uint64_t(target - 0x820F0000u) * 2);
+  if (!fn) {
+    ctx.last_indirect_target = target;
+    fn = rex::runtime::ResolveIndirectFunction(target);
+  }
+  fn(ctx, base);
+}
+inline void CopyF(uint8_t* base, uint32_t dst, uint32_t src) {  // lfs + stfs
+  uint32_t u = Ld32(base, src);
+  float f;
+  std::memcpy(&f, &u, 4);
+  const float g = float(double(f));
+  std::memcpy(&u, &g, 4);
+  St32(base, dst, u);
+}
+inline V Blend1(V dst, V src) {  // vrlimi128 dst,src,1,0 as translated
+  return simde_mm_blend_ps(dst, simde_mm_permute_ps(src, 228), 1);
+}
+
+// Transform of the bounds sphere: writes f+128..140 scratch, f+144 (radius
+// splat), f+112 (centre) and f+176 (local point), in the original's order.
+// K must already be initialised.
+void Transform(PPCContext& ctx, uint8_t* base, uint32_t o, uint32_t b, uint32_t f, V k) {
+  ctx.fpscr.disableFlushMode();
+  CopyF(base, f + 128, b + 52);
+  const V m0 = LdV(base, o + 128);
+  St32(base, f + 132, 0); St32(base, f + 136, 0); St32(base, f + 140, 0);
+  const V sx = LvslSplat(0), sy = LvslSplat(4), sz = LvslSplat(8), sw = LvslSplat(12);
+  const V m2 = LdV(base, o + 160);
+  StV(base, f + 144, light_test::Splat<0xFF>(LdV(base, f + 128)));
+  CopyF(base, f + 128, b + 40);
+  CopyF(base, f + 132, b + 44);
+  CopyF(base, f + 136, b + 48);
+  CopyF(base, f + 140, b + 52);
+  const V m1 = LdV(base, o + 144);
+  V p = LdV(base, f + 128);
+  StV(base, f + 112, p);
+  p = Blend1(p, k);
+  const V px = Perm(p, p, sx), py = Perm(p, p, sy), pz = Perm(p, p, sz);
+  StV(base, f + 112, p);
+  StV(base, f + 176, p);
+  ctx.fpscr.enableFlushModeUnconditional();
+  V c = simde_mm_mul_ps(m0, px);
+  c = simde_mm_add_ps(simde_mm_mul_ps(m1, py), c);
+  const V pw = Perm(p, p, sw);
+  c = simde_mm_add_ps(simde_mm_mul_ps(m2, pz), c);
+  const V m3 = LdV(base, o + 176);
+  c = simde_mm_add_ps(simde_mm_mul_ps(m3, pw), c);
+  c = Blend1(c, p);
+  StV(base, f + 112, c);
+}
+
+uint32_t LightMask(uint8_t* base, uint32_t o) {
+  const uint32_t table_flag = Ld32(base, 0x829701A8u);
+  if (base[0x82970260u] == 0 && table_flag == 0) base[0x82970260u] = 1;
+  const uint32_t table_index = Ld32(base, o + 64);
+  uint32_t entry = 0x8296FEA0u;
+  if (table_flag != 0 && table_index <= 31 &&
+      Ld32(base, entry + 16 + table_index * 20) != 0xFFFFFFFFu)
+    entry += table_index * 20;
+  return Ld32(base, entry + 16);
+}
+
+void NativeObjectLod(PPCContext& ctx, uint8_t* base) {
+  const uint32_t o = ctx.r3.u32;
+  const uint32_t entry_r1 = ctx.r1.u32;
+  const uint64_t entry_lr = ctx.lr;
+  const uint32_t f = entry_r1 - kFrame;
+  St32(base, f, entry_r1);            // stwu r1,-256(r1)
+  const uint32_t t = Ld32(base, Ld32(base, o + 88) + 12);
+  St32(base, entry_r1 + 20, o);       // stw r29,276(r1)
+  if (t == 0) return;
+  const uint32_t owner = Ld32(base, t + 12);  // r28
+  if (owner == 0) return;
+  ctx.r1.u64 = f;
+
+  if (Ld32(base, o + 220) == 0) {
+    St32(base, f + 84, 0);
+    ctx.r10.u64 = 0; ctx.r9.u64 = 0; ctx.r8.u64 = 0; ctx.r7.u64 = 16; ctx.r6.u64 = 2;
+    ctx.r11.u64 = 0x82970000u;
+    ctx.r5.u64 = Ld32(base, 0x8296D894u);
+    ctx.r4.u64 = 0; ctx.r3.u64 = 1856;
+    ctx.lr = 0x82305BF8;
+    sub_8278D258(ctx, base);
+    const uint32_t q = ctx.r3.u32;
+    if (q != 0) {
+      St32(base, q + 4, 0);
+      St32(base, q + 8, 2);
+      St32(base, q + 12, 0);
+      St32(base, q, 0x820217A8u);
+    }
+    St32(base, o + 220, q);
+  }
+  {
+    const uint32_t q = Ld32(base, o + 220);
+    ctx.r3.u64 = q;
+    ctx.r4.u64 = Ld32(base, o + 8);
+    St32(base, q + 8, 0);
+    St32(base, q + 4, 0);
+    CallIndirect(ctx, base, Ld32(base, Ld32(base, q) + 28), 0x82305C48);
+  }
+  {
+    const uint32_t q = Ld32(base, o + 220);
+    ctx.r3.u64 = q;
+    ctx.r4.u64 = o + 128;
+    CallIndirect(ctx, base, Ld32(base, Ld32(base, q) + 48), 0x82305C64);
+  }
+
+  uint32_t flags = 1;  // r27
+  St32(base, f + 96, 1);
+  St32(base, o + 16, Ld32(base, o + 16) & ~0x80u);
+  const uint32_t b = Ld32(base, owner + 68);
+  const uint32_t kflag = Ld32(base, 0x82970370u);
+  V k;
+  if (!(kflag & 1)) {
+    ctx.fpscr.disableFlushMode();
+    CopyF(base, f + 128, 0x820013C0u);
+    St32(base, f + 132, 0); St32(base, f + 136, 0); St32(base, f + 140, 0);
+    St32(base, 0x82970370u, kflag | 1);
+    k = light_test::Splat<0xFF>(LdV(base, f + 128));
+    StV(base, 0x82970360u, k);
+  } else {
+    k = LdV(base, 0x82970360u);
+  }
+  Transform(ctx, base, o, b, f, k);
+
+  ctx.r3.u64 = Ld32(base, 0x829A9390u);
+  ctx.r4.u64 = f + 112;
+  ctx.r5.u64 = f + 144;
+  ctx.lr = 0x82305DD4;
+  sub_82319108(ctx, base);
+  if ((ctx.r3.u32 & 0xFF) == 0) {
+    St32(base, o + 16, Ld32(base, o + 16) | 0x80u);
+    flags = 0;
+  }
+
+  const uint32_t light_owner = Ld32(base, 0x82970190u);  // r28
+  const uint32_t lights = Ld32(base, light_owner + 720);
+  const uint32_t light_mask = LightMask(base, o);
+  for (int32_t l = int32_t(lights) - 1; l >= 0; --l) {
+    const uint32_t bit = l < 32 ? (1u << l) : 0u;
+    if (!(bit & light_mask)) continue;
+    std::memmove(base + f + 128, base + f + 112, 16);
+    ctx.r1.u64 = f;
+    ctx.r3.u64 = light_owner;
+    ctx.r4.u64 = f + 128;
+    ctx.r5.u64 = f + 144;
+    ctx.r6.u64 = uint64_t(uint32_t(l));
+    ctx.r7.u64 = 0; ctx.r8.u64 = 0; ctx.r9.u64 = 0;
+    ctx.lr = 0x82305EB0;
+    sub_8231A5F8(ctx, base);
+    if (!(ctx.r3.u32 & 0xFF)) break;
+    flags |= l < 31 ? (2u << l) : 0u;
+  }
+
+  St32(base, o + 48, flags);
+  std::memmove(base + f + 160, base + f + 112, 16);
+  ctx.r1.u64 = f;
+  ctx.r3.u64 = o;
+  ctx.r4.u64 = f + 160;
+  CallIndirect(ctx, base, Ld32(base, Ld32(base, o) + 88), 0x82305EFC);
+  St32(base, o + 16, Ld32(base, o + 16) | 0x200u);
+  ctx.r1.u64 = entry_r1;
+  ctx.lr = entry_lr;
+}
+
+std::atomic<uint64_t> g_calls{0}, g_mismatches{0}, g_hidden{0}, g_lit{0};
+
+// Shadow: the original runs and its effects are kept. Its dead frame still
+// holds the centre (f+112), radius splat (f+144) and local point (f+176); the
+// native transform is recomputed from the same inputs, which are read after
+// the original returns (o+128.. is written by the vt[48] call), and the
+// visibility and light flags are recomputed with the native leaf rewrites.
+void Shadow(PPCContext& ctx, uint8_t* base) {
+  const uint32_t o = ctx.r3.u32, r1 = ctx.r1.u32;
+  const uint64_t lr = ctx.lr;
+  __imp__sub_82305B88(ctx, base);
+  const uint32_t t = Ld32(base, Ld32(base, o + 88) + 12);
+  if (t == 0 || Ld32(base, t + 12) == 0) return;
+  const uint32_t f = r1 - kFrame;
+  alignas(16) uint8_t original[48];
+  std::memcpy(original, base + f + 112, 16);
+  std::memcpy(original + 16, base + f + 144, 16);
+  std::memcpy(original + 32, base + f + 176, 16);
+  const uint32_t flags_original = Ld32(base, o + 48);
+  const uint32_t o16 = Ld32(base, o + 16);
+  // Saved so the caller sees exactly the original's exit state.
+  const uint64_t r3 = ctx.r3.u64, r4 = ctx.r4.u64, r5 = ctx.r5.u64, r6 = ctx.r6.u64,
+                 r7 = ctx.r7.u64, r8 = ctx.r8.u64, r9 = ctx.r9.u64;
+
+  const uint32_t b = Ld32(base, Ld32(base, t + 12) + 68);
+  Transform(ctx, base, o, b, f, LdV(base, 0x82970360u));
+  const bool same_vectors = std::memcmp(original, base + f + 112, 16) == 0 &&
+                            std::memcmp(original + 16, base + f + 144, 16) == 0 &&
+                            std::memcmp(original + 32, base + f + 176, 16) == 0;
+  ctx.r1.u64 = f;
+  ctx.r3.u64 = Ld32(base, 0x829A9390u);
+  ctx.r4.u64 = f + 112;
+  ctx.r5.u64 = f + 144;
+  uint32_t flags = frustum_cull::NativeCull(ctx, base) & 0xFF ? 1u : 0u;
+  if (!flags) g_hidden.fetch_add(1, std::memory_order_relaxed);
+  const uint32_t light_owner = Ld32(base, 0x82970190u);
+  const uint32_t lights = Ld32(base, light_owner + 720);
+  const uint32_t light_mask = LightMask(base, o);
+  for (int32_t l = int32_t(lights) - 1; l >= 0; --l) {
+    const uint32_t bit = l < 32 ? (1u << l) : 0u;
+    if (!(bit & light_mask)) continue;
+    std::memmove(base + f + 128, base + f + 112, 16);
+    ctx.r1.u64 = f;
+    ctx.r3.u64 = light_owner;
+    ctx.r4.u64 = f + 128;
+    ctx.r5.u64 = f + 144;
+    ctx.r6.u64 = uint64_t(uint32_t(l));
+    ctx.r7.u64 = 0; ctx.r8.u64 = 0; ctx.r9.u64 = 0;
+    if (!(light_test::NativeLightTest(ctx, base) & 0xFF)) break;
+    flags |= l < 31 ? (2u << l) : 0u;
+  }
+  if (flags > 1) g_lit.fetch_add(1, std::memory_order_relaxed);
+  const bool same_hidden = ((o16 & 0x80u) != 0) == ((flags & 1u) == 0);
+  ctx.r3.u64 = r3; ctx.r4.u64 = r4; ctx.r5.u64 = r5; ctx.r6.u64 = r6;
+  ctx.r7.u64 = r7; ctx.r8.u64 = r8; ctx.r9.u64 = r9;
+  ctx.r1.u64 = r1;
+  ctx.lr = lr;
+  const uint64_t calls = g_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (!same_vectors || flags != flags_original || !same_hidden) {
+    const uint64_t n = g_mismatches.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n <= 20)
+      REXLOG_WARN("[native object lod] MISMATCH #{} obj={:08X} vectors_equal={} flags {:08X}/{:08X} "
+                  "hidden_bit_equal={}", n, o, same_vectors, flags_original, flags, same_hidden);
+  }
+  if ((calls & ((1u << 16) - 1)) == 0)
+    REXLOG_INFO("[native object lod] shadow calls={} mismatches={} hidden={} lit={}", calls,
+                g_mismatches.load(std::memory_order_relaxed), g_hidden.load(), g_lit.load());
+}
+}  // namespace object_lod
+
 }  // namespace
 
 REX_HOOK_RAW(sub_8231A5F8) {
@@ -735,6 +1085,41 @@ void RunInstanceLod(PPCContext& ctx, uint8_t* base) {
   if ((calls & ((1u << 16) - 1)) == 0)
     REXLOG_INFO("[native instance lod] shadow calls={} mismatches={}", calls,
                 g_mismatches.load(std::memory_order_relaxed));
+}
+
+void RunFrustumCull(PPCContext& ctx, uint8_t* base) {
+  using namespace frustum_cull;
+  const int32_t mode = FrustumCullMode();
+  if (mode == 1) {
+    ctx.r3.u64 = NativeCull(ctx, base);
+    return;
+  }
+  if (mode != 2) {
+    __imp__sub_82319108(ctx, base);
+    return;
+  }
+  const uint32_t r3 = ctx.r3.u32, r4 = ctx.r4.u32, r5 = ctx.r5.u32;
+  const uint32_t native = NativeCull(ctx, base);
+  ctx.r3.u64 = r3;
+  __imp__sub_82319108(ctx, base);
+  const uint64_t calls = g_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (ctx.r3.u32 != native) {
+    const uint64_t n = g_mismatches.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n <= 20)
+      REXLOG_WARN("[native frustum cull] MISMATCH #{} planes={:08X} point={:08X} bias={:08X} "
+                  "original={} native={}", n, r3, r4, r5, ctx.r3.u32, native);
+  }
+  if ((calls & ((1u << 20) - 1)) == 0)
+    REXLOG_INFO("[native frustum cull] shadow calls={} mismatches={}", calls,
+                g_mismatches.load(std::memory_order_relaxed));
+}
+
+void RunObjectLod(PPCContext& ctx, uint8_t* base) {
+  switch (ObjectLodMode()) {
+    case 1: object_lod::NativeObjectLod(ctx, base); return;
+    case 2: object_lod::Shadow(ctx, base); return;
+    default: __imp__sub_82305B88(ctx, base); return;
+  }
 }
 
 }  // namespace superman_returns::native

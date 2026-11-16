@@ -205,9 +205,17 @@ extern "C" REX_FUNC(sub_82783948) {
   if (!Enabled()) { __imp__sub_82783948(ctx, base); return; }
   Scope scope(1); __imp__sub_82783948(ctx, base);
 }
-SR_PROFILE_GUEST(82305B88,2)
+// 82305B88 also carries the native single-object LOD (native_guest_rewrites.cpp).
+extern "C" REX_FUNC(sub_82305B88) {
+  if(!Enabled()) {superman_returns::native::RunObjectLod(ctx,base);return;}
+  Scope scope(2);superman_returns::native::RunObjectLod(ctx,base);
+}
 SR_PROFILE_GUEST(82316958,3)
-SR_PROFILE_GUEST(82319108,4)
+// 82319108 also carries the native frustum test (native_guest_rewrites.cpp).
+extern "C" REX_FUNC(sub_82319108) {
+  if(!Enabled()) {superman_returns::native::RunFrustumCull(ctx,base);return;}
+  Scope scope(4);superman_returns::native::RunFrustumCull(ctx,base);
+}
 SR_PROFILE_GUEST(826092B8,5)
 // 821078C0 also carries the native masked constant upload (xdk_constant_upload.h).
 REX_EXTERN(__imp__sub_821078C0);
