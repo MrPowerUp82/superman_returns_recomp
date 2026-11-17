@@ -49,3 +49,8 @@ que é limitada pela GPU integrada (README, seção de desempenho). O +6,8% medi
 na demo não se repetiu aqui. Por isso o modo fica opt-in (`0` por padrão). Vale
 repetir o A/B numa máquina limitada pela CPU, ou numa cena de gameplay, antes
 de ativá-lo por padrão.
+
+Atualização (16/11/2026): o modo passou a vir ativo por padrão (`1`), junto com
+as reescritas de [native-guest-rewrites-2026-11-16.md](native-guest-rewrites-2026-11-16.md),
+depois de capturas do sobrevoo com imagem correta. `SR_NATIVE_CONSTANT_UPLOAD=0`
+volta ao original.

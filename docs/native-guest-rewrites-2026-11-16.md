@@ -197,3 +197,21 @@ chamada das funções reescritas. O efeito no FPS desta máquina, limitada pela
 GPU, não é mensurável. Ficam opt-in (`SR_NATIVE_LIGHT_TEST`,
 `SR_NATIVE_INSTANCE_LOD`, `SR_NATIVE_FRUSTUM_CULL`, `SR_NATIVE_OBJECT_LOD`)
 até a validação em gameplay e cooperativo.
+
+## Ativação por padrão (16/11/2026)
+
+Antes de ativar, o benchmark do sobrevoo rodou com janela visível duas vezes:
+uma com o original e outra com as cinco reescritas em modo nativo (estas quatro
+e `SR_NATIVE_CONSTANT_UPLOAD`). As capturas foram feitas aos 36 s e 48 s de
+benchmark e estão em `logs/shots_20261116/`. As duas versões renderizam
+corretamente: céu, nuvens, prédios com janelas iluminadas e reflexos,
+montanhas, outdoor e Superman. Nenhum objeto faltou nem apareceu de repente,
+que seria o sintoma de erro no culling ou no LOD. A câmera difere entre as
+rodadas porque o sobrevoo não avança no mesmo ritmo em tempo real. As capturas
+dos 12 s e 24 s saíram pretas e idênticas nas duas variantes, então são do
+método de captura, não das reescritas. Os dois benchmarks terminaram válidos.
+
+Desde então as cinco reescritas vêm **ativas por padrão** (`1`). Para voltar ao
+original, use `=0` na variável correspondente. Para validar uma cena nova
+(gameplay, cooperativo), use `=2` e procure `MISMATCH` no log. O cooperativo
+ainda não foi testado.

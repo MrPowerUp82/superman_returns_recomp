@@ -18,8 +18,10 @@
 //    except one constant, 0x820219A0 -> 0x82021360. Also owned by the
 //    guest_cpu_profile wrapper, which calls RunFrustumCull.
 //
-// SR_NATIVE_LIGHT_TEST / SR_NATIVE_INSTANCE_LOD / SR_NATIVE_FRUSTUM_CULL: 0 = translated original
-// (default), 1 = native, 2 = shadow (original result kept, native compared).
+// SR_NATIVE_LIGHT_TEST / SR_NATIVE_INSTANCE_LOD / SR_NATIVE_FRUSTUM_CULL /
+// SR_NATIVE_OBJECT_LOD: 0 = translated original, 1 = native (default since the
+// 16/11/2026 shadow run and title-flyover screenshots), 2 = shadow (original
+// result kept, native compared). Unset or invalid values select the default.
 #include <array>
 #include <atomic>
 #include <cstdlib>
@@ -44,9 +46,9 @@ namespace {
 
 int EnvMode(const char* name) {
   const char* v = std::getenv(name);
-  if (!v || !*v) return 0;
+  if (!v || !*v) return 1;
   const int m = std::atoi(v);
-  return m >= 0 && m <= 2 ? m : 0;
+  return m >= 0 && m <= 2 ? m : 1;
 }
 int LightTestMode() {
   static const int mode = EnvMode("SR_NATIVE_LIGHT_TEST");

@@ -24,11 +24,12 @@
 // non-volatile registers are unchanged as after __restgprlr_25. Like the
 // demo, the dead stack save area below r1 is not written.
 //
-// SR_NATIVE_CONSTANT_UPLOAD: 0 = translated original (default), 1 = native,
+// SR_NATIVE_CONSTANT_UPLOAD: 0 = translated original, 1 = native (default),
 // 2 = shadow (native then original on the same inputs; ring bytes and
 // registers compared, mismatches logged; the original's effects are kept).
-// Opt-in: shadow mode matched ~1M calls, but the title-flyover A/B showed no
-// FPS or process-CPU gain (docs/native-constant-upload-2026-11-16.md).
+// Default since 16/11/2026: shadow mode matched ~1M calls and title-flyover
+// screenshots were correct; the A/B showed no measurable FPS gain on its own
+// (docs/native-constant-upload-2026-11-16.md).
 #pragma once
 
 #include <algorithm>
@@ -46,9 +47,9 @@ namespace superman_returns::native::constant_upload {
 inline int Mode() {
   static const int mode = [] {
     const char* v = std::getenv("SR_NATIVE_CONSTANT_UPLOAD");
-    if (!v || !*v) return 0;
+    if (!v || !*v) return 1;
     const int m = std::atoi(v);
-    return m >= 0 && m <= 2 ? m : 0;
+    return m >= 0 && m <= 2 ? m : 1;
   }();
   return mode;
 }
