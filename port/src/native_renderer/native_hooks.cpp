@@ -45,6 +45,7 @@
 #include "xdk_constant_bank_copy.h"
 #include "xdk_draw_submission.h"
 #include "guest_cpu_profile.h"
+#include "native_guest_rewrites.h"
 #include "resource_unlock_audit.h"
 
 namespace {
@@ -561,6 +562,7 @@ bool TryNativeDrawSubmission(PPCContext& ctx,uint8_t* base,bool indexed) {
 }
 #if SR_HOOK_ENABLED(FLOAT_COPY_VS)
 SR_DEFINE_HOOK(SR_ADDR_FLOAT_COPY_VS) {
+  if(native::RunConstantCopy(ctx,base,false,SR_ORIGINAL(SR_ADDR_FLOAT_COPY_VS))) return;
   if(NativeFullConstantsEnabled() && native::Enabled() &&
      native::TryCopyConstantBank(ctx,base,false)) return;
   if(NativeBulkConstantsEnabled() && native::Enabled()) native::TryCopyConstantPrefix(ctx,base,false);
@@ -569,6 +571,7 @@ SR_DEFINE_HOOK(SR_ADDR_FLOAT_COPY_VS) {
 #endif
 #if SR_HOOK_ENABLED(FLOAT_COPY_PS)
 SR_DEFINE_HOOK(SR_ADDR_FLOAT_COPY_PS) {
+  if(native::RunConstantCopy(ctx,base,true,SR_ORIGINAL(SR_ADDR_FLOAT_COPY_PS))) return;
   if(NativeFullConstantsEnabled() && native::Enabled() &&
      native::TryCopyConstantBank(ctx,base,true)) return;
   if(NativeBulkConstantsEnabled() && native::Enabled()) native::TryCopyConstantPrefix(ctx,base,true);

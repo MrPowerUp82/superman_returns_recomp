@@ -45,6 +45,7 @@ Ficam aqui porque o `build.cmd`, os CMake e o código os chamam por caminho.
 | `find_missing_funcs.py`, `find_spin_loops.py` | Procuram funções que a análise estática não achou e laços de espera ativa no código gerado. |
 | `xex_libraries.py`, `inspect_lsfg_dll.py` | Leem metadados do `default.xex` e da `Lossless.dll`, sem copiar dados para o repositório. |
 | `native_ab_compare.py` | Compara dumps A/B do renderer nativo com o Xenos (PSNR). |
+| `trace_functions.py` | Gera cópias instrumentadas (chamadas e escritas) de funções do código gerado, para o *lockstep shadow* das reescritas nativas, em `port/generated/traced/` (ignorado pelo git, porque é derivado do jogo). Rode antes de usar `SR_NATIVE_LAYER_WALK=2`. Detalhes em [native-demo-ports-2026-11-16.md](../docs/native-demo-ports-2026-11-16.md). |
 | `ghidra/ExportDecomp.java` | Script do Ghidra 12.1.3 (modo headless, com XEXLoaderWV) que exporta a descompilação de funções escolhidas. Antes, desmarca como "não retorna" os helpers `__savegprlr`/`__restgprlr`. A linguagem `PowerPC:BE:64:A2ALT` não decodifica VMX128, então funções vetoriais saem truncadas; para elas, a referência continua sendo o C++ gerado. Uso em [native-guest-rewrites-2026-11-16.md](../docs/native-guest-rewrites-2026-11-16.md). |
 | `frame_timeline_report.py` | Lê o CSV de `SR_FRAME_TIMELINE` e imprime FPS, 1% low, tempo ocupado/bloqueado por estágio e a fração de quadros em que cada estágio foi o limitante. Teste em `tests/tools/test_frame_timeline_report.py`. |
 

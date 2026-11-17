@@ -15,7 +15,7 @@ def process_cpu_seconds(handle):
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--blocks',type=int,default=3)
-    parser.add_argument('--suite',choices=['settings','query','compare','arm','arm_compare','arm_default','constant_upload','constant_upload_shadow','guest_rewrites','guest_rewrites_shadow'],default='settings')
+    parser.add_argument('--suite',choices=['settings','query','compare','arm','arm_compare','arm_default','constant_upload','constant_upload_shadow','guest_rewrites','guest_rewrites_shadow','demo_ports','demo_ports_shadow'],default='settings')
     parser.add_argument('--cpu-profile',choices=['0','1'],default='1')
     parser.add_argument('--name',default=datetime.datetime.now().strftime('cpu_web_%Y%m%d_%H%M%S'))
     args=parser.parse_args()
@@ -44,6 +44,8 @@ def main():
         'constant_upload_shadow':{'upload_shadow':{'SR_NATIVE_CONSTANT_UPLOAD':'2'}},
         'guest_rewrites':{'rewrites_original':{'SR_NATIVE_LIGHT_TEST':'0','SR_NATIVE_INSTANCE_LOD':'0','SR_NATIVE_FRUSTUM_CULL':'0','SR_NATIVE_OBJECT_LOD':'0'},
                           'rewrites_native':{'SR_NATIVE_LIGHT_TEST':'1','SR_NATIVE_INSTANCE_LOD':'1','SR_NATIVE_FRUSTUM_CULL':'1','SR_NATIVE_OBJECT_LOD':'1'}},
+        'demo_ports':{'ports_original':{'SR_NATIVE_DRAW_SEGMENTS':'0','SR_NATIVE_CONSTANT_COPY':'0','SR_NATIVE_CONSTANT_UPLOAD_B':'0','SR_NATIVE_CONSTANT_UPLOAD_C':'0','SR_NATIVE_RECORD_BITS':'0','SR_NATIVE_LAYER_WALK':'0'},'ports_native':{'SR_NATIVE_DRAW_SEGMENTS':'1','SR_NATIVE_CONSTANT_COPY':'1','SR_NATIVE_CONSTANT_UPLOAD_B':'1','SR_NATIVE_CONSTANT_UPLOAD_C':'1','SR_NATIVE_RECORD_BITS':'1','SR_NATIVE_LAYER_WALK':'1'}},
+        'demo_ports_shadow':{'ports_shadow':{'SR_NATIVE_DRAW_SEGMENTS':'2','SR_NATIVE_CONSTANT_COPY':'2','SR_NATIVE_CONSTANT_UPLOAD_B':'2','SR_NATIVE_CONSTANT_UPLOAD_C':'2','SR_NATIVE_RECORD_BITS':'2','SR_NATIVE_LAYER_WALK':'2'}},
         'guest_rewrites_shadow':{'rewrites_shadow':{'SR_NATIVE_LIGHT_TEST':'2','SR_NATIVE_INSTANCE_LOD':'2','SR_NATIVE_FRUSTUM_CULL':'2','SR_NATIVE_OBJECT_LOD':'2'}},
         'arm_compare':{'arm_regions':{'SR_D3D12_TEXTURE_WRITE_TRACKING':'compare','SR_TRACKING_BATCH_ARM':'1'},
                        'arm_legacy':{'SR_D3D12_TEXTURE_WRITE_TRACKING':'compare','SR_TRACKING_BATCH_ARM':'0'}}}[args.suite]
@@ -122,12 +124,18 @@ def main():
                         raise RuntimeError('Default mode did not demonstrate region-based Arm')
                 if '[native constant upload] MISMATCH' in log:
                     raise RuntimeError('Native constant upload diverged from the translated original')
-                if any(f'[native {name}] MISMATCH' in log for name in ('light test','instance lod','frustum cull','object lod')):
+                if re.search(r'\[native [^\]]*\] MISMATCH', log):
                     raise RuntimeError('Native guest rewrite diverged from the translated original')
                 if args.suite=='guest_rewrites_shadow':
                     names=('light test','instance lod','frustum cull','object lod')
                     run['rewrite_shadow']=[line for line in log.splitlines() if 'shadow calls=' in line and any(f'[native {n}]' in line for n in names)]
                     missing=[n for n in names if not any(f'[native {n}]' in l for l in run['rewrite_shadow'])]
+                    if missing:
+                        raise RuntimeError('Shadow mode logged no compared calls for: '+', '.join(missing))
+                if args.suite=='demo_ports_shadow':
+                    names=('draw segments','constant copy','constant upload b','constants c','record bits','lockstep layer walk')
+                    run['ports_shadow']=[l for l in log.splitlines() if 'shadow' in l and any(f'[native {n}' in l for n in names)]
+                    missing=[n for n in names if not any(f'[native {n}' in l for l in run['ports_shadow'])]
                     if missing:
                         raise RuntimeError('Shadow mode logged no compared calls for: '+', '.join(missing))
                 if args.suite=='constant_upload_shadow':

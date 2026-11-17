@@ -202,8 +202,9 @@ extern "C" REX_FUNC(sub_823055A8) {
 REX_EXTERN(__imp__sub_82783948);
 extern "C" REX_FUNC(sub_82783948) {
   superman_returns::coop::NoteCameraProbeGroup(ctx.r4.u32, ctx.r5.u32, uint32_t(ctx.lr));
-  if (!Enabled()) { __imp__sub_82783948(ctx, base); return; }
-  Scope scope(1); __imp__sub_82783948(ctx, base);
+  // Also carries the native layer walk (native_layer_walk.cpp, main target).
+  if (!Enabled()) { superman_returns::native::RunLayerWalk(ctx, base); return; }
+  Scope scope(1); superman_returns::native::RunLayerWalk(ctx, base);
 }
 // 82305B88 also carries the native single-object LOD (native_guest_rewrites.cpp).
 extern "C" REX_FUNC(sub_82305B88) {
@@ -216,7 +217,11 @@ extern "C" REX_FUNC(sub_82319108) {
   if(!Enabled()) {superman_returns::native::RunFrustumCull(ctx,base);return;}
   Scope scope(4);superman_returns::native::RunFrustumCull(ctx,base);
 }
-SR_PROFILE_GUEST(826092B8,5)
+// 826092B8 also carries a native rewrite (native_record_bits.cpp).
+extern "C" REX_FUNC(sub_826092B8) {
+  if(!Enabled()) {superman_returns::native::RunRecordBits(ctx,base);return;}
+  Scope scope(5);superman_returns::native::RunRecordBits(ctx,base);
+}
 // 821078C0 also carries the native masked constant upload (xdk_constant_upload.h).
 REX_EXTERN(__imp__sub_821078C0);
 extern "C" REX_FUNC(sub_821078C0) {
@@ -226,7 +231,11 @@ extern "C" REX_FUNC(sub_821078C0) {
 SR_PROFILE_GUEST(827838D0,8)
 SR_PROFILE_GUEST(822E9E68,10)
 SR_PROFILE_GUEST(82307CF8,11)
-SR_PROFILE_GUEST(822F5290,13)
+// 822F5290 also carries a native rewrite (native_draw_segments.cpp).
+extern "C" REX_FUNC(sub_822F5290) {
+  if(!Enabled()) {superman_returns::native::RunDrawSegments(ctx,base);return;}
+  Scope scope(13);superman_returns::native::RunDrawSegments(ctx,base);
+}
 #undef SR_PROFILE_GUEST
 // Keep one strong wrapper per guest symbol, including when CPU timing is off.
 #define SR_PROFILE_RENDER(address,index) \

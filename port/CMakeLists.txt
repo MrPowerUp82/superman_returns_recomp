@@ -67,6 +67,7 @@ endif()
 set(SUPERMANRETURNS_SOURCES
     src/main.cpp
     src/frame_stats.cpp
+    src/native_renderer/native_layer_walk.cpp
     src/title_benchmark.cpp
     src/title_benchmark_dialog.cpp
     src/title_benchmark_hooks.cpp
@@ -246,6 +247,11 @@ if(WIN32 AND EXISTS "${SR_REXGPU_SOURCE_DIR}/src/graphics/d3d12/command_processo
             ${SR_NATIVE_ROOT}/native_hooks.cpp
             ${SR_NATIVE_ROOT}/guest_cpu_profile.cpp
             ${SR_NATIVE_ROOT}/native_guest_rewrites.cpp
+            ${SR_NATIVE_ROOT}/native_draw_segments.cpp
+            ${SR_NATIVE_ROOT}/native_constant_copy.cpp
+            ${SR_NATIVE_ROOT}/native_constant_upload_b.cpp
+            ${SR_NATIVE_ROOT}/native_constant_upload_c.cpp
+            ${SR_NATIVE_ROOT}/native_record_bits.cpp
             ${SR_NATIVE_ROOT}/guest_render_scheduler.cpp
             ${SR_NATIVE_ROOT}/native_graphics_system.cpp
             ${SR_NATIVE_ROOT}/native_renderer.cpp
